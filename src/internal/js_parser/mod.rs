@@ -1,6 +1,7 @@
 //! Port of upstream `internal/js_parser`.
 
 mod control_flow;
+mod dead_control_flow;
 mod duplicate_properties;
 mod global_name;
 mod json;
