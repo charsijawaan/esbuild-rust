@@ -379,11 +379,66 @@ impl Lexer {
         }
     }
 
+    /// Decode the current string literal to UTF-16.
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`LexerPanic`] after logging an invalid escape sequence.
     #[must_use]
     pub fn string_literal(&mut self) -> &[u16] {
-        self.decoded_string_literal.get_or_insert_with(|| {
-            crate::internal::helpers::string_to_utf16(&self.encoded_string_literal_text)
-        })
+        if self.decoded_string_literal.is_none() {
+            let text = self.encoded_string_literal_text.clone();
+            match self.try_to_decode_escape_sequences(
+                self.encoded_string_literal_start,
+                &text,
+                true,
+            ) {
+                Ok(decoded) => self.decoded_string_literal = Some(decoded),
+                Err(end) => {
+                    self.end = end;
+                    self.syntax_error();
+                }
+            }
+        }
+        self.decoded_string_literal
+            .as_deref()
+            .expect("the decoded string was initialized")
+    }
+
+    /// Return the template's cooked UTF-16 value and normalized raw bytes.
+    ///
+    /// The cooked value is `None` for an invalid escape sequence, which maps
+    /// to JavaScript's `undefined` value for tagged templates.
+    #[must_use]
+    pub fn cooked_and_raw_template_contents(&mut self) -> (Option<Vec<u16>>, Vec<u8>) {
+        let (raw_start, raw_end) = match self.token {
+            Token::NoSubstitutionTemplateLiteral | Token::TemplateTail => {
+                (self.start + 1, self.end - 1)
+            }
+            Token::TemplateHead | Token::TemplateMiddle => (self.start + 1, self.end - 2),
+            _ => (self.start, self.start),
+        };
+        let mut raw = self.source.contents[raw_start..raw_end].to_vec();
+        if raw.contains(&b'\r') {
+            let mut normalized = Vec::with_capacity(raw.len());
+            let mut index = 0;
+            while index < raw.len() {
+                let mut byte = raw[index];
+                index += 1;
+                if byte == b'\r' {
+                    if raw.get(index) == Some(&b'\n') {
+                        index += 1;
+                    }
+                    byte = b'\n';
+                }
+                normalized.push(byte);
+            }
+            raw = normalized;
+        }
+        let cooked = self
+            .try_to_decode_escape_sequences(self.start + 1, &raw, false)
+            .ok();
+        (cooked, raw)
     }
 
     /// Advance to the next context-free JavaScript token.
@@ -886,8 +941,11 @@ impl Lexer {
     }
 
     fn syntax_error(&mut self) -> ! {
-        let message = match char::from_u32(self.code_point) {
-            None => "Unexpected end of file".to_owned(),
+        let (code_point, _) = decode_wtf8_rune(&self.source.contents[self.end..]);
+        let character = char::from_u32(code_point);
+        let message = match character {
+            _ if self.end == self.source.contents.len() => "Unexpected end of file".to_owned(),
+            None => format!("Syntax error \"\\u{{{code_point:x}}}\""),
             Some(character) if character < '\u{20}' => {
                 format!("Syntax error \"\\x{:02X}\"", character as u32)
             }
@@ -908,6 +966,195 @@ impl Lexer {
             message,
         );
         panic_any(LexerPanic);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn try_to_decode_escape_sequences(
+        &mut self,
+        start: usize,
+        text: &[u8],
+        report_errors: bool,
+    ) -> Result<Vec<u16>, usize> {
+        let mut decoded = Vec::new();
+        let mut index = 0;
+
+        while index < text.len() {
+            let (mut code_point, width) = decode_wtf8_rune(&text[index..]);
+            index += width;
+
+            if code_point == u32::from(b'\r') {
+                if text.get(index) == Some(&b'\n') {
+                    index += 1;
+                }
+                decoded.push(u16::from(b'\n'));
+                continue;
+            }
+
+            if code_point == u32::from(b'\\') {
+                let (escaped, escaped_width) = decode_wtf8_rune(&text[index..]);
+                if escaped_width == 0 {
+                    return Err(start + index);
+                }
+                index += escaped_width;
+                match char::from_u32(escaped) {
+                    Some('b') => {
+                        decoded.push(u16::from(b'\x08'));
+                        continue;
+                    }
+                    Some('f') => {
+                        decoded.push(u16::from(b'\x0C'));
+                        continue;
+                    }
+                    Some('n') => {
+                        decoded.push(u16::from(b'\n'));
+                        continue;
+                    }
+                    Some('r') => {
+                        decoded.push(u16::from(b'\r'));
+                        continue;
+                    }
+                    Some('t') => {
+                        decoded.push(u16::from(b'\t'));
+                        continue;
+                    }
+                    Some('v') => {
+                        if self.json == JsonFlavor::Json {
+                            return Err(start + index - escaped_width);
+                        }
+                        decoded.push(u16::from(b'\x0B'));
+                        continue;
+                    }
+                    Some('0'..='7') => {
+                        if self.json == JsonFlavor::Json {
+                            return Err(start + index - escaped_width);
+                        }
+                        let octal_start = index - 2;
+                        let mut value = escaped - u32::from(b'0');
+                        let mut is_bad = false;
+                        let (third, third_width) = decode_wtf8_rune(&text[index..]);
+                        if (u32::from(b'0')..=u32::from(b'7')).contains(&third) {
+                            value = value * 8 + third - u32::from(b'0');
+                            index += third_width;
+                            let (fourth, fourth_width) = decode_wtf8_rune(&text[index..]);
+                            if (u32::from(b'0')..=u32::from(b'7')).contains(&fourth) {
+                                let candidate = value * 8 + fourth - u32::from(b'0');
+                                if candidate < 256 {
+                                    value = candidate;
+                                    index += fourth_width;
+                                }
+                            } else if matches!(char::from_u32(fourth), Some('8' | '9')) {
+                                is_bad = true;
+                            }
+                        } else if matches!(char::from_u32(third), Some('8' | '9')) {
+                            is_bad = true;
+                        }
+                        code_point = value;
+                        if is_bad || &text[octal_start..index] != b"\\0" {
+                            self.legacy_octal_loc = Loc {
+                                start: source_i32(start + octal_start),
+                            };
+                        }
+                    }
+                    Some('8' | '9') => {
+                        code_point = escaped;
+                        self.legacy_octal_loc = Loc {
+                            start: source_i32(start + index - 2),
+                        };
+                    }
+                    Some('x') => {
+                        if self.json == JsonFlavor::Json {
+                            return Err(start + index - escaped_width);
+                        }
+                        code_point = 0;
+                        for _ in 0..2 {
+                            let (digit, digit_width) = decode_wtf8_rune(&text[index..]);
+                            index += digit_width;
+                            let Some(value) = hex_value(digit) else {
+                                return Err(start + index - digit_width);
+                            };
+                            code_point = (code_point * 16) | value;
+                        }
+                    }
+                    Some('u') => {
+                        code_point = 0;
+                        let (mut digit, mut digit_width) = decode_wtf8_rune(&text[index..]);
+                        index += digit_width;
+                        if digit == u32::from(b'{') {
+                            if self.json == JsonFlavor::Json {
+                                return Err(start + index - escaped_width);
+                            }
+                            let hex_start = index - width - escaped_width - digit_width;
+                            let mut is_first = true;
+                            let mut is_out_of_range = false;
+                            loop {
+                                (digit, digit_width) = decode_wtf8_rune(&text[index..]);
+                                index += digit_width;
+                                if digit == u32::from(b'}') {
+                                    if is_first {
+                                        return Err(start + index - digit_width);
+                                    }
+                                    break;
+                                }
+                                let Some(value) = hex_value(digit) else {
+                                    return Err(start + index - digit_width);
+                                };
+                                code_point = code_point.saturating_mul(16) | value;
+                                is_out_of_range |= code_point > 0x10_FFFF;
+                                is_first = false;
+                            }
+                            if is_out_of_range && report_errors {
+                                self.add_range_error(
+                                    Range {
+                                        loc: Loc {
+                                            start: source_i32(start + hex_start),
+                                        },
+                                        len: source_i32(index - hex_start),
+                                    },
+                                    "Unicode escape sequence is out of range",
+                                );
+                                panic_any(LexerPanic);
+                            }
+                        } else {
+                            for digit_index in 0..4 {
+                                let Some(value) = hex_value(digit) else {
+                                    return Err(start + index - digit_width);
+                                };
+                                code_point = (code_point * 16) | value;
+                                if digit_index < 3 {
+                                    (digit, digit_width) = decode_wtf8_rune(&text[index..]);
+                                    index += digit_width;
+                                }
+                            }
+                        }
+                    }
+                    Some('\r') => {
+                        if self.json == JsonFlavor::Json {
+                            return Err(start + index - escaped_width);
+                        }
+                        if text.get(index) == Some(&b'\n') {
+                            index += 1;
+                        }
+                        continue;
+                    }
+                    Some('\n' | '\u{2028}' | '\u{2029}') => {
+                        if self.json == JsonFlavor::Json {
+                            return Err(start + index - escaped_width);
+                        }
+                        continue;
+                    }
+                    Some(value) => {
+                        if self.json == JsonFlavor::Json && !matches!(value, '"' | '\\' | '/') {
+                            return Err(start + index - escaped_width);
+                        }
+                        code_point = value as u32;
+                    }
+                    None => return Err(start + index - escaped_width),
+                }
+            }
+
+            append_utf16(&mut decoded, code_point);
+        }
+        Ok(decoded)
     }
 
     fn add_range_error(&mut self, range: Range, text: impl Into<String>) {
@@ -1137,6 +1384,110 @@ fn parse_radix_f64(text: &[u8], radix: u8) -> f64 {
     value
 }
 
+fn source_i32(value: usize) -> i32 {
+    i32::try_from(value).expect("esbuild source offsets must fit in 32 bits")
+}
+
+fn hex_value(code_point: u32) -> Option<u32> {
+    match char::from_u32(code_point)? {
+        '0'..='9' => Some(code_point - u32::from(b'0')),
+        'a'..='f' => Some(code_point + 10 - u32::from(b'a')),
+        'A'..='F' => Some(code_point + 10 - u32::from(b'A')),
+        _ => None,
+    }
+}
+
+fn append_utf16(decoded: &mut Vec<u16>, mut code_point: u32) {
+    if code_point <= 0xFFFF {
+        decoded.push(u16::try_from(code_point).expect("BMP code points fit in UTF-16"));
+    } else {
+        code_point -= 0x1_0000;
+        decoded.push(
+            u16::try_from((0xD800 + ((code_point >> 10) & 0x3FF)) & 0xFFFF)
+                .expect("masked UTF-16 code units fit in u16"),
+        );
+        decoded.push(
+            u16::try_from((0xDC00 + (code_point & 0x3FF)) & 0xFFFF)
+                .expect("masked UTF-16 code units fit in u16"),
+        );
+    }
+}
+
+#[must_use]
+pub fn decode_jsx_entities(text: &[u8]) -> Vec<u16> {
+    let mut decoded = Vec::new();
+    let mut index = 0;
+    while index < text.len() {
+        let (mut code_point, width) = decode_wtf8_rune(&text[index..]);
+        index += width;
+        if code_point == u32::from(b'&')
+            && let Some(length) = text[index..].iter().position(|byte| *byte == b';')
+            && length > 0
+        {
+            let entity = &text[index..index + length];
+            let replacement = if let Some(number) = entity.strip_prefix(b"#") {
+                let (number, radix) = number
+                    .strip_prefix(b"x")
+                    .map_or((number, 10), |number| (number, 16));
+                std::str::from_utf8(number)
+                    .ok()
+                    .and_then(|number| u32::from_str_radix(number, radix).ok())
+            } else {
+                std::str::from_utf8(entity)
+                    .ok()
+                    .and_then(super::jsx_entity)
+                    .map(u32::from)
+            };
+            if let Some(replacement) = replacement {
+                code_point = replacement;
+                index += length + 1;
+            }
+        }
+        append_utf16(&mut decoded, code_point);
+    }
+    decoded
+}
+
+#[must_use]
+pub fn fix_whitespace_and_decode_jsx_entities(text: &[u8]) -> Vec<u16> {
+    let mut after_last_non_whitespace = None;
+    let mut decoded = Vec::new();
+    let mut index = 0;
+    let mut first_non_whitespace = Some(0);
+
+    while index < text.len() {
+        let (code_point, width) = decode_wtf8_rune(&text[index..]);
+        match char::from_u32(code_point) {
+            Some('\r' | '\n' | '\u{2028}' | '\u{2029}') => {
+                if let (Some(first), Some(after_last)) =
+                    (first_non_whitespace, after_last_non_whitespace)
+                {
+                    if !decoded.is_empty() {
+                        decoded.push(u16::from(b' '));
+                    }
+                    decoded.extend(decode_jsx_entities(&text[first..after_last]));
+                }
+                first_non_whitespace = None;
+            }
+            Some('\t' | ' ') => {}
+            Some(character) if !js_ast::is_whitespace(character) => {
+                after_last_non_whitespace = Some(index + width);
+                first_non_whitespace.get_or_insert(index);
+            }
+            _ => {}
+        }
+        index += width;
+    }
+
+    if let Some(first) = first_non_whitespace {
+        if !decoded.is_empty() {
+            decoded.push(u16::from(b' '));
+        }
+        decoded.extend(decode_jsx_entities(&text[first..]));
+    }
+    decoded
+}
+
 fn is_identifier_continue(code_point: u32) -> bool {
     char::from_u32(code_point).is_some_and(js_ast::is_identifier_continue)
 }
@@ -1213,7 +1564,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        CommentBefore, KeyOrValue, Lexer, MaybeSubstring, PragmaArg, has_prefix_with_word_boundary,
+        CommentBefore, JsonFlavor, KeyOrValue, Lexer, MaybeSubstring, PragmaArg,
+        decode_jsx_entities, fix_whitespace_and_decode_jsx_entities, has_prefix_with_word_boundary,
         range_of_identifier, scan_for_pragma_arg,
     };
     use crate::internal::js_lexer::Token;
@@ -1318,5 +1670,45 @@ mod tests {
         assert_eq!(lexer.token, Token::Identifier);
         lexer.next();
         assert_eq!(lexer.token, Token::CloseBrace);
+    }
+
+    #[test]
+    fn lazily_decodes_javascript_escape_sequences() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(
+            log,
+            source(br#""a\n\x62\u0063\u{1F600}""#),
+            TsOptions::default(),
+        );
+        assert_eq!(
+            lexer.string_literal(),
+            "a\nbc😀".encode_utf16().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn json_rejects_non_json_escape_sequences_when_decoded() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new_json(log, source(br#""\x41""#), JsonFlavor::Json, "");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = lexer.string_literal();
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn decodes_and_normalizes_jsx_text() {
+        assert_eq!(
+            decode_jsx_entities(b"&lt;x&#x3e;&#62;"),
+            "<x>>".encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fix_whitespace_and_decode_jsx_entities(b"  first  \n  second &amp; third  "),
+            "  first second & third  "
+                .encode_utf16()
+                .collect::<Vec<_>>()
+        );
     }
 }
