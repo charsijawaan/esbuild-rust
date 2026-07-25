@@ -12,7 +12,7 @@ Status values:
 | `api` | not started |
 | `cmd/esbuild` | not started |
 | `internal/api_helpers` | not started |
-| `internal/ast` | in progress |
+| `internal/ast` | ported |
 | `internal/bundler` | not started |
 | `internal/cache` | not started |
 | `internal/cli_helpers` | not started |

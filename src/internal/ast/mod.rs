@@ -3,6 +3,7 @@
 use crate::internal::helpers::{GlobPart, utf16_equals_wtf8};
 use crate::internal::logger::{Loc, Path, Range};
 use std::ops::{BitOr, BitOrAssign};
+use std::sync::LazyLock;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
@@ -505,11 +506,134 @@ impl SymbolMap {
     }
 }
 
+/// Histogram of identifier character frequencies for minification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CharFreq(pub [i32; 64]);
+
+impl CharFreq {
+    pub fn scan(&mut self, text: &[u8], delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        for byte in text {
+            let index = match byte {
+                b'a'..=b'z' => usize::from(*byte - b'a'),
+                b'A'..=b'Z' => usize::from(*byte - (b'A' - 26)),
+                b'0'..=b'9' => usize::from(*byte + (52 - b'0')),
+                b'_' => 62,
+                b'$' => 63,
+                _ => continue,
+            };
+            self.0[index] = self.0[index].wrapping_add(delta);
+        }
+    }
+
+    pub fn include(&mut self, other: &Self) {
+        for (value, other_value) in self.0.iter_mut().zip(other.0) {
+            *value = value.wrapping_add(other_value);
+        }
+    }
+}
+
+impl Default for CharFreq {
+    fn default() -> Self {
+        Self([0; 64])
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameMinifier {
+    head: String,
+    tail: String,
+}
+
+pub static DEFAULT_NAME_MINIFIER_JS: LazyLock<NameMinifier> = LazyLock::new(|| NameMinifier {
+    head: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$".to_string(),
+    tail: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$".to_string(),
+});
+
+pub static DEFAULT_NAME_MINIFIER_CSS: LazyLock<NameMinifier> = LazyLock::new(|| NameMinifier {
+    head: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_".to_string(),
+    tail: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".to_string(),
+});
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct CharAndCount {
+    character: u8,
+    count: i32,
+    index: u8,
+}
+
+impl NameMinifier {
+    /// # Panics
+    ///
+    /// Panics if the minifier alphabet contains more than 256 characters.
+    #[must_use]
+    pub fn shuffle_by_char_freq(&self, frequency: CharFreq) -> Self {
+        let mut array = vec![CharAndCount::default(); 64];
+        for (index, character) in self.tail.bytes().enumerate() {
+            array[index] = CharAndCount {
+                character,
+                index: u8::try_from(index).expect("minifier alphabet must fit in a byte"),
+                count: frequency.0[index],
+            };
+        }
+        array.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| left.index.cmp(&right.index))
+        });
+
+        let mut head = String::new();
+        let mut tail = String::new();
+        for item in array {
+            if item.character == 0 {
+                continue;
+            }
+            if !item.character.is_ascii_digit() {
+                head.push(char::from(item.character));
+            }
+            tail.push(char::from(item.character));
+        }
+        Self { head, tail }
+    }
+
+    #[must_use]
+    pub fn number_to_minified_name(&self, mut index: usize) -> String {
+        let head_length = self.head.len();
+        let tail_length = self.tail.len();
+        let mut result = String::new();
+
+        let mut character_index = index % head_length;
+        result.push(char::from(self.head.as_bytes()[character_index]));
+        index /= head_length;
+        while index > 0 {
+            index -= 1;
+            character_index = index % tail_length;
+            result.push(char::from(self.tail.as_bytes()[character_index]));
+            index /= tail_length;
+        }
+        result
+    }
+
+    #[must_use]
+    pub fn head(&self) -> &str {
+        &self.head
+    }
+
+    #[must_use]
+    pub fn tail(&self) -> &str {
+        &self.tail
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AssertOrWithEntry, ImportKind, ImportRecordFlags, Index32, Ref, SlotCounts, SlotNamespace,
-        Symbol, SymbolFlags, SymbolKind, SymbolMap, find_assert_or_with_entry,
+        AssertOrWithEntry, CharFreq, DEFAULT_NAME_MINIFIER_CSS, DEFAULT_NAME_MINIFIER_JS,
+        ImportKind, ImportRecordFlags, Index32, Ref, SlotCounts, SlotNamespace, Symbol,
+        SymbolFlags, SymbolKind, SymbolMap, find_assert_or_with_entry,
     };
     use crate::internal::helpers::string_to_utf16;
 
@@ -601,5 +725,28 @@ mod tests {
         let mut counts = SlotCounts([1, 5, 2, 0]);
         counts.union_max(SlotCounts([3, 4, 2, 9]));
         assert_eq!(counts.0, [3, 5, 2, 9]);
+    }
+
+    #[test]
+    fn character_frequencies_accumulate_and_shuffle_names() {
+        let mut frequency = CharFreq::default();
+        frequency.scan(b"zzzzzaaZ9$", 1);
+        let mut additional = CharFreq::default();
+        additional.scan(b"z", 2);
+        frequency.include(&additional);
+
+        let minifier = DEFAULT_NAME_MINIFIER_JS.shuffle_by_char_freq(frequency);
+        assert!(minifier.head().starts_with("zaZ$"));
+        assert!(minifier.tail().starts_with("zaZ9$"));
+        assert_eq!(minifier.number_to_minified_name(0), "z");
+    }
+
+    #[test]
+    fn default_minified_name_sequence_matches_upstream() {
+        assert_eq!(DEFAULT_NAME_MINIFIER_JS.number_to_minified_name(0), "a");
+        assert_eq!(DEFAULT_NAME_MINIFIER_JS.number_to_minified_name(53), "$");
+        assert_eq!(DEFAULT_NAME_MINIFIER_JS.number_to_minified_name(54), "aa");
+        assert_eq!(DEFAULT_NAME_MINIFIER_CSS.number_to_minified_name(52), "_");
+        assert_eq!(DEFAULT_NAME_MINIFIER_CSS.number_to_minified_name(53), "aa");
     }
 }
