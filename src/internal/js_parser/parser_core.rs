@@ -1,11 +1,14 @@
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use crate::internal::{
     ast::{INVALID_REF, LocRef, Ref, Symbol, SymbolFlags, SymbolKind},
     config::Mode,
-    js_ast::{Scope, ScopeKind, ScopeRef},
+    js_ast::{Expr, ExprData, Scope, ScopeKind, ScopeRef, SymbolUse},
     logger::{Loc, Source},
 };
 
@@ -23,9 +26,12 @@ pub(crate) struct ParserCore {
     pub(crate) source: Source,
     pub(crate) current_scope: Option<ScopeRef>,
     pub(crate) scopes_in_order: Vec<ScopeOrder>,
+    pub(crate) scopes_for_current_part: Vec<ScopeRef>,
     pub(crate) symbols: Vec<Symbol>,
+    pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
     pub(crate) ts_use_counts: Vec<u32>,
     pub(crate) is_file_considered_esm: bool,
+    pub(crate) is_control_flow_dead: bool,
 }
 
 impl ParserCore {
@@ -35,9 +41,12 @@ impl ParserCore {
             source,
             current_scope: None,
             scopes_in_order: Vec::new(),
+            scopes_for_current_part: Vec::new(),
             symbols: Vec::new(),
+            symbol_uses: HashMap::new(),
             ts_use_counts: Vec::new(),
             is_file_considered_esm: false,
+            is_control_flow_dead: false,
         }
     }
 
@@ -137,6 +146,29 @@ impl ParserCore {
             }
         }
         self.current_scope = parent;
+    }
+
+    pub(crate) fn push_scope_for_visit_pass(&mut self, kind: ScopeKind, loc: Loc) {
+        let order = self
+            .scopes_in_order
+            .first()
+            .expect("visit pass generated more scopes than parse pass");
+        let actual_kind = order
+            .scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .kind;
+        assert!(
+            order.loc == loc && actual_kind == kind,
+            "Expected scope ({kind:?}, {}) in {:?}, found scope ({actual_kind:?}, {})",
+            loc.start,
+            self.source.pretty_paths.select(self.options.log_path_style),
+            order.loc.start
+        );
+
+        let order = self.scopes_in_order.remove(0);
+        self.current_scope = Some(order.scope.clone());
+        self.scopes_for_current_part.push(order.scope);
     }
 
     pub(crate) fn pop_and_discard_scope(&mut self, scope_index: usize) {
@@ -286,6 +318,60 @@ impl ParserCore {
         self.symbols[new_index].merge_contents_with(&old_symbol);
         new
     }
+
+    pub(crate) fn record_usage(&mut self, reference: Ref) {
+        let symbol_index = usize::try_from(reference.inner_index).expect("symbol index fits usize");
+        if !self.is_control_flow_dead {
+            self.symbols[symbol_index].use_count_estimate = self.symbols[symbol_index]
+                .use_count_estimate
+                .wrapping_add(1);
+            let usage = self.symbol_uses.entry(reference).or_default();
+            usage.count_estimate = usage.count_estimate.wrapping_add(1);
+        }
+
+        if self.options.ts.parse {
+            self.ts_use_counts[symbol_index] = self.ts_use_counts[symbol_index].wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn ignore_usage(&mut self, reference: Ref) {
+        if self.is_control_flow_dead {
+            return;
+        }
+
+        let symbol_index = usize::try_from(reference.inner_index).expect("symbol index fits usize");
+        self.symbols[symbol_index].use_count_estimate -= 1;
+        let usage = self
+            .symbol_uses
+            .get_mut(&reference)
+            .expect("ignored symbol usage must have been recorded");
+        usage.count_estimate -= 1;
+        if usage.count_estimate == 0 {
+            self.symbol_uses.remove(&reference);
+        }
+    }
+
+    pub(crate) fn ignore_usage_of_identifier_in_dot_chain(&mut self, mut expr: &Expr) {
+        loop {
+            match expr.data.as_deref() {
+                Some(ExprData::Identifier(identifier)) => {
+                    self.ignore_usage(identifier.reference);
+                }
+                Some(ExprData::Dot(dot)) => {
+                    expr = &dot.target;
+                    continue;
+                }
+                Some(ExprData::Index(index))
+                    if matches!(index.index.data.as_deref(), Some(ExprData::String(_))) =>
+                {
+                    expr = &index.target;
+                    continue;
+                }
+                _ => {}
+            }
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -295,7 +381,9 @@ mod tests {
     use super::ParserCore;
     use crate::internal::{
         ast::{INVALID_REF, SymbolFlags, SymbolKind},
-        js_ast::{ScopeKind, ScopeMember},
+        js_ast::{
+            DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, ScopeKind, ScopeMember, StringExpr,
+        },
         logger::{Loc, Source},
     };
 
@@ -401,5 +489,69 @@ mod tests {
         assert_eq!(parser.symbols[1].use_count_estimate, 3);
         assert_eq!(parser.symbols[1].original_name, "old");
         assert_eq!(parser.ts_use_counts, [0, 0]);
+    }
+
+    #[test]
+    fn visit_pass_replays_first_pass_scope_order() {
+        let mut parser = parser();
+        parser.push_scope_for_parse_pass(ScopeKind::Entry, Loc { start: 1 });
+        parser.push_scope_for_parse_pass(ScopeKind::Block, Loc { start: 2 });
+        parser.current_scope = None;
+        parser.push_scope_for_visit_pass(ScopeKind::Entry, Loc { start: 1 });
+        parser.push_scope_for_visit_pass(ScopeKind::Block, Loc { start: 2 });
+        assert!(parser.scopes_in_order.is_empty());
+        assert_eq!(parser.scopes_for_current_part.len(), 2);
+    }
+
+    #[test]
+    fn usage_accounting_keeps_typescript_counts_when_usage_is_ignored() {
+        let mut parser = parser();
+        parser.options.ts.parse = true;
+        let reference = parser.new_symbol(SymbolKind::Other, "value");
+        parser.record_usage(reference);
+        assert_eq!(parser.symbols[0].use_count_estimate, 1);
+        assert_eq!(parser.symbol_uses[&reference].count_estimate, 1);
+        assert_eq!(parser.ts_use_counts[0], 1);
+        parser.ignore_usage(reference);
+        assert_eq!(parser.symbols[0].use_count_estimate, 0);
+        assert!(!parser.symbol_uses.contains_key(&reference));
+        assert_eq!(parser.ts_use_counts[0], 1);
+
+        parser.is_control_flow_dead = true;
+        parser.record_usage(reference);
+        assert_eq!(parser.symbols[0].use_count_estimate, 0);
+        assert_eq!(parser.ts_use_counts[0], 2);
+    }
+
+    #[test]
+    fn ignores_identifier_usage_through_static_property_chain() {
+        let mut parser = parser();
+        let reference = parser.new_symbol(SymbolKind::Other, "value");
+        parser.record_usage(reference);
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference,
+                ..IdentifierExpr::default()
+            }),
+        );
+        let dot = Expr::new(
+            Loc::default(),
+            ExprData::Dot(DotExpr {
+                target: identifier,
+                name: "x".into(),
+                ..DotExpr::default()
+            }),
+        );
+        let index = Expr::new(
+            Loc::default(),
+            ExprData::Index(IndexExpr {
+                target: dot,
+                index: Expr::new(Loc::default(), ExprData::String(StringExpr::default())),
+                ..IndexExpr::default()
+            }),
+        );
+        parser.ignore_usage_of_identifier_in_dot_chain(&index);
+        assert_eq!(parser.symbols[0].use_count_estimate, 0);
     }
 }
