@@ -5,7 +5,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub type MsgId = u8;
+mod msg_ids;
+
+pub use msg_ids::{MsgId, msg_id_to_string, string_to_maximum_msg_id, string_to_msg_ids};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(i8)]
