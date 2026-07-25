@@ -9,6 +9,7 @@ mod json;
 mod options;
 mod parser_core;
 mod source_map;
+mod standalone_helpers;
 mod symbols;
 
 pub use global_name::parse_global_name;
