@@ -18,7 +18,7 @@ Status values:
 | `internal/cli_helpers` | not started |
 | `internal/compat` | in progress |
 | `internal/config` | not started |
-| `internal/css_ast` | not started |
+| `internal/css_ast` | in progress |
 | `internal/css_lexer` | ported |
 | `internal/css_parser` | not started |
 | `internal/css_printer` | not started |
