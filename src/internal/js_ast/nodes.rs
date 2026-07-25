@@ -1,6 +1,8 @@
-use crate::internal::ast::{ImportPhase, LocRef, Ref};
-use crate::internal::logger::{Loc, Range, platform_independent_path_dir_base_ext};
+use crate::internal::ast::{CharFreq, ImportPhase, ImportRecord, LocRef, Ref, SlotCounts, Symbol};
+use crate::internal::logger::{Loc, Range, Source, Span, platform_independent_path_dir_base_ext};
+use std::collections::HashMap;
 use std::ops::{BitOr, BitOrAssign};
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -1185,6 +1187,185 @@ pub struct Decl {
     pub value_or_nil: Expr,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScopeMember {
+    pub reference: Ref,
+    pub loc: Loc,
+}
+
+pub type ScopeRef = Arc<Mutex<Scope>>;
+
+#[derive(Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct Scope {
+    pub ts_namespace: Option<TsNamespaceScope>,
+    pub parent: Option<Weak<Mutex<Scope>>>,
+    pub children: Vec<ScopeRef>,
+    pub members: HashMap<String, ScopeMember>,
+    pub replaced: Vec<ScopeMember>,
+    pub generated: Vec<Ref>,
+    pub use_strict_loc: Loc,
+    pub label: LocRef,
+    pub label_stmt_is_loop: bool,
+    pub contains_direct_eval: bool,
+    pub forbid_arguments: bool,
+    pub is_after_const_local_prefix: bool,
+    pub strict_mode: StrictModeKind,
+    pub kind: ScopeKind,
+}
+
+impl Scope {
+    pub fn recursive_set_strict_mode(scope: &ScopeRef, kind: StrictModeKind) {
+        let children = {
+            let mut scope = scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if scope.strict_mode != StrictModeKind::Sloppy {
+                return;
+            }
+            scope.strict_mode = kind;
+            scope.children.clone()
+        };
+        for child in children {
+            Self::recursive_set_strict_mode(&child, kind);
+        }
+    }
+}
+
+pub type TsNamespaceMembers = HashMap<String, TsNamespaceMember>;
+
+#[derive(Clone, Debug, Default)]
+pub struct TsNamespaceScope {
+    pub exported_members: TsNamespaceMembers,
+    pub lazily_generated_property_accesses: HashMap<String, Ref>,
+    pub argument_ref: Ref,
+    pub is_enum_scope: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TsNamespaceMember {
+    pub data: TsNamespaceMemberData,
+    pub loc: Loc,
+    pub is_enum_value: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum TsNamespaceMemberData {
+    Property,
+    Namespace(TsNamespaceMemberNamespace),
+    EnumNumber(f64),
+    EnumString(Vec<u16>),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TsNamespaceMemberNamespace {
+    pub exported_members: TsNamespaceMembers,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ModuleTypeData {
+    pub source: Option<Box<Source>>,
+    pub range: Range,
+    pub module_type: ModuleType,
+}
+
+#[derive(Debug, Default)]
+pub struct Ast {
+    pub module_type_data: ModuleTypeData,
+    pub parts: Vec<Part>,
+    pub symbols: Vec<Symbol>,
+    pub expr_comments: HashMap<Loc, Vec<String>>,
+    pub module_scope: Option<ScopeRef>,
+    pub char_freq: Option<CharFreq>,
+    pub manifest_for_yarn_pnp: Expr,
+    pub hashbang: String,
+    pub directives: Vec<String>,
+    pub url_for_css: String,
+    pub top_level_symbol_to_parts_from_parser: HashMap<Ref, Vec<u32>>,
+    pub ts_enums: HashMap<Ref, HashMap<String, TsEnumValue>>,
+    pub const_values: HashMap<Ref, ConstValue>,
+    pub mangled_props: HashMap<String, Ref>,
+    pub reserved_props: HashMap<String, bool>,
+    pub import_records: Vec<ImportRecord>,
+    pub named_imports: HashMap<Ref, NamedImport>,
+    pub named_exports: HashMap<String, NamedExport>,
+    pub export_star_import_records: Vec<u32>,
+    pub source_map_comment: Span,
+    pub export_keyword: Range,
+    pub top_level_await_keyword: Range,
+    pub live_top_level_await_keyword: Range,
+    pub exports_ref: Ref,
+    pub module_ref: Ref,
+    pub wrapper_ref: Ref,
+    pub approximate_line_count: i32,
+    pub nested_scope_slot_counts: SlotCounts,
+    pub has_lazy_export: bool,
+    pub uses_exports_ref: bool,
+    pub uses_module_ref: bool,
+    pub exports_kind: ExportsKind,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TsEnumValue {
+    pub string: Vec<u16>,
+    pub number: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NamedImport {
+    pub alias: String,
+    pub local_parts_with_uses: Vec<u32>,
+    pub alias_loc: Loc,
+    pub namespace_ref: Ref,
+    pub import_record_index: u32,
+    pub alias_is_star: bool,
+    pub is_exported: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NamedExport {
+    pub reference: Ref,
+    pub alias_loc: Loc,
+}
+
+#[derive(Debug, Default)]
+pub struct Part {
+    pub statements: Vec<Stmt>,
+    pub scopes: Vec<ScopeRef>,
+    pub import_record_indices: Vec<u32>,
+    pub declared_symbols: Vec<DeclaredSymbol>,
+    pub symbol_uses: HashMap<Ref, SymbolUse>,
+    pub symbol_call_uses: HashMap<Ref, SymbolCallUse>,
+    pub import_symbol_property_uses: HashMap<Ref, HashMap<String, SymbolUse>>,
+    pub dependencies: Vec<Dependency>,
+    pub can_be_removed_if_unused: bool,
+    pub force_tree_shaking: bool,
+    pub is_live: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Dependency {
+    pub source_index: u32,
+    pub part_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeclaredSymbol {
+    pub reference: Ref,
+    pub is_top_level: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SymbolUse {
+    pub count_estimate: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SymbolCallUse {
+    pub call_count_estimate: u32,
+    pub single_arg_non_spread_call_count_estimate: u32,
+}
+
 #[must_use]
 #[allow(
     clippy::cast_possible_truncation,
@@ -1292,11 +1473,13 @@ mod tests {
     use super::{
         AnnotationFlags, AssignTarget, CallExpr, CallKind, ConstValueKind, DotExpr, ExportsKind,
         Expr, ExprData, ImportStmt, LocalKind, LocalStmt, ModuleType, OP_TABLE, OpCode,
-        OptionalChain, Precedence, PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData,
-        StringExpr, SwitchCase, const_value_to_expr, ensure_valid_identifier, expr_to_const_value,
+        OptionalChain, Precedence, PropertyFlags, PropertyKind, Scope, ScopeKind, Stmt, StmtData,
+        StrictModeKind, StringExpr, SwitchCase, TsNamespaceMember, TsNamespaceMemberData,
+        const_value_to_expr, ensure_valid_identifier, expr_to_const_value,
         generate_non_unique_name_from_path,
     };
     use crate::internal::logger::Loc;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn operator_table_order_and_metadata_match_enum_order() {
@@ -1459,6 +1642,48 @@ mod tests {
                 kind: LocalKind::AwaitUsing,
                 ..
             }))
+        ));
+    }
+
+    #[test]
+    fn strict_mode_propagates_recursively_without_reference_cycles() {
+        let root = Arc::new(Mutex::new(Scope::default()));
+        let child = Arc::new(Mutex::new(Scope {
+            parent: Some(Arc::downgrade(&root)),
+            ..Scope::default()
+        }));
+        let already_strict = Arc::new(Mutex::new(Scope {
+            strict_mode: StrictModeKind::ExplicitStrict,
+            ..Scope::default()
+        }));
+        root.lock()
+            .expect("root scope")
+            .children
+            .extend([Arc::clone(&child), Arc::clone(&already_strict)]);
+
+        Scope::recursive_set_strict_mode(&root, StrictModeKind::ImplicitStrictEsm);
+        assert_eq!(
+            root.lock().expect("root scope").strict_mode,
+            StrictModeKind::ImplicitStrictEsm
+        );
+        assert_eq!(
+            child.lock().expect("child scope").strict_mode,
+            StrictModeKind::ImplicitStrictEsm
+        );
+        assert_eq!(
+            already_strict.lock().expect("strict scope").strict_mode,
+            StrictModeKind::ExplicitStrict
+        );
+        assert!(child.lock().expect("child scope").parent.is_some());
+
+        let member = TsNamespaceMember {
+            data: TsNamespaceMemberData::EnumString(vec![b'x'.into()]),
+            loc: Loc::default(),
+            is_enum_value: true,
+        };
+        assert!(matches!(
+            member.data,
+            TsNamespaceMemberData::EnumString(ref value) if value == &[u16::from(b'x')]
         ));
     }
 }
