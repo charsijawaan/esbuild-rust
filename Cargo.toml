@@ -1,0 +1,27 @@
+[package]
+name = "esbuild-rs"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.96"
+description = "A source-faithful Rust port of esbuild"
+license = "MIT"
+repository = "https://github.com/charsijawaan/esbuild-rust"
+publish = false
+
+[lib]
+name = "esbuild_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "esbuild"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
