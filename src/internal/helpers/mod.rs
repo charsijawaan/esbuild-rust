@@ -13,6 +13,7 @@ mod quote;
 mod serializer;
 mod stack;
 mod strings;
+mod timer;
 mod typos;
 mod utf;
 mod waitgroup;
@@ -34,6 +35,7 @@ pub use stack::pretty_printed_stack;
 pub use strings::{
     string_array_arrays_equal, string_array_to_quoted_comma_separated_string, string_arrays_equal,
 };
+pub use timer::Timer;
 pub use typos::TypoDetector;
 pub use utf::{
     REPLACEMENT_CHARACTER, contains_non_bmp_code_point, contains_non_bmp_code_point_utf16,
