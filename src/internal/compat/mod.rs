@@ -1,12 +1,14 @@
 // Port of upstream internal/compat.
 
 use crate::internal::ast::SymbolKind;
+use crate::internal::css_ast::Declaration;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::BuildHasher;
 use std::ops::{BitOr, BitOrAssign, Not};
 use std::sync::LazyLock;
 
+mod css_table_data;
 mod js_table_data;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -66,6 +68,7 @@ struct VersionRange {
 
 type EngineRanges = &'static [(Engine, &'static [VersionRange])];
 type FeatureTable = &'static [(JsFeature, EngineRanges)];
+type CssFeatureTable = &'static [(CssFeature, EngineRanges)];
 
 impl VersionRange {
     const fn from_start(major: u16, minor: u8, patch: u8) -> Self {
@@ -254,6 +257,161 @@ impl Not for JsFeature {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct CssFeature(u16);
+
+impl CssFeature {
+    pub const NONE: Self = Self(0);
+    pub const COLOR_FUNCTIONS: Self = Self(1 << 0);
+    pub const GRADIENT_DOUBLE_POSITION: Self = Self(1 << 1);
+    pub const GRADIENT_INTERPOLATION: Self = Self(1 << 2);
+    pub const GRADIENT_MIDPOINTS: Self = Self(1 << 3);
+    pub const HWB: Self = Self(1 << 4);
+    pub const HEX_RGBA: Self = Self(1 << 5);
+    pub const INLINE_STYLE: Self = Self(1 << 6);
+    pub const INSET_PROPERTY: Self = Self(1 << 7);
+    pub const IS_PSEUDO_CLASS: Self = Self(1 << 8);
+    pub const MEDIA_RANGE: Self = Self(1 << 9);
+    pub const MODERN_RGB_HSL: Self = Self(1 << 10);
+    pub const NESTING: Self = Self(1 << 11);
+    pub const REBECCA_PURPLE: Self = Self(1 << 12);
+
+    #[must_use]
+    pub const fn contains(self, feature: Self) -> bool {
+        self.0 & feature.0 != 0
+    }
+
+    #[must_use]
+    pub const fn apply_overrides(self, overrides: Self, mask: Self) -> Self {
+        Self((self.0 & !mask.0) | (overrides.0 & mask.0))
+    }
+}
+
+impl BitOr for CssFeature {
+    type Output = Self;
+
+    fn bitor(self, right: Self) -> Self::Output {
+        Self(self.0 | right.0)
+    }
+}
+
+impl BitOrAssign for CssFeature {
+    fn bitor_assign(&mut self, right: Self) {
+        self.0 |= right.0;
+    }
+}
+
+const CSS_FEATURE_NAMES: &[(&str, CssFeature)] = &[
+    ("color-functions", CssFeature::COLOR_FUNCTIONS),
+    (
+        "gradient-double-position",
+        CssFeature::GRADIENT_DOUBLE_POSITION,
+    ),
+    ("gradient-interpolation", CssFeature::GRADIENT_INTERPOLATION),
+    ("gradient-midpoints", CssFeature::GRADIENT_MIDPOINTS),
+    ("hwb", CssFeature::HWB),
+    ("hex-rgba", CssFeature::HEX_RGBA),
+    ("inline-style", CssFeature::INLINE_STYLE),
+    ("inset-property", CssFeature::INSET_PROPERTY),
+    ("is-pseudo-class", CssFeature::IS_PSEUDO_CLASS),
+    ("media-range", CssFeature::MEDIA_RANGE),
+    ("modern-rgb-hsl", CssFeature::MODERN_RGB_HSL),
+    ("nesting", CssFeature::NESTING),
+    ("rebecca-purple", CssFeature::REBECCA_PURPLE),
+];
+
+pub static STRING_TO_CSS_FEATURE: LazyLock<HashMap<&'static str, CssFeature>> =
+    LazyLock::new(|| CSS_FEATURE_NAMES.iter().copied().collect());
+
+#[must_use]
+pub fn unsupported_css_features<S: BuildHasher>(
+    constraints: &HashMap<Engine, Semver, S>,
+) -> CssFeature {
+    let mut unsupported = CssFeature::NONE;
+    for (feature, engines) in css_table_data::CSS_TABLE {
+        if *feature == CssFeature::INLINE_STYLE {
+            continue;
+        }
+        for (engine, version) in constraints {
+            if !engine.is_browser() {
+                continue;
+            }
+            let ranges = engines
+                .iter()
+                .find_map(|(candidate, ranges)| (candidate == engine).then_some(*ranges));
+            if ranges.is_none_or(|ranges| !is_version_supported(ranges, version)) {
+                unsupported |= *feature;
+            }
+        }
+    }
+    unsupported
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CssPrefix(u8);
+
+impl CssPrefix {
+    pub const NONE: Self = Self(0);
+    pub const KHTML: Self = Self(1 << 0);
+    pub const MOZ: Self = Self(1 << 1);
+    pub const MS: Self = Self(1 << 2);
+    pub const O: Self = Self(1 << 3);
+    pub const WEBKIT: Self = Self(1 << 4);
+
+    #[must_use]
+    pub const fn contains(self, prefix: Self) -> bool {
+        self.0 & prefix.0 != 0
+    }
+}
+
+impl BitOr for CssPrefix {
+    type Output = Self;
+
+    fn bitor(self, right: Self) -> Self::Output {
+        Self(self.0 | right.0)
+    }
+}
+
+impl BitOrAssign for CssPrefix {
+    fn bitor_assign(&mut self, right: Self) {
+        self.0 |= right.0;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PrefixData {
+    engine: Engine,
+    without_prefix: Version,
+    prefix: CssPrefix,
+}
+
+#[must_use]
+pub fn css_prefix_data<S: BuildHasher>(
+    constraints: &HashMap<Engine, Semver, S>,
+) -> HashMap<Declaration, CssPrefix> {
+    let mut entries = HashMap::new();
+    for (property, items) in css_table_data::CSS_PREFIX_TABLE {
+        let mut prefixes = CssPrefix::NONE;
+        for (engine, version) in constraints {
+            if !engine.is_browser() {
+                continue;
+            }
+            for item in *items {
+                if item.engine == *engine
+                    && (item.without_prefix == Version::default()
+                        || compare_versions(item.without_prefix, version) > 0)
+                {
+                    prefixes |= item.prefix;
+                }
+            }
+        }
+        if prefixes != CssPrefix::NONE {
+            entries.insert(*property, prefixes);
+        }
+    }
+    entries
+}
+
 const JS_FEATURE_NAMES: &[(&str, JsFeature)] = &[
     (
         "arbitrary-module-namespace-names",
@@ -404,9 +562,11 @@ pub const fn symbol_feature(kind: SymbolKind) -> JsFeature {
 #[cfg(test)]
 mod tests {
     use super::{
-        Engine, JsFeature, STRING_TO_JS_FEATURE, Semver, Version, compare_versions,
+        CssFeature, CssPrefix, Engine, JsFeature, STRING_TO_CSS_FEATURE, STRING_TO_JS_FEATURE,
+        Semver, Version, compare_versions, css_prefix_data, unsupported_css_features,
         unsupported_js_features,
     };
+    use crate::internal::css_ast::Declaration;
     use std::cmp::Ordering;
     use std::collections::HashMap;
 
@@ -494,5 +654,55 @@ mod tests {
             STRING_TO_JS_FEATURE["optional-chain"],
             JsFeature::OPTIONAL_CHAIN
         );
+    }
+
+    #[test]
+    fn generated_css_table_filters_non_browsers_and_inline_style() {
+        let unsupported_at = |engine, parts: &[i32]| {
+            unsupported_css_features(&HashMap::from([(
+                engine,
+                Semver {
+                    parts: parts.to_vec(),
+                    ..Semver::default()
+                },
+            )]))
+        };
+
+        assert!(unsupported_at(Engine::Chrome, &[110]).contains(CssFeature::COLOR_FUNCTIONS));
+        assert!(!unsupported_at(Engine::Chrome, &[111]).contains(CssFeature::COLOR_FUNCTIONS));
+        assert_eq!(unsupported_at(Engine::Es, &[5]), CssFeature::NONE);
+        assert!(!unsupported_at(Engine::Chrome, &[0]).contains(CssFeature::INLINE_STYLE));
+        assert_eq!(
+            STRING_TO_CSS_FEATURE["gradient-interpolation"],
+            CssFeature::GRADIENT_INTERPOLATION
+        );
+    }
+
+    #[test]
+    fn generated_prefix_table_matches_browser_cutoffs() {
+        let prefixes_at = |engine, parts: &[i32]| {
+            css_prefix_data(&HashMap::from([(
+                engine,
+                Semver {
+                    parts: parts.to_vec(),
+                    ..Semver::default()
+                },
+            )]))
+        };
+
+        assert!(
+            prefixes_at(Engine::Chrome, &[83])[&Declaration::Appearance]
+                .contains(CssPrefix::WEBKIT)
+        );
+        assert!(!prefixes_at(Engine::Chrome, &[84]).contains_key(&Declaration::Appearance));
+
+        let old_safari = prefixes_at(Engine::Safari, &[2]);
+        assert!(old_safari[&Declaration::UserSelect].contains(CssPrefix::KHTML));
+        assert!(old_safari[&Declaration::UserSelect].contains(CssPrefix::WEBKIT));
+
+        let safari_three = prefixes_at(Engine::Safari, &[3]);
+        assert!(!safari_three[&Declaration::UserSelect].contains(CssPrefix::KHTML));
+        assert!(safari_three[&Declaration::UserSelect].contains(CssPrefix::WEBKIT));
+        assert!(prefixes_at(Engine::Es, &[5]).is_empty());
     }
 }

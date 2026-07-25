@@ -16,9 +16,9 @@ Status values:
 | `internal/bundler` | not started |
 | `internal/cache` | not started |
 | `internal/cli_helpers` | not started |
-| `internal/compat` | in progress |
+| `internal/compat` | ported |
 | `internal/config` | not started |
-| `internal/css_ast` | in progress |
+| `internal/css_ast` | ported |
 | `internal/css_lexer` | ported |
 | `internal/css_parser` | not started |
 | `internal/css_printer` | not started |
