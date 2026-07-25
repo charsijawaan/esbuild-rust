@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::internal::{
     ast::LocRef,
     js_ast::{Arg, BinaryExpr, BindingData, BlockStmt, Expr, ExprData, LocalKind, Stmt, StmtData},
-    logger::Loc,
+    logger::{Loc, StringInJsTableEntry, remap_string_in_js_loc},
 };
 
 use super::control_flow::stmt_cares_about_scope;
@@ -179,14 +179,34 @@ pub(crate) fn sorted_keys_of_map_string_loc_ref(input: &HashMap<String, LocRef>)
     keys
 }
 
+pub(crate) fn remap_expr_locs_in_json(expr: &mut Expr, table: &[StringInJsTableEntry]) {
+    expr.loc = remap_string_in_js_loc(table, expr.loc);
+    match expr.data.as_deref_mut() {
+        Some(ExprData::Array(array)) => {
+            array.close_bracket_loc = remap_string_in_js_loc(table, array.close_bracket_loc);
+            for item in &mut array.items {
+                remap_expr_locs_in_json(item, table);
+            }
+        }
+        Some(ExprData::Object(object)) => {
+            object.close_brace_loc = remap_string_in_js_loc(table, object.close_brace_loc);
+            for property in &mut object.properties {
+                remap_expr_locs_in_json(&mut property.key, table);
+                remap_expr_locs_in_json(&mut property.value_or_nil, table);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::{
         contains_closing_script_tag, fn_body_contains_use_strict, is_safe_for_const_local_prefix,
-        is_simple_parameter_list, sorted_keys_of_map_string_loc_ref, stmts_to_single_stmt,
-        try_to_inline_case_body,
+        is_simple_parameter_list, remap_expr_locs_in_json, sorted_keys_of_map_string_loc_ref,
+        stmts_to_single_stmt, try_to_inline_case_body,
     };
     use crate::internal::{
         ast::{LocRef, Ref},
@@ -194,7 +214,7 @@ mod tests {
             Arg, ArrayExpr, Binding, BindingData, BreakStmt, CommentStmt, DirectiveStmt, Expr,
             ExprData, IdentifierBinding, LocalKind, LocalStmt, Stmt, StmtData, StringExpr,
         },
-        logger::Loc,
+        logger::{Loc, StringInJsTableEntry},
     };
 
     fn stmt(data: StmtData) -> Stmt {
@@ -289,5 +309,29 @@ mod tests {
         map.insert("z".into(), LocRef::default());
         map.insert("a".into(), LocRef::default());
         assert_eq!(sorted_keys_of_map_string_loc_ref(&map), ["a", "z"]);
+    }
+
+    #[test]
+    fn remaps_nested_json_expression_locations() {
+        let mut expr = Expr::new(
+            Loc { start: 1 },
+            ExprData::Array(ArrayExpr {
+                items: vec![Expr::new(Loc { start: 2 }, ExprData::Number(1.0))],
+                close_bracket_loc: Loc { start: 3 },
+                ..ArrayExpr::default()
+            }),
+        );
+        let table = [StringInJsTableEntry {
+            inner_loc: Loc { start: 0 },
+            outer_loc: Loc { start: 10 },
+            ..StringInJsTableEntry::default()
+        }];
+        remap_expr_locs_in_json(&mut expr, &table);
+        assert_eq!(expr.loc.start, 11);
+        let Some(ExprData::Array(array)) = expr.data.as_deref() else {
+            panic!("expected array");
+        };
+        assert_eq!(array.items[0].loc.start, 12);
+        assert_eq!(array.close_bracket_loc.start, 13);
     }
 }
