@@ -4,6 +4,7 @@ use super::{
     PropertyKind, SpreadExpr, Stmt, StmtData, UnaryExpr,
 };
 use crate::internal::ast::Ref;
+use crate::internal::compat::JsFeature;
 use crate::internal::helpers::utf16_equals_wtf8;
 use crate::internal::logger::Loc;
 
@@ -116,6 +117,73 @@ pub fn maybe_simplify_not(expr: &Expr) -> Option<Expr> {
         }
         _ => None,
     }
+}
+
+#[must_use]
+pub fn maybe_simplify_equality_comparison(
+    loc: Loc,
+    binary: &BinaryExpr,
+    unsupported_features: JsFeature,
+) -> Option<Expr> {
+    let mut value = &binary.left;
+    let mut primitive = &binary.right;
+    let primitive_first = is_primitive_literal(value.data.as_deref());
+    if primitive_first {
+        std::mem::swap(&mut value, &mut primitive);
+    }
+
+    if let Some(ExprData::Boolean(boolean)) = primitive.data.as_deref()
+        && known_primitive_type(value.data.as_deref()) == PrimitiveType::Boolean
+    {
+        let is_not_equal = matches!(
+            binary.op,
+            OpCode::BinaryLooseNotEqual | OpCode::BinaryStrictNotEqual
+        );
+        return Some(if *boolean == is_not_equal {
+            not(value.clone())
+        } else {
+            value.clone()
+        });
+    }
+
+    if !unsupported_features.contains(JsFeature::TYPEOF_EXOTIC_OBJECT_IS_OBJECT)
+        && matches!(
+            value.data.as_deref(),
+            Some(ExprData::Unary(unary)) if unary.op == OpCode::UnaryTypeof
+        )
+        && matches!(
+            primitive.data.as_deref(),
+            Some(ExprData::String(string)) if utf16_equals_wtf8(&string.value, b"undefined")
+        )
+    {
+        let is_equal = matches!(
+            binary.op,
+            OpCode::BinaryLooseEqual | OpCode::BinaryStrictEqual
+        );
+        let op = if is_equal == primitive_first {
+            OpCode::BinaryLessThan
+        } else {
+            OpCode::BinaryGreaterThan
+        };
+        let short_undefined = Expr::new(
+            primitive.loc,
+            ExprData::String(super::StringExpr {
+                value: vec![u16::from(b'u')],
+                ..super::StringExpr::default()
+            }),
+        );
+        let (left, right) = if primitive_first {
+            (short_undefined, value.clone())
+        } else {
+            (value.clone(), short_undefined)
+        };
+        return Some(Expr::new(
+            loc,
+            ExprData::Binary(BinaryExpr { left, right, op }),
+        ));
+    }
+
+    None
 }
 
 #[must_use]
@@ -560,6 +628,212 @@ pub fn check_equality_big_int(left: &str, right: &str) -> Option<bool> {
     None
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EqualityKind {
+    Loose,
+    Strict,
+}
+
+#[must_use]
+#[allow(clippy::float_cmp, clippy::too_many_lines)]
+pub fn check_equality_if_no_side_effects(
+    left: Option<&ExprData>,
+    right: Option<&ExprData>,
+    kind: EqualityKind,
+) -> Option<bool> {
+    if let Some(ExprData::InlinedEnum(value)) = right {
+        return check_equality_if_no_side_effects(left, value.value.data.as_deref(), kind);
+    }
+
+    match left? {
+        ExprData::InlinedEnum(value) => {
+            check_equality_if_no_side_effects(value.value.data.as_deref(), right, kind)
+        }
+        ExprData::Null => match right? {
+            ExprData::Null => Some(true),
+            ExprData::Undefined => Some(kind == EqualityKind::Loose),
+            right if is_primitive_literal(Some(right)) => Some(false),
+            _ => None,
+        },
+        ExprData::Undefined => match right? {
+            ExprData::Undefined => Some(true),
+            ExprData::Null => Some(kind == EqualityKind::Loose),
+            right if is_primitive_literal(Some(right)) => Some(false),
+            _ => None,
+        },
+        ExprData::Boolean(left) => match right? {
+            ExprData::Boolean(right) => Some(left == right),
+            ExprData::Number(right) if kind == EqualityKind::Loose => {
+                Some(*right == if *left { 1.0 } else { 0.0 })
+            }
+            ExprData::Number(_) | ExprData::Null | ExprData::Undefined => Some(false),
+            right if kind == EqualityKind::Strict && is_primitive_literal(Some(right)) => {
+                Some(false)
+            }
+            _ => None,
+        },
+        ExprData::Number(left) => match right? {
+            ExprData::Number(right) => Some(left == right),
+            ExprData::Boolean(right) if kind == EqualityKind::Loose => {
+                Some(*left == if *right { 1.0 } else { 0.0 })
+            }
+            ExprData::Boolean(_) | ExprData::Null | ExprData::Undefined => Some(false),
+            right if kind == EqualityKind::Strict && is_primitive_literal(Some(right)) => {
+                Some(false)
+            }
+            _ => None,
+        },
+        ExprData::BigInt(left) => match right? {
+            ExprData::BigInt(right) => check_equality_big_int(left, right),
+            ExprData::Null | ExprData::Undefined => Some(false),
+            right if kind == EqualityKind::Strict && is_primitive_literal(Some(right)) => {
+                Some(false)
+            }
+            _ => None,
+        },
+        ExprData::String(left) => match right? {
+            ExprData::String(right) => Some(left.value == right.value),
+            ExprData::Null | ExprData::Undefined => Some(false),
+            right if kind == EqualityKind::Strict && is_primitive_literal(Some(right)) => {
+                Some(false)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn values_look_the_same(left: Option<&ExprData>, right: Option<&ExprData>) -> bool {
+    if let Some(ExprData::InlinedEnum(value)) = right {
+        return values_look_the_same(left, value.value.data.as_deref());
+    }
+
+    match left {
+        Some(ExprData::InlinedEnum(value)) => {
+            return values_look_the_same(value.value.data.as_deref(), right);
+        }
+        Some(ExprData::Identifier(left)) => {
+            if let Some(ExprData::Identifier(right)) = right
+                && left.reference == right.reference
+            {
+                return true;
+            }
+        }
+        Some(ExprData::Dot(left)) => {
+            if let Some(ExprData::Dot(right)) = right
+                && left.has_same_flags_as(right)
+                && left.name == right.name
+                && values_look_the_same(left.target.data.as_deref(), right.target.data.as_deref())
+            {
+                return true;
+            }
+        }
+        Some(ExprData::Index(left)) => {
+            if let Some(ExprData::Index(right)) = right
+                && left.has_same_flags_as(right)
+                && values_look_the_same(left.target.data.as_deref(), right.target.data.as_deref())
+                && values_look_the_same(left.index.data.as_deref(), right.index.data.as_deref())
+            {
+                return true;
+            }
+        }
+        Some(ExprData::If(left)) => {
+            if let Some(ExprData::If(right)) = right
+                && values_look_the_same(left.test.data.as_deref(), right.test.data.as_deref())
+                && values_look_the_same(left.yes.data.as_deref(), right.yes.data.as_deref())
+                && values_look_the_same(left.no.data.as_deref(), right.no.data.as_deref())
+            {
+                return true;
+            }
+        }
+        Some(ExprData::Unary(left)) => {
+            if let Some(ExprData::Unary(right)) = right
+                && left.op == right.op
+                && values_look_the_same(left.value.data.as_deref(), right.value.data.as_deref())
+            {
+                return true;
+            }
+        }
+        Some(ExprData::Binary(left)) => {
+            if let Some(ExprData::Binary(right)) = right
+                && left.op == right.op
+                && values_look_the_same(left.left.data.as_deref(), right.left.data.as_deref())
+                && values_look_the_same(left.right.data.as_deref(), right.right.data.as_deref())
+            {
+                return true;
+            }
+        }
+        Some(ExprData::Call(left)) => {
+            if let Some(ExprData::Call(right)) = right
+                && left.has_same_flags_as(right)
+                && left.args.len() == right.args.len()
+                && values_look_the_same(left.target.data.as_deref(), right.target.data.as_deref())
+                && left.args.iter().zip(&right.args).all(|(left, right)| {
+                    values_look_the_same(left.data.as_deref(), right.data.as_deref())
+                })
+            {
+                return true;
+            }
+        }
+        Some(ExprData::Number(left))
+            if matches!(right, Some(ExprData::Number(right)) if *left == 0.0
+                && *right == 0.0
+                && left.is_sign_negative() != right.is_sign_negative()) =>
+        {
+            return false;
+        }
+        _ => {}
+    }
+
+    check_equality_if_no_side_effects(left, right, EqualityKind::Strict) == Some(true)
+}
+
+pub fn try_to_insert_optional_chain(test: &Expr, expr: &mut Expr) -> bool {
+    match expr.data.as_deref_mut() {
+        Some(ExprData::Dot(value)) => {
+            if values_look_the_same(test.data.as_deref(), value.target.data.as_deref()) {
+                value.optional_chain = OptionalChain::Start;
+                return true;
+            }
+            if try_to_insert_optional_chain(test, &mut value.target) {
+                if value.optional_chain == OptionalChain::None {
+                    value.optional_chain = OptionalChain::Continue;
+                }
+                return true;
+            }
+        }
+        Some(ExprData::Index(value)) => {
+            if values_look_the_same(test.data.as_deref(), value.target.data.as_deref()) {
+                value.optional_chain = OptionalChain::Start;
+                return true;
+            }
+            if try_to_insert_optional_chain(test, &mut value.target) {
+                if value.optional_chain == OptionalChain::None {
+                    value.optional_chain = OptionalChain::Continue;
+                }
+                return true;
+            }
+        }
+        Some(ExprData::Call(value)) => {
+            if values_look_the_same(test.data.as_deref(), value.target.data.as_deref()) {
+                value.optional_chain = OptionalChain::Start;
+                return true;
+            }
+            if try_to_insert_optional_chain(test, &mut value.target) {
+                if value.optional_chain == OptionalChain::None {
+                    value.optional_chain = OptionalChain::Continue;
+                }
+                return true;
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::float_cmp)]
 pub fn try_to_string_on_number_safely(value: f64, radix: u32) -> Option<String> {
@@ -703,18 +977,21 @@ fn format_i32_radix(value: i32, radix: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PrimitiveType, assign, can_change_strict_to_loose, check_equality_big_int,
-        convert_binding_to_expr, inline_spreads_of_array_literals, is_optional_chain,
-        join_all_with_comma, known_primitive_type, mangle_object_spread, maybe_simplify_not, not,
-        string_compare_ucs2, string_to_equivalent_number_value, to_int32,
+        EqualityKind, PrimitiveType, assign, can_change_strict_to_loose, check_equality_big_int,
+        check_equality_if_no_side_effects, convert_binding_to_expr,
+        inline_spreads_of_array_literals, is_optional_chain, join_all_with_comma,
+        known_primitive_type, mangle_object_spread, maybe_simplify_equality_comparison,
+        maybe_simplify_not, not, string_compare_ucs2, string_to_equivalent_number_value, to_int32,
         to_number_without_side_effects, to_string_without_side_effects, to_uint32,
-        try_to_string_on_number_safely, typeof_without_side_effects,
+        try_to_insert_optional_chain, try_to_string_on_number_safely, typeof_without_side_effects,
+        values_look_the_same,
     };
     use crate::internal::ast::Ref;
+    use crate::internal::compat::JsFeature;
     use crate::internal::js_ast::{
         ArrayBinding, ArrayBindingPattern, ArrayExpr, BinaryExpr, Binding, BindingData, Expr,
-        ExprData, IdentifierBinding, ObjectExpr, OpCode, OptionalChain, Property, PropertyKind,
-        SpreadExpr, StringExpr,
+        ExprData, IdentifierBinding, IdentifierExpr, ObjectExpr, OpCode, OptionalChain, Property,
+        PropertyKind, SpreadExpr, StringExpr, UnaryExpr,
     };
     use crate::internal::logger::Loc;
 
@@ -962,5 +1239,155 @@ mod tests {
             Some(ExprData::Object(value)) if value.properties.len() == 1
         ));
         assert_eq!(object.properties.len(), 2);
+    }
+
+    #[test]
+    fn checks_literal_equality_without_side_effects() {
+        let null = ExprData::Null;
+        let undefined = ExprData::Undefined;
+        let one = ExprData::Number(1.0);
+        let true_value = ExprData::Boolean(true);
+        assert_eq!(
+            check_equality_if_no_side_effects(Some(&null), Some(&undefined), EqualityKind::Loose),
+            Some(true)
+        );
+        assert_eq!(
+            check_equality_if_no_side_effects(Some(&null), Some(&undefined), EqualityKind::Strict),
+            Some(false)
+        );
+        assert_eq!(
+            check_equality_if_no_side_effects(Some(&one), Some(&true_value), EqualityKind::Loose),
+            Some(true)
+        );
+        assert_eq!(
+            check_equality_if_no_side_effects(Some(&one), Some(&true_value), EqualityKind::Strict),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn compares_structural_values_and_distinguishes_negative_zero() {
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference: Ref {
+                    source_index: 3,
+                    inner_index: 4,
+                },
+                ..IdentifierExpr::default()
+            }),
+        );
+        assert!(values_look_the_same(
+            identifier.data.as_deref(),
+            identifier.clone().data.as_deref()
+        ));
+        assert!(!values_look_the_same(
+            number(-0.0).data.as_deref(),
+            number(0.0).data.as_deref()
+        ));
+        assert!(values_look_the_same(
+            number(0.0).data.as_deref(),
+            number(0.0).data.as_deref()
+        ));
+    }
+
+    #[test]
+    fn simplifies_boolean_and_typeof_equality_comparisons() {
+        let boolean_value = Expr::new(
+            Loc::default(),
+            ExprData::Unary(UnaryExpr {
+                value: number(1.0),
+                op: OpCode::UnaryNot,
+                ..UnaryExpr::default()
+            }),
+        );
+        let simplified = maybe_simplify_equality_comparison(
+            Loc::default(),
+            &BinaryExpr {
+                left: boolean_value,
+                right: Expr::new(Loc::default(), ExprData::Boolean(false)),
+                op: OpCode::BinaryStrictEqual,
+            },
+            JsFeature::NONE,
+        )
+        .expect("boolean comparison should simplify");
+        assert!(matches!(
+            simplified.data.as_deref(),
+            Some(ExprData::Unary(UnaryExpr {
+                op: OpCode::UnaryNot,
+                ..
+            }))
+        ));
+
+        let typeof_value = Expr::new(
+            Loc::default(),
+            ExprData::Unary(UnaryExpr {
+                value: number(1.0),
+                op: OpCode::UnaryTypeof,
+                ..UnaryExpr::default()
+            }),
+        );
+        let undefined = Expr::new(
+            Loc::default(),
+            ExprData::String(StringExpr {
+                value: "undefined".encode_utf16().collect(),
+                ..StringExpr::default()
+            }),
+        );
+        let simplified = maybe_simplify_equality_comparison(
+            Loc::default(),
+            &BinaryExpr {
+                left: typeof_value,
+                right: undefined,
+                op: OpCode::BinaryLooseNotEqual,
+            },
+            JsFeature::NONE,
+        )
+        .expect("typeof comparison should simplify");
+        assert!(matches!(
+            simplified.data.as_deref(),
+            Some(ExprData::Binary(BinaryExpr {
+                op: OpCode::BinaryLessThan,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn inserts_optional_chain_at_matching_target() {
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference: Ref {
+                    source_index: 7,
+                    inner_index: 8,
+                },
+                ..IdentifierExpr::default()
+            }),
+        );
+        let mut chain = Expr::new(
+            Loc::default(),
+            ExprData::Dot(crate::internal::js_ast::DotExpr {
+                target: Expr::new(
+                    Loc::default(),
+                    ExprData::Dot(crate::internal::js_ast::DotExpr {
+                        target: identifier.clone(),
+                        name: "first".into(),
+                        ..crate::internal::js_ast::DotExpr::default()
+                    }),
+                ),
+                name: "second".into(),
+                ..crate::internal::js_ast::DotExpr::default()
+            }),
+        );
+        assert!(try_to_insert_optional_chain(&identifier, &mut chain));
+        let Some(ExprData::Dot(outer)) = chain.data.as_deref() else {
+            panic!("expected outer property access");
+        };
+        assert_eq!(outer.optional_chain, OptionalChain::Continue);
+        assert!(matches!(
+            outer.target.data.as_deref(),
+            Some(ExprData::Dot(inner)) if inner.optional_chain == OptionalChain::Start
+        ));
     }
 }
