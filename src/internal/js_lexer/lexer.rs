@@ -6,7 +6,7 @@ use crate::internal::{
     config::TsOptions,
     helpers::decode_wtf8_rune,
     js_ast,
-    logger::{LineColumnTracker, Loc, Log, Range, Source, Span},
+    logger::{LineColumnTracker, Loc, Log, Msg, MsgData, MsgKind, Range, Source, Span},
 };
 
 use super::Token;
@@ -425,6 +425,267 @@ impl Lexer {
                 _ => self.validate_and_step_reg_exp(),
             }
         }
+    }
+
+    /// Require a JSX child token and advance in JSX-child mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`LexerPanic`] after logging a mismatch.
+    pub fn expect_jsx_element_child(&mut self, token: Token) {
+        if self.token != token {
+            self.expected(token);
+        }
+        self.next_jsx_element_child();
+    }
+
+    /// Advance while scanning JSX element children.
+    #[allow(clippy::too_many_lines)]
+    pub fn next_jsx_element_child(&mut self) {
+        self.has_newline_before = false;
+        let original_start = self.end;
+        self.start = self.end;
+
+        match char::from_u32(self.code_point) {
+            None => self.token = Token::EndOfFile,
+            Some('{') => self.single_character_token(Token::OpenBrace),
+            Some('<') => self.single_character_token(Token::LessThan),
+            Some(_) => {
+                let mut needs_fixing = false;
+                loop {
+                    match char::from_u32(self.code_point) {
+                        None | Some('{' | '<') => break,
+                        Some('&' | '\r' | '\n' | '\u{2028}' | '\u{2029}') => {
+                            needs_fixing = true;
+                            self.step();
+                        }
+                        Some(character @ ('}' | '>')) => {
+                            self.log_invalid_jsx_text_character(character);
+                            self.step();
+                        }
+                        Some(character) => {
+                            needs_fixing |= !character.is_ascii();
+                            self.step();
+                        }
+                    }
+                }
+                self.token = Token::StringLiteral;
+                let text = &self.source.contents[original_start..self.end];
+                self.decoded_string_literal = Some(if needs_fixing {
+                    fix_whitespace_and_decode_jsx_entities(text)
+                } else {
+                    text.iter().copied().map(u16::from).collect()
+                });
+            }
+        }
+    }
+
+    fn log_invalid_jsx_text_character(&mut self, character: char) {
+        let replacement = if character == '}' { "{'}'}" } else { "{'>'}" };
+        let range = Range {
+            loc: Loc {
+                start: source_i32(self.end),
+            },
+            len: 1,
+        };
+        let mut data = self.tracker.msg_data(
+            range,
+            format!("The character \"{character}\" is not valid inside a JSX element"),
+        );
+        let (kind, notes) = if self.could_be_bad_arrow_in_tsx > 0
+            && character == '>'
+            && self.end > 0
+            && self.source.contents[self.end - 1] == b'='
+        {
+            let mut note = self.tracker.msg_data(
+                self.bad_arrow_in_tsx_range,
+                "TypeScript's TSX syntax interprets arrow functions with a single generic type \
+                 parameter as an opening JSX element. If you want it to be interpreted as an \
+                 arrow function instead, you need to add a trailing comma after the type \
+                 parameter to disambiguate:",
+            );
+            if let Some(location) = &mut note.location {
+                location
+                    .suggestion
+                    .clone_from(&self.bad_arrow_in_tsx_suggestion);
+            }
+            (MsgKind::Error, vec![note])
+        } else {
+            if let Some(location) = &mut data.location {
+                replacement.clone_into(&mut location.suggestion);
+            }
+            (
+                if self.ts.parse {
+                    MsgKind::Error
+                } else {
+                    MsgKind::Warning
+                },
+                vec![MsgData {
+                    text: format!("Did you mean to escape it as {replacement:?} instead?"),
+                    ..MsgData::default()
+                }],
+            )
+        };
+        self.log.add_msg(Msg {
+            notes,
+            data,
+            ..Msg::new(kind, "")
+        });
+    }
+
+    /// Require a token inside a JSX tag and advance in JSX-tag mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`LexerPanic`] after logging a mismatch.
+    pub fn expect_inside_jsx_element(&mut self, token: Token) {
+        if self.token != token {
+            self.expected(token);
+        }
+        self.next_inside_jsx_element();
+    }
+
+    /// Advance while scanning inside a JSX opening or closing tag.
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`LexerPanic`] after logging malformed input.
+    #[allow(clippy::too_many_lines)]
+    pub fn next_inside_jsx_element(&mut self) {
+        self.has_newline_before = false;
+        loop {
+            self.start = self.end;
+            match char::from_u32(self.code_point) {
+                None => self.token = Token::EndOfFile,
+                Some('\r' | '\n' | '\u{2028}' | '\u{2029}') => {
+                    self.step();
+                    self.has_newline_before = true;
+                    continue;
+                }
+                Some('\t' | ' ') => {
+                    self.step();
+                    continue;
+                }
+                Some('.') => self.single_character_token(Token::Dot),
+                Some(':') => self.single_character_token(Token::Colon),
+                Some('=') => self.single_character_token(Token::Equals),
+                Some('{') => self.single_character_token(Token::OpenBrace),
+                Some('}') => self.single_character_token(Token::CloseBrace),
+                Some('<') => self.single_character_token(Token::LessThan),
+                Some('>') => self.single_character_token(Token::GreaterThan),
+                Some('/') => {
+                    self.step();
+                    if self.code_point == u32::from(b'/') {
+                        loop {
+                            self.step();
+                            if matches!(
+                                char::from_u32(self.code_point),
+                                None | Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
+                            ) {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    if self.code_point == u32::from(b'*') {
+                        self.step();
+                        loop {
+                            match char::from_u32(self.code_point) {
+                                Some('*') => {
+                                    self.step();
+                                    if self.code_point == u32::from(b'/') {
+                                        self.step();
+                                        break;
+                                    }
+                                }
+                                Some('\r' | '\n' | '\u{2028}' | '\u{2029}') => {
+                                    self.step();
+                                    self.has_newline_before = true;
+                                }
+                                None => {
+                                    self.add_range_error(
+                                        Range {
+                                            loc: self.loc(),
+                                            len: 0,
+                                        },
+                                        "Expected \"*/\" to terminate multi-line comment",
+                                    );
+                                    panic_any(LexerPanic);
+                                }
+                                Some(_) => self.step(),
+                            }
+                        }
+                        continue;
+                    }
+                    self.token = Token::Slash;
+                }
+                Some(quote @ ('\'' | '"')) => self.scan_jsx_attribute_string(quote),
+                Some(character) if js_ast::is_whitespace(character) => {
+                    self.step();
+                    continue;
+                }
+                Some(character) if js_ast::is_identifier_start(character) => {
+                    self.step();
+                    while char::from_u32(self.code_point)
+                        .is_some_and(|next| js_ast::is_identifier_continue(next) || next == '-')
+                    {
+                        self.step();
+                    }
+                    self.identifier = self.raw_identifier();
+                    self.token = Token::Identifier;
+                }
+                Some(_) => {
+                    self.end = self.current;
+                    self.token = Token::SyntaxError;
+                }
+            }
+            return;
+        }
+    }
+
+    fn scan_jsx_attribute_string(&mut self, quote: char) {
+        let mut backslash = Range::default();
+        let mut needs_decode = false;
+        self.step();
+        loop {
+            match char::from_u32(self.code_point) {
+                None => self.syntax_error(),
+                Some('&') => {
+                    needs_decode = true;
+                    self.step();
+                }
+                Some('\\') => {
+                    backslash = Range {
+                        loc: Loc {
+                            start: source_i32(self.end),
+                        },
+                        len: 1,
+                    };
+                    self.step();
+                    continue;
+                }
+                Some(character) if character == quote => {
+                    if backslash.len > 0 {
+                        backslash.len += 1;
+                        self.previous_backslash_quote_in_jsx = backslash;
+                    }
+                    self.step();
+                    break;
+                }
+                Some(character) => {
+                    needs_decode |= !character.is_ascii();
+                    self.step();
+                }
+            }
+            backslash = Range::default();
+        }
+        self.token = Token::StringLiteral;
+        let text = &self.source.contents[self.start + 1..self.end - 1];
+        self.decoded_string_literal = Some(if needs_decode {
+            decode_jsx_entities(text)
+        } else {
+            text.iter().copied().map(u16::from).collect()
+        });
     }
 
     fn validate_and_step_reg_exp(&mut self) {
@@ -2177,6 +2438,54 @@ mod tests {
             lexer.scan_reg_exp();
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn scans_jsx_tag_tokens_attributes_and_children() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(
+            log,
+            source(
+                br#"<my-tag data-id="a&amp;b">  hello
+              world  </my-tag>"#,
+            ),
+            TsOptions::default(),
+        );
+        assert_eq!(lexer.token, Token::LessThan);
+        lexer.next_inside_jsx_element();
+        assert_eq!(lexer.token, Token::Identifier);
+        assert_eq!(lexer.raw(), b"my-tag");
+        lexer.next_inside_jsx_element();
+        assert_eq!(lexer.raw(), b"data-id");
+        lexer.next_inside_jsx_element();
+        assert_eq!(lexer.token, Token::Equals);
+        lexer.next_inside_jsx_element();
+        assert_eq!(lexer.token, Token::StringLiteral);
+        assert_eq!(
+            lexer.string_literal(),
+            "a&b".encode_utf16().collect::<Vec<_>>()
+        );
+        lexer.next_inside_jsx_element();
+        assert_eq!(lexer.token, Token::GreaterThan);
+        lexer.next_jsx_element_child();
+        assert_eq!(lexer.token, Token::StringLiteral);
+        assert_eq!(
+            lexer.string_literal(),
+            "  hello world  ".encode_utf16().collect::<Vec<_>>()
+        );
+        lexer.next_jsx_element_child();
+        assert_eq!(lexer.token, Token::LessThan);
+    }
+
+    #[test]
+    fn invalid_jsx_text_delimiters_produce_diagnostics() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(log.clone(), source(b"<x>bad > text<"), TsOptions::default());
+        lexer.next_inside_jsx_element();
+        lexer.next_inside_jsx_element();
+        lexer.next_jsx_element_child();
+        assert_eq!(lexer.token, Token::StringLiteral);
+        assert_eq!(log.done().len(), 1);
     }
 
     #[test]
