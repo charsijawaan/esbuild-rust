@@ -22,7 +22,7 @@ Status values:
 | `internal/css_lexer` | ported |
 | `internal/css_parser` | not started |
 | `internal/css_printer` | not started |
-| `internal/fs` | not started |
+| `internal/fs` | in progress |
 | `internal/graph` | not started |
 | `internal/helpers` | ported |
 | `internal/js_ast` | not started |
