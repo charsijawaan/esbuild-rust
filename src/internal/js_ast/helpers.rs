@@ -1038,6 +1038,175 @@ pub fn fold_binary_operator(loc: Loc, binary: &BinaryExpr) -> Option<Expr> {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn simplify_boolean_expr(
+    expr: &Expr,
+    expr_can_be_removed_if_unused: &dyn Fn(&Expr) -> bool,
+) -> Expr {
+    match expr.data.as_deref() {
+        Some(ExprData::Unary(unary)) if unary.op == OpCode::UnaryNot => {
+            if let Some(ExprData::Unary(inner)) = unary.value.data.as_deref()
+                && inner.op == OpCode::UnaryNot
+            {
+                return simplify_boolean_expr(&inner.value, expr_can_be_removed_if_unused);
+            }
+            Expr::new(
+                expr.loc,
+                ExprData::Unary(UnaryExpr {
+                    value: simplify_boolean_expr(&unary.value, expr_can_be_removed_if_unused),
+                    ..unary.clone()
+                }),
+            )
+        }
+        Some(ExprData::Binary(binary)) => {
+            let mut left = binary.left.clone();
+            let mut right = binary.right.clone();
+            match binary.op {
+                OpCode::BinaryStrictEqual
+                | OpCode::BinaryStrictNotEqual
+                | OpCode::BinaryLooseEqual
+                | OpCode::BinaryLooseNotEqual => {
+                    if extract_numeric_value(right.data.as_deref()) == Some(0.0)
+                        && is_int32_or_uint32(left.data.as_deref())
+                    {
+                        return if matches!(
+                            binary.op,
+                            OpCode::BinaryStrictNotEqual | OpCode::BinaryLooseNotEqual
+                        ) {
+                            left
+                        } else {
+                            not(left)
+                        };
+                    }
+                }
+                OpCode::BinaryLogicalAnd => {
+                    left = simplify_boolean_expr(&left, expr_can_be_removed_if_unused);
+                    right = simplify_boolean_expr(&right, expr_can_be_removed_if_unused);
+                    if matches!(
+                        to_boolean_with_side_effects(right.data.as_deref()),
+                        Some((true, SideEffects::NoSideEffects))
+                    ) {
+                        return left;
+                    }
+                }
+                OpCode::BinaryLogicalOr => {
+                    left = simplify_boolean_expr(&left, expr_can_be_removed_if_unused);
+                    right = simplify_boolean_expr(&right, expr_can_be_removed_if_unused);
+                    if matches!(
+                        to_boolean_with_side_effects(right.data.as_deref()),
+                        Some((false, SideEffects::NoSideEffects))
+                    ) {
+                        return left;
+                    }
+                }
+                _ => {}
+            }
+            Expr::new(
+                expr.loc,
+                ExprData::Binary(BinaryExpr {
+                    left,
+                    right,
+                    ..binary.clone()
+                }),
+            )
+        }
+        Some(ExprData::If(value)) => {
+            let yes = simplify_boolean_expr(&value.yes, expr_can_be_removed_if_unused);
+            let no = simplify_boolean_expr(&value.no, expr_can_be_removed_if_unused);
+            if let Some((boolean, SideEffects::NoSideEffects)) =
+                to_boolean_with_side_effects(yes.data.as_deref())
+            {
+                return if boolean {
+                    join_with_left_associative_op(OpCode::BinaryLogicalOr, value.test.clone(), no)
+                } else {
+                    join_with_left_associative_op(
+                        OpCode::BinaryLogicalAnd,
+                        not(value.test.clone()),
+                        no,
+                    )
+                };
+            }
+            if let Some((boolean, SideEffects::NoSideEffects)) =
+                to_boolean_with_side_effects(no.data.as_deref())
+            {
+                return if boolean {
+                    join_with_left_associative_op(
+                        OpCode::BinaryLogicalOr,
+                        not(value.test.clone()),
+                        yes,
+                    )
+                } else {
+                    join_with_left_associative_op(OpCode::BinaryLogicalAnd, value.test.clone(), yes)
+                };
+            }
+            Expr::new(
+                expr.loc,
+                ExprData::If(super::IfExpr {
+                    test: value.test.clone(),
+                    yes,
+                    no,
+                }),
+            )
+        }
+        data => {
+            if let Some((boolean, side_effects)) = to_boolean_with_side_effects(data)
+                && (side_effects == SideEffects::NoSideEffects
+                    || expr_can_be_removed_if_unused(expr))
+            {
+                return Expr::new(expr.loc, ExprData::Boolean(boolean));
+            }
+            expr.clone()
+        }
+    }
+}
+
+#[must_use]
+pub fn is_binary_null_and_undefined(left: &Expr, right: &Expr, op: OpCode) -> Option<(Expr, Expr)> {
+    let Some(ExprData::Binary(left_binary)) = left.data.as_deref() else {
+        return None;
+    };
+    let Some(ExprData::Binary(right_binary)) = right.data.as_deref() else {
+        return None;
+    };
+    if left_binary.op != op || right_binary.op != op {
+        return None;
+    }
+
+    let (mut left_id, mut left_equality) = (&left_binary.left, &left_binary.right);
+    let (mut right_id, mut right_equality) = (&right_binary.left, &right_binary.right);
+    if matches!(left_equality.data.as_deref(), Some(ExprData::Identifier(_))) {
+        std::mem::swap(&mut left_id, &mut left_equality);
+    }
+    if matches!(
+        right_equality.data.as_deref(),
+        Some(ExprData::Identifier(_))
+    ) {
+        std::mem::swap(&mut right_id, &mut right_equality);
+    }
+
+    let (Some(ExprData::Identifier(left_identifier)), Some(ExprData::Identifier(right_identifier))) =
+        (left_id.data.as_deref(), right_id.data.as_deref())
+    else {
+        return None;
+    };
+    if left_identifier.reference != right_identifier.reference {
+        return None;
+    }
+
+    if matches!(left_equality.data.as_deref(), Some(ExprData::Null))
+        && matches!(right_equality.data.as_deref(), Some(ExprData::Undefined))
+    {
+        return Some((left_binary.left.clone(), left_binary.right.clone()));
+    }
+    if matches!(left_equality.data.as_deref(), Some(ExprData::Undefined))
+        && matches!(right_equality.data.as_deref(), Some(ExprData::Null))
+    {
+        return Some((right_binary.left.clone(), right_binary.right.clone()));
+    }
+    None
+}
+
+#[must_use]
 pub fn check_equality_big_int(left: &str, right: &str) -> Option<bool> {
     if left == right {
         return Some(true);
@@ -1602,6 +1771,42 @@ pub fn mangle_object_spread(properties: &[Property]) -> Vec<Property> {
     result
 }
 
+pub fn for_each_identifier_binding_in_decls(
+    declarations: &mut [super::Decl],
+    callback: &mut impl FnMut(Loc, &mut super::IdentifierBinding),
+) {
+    for declaration in declarations {
+        for_each_identifier_binding(&mut declaration.binding, callback);
+    }
+}
+
+/// # Panics
+///
+/// Panics if the binding is an invalid placeholder without binding data.
+pub fn for_each_identifier_binding(
+    binding: &mut Binding,
+    callback: &mut impl FnMut(Loc, &mut super::IdentifierBinding),
+) {
+    let data = binding
+        .data
+        .as_deref_mut()
+        .expect("internal error: missing binding data");
+    match data {
+        BindingData::Missing => {}
+        BindingData::Identifier(identifier) => callback(binding.loc, identifier),
+        BindingData::Array(array) => {
+            for item in &mut array.items {
+                for_each_identifier_binding(&mut item.binding, callback);
+            }
+        }
+        BindingData::Object(object) => {
+            for property in &mut object.properties {
+                for_each_identifier_binding(&mut property.value, callback);
+            }
+        }
+    }
+}
+
 fn format_i32_radix(value: i32, radix: u32) -> Option<String> {
     if !(2..=36).contains(&radix) {
         return None;
@@ -1634,10 +1839,11 @@ mod tests {
         EqualityKind, PrimitiveType, SideEffects, StringAdditionKind, assign,
         can_change_strict_to_loose, check_equality_big_int, check_equality_if_no_side_effects,
         convert_binding_to_expr, fold_binary_operator, fold_string_addition,
-        inline_primitives_into_template, inline_spreads_of_array_literals, is_optional_chain,
+        for_each_identifier_binding, inline_primitives_into_template,
+        inline_spreads_of_array_literals, is_binary_null_and_undefined, is_optional_chain,
         join_all_with_comma, known_primitive_type, mangle_object_spread,
         maybe_simplify_equality_comparison, maybe_simplify_not, not,
-        should_fold_binary_operator_when_minifying, string_compare_ucs2,
+        should_fold_binary_operator_when_minifying, simplify_boolean_expr, string_compare_ucs2,
         string_to_equivalent_number_value, to_boolean_with_side_effects, to_int32,
         to_null_or_undefined_with_side_effects, to_number_without_side_effects,
         to_string_without_side_effects, to_uint32, try_to_insert_optional_chain,
@@ -1647,8 +1853,9 @@ mod tests {
     use crate::internal::compat::JsFeature;
     use crate::internal::js_ast::{
         ArrayBinding, ArrayBindingPattern, ArrayExpr, BinaryExpr, Binding, BindingData, Expr,
-        ExprData, IdentifierBinding, IdentifierExpr, ObjectExpr, OpCode, OptionalChain, Property,
-        PropertyKind, SpreadExpr, StringExpr, TemplateExpr, TemplatePart, UnaryExpr,
+        ExprData, IdentifierBinding, IdentifierExpr, IfExpr, ObjectBindingPattern, ObjectExpr,
+        OpCode, OptionalChain, Property, PropertyBinding, PropertyKind, SpreadExpr, StringExpr,
+        TemplateExpr, TemplatePart, UnaryExpr,
     };
     use crate::internal::logger::Loc;
 
@@ -2306,6 +2513,134 @@ mod tests {
             Some(ExprData::String(value))
                 if value.value == "abc".encode_utf16().collect::<Vec<_>>()
                     && value.prefer_template
+        ));
+    }
+
+    #[test]
+    fn simplifies_expressions_in_boolean_contexts() {
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference: Ref {
+                    source_index: 1,
+                    inner_index: 9,
+                },
+                ..IdentifierExpr::default()
+            }),
+        );
+        let double_not = Expr::new(
+            Loc::default(),
+            ExprData::Unary(UnaryExpr {
+                value: Expr::new(
+                    Loc::default(),
+                    ExprData::Unary(UnaryExpr {
+                        value: identifier.clone(),
+                        op: OpCode::UnaryNot,
+                        ..UnaryExpr::default()
+                    }),
+                ),
+                op: OpCode::UnaryNot,
+                ..UnaryExpr::default()
+            }),
+        );
+        assert!(values_look_the_same(
+            simplify_boolean_expr(&double_not, &|_| false)
+                .data
+                .as_deref(),
+            identifier.data.as_deref()
+        ));
+
+        let conditional = Expr::new(
+            Loc::default(),
+            ExprData::If(IfExpr {
+                test: identifier.clone(),
+                yes: Expr::new(Loc::default(), ExprData::Boolean(true)),
+                no: number(0.0),
+            }),
+        );
+        assert!(matches!(
+            simplify_boolean_expr(&conditional, &|_| false)
+                .data
+                .as_deref(),
+            Some(ExprData::Binary(BinaryExpr {
+                op: OpCode::BinaryLogicalOr,
+                ..
+            }))
+        ));
+
+        let object = Expr::new(Loc::default(), ExprData::Object(ObjectExpr::default()));
+        assert!(matches!(
+            simplify_boolean_expr(&object, &|_| true).data.as_deref(),
+            Some(ExprData::Boolean(true))
+        ));
+    }
+
+    #[test]
+    fn detects_paired_null_and_undefined_checks() {
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference: Ref {
+                    source_index: 2,
+                    inner_index: 3,
+                },
+                ..IdentifierExpr::default()
+            }),
+        );
+        let comparison = |right: Expr| {
+            Expr::new(
+                Loc::default(),
+                ExprData::Binary(BinaryExpr {
+                    left: identifier.clone(),
+                    right,
+                    op: OpCode::BinaryStrictEqual,
+                }),
+            )
+        };
+        assert!(
+            is_binary_null_and_undefined(
+                &comparison(Expr::new(Loc::default(), ExprData::Null)),
+                &comparison(Expr::new(Loc::default(), ExprData::Undefined)),
+                OpCode::BinaryStrictEqual,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn visits_identifier_bindings_recursively() {
+        let mut binding = Binding {
+            data: Some(Box::new(BindingData::Object(ObjectBindingPattern {
+                properties: vec![PropertyBinding {
+                    value: Binding {
+                        loc: Loc { start: 42 },
+                        data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                            reference: Ref {
+                                source_index: 1,
+                                inner_index: 2,
+                            },
+                        }))),
+                    },
+                    ..PropertyBinding::default()
+                }],
+                ..ObjectBindingPattern::default()
+            }))),
+            ..Binding::default()
+        };
+        let mut visited = Vec::new();
+        for_each_identifier_binding(&mut binding, &mut |loc, identifier| {
+            visited.push(loc.start);
+            identifier.reference.inner_index += 1;
+        });
+        assert_eq!(visited, vec![42]);
+        assert!(matches!(
+            binding.data.as_deref(),
+            Some(BindingData::Object(value))
+                if matches!(
+                    value.properties[0].value.data.as_deref(),
+                    Some(BindingData::Identifier(identifier))
+                        if identifier.reference.inner_index == 3
+                )
         ));
     }
 }
