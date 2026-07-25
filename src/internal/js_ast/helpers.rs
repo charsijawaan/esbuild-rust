@@ -4,6 +4,7 @@ use super::{
     PropertyKind, SpreadExpr, Stmt, StmtData, UnaryExpr,
 };
 use crate::internal::ast::Ref;
+use crate::internal::helpers::utf16_equals_wtf8;
 use crate::internal::logger::Loc;
 
 #[must_use]
@@ -74,6 +75,8 @@ pub fn maybe_simplify_not(expr: &Expr) -> Option<Expr> {
         ExprData::Boolean(value) => boolean(!value),
         ExprData::Number(value) => boolean(*value == 0.0 || value.is_nan()),
         ExprData::String(value) => boolean(value.value.is_empty()),
+        ExprData::BigInt(value) => check_equality_big_int(value, "0")
+            .map(|equal| Expr::new(expr.loc, ExprData::Boolean(equal))),
         ExprData::Function(_) | ExprData::Arrow(_) | ExprData::RegExp(_) => boolean(false),
         ExprData::Unary(unary)
             if unary.op == OpCode::UnaryNot
@@ -468,17 +471,250 @@ pub const fn unary_assign_target_for(op: OpCode) -> AssignTarget {
     }
 }
 
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::float_cmp
+)]
+pub fn to_int32(value: f64) -> i32 {
+    let easy = value as i32;
+    if f64::from(easy) == value {
+        return easy;
+    }
+    if !value.is_finite() {
+        return 0;
+    }
+    let wrapped = ((value.abs() % 4_294_967_296.0) as u32).cast_signed();
+    if value.is_sign_negative() {
+        wrapped.wrapping_neg()
+    } else {
+        wrapped
+    }
+}
+
+#[must_use]
+#[allow(clippy::cast_sign_loss)]
+pub fn to_uint32(value: f64) -> u32 {
+    to_int32(value) as u32
+}
+
+#[must_use]
+pub fn to_number_without_side_effects(data: Option<&ExprData>) -> Option<f64> {
+    match data? {
+        ExprData::Annotation(value) => to_number_without_side_effects(value.value.data.as_deref()),
+        ExprData::InlinedEnum(value) => to_number_without_side_effects(value.value.data.as_deref()),
+        ExprData::Null => Some(0.0),
+        ExprData::Undefined | ExprData::RegExp(_) => Some(f64::NAN),
+        ExprData::Array(value) if value.items.is_empty() => Some(0.0),
+        ExprData::Object(value) if value.properties.is_empty() => Some(f64::NAN),
+        ExprData::Boolean(value) => Some(if *value { 1.0 } else { 0.0 }),
+        ExprData::Number(value) => Some(*value),
+        ExprData::String(value) if value.value.is_empty() => Some(0.0),
+        ExprData::String(value) => string_to_equivalent_number_value(&value.value),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn to_string_without_side_effects(data: Option<&ExprData>) -> Option<String> {
+    match data? {
+        ExprData::Null => Some("null".into()),
+        ExprData::Undefined => Some("undefined".into()),
+        ExprData::Boolean(value) => Some(if *value { "true" } else { "false" }.into()),
+        ExprData::BigInt(value) if value.len() < 2 || !value.starts_with('0') => {
+            Some(value.clone())
+        }
+        ExprData::Number(value) => try_to_string_on_number_safely(*value, 10),
+        ExprData::RegExp(value) => Some(value.clone()),
+        ExprData::Dot(value) if value.name == "constructor" => match value.target.data.as_deref() {
+            Some(ExprData::String(_)) => Some("function String() { [native code] }".into()),
+            Some(ExprData::RegExp(_)) => Some("function RegExp() { [native code] }".into()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn string_compare_ucs2(left: &[u16], right: &[u16]) -> i32 {
+    for (&left, &right) in left.iter().zip(right) {
+        let difference = i32::from(left) - i32::from(right);
+        if difference != 0 {
+            return difference;
+        }
+    }
+    i32::try_from(left.len())
+        .unwrap_or(i32::MAX)
+        .saturating_sub(i32::try_from(right.len()).unwrap_or(i32::MAX))
+}
+
+#[must_use]
+pub fn check_equality_big_int(left: &str, right: &str) -> Option<bool> {
+    if left == right {
+        return Some(true);
+    }
+    if (left.len() < 2 || !left.starts_with('0')) && (right.len() < 2 || !right.starts_with('0')) {
+        return Some(false);
+    }
+    None
+}
+
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::float_cmp)]
+pub fn try_to_string_on_number_safely(value: f64, radix: u32) -> Option<String> {
+    let integer = value as i32;
+    if f64::from(integer) == value {
+        return format_i32_radix(integer, radix);
+    }
+    if value.is_nan() {
+        return Some("NaN".into());
+    }
+    if value == f64::INFINITY {
+        return Some("Infinity".into());
+    }
+    if value == f64::NEG_INFINITY {
+        return Some("-Infinity".into());
+    }
+    None
+}
+
+#[must_use]
+pub fn string_to_equivalent_number_value(value: &[u16]) -> Option<f64> {
+    if value.is_empty() {
+        return None;
+    }
+    let negative = value[0] == u16::from(b'-') && value.len() > 1;
+    let start = usize::from(negative);
+    let mut integer = 0_i32;
+    for &character in &value[start..] {
+        if !(u16::from(b'0')..=u16::from(b'9')).contains(&character) {
+            return None;
+        }
+        integer = integer
+            .wrapping_mul(10)
+            .wrapping_add(i32::from(character) - i32::from(b'0'));
+    }
+    if negative {
+        integer = integer.wrapping_neg();
+    }
+    let printed: Vec<u16> = integer.to_string().encode_utf16().collect();
+    (printed == value).then_some(f64::from(integer))
+}
+
+#[must_use]
+pub fn inline_spreads_of_array_literals(values: &[Expr]) -> Vec<Expr> {
+    let mut results = Vec::new();
+    for value in values {
+        if let Some(ExprData::Spread(spread)) = value.data.as_deref()
+            && let Some(ExprData::Array(array)) = spread.value.data.as_deref()
+        {
+            results.extend(array.items.iter().map(|item| {
+                if matches!(item.data.as_deref(), Some(ExprData::Missing)) {
+                    Expr::new(item.loc, ExprData::Undefined)
+                } else {
+                    item.clone()
+                }
+            }));
+            continue;
+        }
+        results.push(value.clone());
+    }
+    results
+}
+
+#[must_use]
+pub fn mangle_object_spread(properties: &[Property]) -> Vec<Property> {
+    let mut result = Vec::new();
+    for property in properties {
+        if property.kind == PropertyKind::Spread {
+            match property.value_or_nil.data.as_deref() {
+                Some(
+                    ExprData::Boolean(_)
+                    | ExprData::Null
+                    | ExprData::Undefined
+                    | ExprData::Number(_)
+                    | ExprData::BigInt(_)
+                    | ExprData::RegExp(_)
+                    | ExprData::Function(_)
+                    | ExprData::Arrow(_),
+                ) => continue,
+                Some(ExprData::Object(object)) => {
+                    for (index, nested) in object.properties.iter().enumerate() {
+                        let is_accessor =
+                            matches!(nested.kind, PropertyKind::Getter | PropertyKind::Setter);
+                        let is_proto = nested.kind == PropertyKind::Field
+                            && !nested.flags.contains(PropertyFlags::IS_COMPUTED)
+                            && matches!(
+                                nested.key.data.as_deref(),
+                                Some(ExprData::String(value))
+                                    if utf16_equals_wtf8(&value.value, b"__proto__")
+                            );
+                        if is_accessor || is_proto {
+                            let mut remaining = property.clone();
+                            remaining.value_or_nil = Expr::new(
+                                property.value_or_nil.loc,
+                                ExprData::Object(ObjectExpr {
+                                    properties: object.properties[index..].to_vec(),
+                                    ..object.clone()
+                                }),
+                            );
+                            result.push(remaining);
+                            break;
+                        }
+                        result.push(nested.clone());
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        result.push(property.clone());
+    }
+    result
+}
+
+fn format_i32_radix(value: i32, radix: u32) -> Option<String> {
+    if !(2..=36).contains(&radix) {
+        return None;
+    }
+    if value == 0 {
+        return Some("0".into());
+    }
+    let negative = value < 0;
+    let mut value = value.unsigned_abs();
+    let mut digits = Vec::new();
+    while value > 0 {
+        let digit = value % radix;
+        digits.push(if digit < 10 {
+            char::from(b'0' + u8::try_from(digit).ok()?)
+        } else {
+            char::from(b'a' + u8::try_from(digit - 10).ok()?)
+        });
+        value /= radix;
+    }
+    if negative {
+        digits.push('-');
+    }
+    digits.reverse();
+    Some(digits.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        PrimitiveType, assign, can_change_strict_to_loose, convert_binding_to_expr,
-        is_optional_chain, join_all_with_comma, known_primitive_type, maybe_simplify_not, not,
-        typeof_without_side_effects,
+        PrimitiveType, assign, can_change_strict_to_loose, check_equality_big_int,
+        convert_binding_to_expr, inline_spreads_of_array_literals, is_optional_chain,
+        join_all_with_comma, known_primitive_type, mangle_object_spread, maybe_simplify_not, not,
+        string_compare_ucs2, string_to_equivalent_number_value, to_int32,
+        to_number_without_side_effects, to_string_without_side_effects, to_uint32,
+        try_to_string_on_number_safely, typeof_without_side_effects,
     };
     use crate::internal::ast::Ref;
     use crate::internal::js_ast::{
-        ArrayBinding, ArrayBindingPattern, BinaryExpr, Binding, BindingData, Expr, ExprData,
-        IdentifierBinding, OpCode, OptionalChain, StringExpr,
+        ArrayBinding, ArrayBindingPattern, ArrayExpr, BinaryExpr, Binding, BindingData, Expr,
+        ExprData, IdentifierBinding, ObjectExpr, OpCode, OptionalChain, Property, PropertyKind,
+        SpreadExpr, StringExpr,
     };
     use crate::internal::logger::Loc;
 
@@ -571,5 +807,160 @@ mod tests {
             ExprData::Dot(optional)
         )));
         assert_eq!(assign(number(1.0), number(2.0)).loc, Loc::default());
+    }
+
+    #[test]
+    fn converts_javascript_numbers_with_int32_wraparound() {
+        assert_eq!(to_int32(f64::NAN), 0);
+        assert_eq!(to_int32(f64::INFINITY), 0);
+        assert_eq!(to_int32(4_294_967_297.0), 1);
+        assert_eq!(to_int32(-1.0), -1);
+        assert_eq!(to_uint32(-1.0), u32::MAX);
+    }
+
+    #[test]
+    fn converts_literal_values_without_side_effects() {
+        assert_eq!(
+            to_number_without_side_effects(
+                Expr::new(Loc::default(), ExprData::Null).data.as_deref()
+            ),
+            Some(0.0)
+        );
+        assert!(
+            to_number_without_side_effects(
+                Expr::new(Loc::default(), ExprData::Undefined)
+                    .data
+                    .as_deref()
+            )
+            .is_some_and(f64::is_nan)
+        );
+        assert_eq!(
+            to_number_without_side_effects(
+                Expr::new(Loc::default(), ExprData::Array(ArrayExpr::default()))
+                    .data
+                    .as_deref()
+            ),
+            Some(0.0)
+        );
+        assert!(
+            to_number_without_side_effects(
+                Expr::new(Loc::default(), ExprData::Object(ObjectExpr::default()))
+                    .data
+                    .as_deref()
+            )
+            .is_some_and(f64::is_nan)
+        );
+        assert_eq!(
+            to_string_without_side_effects(number(f64::INFINITY).data.as_deref()),
+            Some("Infinity".into())
+        );
+    }
+
+    #[test]
+    fn recognizes_only_canonical_integer_strings() {
+        let utf16 = |text: &str| text.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            string_to_equivalent_number_value(&utf16("123")),
+            Some(123.0)
+        );
+        assert_eq!(
+            string_to_equivalent_number_value(&utf16("-12")),
+            Some(-12.0)
+        );
+        assert_eq!(string_to_equivalent_number_value(&utf16("01")), None);
+        assert_eq!(string_to_equivalent_number_value(&utf16("-0")), None);
+        assert_eq!(string_to_equivalent_number_value(&[]), None);
+        assert!(string_compare_ucs2(&utf16("a"), &utf16("b")) < 0);
+        assert!(string_compare_ucs2(&utf16("aa"), &utf16("a")) > 0);
+    }
+
+    #[test]
+    fn safely_formats_numbers_and_compares_bigints() {
+        assert_eq!(try_to_string_on_number_safely(255.0, 16), Some("ff".into()));
+        assert_eq!(
+            try_to_string_on_number_safely(-10.0, 2),
+            Some("-1010".into())
+        );
+        assert_eq!(
+            try_to_string_on_number_safely(f64::NAN, 10),
+            Some("NaN".into())
+        );
+        assert_eq!(try_to_string_on_number_safely(1.5, 10), None);
+        assert_eq!(check_equality_big_int("1", "1"), Some(true));
+        assert_eq!(check_equality_big_int("1", "2"), Some(false));
+        assert_eq!(check_equality_big_int("0x1", "1"), None);
+        assert!(matches!(
+            maybe_simplify_not(&Expr::new(Loc::default(), ExprData::BigInt("0".into())))
+                .and_then(|expr| expr.data.map(|data| *data)),
+            Some(ExprData::Boolean(true))
+        ));
+    }
+
+    #[test]
+    fn inlines_array_and_object_spreads_without_mutating_inputs() {
+        let missing = Expr::new(Loc::default(), ExprData::Missing);
+        let spread = Expr::new(
+            Loc::default(),
+            ExprData::Spread(SpreadExpr {
+                value: Expr::new(
+                    Loc::default(),
+                    ExprData::Array(ArrayExpr {
+                        items: vec![missing.clone(), number(1.0)],
+                        ..ArrayExpr::default()
+                    }),
+                ),
+            }),
+        );
+        let inlined = inline_spreads_of_array_literals(&[spread]);
+        assert!(matches!(
+            inlined[0].data.as_deref(),
+            Some(ExprData::Undefined)
+        ));
+        assert!(matches!(
+            inlined[1].data.as_deref(),
+            Some(ExprData::Number(1.0))
+        ));
+        assert!(matches!(missing.data.as_deref(), Some(ExprData::Missing)));
+
+        let field = Property {
+            key: Expr::new(
+                Loc::default(),
+                ExprData::String(StringExpr {
+                    value: "x".encode_utf16().collect(),
+                    ..StringExpr::default()
+                }),
+            ),
+            value_or_nil: number(1.0),
+            ..Property::default()
+        };
+        let getter = Property {
+            kind: PropertyKind::Getter,
+            ..Property::default()
+        };
+        let object = ObjectExpr {
+            properties: vec![field.clone(), getter],
+            ..ObjectExpr::default()
+        };
+        let spread_property = Property {
+            kind: PropertyKind::Spread,
+            value_or_nil: Expr::new(Loc::default(), ExprData::Object(object.clone())),
+            ..Property::default()
+        };
+        let mangled = mangle_object_spread(&[
+            Property {
+                kind: PropertyKind::Spread,
+                value_or_nil: number(1.0),
+                ..Property::default()
+            },
+            spread_property,
+        ]);
+        assert_eq!(mangled.len(), 2);
+        assert_eq!(mangled[0].kind, PropertyKind::Field);
+        assert_eq!(mangled[1].kind, PropertyKind::Spread);
+        assert!(matches!(
+            mangled[1].value_or_nil.data.as_deref(),
+            Some(ExprData::Object(value)) if value.properties.len() == 1
+        ));
+        assert_eq!(object.properties.len(), 2);
     }
 }
