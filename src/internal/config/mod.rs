@@ -1,16 +1,169 @@
 //! Partial port of `internal/config`.
 
+mod known_globals;
+
 use crate::internal::ast::Index32;
-use crate::internal::js_ast::Expr;
+use crate::internal::js_ast::{Expr, ExprData};
+use known_globals::KNOWN_GLOBALS;
 use std::collections::HashMap;
 use std::ops::{BitOr, BitOrAssign};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct DefineExpr {
     pub constant: Expr,
     pub parts: Vec<String>,
     pub injected_define_index: Index32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DefineData {
+    pub key_parts: Vec<String>,
+    pub define_expr: Option<DefineExpr>,
+    pub flags: DefineFlags,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DefineFlags(u8);
+
+impl DefineFlags {
+    pub const NONE: Self = Self(0);
+    pub const CAN_BE_REMOVED_IF_UNUSED: Self = Self(1 << 0);
+    pub const CALL_CAN_BE_UNWRAPPED_IF_UNUSED: Self = Self(1 << 1);
+    pub const METHOD_CALLS_MUST_BE_REPLACED_WITH_UNDEFINED: Self = Self(1 << 2);
+    pub const IS_SYMBOL_INSTANCE: Self = Self(1 << 3);
+
+    #[must_use]
+    pub const fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 != 0
+    }
+}
+
+impl BitOr for DefineFlags {
+    type Output = Self;
+
+    fn bitor(self, right: Self) -> Self::Output {
+        Self(self.0 | right.0)
+    }
+}
+
+impl BitOrAssign for DefineFlags {
+    fn bitor_assign(&mut self, right: Self) {
+        self.0 |= right.0;
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProcessedDefines {
+    pub identifier_defines: HashMap<String, DefineData>,
+    pub dot_defines: HashMap<String, Vec<DefineData>>,
+}
+
+static PROCESSED_GLOBALS: OnceLock<ProcessedDefines> = OnceLock::new();
+
+#[must_use]
+pub fn process_defines(user_defines: &[DefineData]) -> ProcessedDefines {
+    if user_defines.is_empty() {
+        return PROCESSED_GLOBALS
+            .get_or_init(|| process_defines_uncached(&[]))
+            .clone();
+    }
+    process_defines_uncached(user_defines)
+}
+
+fn process_defines_uncached(user_defines: &[DefineData]) -> ProcessedDefines {
+    let mut result = ProcessedDefines::default();
+    for parts in KNOWN_GLOBALS {
+        let tail = parts
+            .last()
+            .expect("known global paths are never empty")
+            .to_string();
+        if parts.len() == 1 {
+            result.identifier_defines.insert(
+                tail,
+                DefineData {
+                    flags: DefineFlags::CAN_BE_REMOVED_IF_UNUSED,
+                    ..DefineData::default()
+                },
+            );
+        } else {
+            let mut flags = DefineFlags::CAN_BE_REMOVED_IF_UNUSED;
+            if parts[0] == "Symbol" {
+                flags |= DefineFlags::IS_SYMBOL_INSTANCE;
+            }
+            result
+                .dot_defines
+                .entry(tail)
+                .or_default()
+                .push(DefineData {
+                    key_parts: parts.iter().map(|part| (*part).to_string()).collect(),
+                    flags,
+                    ..DefineData::default()
+                });
+        }
+    }
+
+    for (name, data) in [
+        (
+            "undefined",
+            Expr::new(crate::internal::logger::Loc::default(), ExprData::Undefined),
+        ),
+        (
+            "NaN",
+            Expr::new(
+                crate::internal::logger::Loc::default(),
+                ExprData::Number(f64::NAN),
+            ),
+        ),
+        (
+            "Infinity",
+            Expr::new(
+                crate::internal::logger::Loc::default(),
+                ExprData::Number(f64::INFINITY),
+            ),
+        ),
+    ] {
+        result.identifier_defines.insert(
+            name.to_string(),
+            DefineData {
+                define_expr: Some(DefineExpr {
+                    constant: data,
+                    ..DefineExpr::default()
+                }),
+                ..DefineData::default()
+            },
+        );
+    }
+
+    for data in user_defines {
+        let Some(tail) = data.key_parts.last() else {
+            continue;
+        };
+        if data.key_parts.len() == 1 {
+            let mut merged = data.clone();
+            if let Some(old) = result.identifier_defines.get(tail) {
+                merged.flags |= old.flags;
+            }
+            result.identifier_defines.insert(tail.clone(), merged);
+            continue;
+        }
+
+        let definitions = result.dot_defines.entry(tail.clone()).or_default();
+        if let Some(existing) = definitions
+            .iter_mut()
+            .find(|define| define.key_parts == data.key_parts)
+        {
+            let old_flags = existing.flags;
+            *existing = data.clone();
+            existing.flags |= old_flags;
+        } else {
+            definitions.push(data.clone());
+        }
+    }
+    result
 }
 
 #[derive(Clone, Debug, Default)]
@@ -505,9 +658,10 @@ pub const fn should_call_runtime_require(mode: Mode, output_format: Format) -> b
 #[cfg(test)]
 mod tests {
     use super::{
-        Format, JsxOptions, Loader, MaybeBool, PathPlaceholder, PathPlaceholders, PathTemplate,
-        TsConfig, TsConfigJsx, TsImportsNotUsedAsValues, TsJsx, TsUnusedImportFlags,
-        has_placeholder, loader_from_file_extension, should_call_runtime_require,
+        DefineData, DefineExpr, DefineFlags, Format, JsxOptions, Loader, MaybeBool,
+        PathPlaceholder, PathPlaceholders, PathTemplate, TsConfig, TsConfigJsx,
+        TsImportsNotUsedAsValues, TsJsx, TsUnusedImportFlags, has_placeholder,
+        loader_from_file_extension, process_defines, should_call_runtime_require,
         substitute_template, template_to_string,
     };
     use std::collections::HashMap;
@@ -582,5 +736,77 @@ mod tests {
             super::Mode::Bundle,
             Format::EsModule
         ));
+    }
+
+    #[test]
+    fn known_globals_and_primitive_defines_are_processed() {
+        let defines = process_defines(&[]);
+        assert!(
+            defines.identifier_defines["window"]
+                .flags
+                .contains(DefineFlags::CAN_BE_REMOVED_IF_UNUSED)
+        );
+        assert!(
+            defines.dot_defines["assign"]
+                .iter()
+                .any(|define| define.key_parts == ["Object", "assign"])
+        );
+        assert!(defines.dot_defines["iterator"].iter().any(|define| {
+            define.key_parts == ["Symbol", "iterator"]
+                && define.flags.contains(DefineFlags::IS_SYMBOL_INSTANCE)
+        }));
+        assert!(matches!(
+            defines.identifier_defines["undefined"]
+                .define_expr
+                .as_ref()
+                .and_then(|define| define.constant.data.as_deref()),
+            Some(crate::internal::js_ast::ExprData::Undefined)
+        ));
+    }
+
+    #[test]
+    fn user_defines_override_values_and_merge_flags() {
+        let defines = process_defines(&[
+            DefineData {
+                key_parts: vec!["Object".into(), "assign".into()],
+                define_expr: Some(DefineExpr {
+                    parts: vec!["replacement".into()],
+                    ..DefineExpr::default()
+                }),
+                flags: DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
+            },
+            DefineData {
+                key_parts: vec!["window".into()],
+                flags: DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
+                ..DefineData::default()
+            },
+        ]);
+        let object_assign = defines.dot_defines["assign"]
+            .iter()
+            .find(|define| define.key_parts == ["Object", "assign"])
+            .expect("Object.assign define");
+        assert_eq!(
+            object_assign
+                .define_expr
+                .as_ref()
+                .expect("replacement")
+                .parts,
+            ["replacement"]
+        );
+        assert!(
+            object_assign
+                .flags
+                .contains(DefineFlags::CAN_BE_REMOVED_IF_UNUSED)
+        );
+        assert!(
+            object_assign
+                .flags
+                .contains(DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED)
+        );
+        assert!(
+            defines.identifier_defines["window"]
+                .flags
+                .contains(DefineFlags::CAN_BE_REMOVED_IF_UNUSED)
+        );
     }
 }
