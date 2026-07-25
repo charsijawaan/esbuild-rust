@@ -35,4 +35,4 @@ Status values:
 | `internal/resolver` | not started |
 | `internal/runtime` | not started |
 | `internal/sourcemap` | not started |
-| `internal/xxhash` | not started |
+| `internal/xxhash` | ported |
