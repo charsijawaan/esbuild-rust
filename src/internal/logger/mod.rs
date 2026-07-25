@@ -1061,6 +1061,113 @@ pub fn remap_string_in_js_loc(table: &[StringInJsTableEntry], inner_loc: Loc) ->
     }
 }
 
+#[must_use]
+pub fn linkify_text(mut text: &str, underline: &str, reset: &str) -> String {
+    if underline.is_empty() || !text.contains("https://") {
+        return text.to_string();
+    }
+
+    let mut result = String::new();
+    while let Some(https) = text.find("https://") {
+        let mut end = text[https..]
+            .find(' ')
+            .map_or(text.len(), |offset| https + offset);
+        if end > https
+            && matches!(
+                text.as_bytes()[end - 1],
+                b'.' | b',' | b'?' | b'!' | b')' | b']' | b'}'
+            )
+        {
+            end -= 1;
+        }
+        result.push_str(&text[..https]);
+        result.push_str(underline);
+        result.push_str(&text[https..end]);
+        result.push_str(reset);
+        text = &text[end..];
+    }
+    result.push_str(text);
+    result
+}
+
+#[must_use]
+pub fn wrap_words_in_string(mut text: &str, width: usize) -> Vec<String> {
+    let mut runs = Vec::new();
+
+    'outer: while !text.is_empty() {
+        let mut index = 0;
+        let mut columns = 0;
+        let mut word_end = 0;
+
+        while index < text.len() && text.as_bytes()[index] == b' ' {
+            index += 1;
+            columns += 1;
+        }
+
+        while index < text.len() {
+            let old_word_end = word_end;
+            let word_start = index;
+            while index < text.len() {
+                let Some(character) = text[index..].chars().next() else {
+                    break;
+                };
+                if character == ' ' {
+                    break;
+                }
+                index += character.len_utf8();
+                columns += 1;
+            }
+            word_end = index;
+
+            if word_start > 0 && columns > width {
+                runs.push(text[..old_word_end].to_string());
+                text = &text[word_start..];
+                continue 'outer;
+            }
+
+            while index < text.len() && text.as_bytes()[index] == b' ' {
+                index += 1;
+                columns += 1;
+            }
+        }
+        break;
+    }
+
+    runs.push(text.trim_end_matches(' ').to_string());
+    runs
+}
+
+/// Estimates printed columns by treating each code point as one column.
+#[must_use]
+pub fn estimate_width_in_terminal(text: &str) -> usize {
+    text.chars()
+        .filter(|character| *character != '\u{feff}')
+        .count()
+}
+
+/// # Panics
+///
+/// Panics if `spaces_per_tab` is zero and `with_tabs` contains a tab.
+#[must_use]
+pub fn render_tab_stops(with_tabs: &str, spaces_per_tab: usize) -> String {
+    if !with_tabs.contains('\t') {
+        return with_tabs.to_string();
+    }
+    let mut without_tabs = String::new();
+    let mut count = 0;
+    for character in with_tabs.chars() {
+        if character == '\t' {
+            let spaces = spaces_per_tab - count % spaces_per_tab;
+            without_tabs.extend(std::iter::repeat_n(' ', spaces));
+            count += spaces;
+        } else {
+            without_tabs.push(character);
+            count += 1;
+        }
+    }
+    without_tabs
+}
+
 fn range_start(range: Range) -> usize {
     usize::try_from(range.loc.start).expect("source locations are non-negative")
 }
@@ -1120,8 +1227,9 @@ fn decode_last_wtf8_rune(bytes: &[u8]) -> (u32, usize) {
 mod tests {
     use super::{
         DeferLogKind, ImportAttributes, LineColumnTracker, Loc, Log, LogLevel, Msg, MsgId, MsgKind,
-        MsgLocation, PathFlags, PathStyle, PrettyPaths, Range, Source, generate_string_in_js_table,
-        platform_independent_path_dir_base_ext, remap_string_in_js_loc,
+        MsgLocation, PathFlags, PathStyle, PrettyPaths, Range, Source, estimate_width_in_terminal,
+        generate_string_in_js_table, linkify_text, platform_independent_path_dir_base_ext,
+        remap_string_in_js_loc, render_tab_stops, wrap_words_in_string,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1329,6 +1437,42 @@ mod tests {
             thread.join().unwrap();
         }
         assert_eq!(log.done().len(), 100);
+    }
+
+    #[test]
+    fn linkifies_urls_without_underlining_trailing_punctuation() {
+        assert_eq!(
+            linkify_text(
+                "See https://example.com/a, then https://example.com/b.",
+                "<u>",
+                "</u>"
+            ),
+            "See <u>https://example.com/a</u>, then <u>https://example.com/b</u>."
+        );
+        assert_eq!(
+            linkify_text("https://example.com", "", "reset"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn wraps_words_by_code_points_and_preserves_long_words() {
+        assert_eq!(
+            wrap_words_in_string("one two three", 7),
+            ["one two", "three"]
+        );
+        assert_eq!(
+            wrap_words_in_string("🙂🙂🙂 trailing   ", 2),
+            ["🙂🙂🙂", "trailing"]
+        );
+        assert_eq!(wrap_words_in_string("", 10), [""]);
+    }
+
+    #[test]
+    fn estimates_width_and_expands_tab_stops() {
+        assert_eq!(estimate_width_in_terminal("a\u{feff}🙂"), 2);
+        assert_eq!(render_tab_stops("a\tb\t", 4), "a   b   ");
+        assert_eq!(render_tab_stops("no tabs", 0), "no tabs");
     }
 
     #[test]
