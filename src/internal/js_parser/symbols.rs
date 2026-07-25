@@ -2,8 +2,12 @@
 
 use crate::internal::{
     ast::SymbolKind,
-    js_ast::{Scope, ScopeKind},
+    compat::JsFeature,
+    config::Mode,
+    js_ast::{LocalKind, Scope, ScopeKind},
 };
+
+use super::Options;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MergeResult {
@@ -91,12 +95,43 @@ pub(crate) fn can_merge_symbols(
     MergeResult::Forbidden
 }
 
+pub(crate) fn select_local_kind(
+    kind: LocalKind,
+    options: &Options,
+    is_top_level: bool,
+    will_wrap_module_in_try_catch_for_using: bool,
+) -> LocalKind {
+    if matches!(kind, LocalKind::Let | LocalKind::Const)
+        && options
+            .unsupported_js_features
+            .contains(JsFeature::CONST_AND_LET)
+    {
+        return LocalKind::Var;
+    }
+
+    if is_top_level
+        && matches!(kind, LocalKind::Let | LocalKind::Const)
+        && (options.mode == Mode::Bundle || will_wrap_module_in_try_catch_for_using)
+    {
+        return LocalKind::Var;
+    }
+
+    if options.mode == Mode::Bundle && kind == LocalKind::Const && options.minify_syntax {
+        return LocalKind::Let;
+    }
+
+    kind
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MergeResult, can_merge_symbols};
+    use super::{MergeResult, can_merge_symbols, select_local_kind};
     use crate::internal::{
         ast::SymbolKind,
-        js_ast::{Scope, ScopeKind},
+        compat::JsFeature,
+        config::Mode,
+        js_ast::{LocalKind, Scope, ScopeKind},
+        js_parser::Options,
     };
 
     fn scope(kind: ScopeKind) -> Scope {
@@ -204,5 +239,39 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn selects_local_kind_for_target_bundle_and_minification() {
+        let mut options = Options::default();
+        assert_eq!(
+            select_local_kind(LocalKind::Const, &options, false, false),
+            LocalKind::Const
+        );
+
+        options.unsupported_js_features = JsFeature::CONST_AND_LET;
+        assert_eq!(
+            select_local_kind(LocalKind::Let, &options, false, false),
+            LocalKind::Var
+        );
+
+        options.unsupported_js_features = JsFeature::default();
+        options.mode = Mode::Bundle;
+        assert_eq!(
+            select_local_kind(LocalKind::Const, &options, true, false),
+            LocalKind::Var
+        );
+
+        options.minify_syntax = true;
+        assert_eq!(
+            select_local_kind(LocalKind::Const, &options, false, false),
+            LocalKind::Let
+        );
+
+        options.mode = Mode::default();
+        assert_eq!(
+            select_local_kind(LocalKind::Let, &options, true, true),
+            LocalKind::Var
+        );
     }
 }
