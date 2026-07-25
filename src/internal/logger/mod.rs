@@ -1168,6 +1168,485 @@ pub fn render_tab_stops(with_tabs: &str, spaces_per_tab: usize) -> String {
     without_tabs
 }
 
+const DEFAULT_TERMINAL_WIDTH: usize = 80;
+const EXTRA_MARGIN_CHARS: usize = 9;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TerminalInfo {
+    pub is_tty: bool,
+    pub use_color_escapes: bool,
+    pub width: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UseColor {
+    #[default]
+    IfTerminal,
+    Never,
+    Always,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutputOptions {
+    pub message_limit: usize,
+    pub include_source: bool,
+    pub color: UseColor,
+    pub log_level: LogLevel,
+    pub path_style: PathStyle,
+    pub overrides: HashMap<MsgId, LogLevel>,
+}
+
+impl Default for OutputOptions {
+    fn default() -> Self {
+        Self {
+            message_limit: 0,
+            include_source: false,
+            color: UseColor::IfTerminal,
+            log_level: LogLevel::None,
+            path_style: PathStyle::Relative,
+            overrides: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Colors {
+    pub reset: &'static str,
+    pub bold: &'static str,
+    pub dim: &'static str,
+    pub underline: &'static str,
+    pub red: &'static str,
+    pub green: &'static str,
+    pub blue: &'static str,
+    pub cyan: &'static str,
+    pub magenta: &'static str,
+    pub yellow: &'static str,
+    pub red_bg_red: &'static str,
+    pub red_bg_white: &'static str,
+    pub green_bg_green: &'static str,
+    pub green_bg_white: &'static str,
+    pub blue_bg_blue: &'static str,
+    pub blue_bg_white: &'static str,
+    pub cyan_bg_cyan: &'static str,
+    pub cyan_bg_black: &'static str,
+    pub magenta_bg_magenta: &'static str,
+    pub magenta_bg_black: &'static str,
+    pub yellow_bg_yellow: &'static str,
+    pub yellow_bg_black: &'static str,
+}
+
+pub const TERMINAL_COLORS: Colors = Colors {
+    reset: "\x1b[0m",
+    bold: "\x1b[1m",
+    dim: "\x1b[37m",
+    underline: "\x1b[4m",
+    red: "\x1b[31m",
+    green: "\x1b[32m",
+    blue: "\x1b[34m",
+    cyan: "\x1b[36m",
+    magenta: "\x1b[35m",
+    yellow: "\x1b[33m",
+    red_bg_red: "\x1b[41;31m",
+    red_bg_white: "\x1b[41;97m",
+    green_bg_green: "\x1b[42;32m",
+    green_bg_white: "\x1b[42;97m",
+    blue_bg_blue: "\x1b[44;34m",
+    blue_bg_white: "\x1b[44;97m",
+    cyan_bg_cyan: "\x1b[46;36m",
+    cyan_bg_black: "\x1b[46;30m",
+    magenta_bg_magenta: "\x1b[45;35m",
+    magenta_bg_black: "\x1b[45;30m",
+    yellow_bg_yellow: "\x1b[43;33m",
+    yellow_bg_black: "\x1b[43;30m",
+};
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MsgDetail {
+    pub source_before: Vec<u8>,
+    pub source_marked: Vec<u8>,
+    pub source_after: Vec<u8>,
+    pub indent: String,
+    pub marker: String,
+    pub suggestion: String,
+    pub content_after: Vec<u8>,
+    pub path: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+fn margin_with_line_text(max_margin: usize, line: usize) -> String {
+    let number = line.to_string();
+    format!(
+        "      {}{} │ ",
+        " ".repeat(max_margin.saturating_sub(number.len())),
+        number
+    )
+}
+
+fn empty_margin_text(max_margin: usize, is_last: bool) -> String {
+    format!(
+        "      {} {} ",
+        " ".repeat(max_margin),
+        if is_last { '╵' } else { '│' }
+    )
+}
+
+#[must_use]
+pub fn message_detail(
+    data: &MsgData,
+    path_style: PathStyle,
+    terminal_info: TerminalInfo,
+    max_margin: usize,
+) -> Option<MsgDetail> {
+    let mut location = data.location.clone()?;
+    let end_of_first_line = location
+        .line_text
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(location.line_text.len());
+    let first_line = &location.line_text[..end_of_first_line];
+    let mut after_first_line = location.line_text[end_of_first_line..].to_vec();
+    if !after_first_line.is_empty() && !after_first_line.ends_with(b"\n") {
+        after_first_line.push(b'\n');
+    }
+
+    location.column = location.column.min(end_of_first_line);
+    location.length = location.length.min(end_of_first_line - location.column);
+
+    let spaces_per_tab = 2;
+    let mut line_text = render_tab_stops_bytes(first_line, spaces_per_tab);
+    let text_up_to_location =
+        render_tab_stops_bytes(&first_line[..location.column], spaces_per_tab);
+    let mut marker_start = text_up_to_location.len();
+    let mut marker_end = marker_start;
+    let mut indent = " ".repeat(estimate_width_in_terminal_bytes(&text_up_to_location));
+    let mut marker = "^".to_string();
+
+    if location.length > 0 {
+        marker_end = render_tab_stops_bytes(
+            &first_line[..location.column + location.length],
+            spaces_per_tab,
+        )
+        .len();
+    }
+    marker_start = marker_start.min(line_text.len());
+    marker_end = marker_end.min(line_text.len()).max(marker_start);
+
+    let mut width = if terminal_info.width < 1 {
+        DEFAULT_TERMINAL_WIDTH
+    } else {
+        terminal_info.width
+    };
+    width = width.saturating_sub(max_margin + EXTRA_MARGIN_CHARS).max(1);
+    if location.column == end_of_first_line {
+        width = width.saturating_sub(1);
+    }
+
+    if line_text.len() > width {
+        let mut slice_start = (marker_start + marker_end).saturating_sub(width) / 2;
+        let preferred_start = marker_start.saturating_sub(width / 5);
+        if slice_start > preferred_start {
+            slice_start = preferred_start;
+        }
+        slice_start = slice_start.min(line_text.len() - width);
+        let slice_end = slice_start + width;
+
+        let mut sliced_line = line_text[slice_start..slice_end].to_vec();
+        marker_start = marker_start.saturating_sub(slice_start);
+        marker_end = marker_end
+            .saturating_sub(slice_start)
+            .min(sliced_line.len());
+
+        if sliced_line.len() > 3 && slice_start > 0 {
+            sliced_line[..3].copy_from_slice(b"...");
+            marker_start = marker_start.max(3);
+        }
+        if sliced_line.len() > 3 && slice_end < line_text.len() {
+            let dots = sliced_line.len() - 3;
+            sliced_line[dots..].copy_from_slice(b"...");
+            marker_end = marker_end.min(dots).max(marker_start);
+        }
+        line_text = sliced_line;
+        indent = " ".repeat(estimate_width_in_terminal_bytes(&line_text[..marker_start]));
+    }
+
+    if marker_end - marker_start > 1 {
+        marker = "~".repeat(estimate_width_in_terminal_bytes(
+            &line_text[marker_start..marker_end],
+        ));
+    }
+    let mut source_before = margin_with_line_text(max_margin, location.line).into_bytes();
+    source_before.extend_from_slice(&line_text[..marker_start]);
+
+    Some(MsgDetail {
+        path: location.file.select(path_style).to_string(),
+        line: location.line,
+        column: location.column,
+        source_before,
+        source_marked: line_text[marker_start..marker_end].to_vec(),
+        source_after: line_text[marker_end..].to_vec(),
+        indent,
+        marker,
+        suggestion: location.suggestion,
+        content_after: after_first_line,
+    })
+}
+
+fn strict_utf8_rune(bytes: &[u8]) -> (Option<char>, usize) {
+    if bytes.is_empty() {
+        return (None, 0);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(text) => {
+            let character = text.chars().next().expect("non-empty UTF-8 text");
+            (Some(character), character.len_utf8())
+        }
+        Err(error) if error.valid_up_to() > 0 => {
+            let valid = std::str::from_utf8(&bytes[..error.valid_up_to()])
+                .expect("prefix reported as valid UTF-8");
+            let character = valid.chars().next().expect("valid prefix is non-empty");
+            (Some(character), character.len_utf8())
+        }
+        Err(_) => (None, 1),
+    }
+}
+
+fn estimate_width_in_terminal_bytes(mut bytes: &[u8]) -> usize {
+    let mut width = 0;
+    while !bytes.is_empty() {
+        let (character, size) = strict_utf8_rune(bytes);
+        bytes = &bytes[size..];
+        if character != Some('\u{feff}') {
+            width += 1;
+        }
+    }
+    width
+}
+
+fn render_tab_stops_bytes(with_tabs: &[u8], spaces_per_tab: usize) -> Vec<u8> {
+    if !with_tabs.contains(&b'\t') {
+        return with_tabs.to_vec();
+    }
+    let mut without_tabs = Vec::with_capacity(with_tabs.len());
+    let mut count = 0;
+    let mut index = 0;
+    while index < with_tabs.len() {
+        let (character, size) = strict_utf8_rune(&with_tabs[index..]);
+        if character == Some('\t') {
+            let spaces = spaces_per_tab - count % spaces_per_tab;
+            without_tabs.extend(std::iter::repeat_n(b' ', spaces));
+            count += spaces;
+        } else {
+            without_tabs.extend_from_slice(&with_tabs[index..index + size]);
+            count += 1;
+        }
+        index += size;
+    }
+    without_tabs
+}
+
+impl Msg {
+    #[must_use]
+    pub fn to_bytes(&self, options: &OutputOptions, terminal_info: TerminalInfo) -> Vec<u8> {
+        let mut output = format_message_bytes(
+            options.include_source,
+            options.path_style,
+            terminal_info,
+            self.id,
+            self.kind,
+            &self.data,
+            &self.plugin_name,
+        );
+        let mut old_data: Option<&MsgData> = None;
+        for (index, note) in self.notes.iter().enumerate() {
+            if options.include_source
+                && (index == 0
+                    || old_data
+                        .is_some_and(|old| old.text.contains('\n') || old.location.is_some()))
+            {
+                output.push(b'\n');
+            }
+            output.extend(format_message_bytes(
+                options.include_source,
+                options.path_style,
+                terminal_info,
+                MsgId::None,
+                MsgKind::Note,
+                note,
+                "",
+            ));
+            old_data = Some(note);
+        }
+        if options.include_source {
+            output.push(b'\n');
+        }
+        output
+    }
+
+    #[must_use]
+    pub fn to_string_lossy(&self, options: &OutputOptions, terminal_info: TerminalInfo) -> String {
+        String::from_utf8_lossy(&self.to_bytes(options, terminal_info)).into_owned()
+    }
+}
+
+fn format_message_bytes(
+    include_source: bool,
+    path_style: PathStyle,
+    terminal_info: TerminalInfo,
+    id: MsgId,
+    kind: MsgKind,
+    data: &MsgData,
+    plugin_name: &str,
+) -> Vec<u8> {
+    if !include_source {
+        return data.location.as_ref().map_or_else(
+            || format!("{}: {}\n", kind.as_str(), data.text).into_bytes(),
+            |location| {
+                format!(
+                    "{}: {}: {}\n",
+                    location.file.select(path_style),
+                    kind.as_str(),
+                    data.text
+                )
+                .into_bytes()
+            },
+        );
+    }
+
+    let colors = if terminal_info.use_color_escapes {
+        TERMINAL_COLORS
+    } else {
+        Colors::default()
+    };
+    let location_output = format_location_bytes(data, path_style, terminal_info, &colors);
+
+    if kind == MsgKind::Note {
+        let mut output = Vec::new();
+        for line in data.text.split('\n') {
+            let mut wrap_width = terminal_info.width;
+            if wrap_width > 2 {
+                if !data.disable_maximum_width && wrap_width > 100 {
+                    wrap_width = 100;
+                }
+                for run in wrap_words_in_string(line, wrap_width - 2) {
+                    output.extend_from_slice(b"  ");
+                    append_str(
+                        &mut output,
+                        &linkify_text(&run, colors.underline, colors.reset),
+                    );
+                    output.push(b'\n');
+                }
+            } else {
+                output.extend_from_slice(b"  ");
+                append_str(
+                    &mut output,
+                    &linkify_text(line, colors.underline, colors.reset),
+                );
+                output.push(b'\n');
+            }
+        }
+        output.extend(location_output);
+        return output;
+    }
+
+    let (icon_color, kind_color_brackets, kind_color_text) = match kind {
+        MsgKind::Verbose => (colors.cyan, colors.cyan_bg_cyan, colors.cyan_bg_black),
+        MsgKind::Debug => (colors.green, colors.green_bg_green, colors.green_bg_white),
+        MsgKind::Info => (colors.blue, colors.blue_bg_blue, colors.blue_bg_white),
+        MsgKind::Error => (colors.red, colors.red_bg_red, colors.red_bg_white),
+        MsgKind::Warning => (
+            colors.yellow,
+            colors.yellow_bg_yellow,
+            colors.yellow_bg_black,
+        ),
+        MsgKind::Note => unreachable!("notes returned above"),
+    };
+
+    let plugin = if plugin_name.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}{}[plugin {}]{}",
+            colors.bold, colors.magenta, plugin_name, colors.reset
+        )
+    };
+    let message_id = msg_id_to_string(id);
+    let message_id = if message_id.is_empty() {
+        String::new()
+    } else {
+        format!(" [{message_id}]")
+    };
+    let mut output = format!(
+        "{}{} {}[{}{}{}]{} {}{}{}{}{}\n",
+        icon_color,
+        kind.icon(),
+        kind_color_brackets,
+        kind_color_text,
+        kind.as_str(),
+        kind_color_brackets,
+        colors.reset,
+        colors.bold,
+        data.text,
+        colors.reset,
+        plugin,
+        message_id
+    )
+    .into_bytes();
+    output.extend(location_output);
+    output
+}
+
+fn format_location_bytes(
+    data: &MsgData,
+    path_style: PathStyle,
+    terminal_info: TerminalInfo,
+    colors: &Colors,
+) -> Vec<u8> {
+    let Some(location) = &data.location else {
+        return Vec::new();
+    };
+    let max_margin = location.line.to_string().len();
+    let Some(detail) = message_detail(data, path_style, terminal_info, max_margin) else {
+        return Vec::new();
+    };
+    let mut output =
+        format!("\n    {}:{}:{}:\n", detail.path, detail.line, detail.column).into_bytes();
+    append_str(&mut output, colors.dim);
+    output.extend_from_slice(&detail.source_before);
+    append_str(&mut output, colors.green);
+    output.extend_from_slice(&detail.source_marked);
+    append_str(&mut output, colors.dim);
+    output.extend_from_slice(&detail.source_after);
+    output.push(b'\n');
+
+    append_str(
+        &mut output,
+        &empty_margin_text(max_margin, detail.suggestion.is_empty()),
+    );
+    append_str(&mut output, &detail.indent);
+    append_str(&mut output, colors.green);
+    append_str(&mut output, &detail.marker);
+    if detail.suggestion.is_empty() {
+        append_str(&mut output, colors.reset);
+        output.push(b'\n');
+    } else {
+        append_str(&mut output, colors.dim);
+        output.push(b'\n');
+        append_str(&mut output, &empty_margin_text(max_margin, true));
+        append_str(&mut output, &detail.indent);
+        append_str(&mut output, colors.green);
+        append_str(&mut output, &detail.suggestion);
+        append_str(&mut output, colors.reset);
+        output.push(b'\n');
+    }
+    output.extend_from_slice(&detail.content_after);
+    output
+}
+
+fn append_str(output: &mut Vec<u8>, text: &str) {
+    output.extend_from_slice(text.as_bytes());
+}
+
 fn range_start(range: Range) -> usize {
     usize::try_from(range.loc.start).expect("source locations are non-negative")
 }
@@ -1226,10 +1705,11 @@ fn decode_last_wtf8_rune(bytes: &[u8]) -> (u32, usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeferLogKind, ImportAttributes, LineColumnTracker, Loc, Log, LogLevel, Msg, MsgId, MsgKind,
-        MsgLocation, PathFlags, PathStyle, PrettyPaths, Range, Source, estimate_width_in_terminal,
-        generate_string_in_js_table, linkify_text, platform_independent_path_dir_base_ext,
-        remap_string_in_js_loc, render_tab_stops, wrap_words_in_string,
+        DeferLogKind, ImportAttributes, LineColumnTracker, Loc, Log, LogLevel, Msg, MsgData, MsgId,
+        MsgKind, MsgLocation, OutputOptions, PathFlags, PathStyle, PrettyPaths, Range, Source,
+        TerminalInfo, estimate_width_in_terminal, generate_string_in_js_table, linkify_text,
+        message_detail, platform_independent_path_dir_base_ext, remap_string_in_js_loc,
+        render_tab_stops, wrap_words_in_string,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1473,6 +1953,113 @@ mod tests {
         assert_eq!(estimate_width_in_terminal("a\u{feff}🙂"), 2);
         assert_eq!(render_tab_stops("a\tb\t", 4), "a   b   ");
         assert_eq!(render_tab_stops("no tabs", 0), "no tabs");
+    }
+
+    #[test]
+    fn lays_out_source_markers_using_byte_columns_and_tab_stops() {
+        let detail = message_detail(
+            &MsgData {
+                location: Some(MsgLocation {
+                    file: PrettyPaths {
+                        abs: "/abs/a.js".into(),
+                        rel: "a.js".into(),
+                    },
+                    line_text: b"\tfoo bar".to_vec(),
+                    suggestion: "fix".into(),
+                    line: 4,
+                    column: 1,
+                    length: 3,
+                    ..MsgLocation::default()
+                }),
+                ..MsgData::default()
+            },
+            PathStyle::Relative,
+            TerminalInfo {
+                width: 80,
+                ..TerminalInfo::default()
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(detail.path, "a.js");
+        assert!(detail.source_before.ends_with(b"  "));
+        assert_eq!(detail.source_marked, b"foo");
+        assert_eq!(detail.source_after, b" bar");
+        assert_eq!(detail.indent, "  ");
+        assert_eq!(detail.marker, "~~~");
+        assert_eq!(detail.suggestion, "fix");
+    }
+
+    #[test]
+    fn formats_plain_and_source_annotated_diagnostics() {
+        let mut message = Msg::new(MsgKind::Error, "boom");
+        message.id = MsgId::JsDirectEval;
+        message.plugin_name = "test".into();
+        message.data.location = Some(MsgLocation {
+            file: PrettyPaths {
+                abs: "/abs/a.js".into(),
+                rel: "a.js".into(),
+            },
+            line_text: b"let x = 1".to_vec(),
+            line: 1,
+            column: 4,
+            length: 1,
+            ..MsgLocation::default()
+        });
+
+        assert_eq!(
+            message.to_bytes(&OutputOptions::default(), TerminalInfo::default()),
+            b"a.js: ERROR: boom\n"
+        );
+
+        let output = message.to_bytes(
+            &OutputOptions {
+                include_source: true,
+                ..OutputOptions::default()
+            },
+            TerminalInfo {
+                width: 80,
+                ..TerminalInfo::default()
+            },
+        );
+        assert_eq!(
+            output,
+            concat!(
+                "✘ [ERROR] boom [plugin test] [direct-eval]\n",
+                "\n    a.js:1:4:\n",
+                "      1 │ let x = 1\n",
+                "        ╵     ^\n",
+                "\n"
+            )
+            .as_bytes()
+        );
+    }
+
+    #[test]
+    fn formatter_preserves_invalid_source_bytes() {
+        let mut message = Msg::new(MsgKind::Warning, "raw");
+        message.data.location = Some(MsgLocation {
+            file: PrettyPaths {
+                rel: "raw.js".into(),
+                ..PrettyPaths::default()
+            },
+            line_text: vec![b'a', 0xff, b'b'],
+            line: 1,
+            column: 1,
+            length: 1,
+            ..MsgLocation::default()
+        });
+        let output = message.to_bytes(
+            &OutputOptions {
+                include_source: true,
+                ..OutputOptions::default()
+            },
+            TerminalInfo {
+                width: 80,
+                ..TerminalInfo::default()
+            },
+        );
+        assert!(output.contains(&0xff));
     }
 
     #[test]
