@@ -428,6 +428,276 @@ where
 
     #[must_use]
     #[allow(clippy::too_many_lines)]
+    pub fn mangle_if_expr(
+        &self,
+        loc: Loc,
+        value: &super::IfExpr,
+        unsupported_features: JsFeature,
+    ) -> Expr {
+        let mut test = value.test.clone();
+        let mut yes = value.yes.clone();
+        let mut no = value.no.clone();
+
+        if let Some(ExprData::Binary(comma)) = test.data.as_deref()
+            && comma.op == OpCode::BinaryComma
+        {
+            return join_with_comma(
+                comma.left.clone(),
+                self.mangle_if_expr(
+                    comma.right.loc,
+                    &super::IfExpr {
+                        test: comma.right.clone(),
+                        yes,
+                        no,
+                    },
+                    unsupported_features,
+                ),
+            );
+        }
+
+        if let Some(ExprData::Unary(unary)) = test.data.as_deref()
+            && unary.op == OpCode::UnaryNot
+        {
+            test = unary.value.clone();
+            std::mem::swap(&mut yes, &mut no);
+        }
+
+        if values_look_the_same(yes.data.as_deref(), no.data.as_deref()) {
+            if self.expr_can_be_removed_if_unused(&test) {
+                return yes;
+            }
+            return join_with_comma(test, yes);
+        }
+
+        if let (Some(ExprData::Boolean(yes_boolean)), Some(ExprData::Boolean(no_boolean))) =
+            (yes.data.as_deref(), no.data.as_deref())
+        {
+            if *yes_boolean && !*no_boolean {
+                return not(not(test));
+            }
+            if !*yes_boolean && *no_boolean {
+                return not(test);
+            }
+        }
+
+        if let Some(ExprData::Identifier(test_identifier)) = test.data.as_deref() {
+            if matches!(
+                yes.data.as_deref(),
+                Some(ExprData::Identifier(identifier))
+                    if identifier.reference == test_identifier.reference
+            ) {
+                return join_with_left_associative_op(OpCode::BinaryLogicalOr, test, no);
+            }
+            if matches!(
+                no.data.as_deref(),
+                Some(ExprData::Identifier(identifier))
+                    if identifier.reference == test_identifier.reference
+            ) {
+                return join_with_left_associative_op(OpCode::BinaryLogicalAnd, test, yes);
+            }
+        }
+
+        if let Some(ExprData::If(yes_if)) = yes.data.as_deref()
+            && values_look_the_same(yes_if.no.data.as_deref(), no.data.as_deref())
+        {
+            return Expr::new(
+                loc,
+                ExprData::If(super::IfExpr {
+                    test: join_with_left_associative_op(
+                        OpCode::BinaryLogicalAnd,
+                        test,
+                        yes_if.test.clone(),
+                    ),
+                    yes: yes_if.yes.clone(),
+                    no,
+                }),
+            );
+        }
+
+        if let Some(ExprData::If(no_if)) = no.data.as_deref()
+            && values_look_the_same(yes.data.as_deref(), no_if.yes.data.as_deref())
+        {
+            return Expr::new(
+                loc,
+                ExprData::If(super::IfExpr {
+                    test: join_with_left_associative_op(
+                        OpCode::BinaryLogicalOr,
+                        test,
+                        no_if.test.clone(),
+                    ),
+                    yes,
+                    no: no_if.no.clone(),
+                }),
+            );
+        }
+
+        if let Some(ExprData::Binary(comma)) = no.data.as_deref()
+            && comma.op == OpCode::BinaryComma
+            && values_look_the_same(yes.data.as_deref(), comma.right.data.as_deref())
+        {
+            return join_with_comma(
+                join_with_left_associative_op(OpCode::BinaryLogicalOr, test, comma.left.clone()),
+                comma.right.clone(),
+            );
+        }
+
+        if let Some(ExprData::Binary(comma)) = yes.data.as_deref()
+            && comma.op == OpCode::BinaryComma
+            && values_look_the_same(comma.right.data.as_deref(), no.data.as_deref())
+        {
+            return join_with_comma(
+                join_with_left_associative_op(OpCode::BinaryLogicalAnd, test, comma.left.clone()),
+                comma.right.clone(),
+            );
+        }
+
+        if let Some(ExprData::Binary(binary)) = yes.data.as_deref()
+            && binary.op == OpCode::BinaryLogicalOr
+            && values_look_the_same(binary.right.data.as_deref(), no.data.as_deref())
+        {
+            return Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: join_with_left_associative_op(
+                        OpCode::BinaryLogicalAnd,
+                        test,
+                        binary.left.clone(),
+                    ),
+                    right: binary.right.clone(),
+                    op: OpCode::BinaryLogicalOr,
+                }),
+            );
+        }
+
+        if let Some(ExprData::Binary(binary)) = no.data.as_deref()
+            && binary.op == OpCode::BinaryLogicalAnd
+            && values_look_the_same(yes.data.as_deref(), binary.right.data.as_deref())
+        {
+            return Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: join_with_left_associative_op(
+                        OpCode::BinaryLogicalOr,
+                        test,
+                        binary.left.clone(),
+                    ),
+                    right: binary.right.clone(),
+                    op: OpCode::BinaryLogicalAnd,
+                }),
+            );
+        }
+
+        if let (Some(ExprData::Call(yes_call)), Some(ExprData::Call(no_call))) =
+            (yes.data.as_deref(), no.data.as_deref())
+            && !yes_call.args.is_empty()
+            && yes_call.args.len() == no_call.args.len()
+            && yes_call.has_same_flags_as(no_call)
+            && values_look_the_same(
+                yes_call.target.data.as_deref(),
+                no_call.target.data.as_deref(),
+            )
+            && self.expr_can_be_removed_if_unused(&test)
+            && self.expr_can_be_removed_if_unused(&yes_call.target)
+            && yes_call.args[1..]
+                .iter()
+                .zip(&no_call.args[1..])
+                .all(|(yes, no)| values_look_the_same(yes.data.as_deref(), no.data.as_deref()))
+        {
+            let yes_spread = match yes_call.args[0].data.as_deref() {
+                Some(ExprData::Spread(spread)) => Some(spread),
+                _ => None,
+            };
+            let no_spread = match no_call.args[0].data.as_deref() {
+                Some(ExprData::Spread(spread)) => Some(spread),
+                _ => None,
+            };
+            if let (Some(yes_spread), Some(no_spread)) = (yes_spread, no_spread) {
+                let mut call = yes_call.clone();
+                call.args[0] = Expr::new(
+                    loc,
+                    ExprData::Spread(SpreadExpr {
+                        value: self.mangle_if_expr(
+                            loc,
+                            &super::IfExpr {
+                                test,
+                                yes: yes_spread.value.clone(),
+                                no: no_spread.value.clone(),
+                            },
+                            unsupported_features,
+                        ),
+                    }),
+                );
+                return Expr::new(loc, ExprData::Call(call));
+            }
+            if yes_spread.is_none() && no_spread.is_none() {
+                let mut call = yes_call.clone();
+                call.args[0] = self.mangle_if_expr(
+                    loc,
+                    &super::IfExpr {
+                        test,
+                        yes: yes_call.args[0].clone(),
+                        no: no_call.args[0].clone(),
+                    },
+                    unsupported_features,
+                );
+                return Expr::new(loc, ExprData::Call(call));
+            }
+        }
+
+        if let Some(ExprData::Binary(binary)) = test.data.as_deref() {
+            let mut check = Expr::default();
+            let mut when_null = Expr::default();
+            let mut when_non_null = Expr::default();
+            match binary.op {
+                OpCode::BinaryLooseEqual => {
+                    if matches!(binary.right.data.as_deref(), Some(ExprData::Null)) {
+                        check = binary.left.clone();
+                        when_null = yes.clone();
+                        when_non_null = no.clone();
+                    } else if matches!(binary.left.data.as_deref(), Some(ExprData::Null)) {
+                        check = binary.right.clone();
+                        when_null = yes.clone();
+                        when_non_null = no.clone();
+                    }
+                }
+                OpCode::BinaryLooseNotEqual => {
+                    if matches!(binary.right.data.as_deref(), Some(ExprData::Null)) {
+                        check = binary.left.clone();
+                        when_non_null = yes.clone();
+                        when_null = no.clone();
+                    } else if matches!(binary.left.data.as_deref(), Some(ExprData::Null)) {
+                        check = binary.right.clone();
+                        when_non_null = yes.clone();
+                        when_null = no.clone();
+                    }
+                }
+                _ => {}
+            }
+
+            if self.expr_can_be_removed_if_unused(&check) {
+                if !unsupported_features.contains(JsFeature::NULLISH_COALESCING)
+                    && values_look_the_same(check.data.as_deref(), when_non_null.data.as_deref())
+                {
+                    return join_with_left_associative_op(
+                        OpCode::BinaryNullishCoalescing,
+                        check,
+                        when_null,
+                    );
+                }
+                if !unsupported_features.contains(JsFeature::OPTIONAL_CHAIN)
+                    && matches!(when_null.data.as_deref(), Some(ExprData::Undefined))
+                    && try_to_insert_optional_chain(&check, &mut when_non_null)
+                {
+                    return when_non_null;
+                }
+            }
+        }
+
+        Expr::new(loc, ExprData::If(super::IfExpr { test, yes, no }))
+    }
+
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
     /// # Panics
     ///
     /// Panics if a default export contains an invalid internal statement kind.
@@ -3870,5 +4140,179 @@ mod tests {
                 .data
                 .is_none()
         );
+    }
+
+    #[test]
+    fn mangles_boolean_and_repeated_conditional_branches() {
+        let context = make_helper_context(|_| false);
+        let test = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr::default()),
+        );
+        let boolean = context.mangle_if_expr(
+            Loc::default(),
+            &IfExpr {
+                test: test.clone(),
+                yes: Expr::new(Loc::default(), ExprData::Boolean(true)),
+                no: Expr::new(Loc::default(), ExprData::Boolean(false)),
+            },
+            JsFeature::NONE,
+        );
+        assert!(matches!(
+            boolean.data.as_deref(),
+            Some(ExprData::Unary(UnaryExpr {
+                op: OpCode::UnaryNot,
+                value,
+                ..
+            })) if matches!(
+                value.data.as_deref(),
+                Some(ExprData::Unary(UnaryExpr {
+                    op: OpCode::UnaryNot,
+                    ..
+                }))
+            )
+        ));
+
+        let repeated = context.mangle_if_expr(
+            Loc::default(),
+            &IfExpr {
+                test: number(0.0),
+                yes: test.clone(),
+                no: test.clone(),
+            },
+            JsFeature::NONE,
+        );
+        assert!(values_look_the_same(
+            repeated.data.as_deref(),
+            test.data.as_deref()
+        ));
+
+        let identifier_branch = context.mangle_if_expr(
+            Loc::default(),
+            &IfExpr {
+                test: test.clone(),
+                yes: test,
+                no: number(1.0),
+            },
+            JsFeature::NONE,
+        );
+        assert!(matches!(
+            identifier_branch.data.as_deref(),
+            Some(ExprData::Binary(BinaryExpr {
+                op: OpCode::BinaryLogicalOr,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn merges_matching_conditional_calls() {
+        let context = make_helper_context(|_| false);
+        let test = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference: Ref {
+                    source_index: 1,
+                    inner_index: 1,
+                },
+                ..IdentifierExpr::default()
+            }),
+        );
+        let target = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference: Ref {
+                    source_index: 1,
+                    inner_index: 2,
+                },
+                ..IdentifierExpr::default()
+            }),
+        );
+        let call = |first| {
+            Expr::new(
+                Loc::default(),
+                ExprData::Call(CallExpr {
+                    target: target.clone(),
+                    args: vec![number(first), number(3.0)],
+                    ..CallExpr::default()
+                }),
+            )
+        };
+        let mangled = context.mangle_if_expr(
+            Loc::default(),
+            &IfExpr {
+                test,
+                yes: call(1.0),
+                no: call(2.0),
+            },
+            JsFeature::NONE,
+        );
+        assert!(matches!(
+            mangled.data.as_deref(),
+            Some(ExprData::Call(value))
+                if matches!(value.args[0].data.as_deref(), Some(ExprData::If(_)))
+                    && matches!(value.args[1].data.as_deref(), Some(ExprData::Number(3.0)))
+        ));
+    }
+
+    #[test]
+    fn mangles_nullish_conditionals() {
+        let context = make_helper_context(|_| false);
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference: Ref {
+                    source_index: 6,
+                    inner_index: 7,
+                },
+                ..IdentifierExpr::default()
+            }),
+        );
+        let test = Expr::new(
+            Loc::default(),
+            ExprData::Binary(BinaryExpr {
+                left: identifier.clone(),
+                right: Expr::new(Loc::default(), ExprData::Null),
+                op: OpCode::BinaryLooseNotEqual,
+            }),
+        );
+        let coalesced = context.mangle_if_expr(
+            Loc::default(),
+            &IfExpr {
+                test: test.clone(),
+                yes: identifier.clone(),
+                no: number(1.0),
+            },
+            JsFeature::NONE,
+        );
+        assert!(matches!(
+            coalesced.data.as_deref(),
+            Some(ExprData::Binary(BinaryExpr {
+                op: OpCode::BinaryNullishCoalescing,
+                ..
+            }))
+        ));
+
+        let optional = context.mangle_if_expr(
+            Loc::default(),
+            &IfExpr {
+                test,
+                yes: Expr::new(
+                    Loc::default(),
+                    ExprData::Dot(crate::internal::js_ast::DotExpr {
+                        target: identifier,
+                        name: "value".into(),
+                        ..crate::internal::js_ast::DotExpr::default()
+                    }),
+                ),
+                no: Expr::new(Loc::default(), ExprData::Undefined),
+            },
+            JsFeature::NONE,
+        );
+        assert!(matches!(
+            optional.data.as_deref(),
+            Some(ExprData::Dot(value))
+                if value.optional_chain == OptionalChain::Start
+        ));
     }
 }
