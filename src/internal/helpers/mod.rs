@@ -8,10 +8,14 @@ mod glob;
 mod hash;
 mod joiner;
 mod mime;
+mod path;
 mod quote;
+mod serializer;
+mod stack;
 mod strings;
 mod typos;
 mod utf;
+mod waitgroup;
 
 pub use bitset::BitSet;
 pub use comment::escape_closing_tag;
@@ -21,7 +25,12 @@ pub use glob::{GlobPart, GlobWildcard, glob_pattern_to_string, parse_glob_patter
 pub use hash::{hash_combine, hash_combine_string};
 pub use joiner::Joiner;
 pub use mime::mime_type_by_extension;
+pub use path::{
+    FileUrl, file_path_from_file_url, file_url_from_file_path, is_file_url, is_inside_node_modules,
+};
 pub use quote::{quote_for_json, quote_single};
+pub use serializer::Serializer;
+pub use stack::pretty_printed_stack;
 pub use strings::{
     string_array_arrays_equal, string_array_to_quoted_comma_separated_string, string_arrays_equal,
 };
@@ -31,3 +40,4 @@ pub use utf::{
     decode_wtf8_rune, string_to_utf16, utf16_equals_utf16, utf16_equals_wtf8, utf16_to_string,
     utf16_to_string_with_validation,
 };
+pub use waitgroup::ThreadSafeWaitGroup;
