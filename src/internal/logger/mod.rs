@@ -1061,6 +1061,92 @@ pub fn remap_string_in_js_loc(table: &[StringInJsTableEntry], inner_loc: Loc) ->
     }
 }
 
+/// Wraps a log so locations from JSON embedded in a JavaScript string are
+/// remapped back into the outer JavaScript source.
+///
+/// # Panics
+///
+/// Adding a message with a location panics if `table` is empty, if a remapped
+/// range is invalid, or if the private tracker mutex is poisoned.
+#[must_use]
+pub fn new_string_in_js_log(
+    mut log: Log,
+    outer_tracker: &LineColumnTracker,
+    table: Vec<StringInJsTableEntry>,
+) -> Log {
+    let old_add_msg = Arc::clone(&log.add_msg_callback);
+    let outer_tracker = Arc::new(Mutex::new(outer_tracker.clone()));
+
+    log.add_msg_callback = Arc::new(move |mut message| {
+        fn remap_line_and_column_to_loc(
+            table: &[StringInJsTableEntry],
+            line: i32,
+            column: i32,
+        ) -> Loc {
+            let mut count = table.len();
+            let mut index = 0;
+            while count > 0 {
+                let step = count / 2;
+                let candidate = index + step;
+                if candidate + 1 < table.len() {
+                    let entry = table[candidate + 1];
+                    if entry.inner_line < line
+                        || (entry.inner_line == line && entry.inner_column < column)
+                    {
+                        index = candidate + 1;
+                        count -= step + 1;
+                        continue;
+                    }
+                }
+                count = step;
+            }
+            let entry = table[index];
+            Loc {
+                start: entry.outer_loc.start + column - entry.inner_column,
+            }
+        }
+
+        fn remap_data(
+            table: &[StringInJsTableEntry],
+            tracker: &mut LineColumnTracker,
+            mut data: MsgData,
+        ) -> MsgData {
+            let Some(inner_location) = data.location.as_ref() else {
+                return data;
+            };
+            let line = i32::try_from(inner_location.line).expect("line number must fit in i32");
+            let column =
+                i32::try_from(inner_location.column).expect("column number must fit in i32");
+            let start = remap_line_and_column_to_loc(table, line, column);
+            let mut range = Range { loc: start, len: 0 };
+            if inner_location.length != 0 {
+                let end_column = i32::try_from(inner_location.column + inner_location.length)
+                    .expect("column number must fit in i32");
+                range.len =
+                    remap_line_and_column_to_loc(table, line, end_column).start - start.start;
+            }
+            let suggestion = inner_location.suggestion.clone();
+            let mut location = tracker
+                .msg_data(range, data.text.clone())
+                .location
+                .expect("the outer tracker must contain a source");
+            location.suggestion = suggestion;
+            data.location = Some(location);
+            data
+        }
+
+        let mut tracker = outer_tracker
+            .lock()
+            .expect("string-in-JavaScript tracker mutex was poisoned");
+        message.data = remap_data(&table, &mut tracker, message.data);
+        for note in &mut message.notes {
+            *note = remap_data(&table, &mut tracker, note.clone());
+        }
+        old_add_msg(message);
+    });
+    log
+}
+
 #[must_use]
 pub fn linkify_text(mut text: &str, underline: &str, reset: &str) -> String {
     if underline.is_empty() || !text.contains("https://") {
@@ -1708,8 +1794,8 @@ mod tests {
         DeferLogKind, ImportAttributes, LineColumnTracker, Loc, Log, LogLevel, Msg, MsgData, MsgId,
         MsgKind, MsgLocation, OutputOptions, PathFlags, PathStyle, PrettyPaths, Range, Source,
         TerminalInfo, estimate_width_in_terminal, generate_string_in_js_table, linkify_text,
-        message_detail, platform_independent_path_dir_base_ext, remap_string_in_js_loc,
-        render_tab_stops, wrap_words_in_string,
+        message_detail, new_string_in_js_log, platform_independent_path_dir_base_ext,
+        remap_string_in_js_loc, render_tab_stops, wrap_words_in_string,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1834,6 +1920,42 @@ mod tests {
             remap_string_in_js_loc(&table, Loc { start: 2 }),
             Loc { start: 10 }
         );
+    }
+
+    #[test]
+    fn wrapped_log_remaps_embedded_diagnostic_locations() {
+        let source = Source {
+            pretty_paths: PrettyPaths {
+                abs: "/outer.js".into(),
+                rel: "outer.js".into(),
+            },
+            contents: Arc::from(&b"prefix \"abc\" suffix"[..]),
+            ..Source::default()
+        };
+        let table = generate_string_in_js_table(&source.contents, Loc { start: 7 }, b"abc");
+        let log = new_string_in_js_log(
+            Log::new_defer(DeferLogKind::All, HashMap::new()),
+            &LineColumnTracker::new(Some(&source)),
+            table,
+        );
+        let mut message = Msg::new(MsgKind::Error, "embedded");
+        message.data.location = Some(MsgLocation {
+            line: 1,
+            column: 2,
+            length: 1,
+            suggestion: "c".into(),
+            ..MsgLocation::default()
+        });
+        log.add_msg(message);
+
+        let messages = log.done();
+        let location = messages[0].data.location.as_ref().unwrap();
+        assert_eq!(location.file.rel, "outer.js");
+        assert_eq!(
+            (location.line, location.column, location.length),
+            (1, 10, 1)
+        );
+        assert_eq!(location.suggestion, "c");
     }
 
     #[test]
