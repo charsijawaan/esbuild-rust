@@ -1,3 +1,4 @@
+use crate::internal::logger::platform_independent_path_dir_base_ext;
 use std::ops::{BitOr, BitOrAssign};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -303,10 +304,166 @@ impl AnnotationFlags {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum LocalKind {
+    #[default]
+    Var,
+    Let,
+    Const,
+    Using,
+    AwaitUsing,
+}
+
+impl LocalKind {
+    #[must_use]
+    pub fn is_using(self) -> bool {
+        self >= Self::Using
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum ScopeKind {
+    #[default]
+    Block,
+    With,
+    Label,
+    ClassName,
+    ClassBody,
+    CatchBinding,
+    Entry,
+    FunctionArgs,
+    FunctionBody,
+    ClassStaticInit,
+}
+
+impl ScopeKind {
+    #[must_use]
+    pub fn stops_hoisting(self) -> bool {
+        self >= Self::Entry
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StrictModeKind {
+    #[default]
+    Sloppy,
+    ExplicitStrict,
+    ImplicitStrictClass,
+    ImplicitStrictEsm,
+    ImplicitStrictTsAlwaysStrict,
+    ImplicitStrictJsxAutomaticRuntime,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ExportsKind {
+    #[default]
+    None,
+    CommonJs,
+    Esm,
+    EsmWithDynamicFallback,
+}
+
+impl ExportsKind {
+    #[must_use]
+    pub const fn is_dynamic(self) -> bool {
+        matches!(self, Self::CommonJs | Self::EsmWithDynamicFallback)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum ModuleType {
+    #[default]
+    Unknown,
+    CommonJsCjs,
+    CommonJsCts,
+    CommonJsPackageJson,
+    EsmMjs,
+    EsmMts,
+    EsmPackageJson,
+}
+
+impl ModuleType {
+    #[must_use]
+    pub fn is_common_js(self) -> bool {
+        (Self::CommonJsCjs..=Self::CommonJsPackageJson).contains(&self)
+    }
+
+    #[must_use]
+    pub fn is_esm(self) -> bool {
+        (Self::EsmMjs..=Self::EsmPackageJson).contains(&self)
+    }
+}
+
+pub const NS_EXPORT_PART_INDEX: u32 = 0;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ConstValueKind {
+    #[default]
+    None,
+    Null,
+    Undefined,
+    True,
+    False,
+    Number,
+    String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConstValue {
+    pub number: f64,
+    pub string: Vec<u16>,
+    pub kind: ConstValueKind,
+}
+
+#[must_use]
+pub fn generate_non_unique_name_from_path(path: &str) -> String {
+    let (directory, mut base, _) = platform_independent_path_dir_base_ext(path);
+    if base == "index" {
+        let (_, directory_base, _) = platform_independent_path_dir_base_ext(&directory);
+        if !directory_base.is_empty() {
+            base = directory_base;
+        }
+    }
+    ensure_valid_identifier(&base)
+}
+
+#[must_use]
+pub fn ensure_valid_identifier(base: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut needs_gap = false;
+    for character in base.chars() {
+        let is_letter = character.is_ascii_alphabetic();
+        let is_non_initial_digit = !bytes.is_empty() && character.is_ascii_digit();
+        if is_letter || is_non_initial_digit {
+            if needs_gap {
+                bytes.push(b'_');
+                needs_gap = false;
+            }
+            let mut encoded = [0; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+        } else if !bytes.is_empty() {
+            needs_gap = true;
+        }
+    }
+    if bytes.is_empty() {
+        "_".into()
+    } else {
+        bytes.into_iter().map(char::from).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AnnotationFlags, AssignTarget, OP_TABLE, OpCode, Precedence, PropertyFlags, PropertyKind,
+        AnnotationFlags, AssignTarget, ExportsKind, LocalKind, ModuleType, OP_TABLE, OpCode,
+        Precedence, PropertyFlags, PropertyKind, ScopeKind, ensure_valid_identifier,
+        generate_non_unique_name_from_path,
     };
 
     #[test]
@@ -356,6 +513,35 @@ mod tests {
         assert!(
             AnnotationFlags::CAN_BE_REMOVED_IF_UNUSED
                 .contains(AnnotationFlags::CAN_BE_REMOVED_IF_UNUSED)
+        );
+    }
+
+    #[test]
+    fn scope_module_and_export_classification_matches_boundaries() {
+        assert!(!LocalKind::Const.is_using());
+        assert!(LocalKind::Using.is_using());
+        assert!(!ScopeKind::CatchBinding.stops_hoisting());
+        assert!(ScopeKind::Entry.stops_hoisting());
+        assert!(ExportsKind::CommonJs.is_dynamic());
+        assert!(!ExportsKind::Esm.is_dynamic());
+        assert!(ModuleType::CommonJsCts.is_common_js());
+        assert!(!ModuleType::EsmMts.is_common_js());
+        assert!(ModuleType::EsmPackageJson.is_esm());
+    }
+
+    #[test]
+    fn generated_names_follow_upstream_path_and_ascii_rules() {
+        assert_eq!(ensure_valid_identifier("hello-world"), "hello_world");
+        assert_eq!(ensure_valid_identifier("123"), "_");
+        assert_eq!(ensure_valid_identifier("x--y"), "x_y");
+        assert_eq!(ensure_valid_identifier("πx"), "x");
+        assert_eq!(
+            generate_non_unique_name_from_path("/packages/react/index.js"),
+            "react"
+        );
+        assert_eq!(
+            generate_non_unique_name_from_path("C:\\src\\hello-world.ts"),
+            "hello_world"
         );
     }
 }
