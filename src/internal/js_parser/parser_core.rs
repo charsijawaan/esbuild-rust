@@ -10,7 +10,10 @@ use crate::internal::{
     compat::JsFeature,
     config::{Mode, pretty_print_target_environment},
     helpers::contains_non_bmp_code_point,
-    js_ast::{Expr, ExprData, Scope, ScopeKind, ScopeMember, ScopeRef, SymbolUse},
+    js_ast::{
+        CallExpr, Expr, ExprData, IdentifierExpr, Scope, ScopeKind, ScopeMember, ScopeRef,
+        SymbolUse,
+    },
     js_lexer::range_of_identifier,
     logger::{LineColumnTracker, Loc, Log, Source},
 };
@@ -37,10 +40,14 @@ pub(crate) struct ParserCore {
     pub(crate) scopes_for_current_part: Vec<ScopeRef>,
     pub(crate) symbols: Vec<Symbol>,
     pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
+    pub(crate) runtime_imports: HashMap<String, LocRef>,
     pub(crate) unrepresentable_identifiers: HashMap<String, bool>,
     pub(crate) ts_use_counts: Vec<u32>,
     pub(crate) is_file_considered_esm: bool,
     pub(crate) is_control_flow_dead: bool,
+    pub(crate) promise_ref: Ref,
+    pub(crate) reg_exp_ref: Ref,
+    pub(crate) big_int_ref: Ref,
 }
 
 impl ParserCore {
@@ -57,10 +64,14 @@ impl ParserCore {
             scopes_for_current_part: Vec::new(),
             symbols: Vec::new(),
             symbol_uses: HashMap::new(),
+            runtime_imports: HashMap::new(),
             unrepresentable_identifiers: HashMap::new(),
             ts_use_counts: Vec::new(),
             is_file_considered_esm: false,
             is_control_flow_dead: false,
+            promise_ref: INVALID_REF,
+            reg_exp_ref: INVALID_REF,
+            big_int_ref: INVALID_REF,
         }
     }
 
@@ -605,6 +616,80 @@ impl ParserCore {
         reference
     }
 
+    pub(crate) fn import_from_runtime(&mut self, loc: Loc, name: &str) -> Expr {
+        let item = if let Some(item) = self.runtime_imports.get(name).copied() {
+            item
+        } else {
+            let item = LocRef {
+                loc,
+                reference: self.new_symbol(SymbolKind::Other, name),
+            };
+            self.module_scope
+                .as_ref()
+                .expect("runtime imports require a module scope")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generated
+                .push(item.reference);
+            self.runtime_imports.insert(name.into(), item);
+            item
+        };
+        self.record_usage(item.reference);
+        Expr::new(
+            loc,
+            ExprData::Identifier(IdentifierExpr {
+                reference: item.reference,
+                ..IdentifierExpr::default()
+            }),
+        )
+    }
+
+    pub(crate) fn call_runtime(&mut self, loc: Loc, name: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            loc,
+            ExprData::Call(CallExpr {
+                target: self.import_from_runtime(loc, name),
+                args,
+                ..CallExpr::default()
+            }),
+        )
+    }
+
+    pub(crate) fn make_promise_ref(&mut self) -> Ref {
+        if self.promise_ref == INVALID_REF {
+            self.promise_ref = self.new_symbol(SymbolKind::Unbound, "Promise");
+        }
+        self.promise_ref
+    }
+
+    pub(crate) fn make_reg_exp_ref(&mut self) -> Ref {
+        if self.reg_exp_ref == INVALID_REF {
+            self.reg_exp_ref = self.new_symbol(SymbolKind::Unbound, "RegExp");
+            self.module_scope
+                .as_ref()
+                .expect("generated references require a module scope")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generated
+                .push(self.reg_exp_ref);
+        }
+        self.reg_exp_ref
+    }
+
+    pub(crate) fn make_big_int_ref(&mut self) -> Ref {
+        if self.big_int_ref == INVALID_REF {
+            self.big_int_ref = self.new_symbol(SymbolKind::Unbound, "BigInt");
+            self.module_scope
+                .as_ref()
+                .expect("generated references require a module scope")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generated
+                .push(self.big_int_ref);
+        }
+        self.big_int_ref
+    }
+
     fn check_for_unrepresentable_identifier(&mut self, loc: Loc, name: &str) {
         if self.options.ascii_only
             && self
@@ -1012,6 +1097,66 @@ mod tests {
                 .members["value"]
                 .reference,
             first
+        );
+    }
+
+    #[test]
+    fn runtime_imports_are_generated_once_and_count_each_use() {
+        let mut parser = parser();
+        parser.push_scope_for_parse_pass(ScopeKind::Entry, Loc { start: 1 });
+        let first = parser.import_from_runtime(Loc { start: 2 }, "__helper");
+        let call = parser.call_runtime(
+            Loc { start: 3 },
+            "__helper",
+            vec![Expr::new(Loc::default(), ExprData::Number(1.0))],
+        );
+        let Some(ExprData::Identifier(first)) = first.data.as_deref() else {
+            panic!("expected runtime identifier");
+        };
+        let Some(ExprData::Call(call)) = call.data.as_deref() else {
+            panic!("expected runtime call");
+        };
+        let Some(ExprData::Identifier(target)) = call.target.data.as_deref() else {
+            panic!("expected runtime call target");
+        };
+        assert_eq!(first.reference, target.reference);
+        assert_eq!(parser.runtime_imports.len(), 1);
+        assert_eq!(
+            parser.symbols[usize::try_from(first.reference.inner_index).unwrap()]
+                .use_count_estimate,
+            2
+        );
+        assert_eq!(
+            parser
+                .module_scope
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generated,
+            [first.reference]
+        );
+    }
+
+    #[test]
+    fn special_global_references_match_upstream_generation_rules() {
+        let mut parser = parser();
+        parser.push_scope_for_parse_pass(ScopeKind::Entry, Loc { start: 1 });
+        let promise = parser.make_promise_ref();
+        let regexp = parser.make_reg_exp_ref();
+        let bigint = parser.make_big_int_ref();
+        assert_eq!(parser.make_promise_ref(), promise);
+        assert_eq!(parser.make_reg_exp_ref(), regexp);
+        assert_eq!(parser.make_big_int_ref(), bigint);
+        assert_eq!(
+            parser
+                .module_scope
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generated,
+            [regexp, bigint]
         );
     }
 }
