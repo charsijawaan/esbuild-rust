@@ -7,13 +7,18 @@ use std::{
 
 use crate::internal::{
     ast::{INVALID_REF, LocRef, NamespaceAlias, Ref, Symbol, SymbolFlags, SymbolKind},
-    config::Mode,
+    compat::JsFeature,
+    config::{Mode, pretty_print_target_environment},
+    helpers::contains_non_bmp_code_point,
     js_ast::{Expr, ExprData, Scope, ScopeKind, ScopeMember, ScopeRef, SymbolUse},
     js_lexer::range_of_identifier,
     logger::{LineColumnTracker, Loc, Log, Source},
 };
 
-use super::Options;
+use super::{
+    Options,
+    symbols::{MergeResult, can_merge_symbols},
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ScopeOrder {
@@ -32,6 +37,7 @@ pub(crate) struct ParserCore {
     pub(crate) scopes_for_current_part: Vec<ScopeRef>,
     pub(crate) symbols: Vec<Symbol>,
     pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
+    pub(crate) unrepresentable_identifiers: HashMap<String, bool>,
     pub(crate) ts_use_counts: Vec<u32>,
     pub(crate) is_file_considered_esm: bool,
     pub(crate) is_control_flow_dead: bool,
@@ -51,6 +57,7 @@ impl ParserCore {
             scopes_for_current_part: Vec::new(),
             symbols: Vec::new(),
             symbol_uses: HashMap::new(),
+            unrepresentable_identifiers: HashMap::new(),
             ts_use_counts: Vec::new(),
             is_file_considered_esm: false,
             is_control_flow_dead: false,
@@ -467,6 +474,7 @@ impl ParserCore {
                 continue;
             }
 
+            self.check_for_unrepresentable_identifier(loc, name);
             let reference = self.new_symbol(SymbolKind::Unbound, name);
             self.module_scope
                 .as_ref()
@@ -529,6 +537,114 @@ impl ParserCore {
         let reference = self.new_symbol(SymbolKind::Unbound, name);
         self.record_usage(reference);
         (reference, false, false)
+    }
+
+    pub(crate) fn declare_symbol(&mut self, kind: SymbolKind, loc: Loc, name: &str) -> Ref {
+        self.check_for_unrepresentable_identifier(loc, name);
+        let mut reference = self.new_symbol(kind, name);
+        let scope = self
+            .current_scope
+            .as_ref()
+            .expect("symbol declarations require a current scope")
+            .clone();
+        let existing = scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .get(name)
+            .copied();
+
+        if let Some(existing) = existing {
+            let existing_index =
+                usize::try_from(existing.reference.inner_index).expect("symbol index fits usize");
+            let existing_kind = self.symbols[existing_index].kind;
+            let merge_result = {
+                let scope = scope
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                can_merge_symbols(&scope, existing_kind, kind, self.options.ts.parse)
+            };
+            match merge_result {
+                MergeResult::Forbidden => {
+                    self.add_symbol_already_declared_error(name, loc, existing.loc);
+                    return existing.reference;
+                }
+                MergeResult::KeepExisting => reference = existing.reference,
+                MergeResult::ReplaceWithNew => {
+                    self.symbols[existing_index].link = reference;
+                    scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .replaced
+                        .push(existing);
+                    if self.options.minify_syntax
+                        && kind.is_function()
+                        && existing_kind.is_function()
+                    {
+                        self.symbols[existing_index].flags |=
+                            SymbolFlags::REMOVE_OVERWRITTEN_FUNCTION_DECLARATION;
+                    }
+                }
+                MergeResult::BecomePrivateGetSetPair => {
+                    reference = existing.reference;
+                    self.symbols[existing_index].kind = SymbolKind::PrivateGetSetPair;
+                }
+                MergeResult::BecomePrivateStaticGetSetPair => {
+                    reference = existing.reference;
+                    self.symbols[existing_index].kind = SymbolKind::PrivateStaticGetSetPair;
+                }
+                MergeResult::OverwriteWithNew => {}
+            }
+        }
+
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .insert(name.into(), ScopeMember { reference, loc });
+        reference
+    }
+
+    fn check_for_unrepresentable_identifier(&mut self, loc: Loc, name: &str) {
+        if self.options.ascii_only
+            && self
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::UNICODE_ESCAPES)
+            && contains_non_bmp_code_point(name.as_bytes())
+            && self
+                .unrepresentable_identifiers
+                .insert(name.into(), true)
+                .is_none()
+        {
+            let environment = pretty_print_target_environment(
+                &self.options.original_target_env,
+                self.options.unsupported_js_feature_overrides_mask,
+            );
+            self.add_error(
+                loc,
+                format!(
+                    "{name:?} cannot be escaped in {environment} but you can set the charset to \
+                     \"utf8\" to allow unescaped Unicode characters"
+                ),
+            );
+        }
+    }
+
+    fn add_symbol_already_declared_error(&mut self, name: &str, new_loc: Loc, old_loc: Loc) {
+        let Some(log) = self.log.clone() else {
+            return;
+        };
+        let note = self.tracker.msg_data(
+            range_of_identifier(&self.source, old_loc),
+            format!("The symbol {name:?} was originally declared here:"),
+        );
+        log.add_error_with_notes(
+            Some(&mut self.tracker),
+            range_of_identifier(&self.source, new_loc),
+            format!("The symbol {name:?} has already been declared"),
+            vec![note],
+        );
     }
 
     fn add_error(&mut self, loc: Loc, text: impl Into<String>) {
@@ -846,6 +962,56 @@ mod tests {
         assert_eq!(
             parser.symbols[usize::try_from(missing.inner_index).unwrap()].kind,
             SymbolKind::Unbound
+        );
+    }
+
+    #[test]
+    fn declarations_update_replacements_and_private_accessor_pairs() {
+        let mut parser = parser();
+        parser.options.minify_syntax = true;
+        parser.push_scope_for_parse_pass(ScopeKind::Entry, Loc { start: 1 });
+
+        let first =
+            parser.declare_symbol(SymbolKind::HoistedFunction, Loc { start: 2 }, "function");
+        let second =
+            parser.declare_symbol(SymbolKind::HoistedFunction, Loc { start: 3 }, "function");
+        assert_ne!(first, second);
+        assert_eq!(
+            parser.symbols[usize::try_from(first.inner_index).unwrap()].link,
+            second
+        );
+        assert!(
+            parser.symbols[usize::try_from(first.inner_index).unwrap()]
+                .flags
+                .contains(SymbolFlags::REMOVE_OVERWRITTEN_FUNCTION_DECLARATION)
+        );
+
+        let getter = parser.declare_symbol(SymbolKind::PrivateGet, Loc { start: 4 }, "#accessor");
+        let setter = parser.declare_symbol(SymbolKind::PrivateSet, Loc { start: 5 }, "#accessor");
+        assert_eq!(getter, setter);
+        assert_eq!(
+            parser.symbols[usize::try_from(getter.inner_index).unwrap()].kind,
+            SymbolKind::PrivateGetSetPair
+        );
+    }
+
+    #[test]
+    fn forbidden_declarations_reuse_the_existing_scope_member() {
+        let mut parser = parser();
+        parser.push_scope_for_parse_pass(ScopeKind::Entry, Loc { start: 1 });
+        let first = parser.declare_symbol(SymbolKind::Const, Loc { start: 2 }, "value");
+        let second = parser.declare_symbol(SymbolKind::Class, Loc { start: 3 }, "value");
+        assert_eq!(first, second);
+        assert_eq!(
+            parser
+                .current_scope
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .members["value"]
+                .reference,
+            first
         );
     }
 }
