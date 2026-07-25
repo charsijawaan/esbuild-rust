@@ -6,10 +6,11 @@ use std::{
 };
 
 use crate::internal::{
-    ast::{INVALID_REF, LocRef, Ref, Symbol, SymbolFlags, SymbolKind},
+    ast::{INVALID_REF, LocRef, NamespaceAlias, Ref, Symbol, SymbolFlags, SymbolKind},
     config::Mode,
-    js_ast::{Expr, ExprData, Scope, ScopeKind, ScopeRef, SymbolUse},
-    logger::{Loc, Source},
+    js_ast::{Expr, ExprData, Scope, ScopeKind, ScopeMember, ScopeRef, SymbolUse},
+    js_lexer::range_of_identifier,
+    logger::{LineColumnTracker, Loc, Log, Source},
 };
 
 use super::Options;
@@ -20,11 +21,13 @@ pub(crate) struct ScopeOrder {
     loc: Loc,
 }
 
-#[derive(Debug)]
 pub(crate) struct ParserCore {
     pub(crate) options: Options,
+    pub(crate) log: Option<Log>,
     pub(crate) source: Source,
+    pub(crate) tracker: LineColumnTracker,
     pub(crate) current_scope: Option<ScopeRef>,
+    pub(crate) module_scope: Option<ScopeRef>,
     pub(crate) scopes_in_order: Vec<ScopeOrder>,
     pub(crate) scopes_for_current_part: Vec<ScopeRef>,
     pub(crate) symbols: Vec<Symbol>,
@@ -36,10 +39,14 @@ pub(crate) struct ParserCore {
 
 impl ParserCore {
     pub(crate) fn new(source: Source, options: Options) -> Self {
+        let tracker = LineColumnTracker::new(Some(&source));
         Self {
             options,
+            log: None,
             source,
+            tracker,
             current_scope: None,
+            module_scope: None,
             scopes_in_order: Vec::new(),
             scopes_for_current_part: Vec::new(),
             symbols: Vec::new(),
@@ -47,6 +54,13 @@ impl ParserCore {
             ts_use_counts: Vec::new(),
             is_file_considered_esm: false,
             is_control_flow_dead: false,
+        }
+    }
+
+    pub(crate) fn new_with_log(source: Source, options: Options, log: Log) -> Self {
+        Self {
+            log: Some(log),
+            ..Self::new(source, options)
         }
     }
 
@@ -77,6 +91,9 @@ impl ParserCore {
             scope.use_strict_loc = use_strict_loc;
         }
         self.current_scope = Some(scope.clone());
+        if kind == ScopeKind::Entry && self.module_scope.is_none() {
+            self.module_scope = Some(scope.clone());
+        }
 
         if let Some(previous) = self.scopes_in_order.last() {
             assert!(
@@ -372,6 +389,164 @@ impl ParserCore {
             return;
         }
     }
+
+    pub(crate) fn find_symbol(&mut self, loc: Loc, name: &str) -> FindSymbolResult {
+        let mut scope = self
+            .current_scope
+            .clone()
+            .expect("symbol lookup requires a current scope");
+        let mut is_inside_with_scope = false;
+        let mut did_forbid_arguments = false;
+
+        let (reference, declare_loc) = loop {
+            let (member, namespace_match, parent, is_with, forbid_arguments) = {
+                let scope = scope
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let namespace_match = scope.ts_namespace.as_ref().and_then(|namespace| {
+                    namespace
+                        .exported_members
+                        .get(name)
+                        .filter(|member| namespace.is_enum_scope == member.is_enum_value)
+                        .map(|member| {
+                            (
+                                namespace
+                                    .lazily_generated_property_accesses
+                                    .get(name)
+                                    .copied(),
+                                namespace.argument_ref,
+                                member.loc,
+                            )
+                        })
+                });
+                (
+                    scope.members.get(name).copied(),
+                    namespace_match,
+                    scope.parent.as_ref().and_then(std::sync::Weak::upgrade),
+                    scope.kind == ScopeKind::With,
+                    scope.forbid_arguments,
+                )
+            };
+
+            is_inside_with_scope |= is_with;
+            if forbid_arguments && name == "arguments" && !did_forbid_arguments {
+                self.add_error(loc, format!("Cannot access {name:?} here:"));
+                did_forbid_arguments = true;
+            }
+
+            if let Some(member) = member {
+                break (member.reference, member.loc);
+            }
+
+            if let Some((cached, namespace_ref, member_loc)) = namespace_match {
+                let reference = if let Some(reference) = cached {
+                    reference
+                } else {
+                    let reference = self.new_symbol(SymbolKind::Other, name);
+                    let symbol_index =
+                        usize::try_from(reference.inner_index).expect("symbol index fits usize");
+                    self.symbols[symbol_index].namespace_alias = Some(NamespaceAlias {
+                        namespace_ref,
+                        alias: name.into(),
+                    });
+                    scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .ts_namespace
+                        .as_mut()
+                        .expect("namespace metadata must still be present")
+                        .lazily_generated_property_accesses
+                        .insert(name.into(), reference);
+                    reference
+                };
+                break (reference, member_loc);
+            }
+
+            if let Some(parent) = parent {
+                scope = parent;
+                continue;
+            }
+
+            let reference = self.new_symbol(SymbolKind::Unbound, name);
+            self.module_scope
+                .as_ref()
+                .expect("unbound symbols require a module scope")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .members
+                .insert(
+                    name.into(),
+                    ScopeMember {
+                        reference,
+                        loc: Loc { start: -1 },
+                    },
+                );
+            break (reference, loc);
+        };
+
+        if is_inside_with_scope {
+            let symbol_index =
+                usize::try_from(reference.inner_index).expect("symbol index fits usize");
+            self.symbols[symbol_index].flags |= SymbolFlags::MUST_NOT_BE_RENAMED;
+        }
+        self.record_usage(reference);
+        FindSymbolResult {
+            reference,
+            declare_loc,
+            is_inside_with_scope,
+        }
+    }
+
+    pub(crate) fn find_label_symbol(&mut self, loc: Loc, name: &str) -> (Ref, bool, bool) {
+        let mut scope = self.current_scope.clone();
+        while let Some(current) = scope {
+            let (kind, label, is_loop, parent) = {
+                let scope = current
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    scope.kind,
+                    scope.label.reference,
+                    scope.label_stmt_is_loop,
+                    scope.parent.as_ref().and_then(std::sync::Weak::upgrade),
+                )
+            };
+            if kind.stops_hoisting() {
+                break;
+            }
+            if kind == ScopeKind::Label {
+                let symbol_index =
+                    usize::try_from(label.inner_index).expect("symbol index fits usize");
+                if self.symbols[symbol_index].original_name == name {
+                    self.record_usage(label);
+                    return (label, is_loop, true);
+                }
+            }
+            scope = parent;
+        }
+
+        self.add_error(loc, format!("There is no containing label named {name:?}"));
+        let reference = self.new_symbol(SymbolKind::Unbound, name);
+        self.record_usage(reference);
+        (reference, false, false)
+    }
+
+    fn add_error(&mut self, loc: Loc, text: impl Into<String>) {
+        if let Some(log) = &self.log {
+            log.add_error(
+                Some(&mut self.tracker),
+                range_of_identifier(&self.source, loc),
+                text,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FindSymbolResult {
+    pub(crate) reference: Ref,
+    pub(crate) declare_loc: Loc,
+    pub(crate) is_inside_with_scope: bool,
 }
 
 #[cfg(test)]
@@ -383,6 +558,7 @@ mod tests {
         ast::{INVALID_REF, SymbolFlags, SymbolKind},
         js_ast::{
             DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, ScopeKind, ScopeMember, StringExpr,
+            TsNamespaceMember, TsNamespaceMemberData, TsNamespaceScope,
         },
         logger::{Loc, Source},
     };
@@ -553,5 +729,123 @@ mod tests {
         );
         parser.ignore_usage_of_identifier_in_dot_chain(&index);
         assert_eq!(parser.symbols[0].use_count_estimate, 0);
+    }
+
+    #[test]
+    fn resolves_symbols_through_with_scopes_and_allocates_unbound_names() {
+        let mut parser = parser();
+        parser.push_scope_for_parse_pass(ScopeKind::Entry, Loc { start: 1 });
+        let local = parser.new_symbol(SymbolKind::Other, "local");
+        parser
+            .current_scope
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .insert(
+                "local".into(),
+                ScopeMember {
+                    reference: local,
+                    loc: Loc { start: 1 },
+                },
+            );
+        parser.push_scope_for_parse_pass(ScopeKind::With, Loc { start: 2 });
+
+        let result = parser.find_symbol(Loc { start: 2 }, "local");
+        assert_eq!(result.reference, local);
+        assert!(result.is_inside_with_scope);
+        assert!(
+            parser.symbols[0]
+                .flags
+                .contains(SymbolFlags::MUST_NOT_BE_RENAMED)
+        );
+
+        let unbound = parser.find_symbol(Loc { start: 2 }, "missing");
+        assert_eq!(
+            parser.symbols[usize::try_from(unbound.reference.inner_index).unwrap()].kind,
+            SymbolKind::Unbound
+        );
+        assert_eq!(
+            parser
+                .module_scope
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .members["missing"]
+                .loc
+                .start,
+            -1
+        );
+    }
+
+    #[test]
+    fn lazily_generates_typescript_namespace_property_aliases() {
+        let mut parser = parser();
+        parser.options.ts.parse = true;
+        parser.push_scope_for_parse_pass(ScopeKind::Entry, Loc { start: 1 });
+        let namespace_ref = parser.new_symbol(SymbolKind::Other, "namespace");
+        {
+            let mut scope = parser
+                .current_scope
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut namespace = TsNamespaceScope {
+                argument_ref: namespace_ref,
+                ..TsNamespaceScope::default()
+            };
+            namespace.exported_members.insert(
+                "member".into(),
+                TsNamespaceMember {
+                    data: TsNamespaceMemberData::Property,
+                    loc: Loc { start: 1 },
+                    is_enum_value: false,
+                },
+            );
+            scope.ts_namespace = Some(namespace);
+        }
+
+        let first = parser.find_symbol(Loc { start: 1 }, "member");
+        let second = parser.find_symbol(Loc { start: 1 }, "member");
+        assert_eq!(first.reference, second.reference);
+        let alias = parser.symbols[usize::try_from(first.reference.inner_index).unwrap()]
+            .namespace_alias
+            .as_ref()
+            .unwrap();
+        assert_eq!(alias.namespace_ref, namespace_ref);
+        assert_eq!(alias.alias, "member");
+    }
+
+    #[test]
+    fn resolves_containing_labels_and_recovers_from_missing_labels() {
+        let mut parser = parser();
+        parser.push_scope_for_parse_pass(ScopeKind::Entry, Loc { start: 1 });
+        parser.push_scope_for_parse_pass(ScopeKind::Label, Loc { start: 2 });
+        let label = parser.new_symbol(SymbolKind::Label, "loop");
+        {
+            let mut scope = parser
+                .current_scope
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scope.label.reference = label;
+            scope.label_stmt_is_loop = true;
+        }
+        parser.push_scope_for_parse_pass(ScopeKind::Block, Loc { start: 3 });
+        assert_eq!(
+            parser.find_label_symbol(Loc { start: 3 }, "loop"),
+            (label, true, true)
+        );
+        let (missing, is_loop, found) = parser.find_label_symbol(Loc { start: 3 }, "missing");
+        assert!(!found);
+        assert!(!is_loop);
+        assert_eq!(
+            parser.symbols[usize::try_from(missing.inner_index).unwrap()].kind,
+            SymbolKind::Unbound
+        );
     }
 }
