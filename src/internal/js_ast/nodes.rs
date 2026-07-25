@@ -877,15 +877,312 @@ pub struct Stmt {
     pub loc: Loc,
 }
 
+impl Stmt {
+    #[must_use]
+    pub fn new(loc: Loc, data: StmtData) -> Self {
+        Self {
+            data: Some(Box::new(data)),
+            loc,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum StmtData {
-    Placeholder,
+    Block(BlockStmt),
+    Comment(CommentStmt),
+    Debugger,
+    Directive(DirectiveStmt),
+    Empty,
+    TypeScript(TypeScriptStmt),
+    ExportClause(ExportClauseStmt),
+    ExportFrom(ExportFromStmt),
+    ExportDefault(ExportDefaultStmt),
+    ExportStar(ExportStarStmt),
+    ExportEquals(ExportEqualsStmt),
+    LazyExport(LazyExportStmt),
+    Expr(ExprStmt),
+    Enum(EnumStmt),
+    Namespace(NamespaceStmt),
+    Function(FunctionStmt),
+    Class(ClassStmt),
+    Label(LabelStmt),
+    If(IfStmt),
+    For(ForStmt),
+    ForIn(ForInStmt),
+    ForOf(ForOfStmt),
+    DoWhile(DoWhileStmt),
+    While(WhileStmt),
+    With(WithStmt),
+    Try(TryStmt),
+    Switch(SwitchStmt),
+    Import(ImportStmt),
+    Return(ReturnStmt),
+    Throw(ThrowStmt),
+    Local(LocalStmt),
+    Break(BreakStmt),
+    Continue(ContinueStmt),
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct BlockStmt {
     pub statements: Vec<Stmt>,
     pub close_brace_loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TypeScriptStmt {
+    pub was_declare_class: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CommentStmt {
+    pub text: String,
+    pub is_legal_comment: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DirectiveStmt {
+    pub value: Vec<u16>,
+    pub legacy_octal_loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportClauseStmt {
+    pub items: Vec<ClauseItem>,
+    pub is_single_line: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportFromStmt {
+    pub items: Vec<ClauseItem>,
+    pub namespace_ref: Ref,
+    pub import_record_index: u32,
+    pub is_single_line: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportDefaultStmt {
+    pub value: Stmt,
+    pub default_name: LocRef,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportStarAlias {
+    pub original_name: String,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportStarStmt {
+    pub alias: Option<ExportStarAlias>,
+    pub namespace_ref: Ref,
+    pub import_record_index: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExportEqualsStmt {
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LazyExportStmt {
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExprStmt {
+    pub value: Expr,
+    pub is_from_class_or_fn_that_can_be_removed_if_unused: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EnumValue {
+    pub value_or_nil: Expr,
+    pub name: Vec<u16>,
+    pub reference: Ref,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EnumStmt {
+    pub values: Vec<EnumValue>,
+    pub name: LocRef,
+    pub argument: Ref,
+    pub is_export: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NamespaceStmt {
+    pub statements: Vec<Stmt>,
+    pub name: LocRef,
+    pub argument: Ref,
+    pub is_export: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FunctionStmt {
+    pub function: Function,
+    pub is_export: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ClassStmt {
+    pub class: Class,
+    pub is_export: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LabelStmt {
+    pub statement: Stmt,
+    pub name: LocRef,
+    pub is_single_line_stmt: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IfStmt {
+    pub test: Expr,
+    pub yes: Stmt,
+    pub no_or_nil: Stmt,
+    pub is_single_line_yes: bool,
+    pub is_single_line_no: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ForStmt {
+    pub init_or_nil: Stmt,
+    pub test_or_nil: Expr,
+    pub update_or_nil: Expr,
+    pub body: Stmt,
+    pub is_single_line_body: bool,
+    pub is_lowered_for_await: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ForInStmt {
+    pub init: Stmt,
+    pub value: Expr,
+    pub body: Stmt,
+    pub is_single_line_body: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ForOfStmt {
+    pub init: Stmt,
+    pub value: Expr,
+    pub body: Stmt,
+    pub await_range: Range,
+    pub is_single_line_body: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DoWhileStmt {
+    pub body: Stmt,
+    pub test: Expr,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WhileStmt {
+    pub test: Expr,
+    pub body: Stmt,
+    pub is_single_line_body: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WithStmt {
+    pub value: Expr,
+    pub body: Stmt,
+    pub body_loc: Loc,
+    pub is_single_line_body: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Catch {
+    pub binding_or_nil: Binding,
+    pub block: BlockStmt,
+    pub loc: Loc,
+    pub block_loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Finally {
+    pub block: BlockStmt,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TryStmt {
+    pub catch: Option<Catch>,
+    pub finally: Option<Finally>,
+    pub block: BlockStmt,
+    pub block_loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SwitchCase {
+    pub value_or_nil: Expr,
+    pub body: Vec<Stmt>,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SwitchStmt {
+    pub test: Expr,
+    pub cases: Vec<SwitchCase>,
+    pub body_loc: Loc,
+    pub close_brace_loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ImportStmt {
+    pub default_name: Option<LocRef>,
+    pub items: Option<Vec<ClauseItem>>,
+    pub star_name_loc: Option<Loc>,
+    pub namespace_ref: Ref,
+    pub import_record_index: u32,
+    pub is_single_line: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ReturnStmt {
+    pub value_or_nil: Expr,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ThrowStmt {
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LocalStmt {
+    pub declarations: Vec<Decl>,
+    pub kind: LocalKind,
+    pub is_export: bool,
+    pub was_ts_import_equals: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BreakStmt {
+    pub label: Option<LocRef>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ContinueStmt {
+    pub label: Option<LocRef>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ClauseItem {
+    pub alias: String,
+    pub original_name: String,
+    pub alias_loc: Loc,
+    pub name: LocRef,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Decl {
+    pub binding: Binding,
+    pub value_or_nil: Expr,
 }
 
 #[must_use]
@@ -994,9 +1291,10 @@ pub fn ensure_valid_identifier(base: &str) -> String {
 mod tests {
     use super::{
         AnnotationFlags, AssignTarget, CallExpr, CallKind, ConstValueKind, DotExpr, ExportsKind,
-        Expr, ExprData, LocalKind, ModuleType, OP_TABLE, OpCode, OptionalChain, Precedence,
-        PropertyFlags, PropertyKind, ScopeKind, StringExpr, const_value_to_expr,
-        ensure_valid_identifier, expr_to_const_value, generate_non_unique_name_from_path,
+        Expr, ExprData, ImportStmt, LocalKind, LocalStmt, ModuleType, OP_TABLE, OpCode,
+        OptionalChain, Precedence, PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData,
+        StringExpr, SwitchCase, const_value_to_expr, ensure_valid_identifier, expr_to_const_value,
+        generate_non_unique_name_from_path,
     };
     use crate::internal::logger::Loc;
 
@@ -1136,5 +1434,31 @@ mod tests {
             expr_to_const_value(&Expr::new(Loc::default(), ExprData::Number(1e100))).kind,
             ConstValueKind::None
         );
+    }
+
+    #[test]
+    fn statement_variants_preserve_nullable_go_interface_fields() {
+        let import = ImportStmt::default();
+        assert!(import.default_name.is_none());
+        assert!(import.items.is_none());
+        assert!(import.star_name_loc.is_none());
+
+        let switch_case = SwitchCase::default();
+        assert!(switch_case.value_or_nil.data.is_none());
+
+        let statement = Stmt::new(
+            Loc::default(),
+            StmtData::Local(LocalStmt {
+                kind: LocalKind::AwaitUsing,
+                ..LocalStmt::default()
+            }),
+        );
+        assert!(matches!(
+            statement.data.as_deref(),
+            Some(StmtData::Local(LocalStmt {
+                kind: LocalKind::AwaitUsing,
+                ..
+            }))
+        ));
     }
 }
