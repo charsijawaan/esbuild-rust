@@ -336,3 +336,30 @@ fn upstream_keyword_token_matrix() {
         assert_eq!(lexer.token, expected, "{input:?}");
     }
 }
+
+#[test]
+fn raw_wtf8_surrogates_are_not_treated_as_end_of_file() {
+    let surrogate = [0xED, 0xA0, 0x80];
+
+    let mut string = vec![b'\''];
+    string.extend(surrogate);
+    string.push(b'\'');
+    expect_string(&string, &[0xD800]);
+
+    let mut regexp = vec![b'/'];
+    regexp.extend(surrogate);
+    regexp.extend(b"/g");
+    let (mut regexp_lexer, log) = lexer(&regexp);
+    assert_eq!(regexp_lexer.token, Token::Slash);
+    regexp_lexer.scan_reg_exp();
+    assert_eq!(regexp_lexer.raw(), regexp);
+    assert!(log.done().is_empty());
+
+    let mut comment = b"// before ".to_vec();
+    comment.extend(surrogate);
+    comment.extend(b"\nafter");
+    let (lexer, log) = lexer(&comment);
+    assert_eq!(lexer.token, Token::Identifier);
+    assert_eq!(lexer.raw(), b"after");
+    assert!(log.done().is_empty());
+}

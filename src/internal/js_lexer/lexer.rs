@@ -578,15 +578,16 @@ impl Lexer {
         self.start = self.end;
 
         match char::from_u32(self.code_point) {
-            None => self.token = Token::EndOfFile,
+            _ if self.code_point == END_OF_FILE => self.token = Token::EndOfFile,
             Some('{') => self.single_character_token(Token::OpenBrace),
             Some('<') => self.single_character_token(Token::LessThan),
-            Some(_) => {
+            _ => {
                 let mut needs_fixing = false;
                 loop {
                     match char::from_u32(self.code_point) {
-                        None | Some('{' | '<') => break,
-                        Some('&' | '\r' | '\n' | '\u{2028}' | '\u{2029}') => {
+                        _ if self.code_point == END_OF_FILE => break,
+                        Some('{' | '<') => break,
+                        Some('&' | '\r' | '\n' | '\u{2028}' | '\u{2029}') | None => {
                             needs_fixing = true;
                             self.step();
                         }
@@ -687,7 +688,7 @@ impl Lexer {
         loop {
             self.start = self.end;
             match char::from_u32(self.code_point) {
-                None => self.token = Token::EndOfFile,
+                _ if self.code_point == END_OF_FILE => self.token = Token::EndOfFile,
                 Some('\r' | '\n' | '\u{2028}' | '\u{2029}') => {
                     self.step();
                     self.has_newline_before = true;
@@ -709,10 +710,7 @@ impl Lexer {
                     if self.code_point == u32::from(b'/') {
                         loop {
                             self.step();
-                            if matches!(
-                                char::from_u32(self.code_point),
-                                None | Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
-                            ) {
+                            if is_line_terminator_or_eof(self.code_point) {
                                 break;
                             }
                         }
@@ -734,7 +732,7 @@ impl Lexer {
                                     self.step();
                                     self.has_newline_before = true;
                                 }
-                                None => {
+                                _ if self.code_point == END_OF_FILE => {
                                     self.start = self.end;
                                     let note = self.tracker.msg_data(
                                         start_range,
@@ -750,7 +748,7 @@ impl Lexer {
                                     );
                                     panic_any(LexerPanic);
                                 }
-                                Some(_) => self.step(),
+                                None | Some(_) => self.step(),
                             }
                         }
                         continue;
@@ -772,7 +770,7 @@ impl Lexer {
                     self.identifier = self.raw_identifier();
                     self.token = Token::Identifier;
                 }
-                Some(_) => {
+                Some(_) | None => {
                     self.end = self.current;
                     self.token = Token::SyntaxError;
                 }
@@ -787,8 +785,8 @@ impl Lexer {
         self.step();
         loop {
             match char::from_u32(self.code_point) {
-                None => self.syntax_error(),
-                Some('&') => {
+                _ if self.code_point == END_OF_FILE => self.syntax_error(),
+                Some('&') | None => {
                     needs_decode = true;
                     self.step();
                 }
@@ -830,10 +828,12 @@ impl Lexer {
         if self.code_point == u32::from(b'\\') {
             self.step();
         }
-        if matches!(
-            char::from_u32(self.code_point),
-            None | Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
-        ) {
+        if self.code_point == END_OF_FILE
+            || matches!(
+                char::from_u32(self.code_point),
+                Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
+            )
+        {
             self.add_range_error(
                 Range {
                     loc: Loc {
@@ -984,10 +984,7 @@ impl Lexer {
             match character {
                 '#' => {
                     if self.start == 0 && self.source.contents.starts_with(b"#!") {
-                        while !matches!(
-                            char::from_u32(self.code_point),
-                            Some('\r' | '\n' | '\u{2028}' | '\u{2029}') | None
-                        ) {
+                        while !is_line_terminator_or_eof(self.code_point) {
                             self.step();
                         }
                         self.token = Token::Hashbang;
@@ -1103,10 +1100,7 @@ impl Lexer {
                                 range,
                                 "Treating \"-->\" as the start of a legacy HTML single-line comment",
                             );
-                            while !matches!(
-                                char::from_u32(self.code_point),
-                                None | Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
-                            ) {
+                            while !is_line_terminator_or_eof(self.code_point) {
                                 self.step();
                             }
                             continue;
@@ -1139,10 +1133,7 @@ impl Lexer {
                     } else if self.code_point == u32::from(b'/') {
                         loop {
                             self.step();
-                            if matches!(
-                                char::from_u32(self.code_point),
-                                Some('\r' | '\n' | '\u{2028}' | '\u{2029}') | None
-                            ) {
+                            if is_line_terminator_or_eof(self.code_point) {
                                 break;
                             }
                         }
@@ -1167,7 +1158,7 @@ impl Lexer {
                                     self.step();
                                     self.has_newline_before = true;
                                 }
-                                None => {
+                                _ if self.code_point == END_OF_FILE => {
                                     self.start = self.end;
                                     let note = self.tracker.msg_data(
                                         start_range,
@@ -1183,7 +1174,7 @@ impl Lexer {
                                     );
                                     panic_any(LexerPanic);
                                 }
-                                Some(_) => self.step(),
+                                None | Some(_) => self.step(),
                             }
                         }
                         if self.json == JsonFlavor::Json {
@@ -1240,10 +1231,7 @@ impl Lexer {
                             range,
                             "Treating \"<!--\" as the start of a legacy HTML single-line comment",
                         );
-                        while !matches!(
-                            char::from_u32(self.code_point),
-                            None | Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
-                        ) {
+                        while !is_line_terminator_or_eof(self.code_point) {
                             self.step();
                         }
                         continue;
@@ -1386,9 +1374,9 @@ impl Lexer {
                     }
                     self.step();
                 }
-                None => self.unterminated_string(),
+                _ if self.code_point == END_OF_FILE => self.unterminated_string(),
                 Some('\r' | '\n') if quote != '`' => self.unterminated_string(),
-                Some('\r') => {
+                Some('\r') | None => {
                     needs_slow_path = true;
                     self.step();
                 }
@@ -1967,7 +1955,7 @@ impl Lexer {
                         }
                         code_point = value as u32;
                     }
-                    None => return Err(start + index - escaped_width),
+                    None => code_point = escaped,
                 }
             }
 
@@ -2355,6 +2343,10 @@ pub fn fix_whitespace_and_decode_jsx_entities(text: &[u8]) -> Vec<u16> {
                 after_last_non_whitespace = Some(index + width);
                 first_non_whitespace.get_or_insert(index);
             }
+            None => {
+                after_last_non_whitespace = Some(index + width);
+                first_non_whitespace.get_or_insert(index);
+            }
             _ => {}
         }
         index += width;
@@ -2371,6 +2363,14 @@ pub fn fix_whitespace_and_decode_jsx_entities(text: &[u8]) -> Vec<u16> {
 
 fn is_identifier_continue(code_point: u32) -> bool {
     char::from_u32(code_point).is_some_and(js_ast::is_identifier_continue)
+}
+
+fn is_line_terminator_or_eof(code_point: u32) -> bool {
+    code_point == END_OF_FILE
+        || matches!(
+            char::from_u32(code_point),
+            Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
+        )
 }
 
 fn has_prefix_with_word_boundary(text: &[u8], prefix: &[u8]) -> bool {
