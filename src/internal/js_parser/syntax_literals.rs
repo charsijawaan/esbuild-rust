@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
+    compat::JsFeature,
     helpers::utf16_to_string,
     js_ast::{Expr, ExprData, NameOfSymbolExpr, StringExpr},
     js_lexer::{CommentBefore, Lexer, MaybeSubstring, Token},
@@ -8,6 +9,39 @@ use crate::internal::{
 };
 
 use super::parser_core::ParserCore;
+
+pub(crate) fn parse_big_int_or_string_if_unsupported(core: &ParserCore, lexer: &Lexer) -> Expr {
+    let loc = lexer.loc();
+    let text = std::str::from_utf8(&lexer.identifier.string)
+        .expect("big integer tokens must be valid ASCII");
+    if core
+        .options
+        .unsupported_js_features
+        .contains(JsFeature::BIGINT)
+    {
+        let (digits, radix) = if let Some(digits) = text.strip_prefix("0b") {
+            (digits, 2)
+        } else if let Some(digits) = text.strip_prefix("0o") {
+            (digits, 8)
+        } else if let Some(digits) = text.strip_prefix("0x") {
+            (digits, 16)
+        } else {
+            (text, 10)
+        };
+        let decimal = num_bigint::BigUint::parse_bytes(digits.as_bytes(), radix)
+            .expect("lexer only produces valid big integer tokens")
+            .to_str_radix(10);
+        Expr::new(
+            loc,
+            ExprData::String(StringExpr {
+                value: decimal.encode_utf16().collect(),
+                ..StringExpr::default()
+            }),
+        )
+    } else {
+        Expr::new(loc, ExprData::BigInt(text.into()))
+    }
+}
 
 pub(crate) fn parse_string_literal(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
     let loc = lexer.loc();
@@ -57,7 +91,7 @@ mod tests {
 
     use regex::Regex;
 
-    use super::parse_string_literal;
+    use super::{parse_big_int_or_string_if_unsupported, parse_string_literal};
     use crate::internal::{
         config::TsOptions,
         js_ast::ExprData,
@@ -105,5 +139,26 @@ mod tests {
             Some(ExprData::NameOfSymbol(value)) if value.has_property_key_comment
         ));
         assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn normalizes_unsupported_bigints_to_decimal_strings() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"0x1_0000_0000_0000_0001n"[..]),
+            ..Source::default()
+        };
+        let lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let options = Options {
+            unsupported_js_features: crate::internal::compat::JsFeature::BIGINT,
+            ..Options::default()
+        };
+        let core = super::ParserCore::new(source, options);
+        let expr = parse_big_int_or_string_if_unsupported(&core, &lexer);
+        assert!(matches!(
+            expr.data.as_deref(),
+            Some(ExprData::String(value))
+                if value.value == "18446744073709551617".encode_utf16().collect::<Vec<_>>()
+        ));
     }
 }
