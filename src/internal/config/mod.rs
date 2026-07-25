@@ -193,7 +193,7 @@ pub enum TsJsx {
     ReactJsxDev,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TsOptions {
     pub config: TsConfig,
     pub parse: bool,
