@@ -2,6 +2,7 @@
 
 mod control_flow;
 mod dead_control_flow;
+mod deferred_errors;
 mod duplicate_properties;
 mod global_name;
 mod json;

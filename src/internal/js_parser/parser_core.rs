@@ -14,7 +14,7 @@ use crate::internal::{
         CallExpr, Expr, ExprData, IdentifierExpr, Scope, ScopeKind, ScopeMember, ScopeRef,
         SymbolUse,
     },
-    js_lexer::range_of_identifier,
+    js_lexer::{MaybeSubstring, range_of_identifier},
     logger::{LineColumnTracker, Loc, Log, Source},
 };
 
@@ -41,6 +41,7 @@ pub(crate) struct ParserCore {
     pub(crate) symbols: Vec<Symbol>,
     pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
     pub(crate) runtime_imports: HashMap<String, LocRef>,
+    pub(crate) allocated_names: Vec<Vec<u8>>,
     pub(crate) unrepresentable_identifiers: HashMap<String, bool>,
     pub(crate) ts_use_counts: Vec<u32>,
     pub(crate) is_file_considered_esm: bool,
@@ -65,6 +66,7 @@ impl ParserCore {
             symbols: Vec::new(),
             symbol_uses: HashMap::new(),
             runtime_imports: HashMap::new(),
+            allocated_names: Vec::new(),
             unrepresentable_identifiers: HashMap::new(),
             ts_use_counts: Vec::new(),
             is_file_considered_esm: false,
@@ -690,6 +692,44 @@ impl ParserCore {
         self.big_int_ref
     }
 
+    pub(crate) fn store_name_in_ref(&mut self, name: MaybeSubstring) -> Ref {
+        if name.start.is_valid() {
+            let length =
+                u32::try_from(name.string.len()).expect("identifier length must fit in u32");
+            assert!(length > 0, "source identifier names must not be empty");
+            Ref {
+                source_index: 0_u32.wrapping_sub(length),
+                inner_index: name.start.get_index(),
+            }
+        } else {
+            let inner_index = u32::try_from(self.allocated_names.len())
+                .expect("allocated identifier count must fit in u32");
+            self.allocated_names.push(name.string);
+            Ref {
+                source_index: 0x8000_0000,
+                inner_index,
+            }
+        }
+    }
+
+    pub(crate) fn load_name_from_ref(&self, reference: Ref) -> &[u8] {
+        if reference.source_index == 0x8000_0000 {
+            let index =
+                usize::try_from(reference.inner_index).expect("allocated name index fits usize");
+            &self.allocated_names[index]
+        } else {
+            assert!(
+                reference.source_index & 0x8000_0000 != 0,
+                "Internal error: invalid symbol reference"
+            );
+            let start =
+                usize::try_from(reference.inner_index).expect("identifier offset fits usize");
+            let length = usize::try_from(0_u32.wrapping_sub(reference.source_index))
+                .expect("identifier length fits usize");
+            &self.source.contents[start..start + length]
+        }
+    }
+
     fn check_for_unrepresentable_identifier(&mut self, loc: Loc, name: &str) {
         if self.options.ascii_only
             && self
@@ -756,11 +796,12 @@ mod tests {
 
     use super::ParserCore;
     use crate::internal::{
-        ast::{INVALID_REF, SymbolFlags, SymbolKind},
+        ast::{INVALID_REF, Index32, SymbolFlags, SymbolKind},
         js_ast::{
             DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, ScopeKind, ScopeMember, StringExpr,
             TsNamespaceMember, TsNamespaceMemberData, TsNamespaceScope,
         },
+        js_lexer::MaybeSubstring,
         logger::{Loc, Source},
     };
 
@@ -1158,5 +1199,26 @@ mod tests {
                 .generated,
             [regexp, bigint]
         );
+    }
+
+    #[test]
+    fn compact_name_refs_round_trip_source_and_allocated_names() {
+        let mut parser = ParserCore::new(
+            Source {
+                contents: std::sync::Arc::from(&b"let source_name"[..]),
+                ..Source::default()
+            },
+            super::Options::default(),
+        );
+        let source_ref = parser.store_name_in_ref(MaybeSubstring {
+            string: b"source_name".to_vec(),
+            start: Index32::new(4),
+        });
+        assert_eq!(parser.load_name_from_ref(source_ref), b"source_name");
+
+        let allocated_ref =
+            parser.store_name_in_ref(MaybeSubstring::from_allocated(b"escaped".to_vec()));
+        assert_eq!(parser.load_name_from_ref(allocated_ref), b"escaped");
+        assert_eq!(parser.allocated_names.len(), 1);
     }
 }
