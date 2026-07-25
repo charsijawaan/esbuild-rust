@@ -2,6 +2,7 @@
 
 pub mod ast;
 pub mod compat;
+pub mod css_lexer;
 pub mod helpers;
 pub mod logger;
 pub mod sourcemap;

@@ -19,7 +19,7 @@ Status values:
 | `internal/compat` | in progress |
 | `internal/config` | not started |
 | `internal/css_ast` | not started |
-| `internal/css_lexer` | not started |
+| `internal/css_lexer` | ported |
 | `internal/css_parser` | not started |
 | `internal/css_printer` | not started |
 | `internal/fs` | not started |
