@@ -1273,6 +1273,240 @@ pub fn try_to_string_on_number_safely(value: f64, radix: u32) -> Option<String> 
     None
 }
 
+fn fold_addition_pre_process(mut expr: Expr) -> Expr {
+    match expr.data.as_deref() {
+        Some(ExprData::InlinedEnum(value)) => value.value.clone(),
+        Some(ExprData::Array(array)) => {
+            let mut joined = Vec::new();
+            for (index, item) in array.items.iter().enumerate() {
+                if index > 0 {
+                    joined.push(u16::from(b','));
+                }
+                match item.data.as_deref() {
+                    Some(ExprData::Undefined | ExprData::Null) => {}
+                    Some(ExprData::String(value)) => joined.extend_from_slice(&value.value),
+                    data => {
+                        let Some(value) = to_string_without_side_effects(data) else {
+                            return expr;
+                        };
+                        joined.extend(value.encode_utf16());
+                    }
+                }
+            }
+            expr.data = Some(Box::new(ExprData::String(super::StringExpr {
+                value: joined,
+                ..super::StringExpr::default()
+            })));
+            expr
+        }
+        Some(ExprData::Object(object)) if object.properties.is_empty() => {
+            expr.data = Some(Box::new(ExprData::String(super::StringExpr {
+                value: "[object Object]".encode_utf16().collect(),
+                ..super::StringExpr::default()
+            })));
+            expr
+        }
+        _ => expr,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StringAdditionKind {
+    #[default]
+    Normal,
+    WithNestedLeft,
+}
+
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn fold_string_addition(left: Expr, right: Expr, kind: StringAdditionKind) -> Option<Expr> {
+    let mut left = fold_addition_pre_process(left);
+    let mut right = fold_addition_pre_process(right);
+
+    if kind != StringAdditionKind::WithNestedLeft
+        && matches!(
+            right.data.as_deref(),
+            Some(ExprData::String(_) | ExprData::Template(_))
+        )
+        && let Some(string) = to_string_without_side_effects(left.data.as_deref())
+    {
+        left.data = Some(Box::new(ExprData::String(super::StringExpr {
+            value: string.encode_utf16().collect(),
+            ..super::StringExpr::default()
+        })));
+    }
+
+    match left.data.as_deref() {
+        Some(ExprData::String(left_string)) => {
+            if let Some(string) = to_string_without_side_effects(right.data.as_deref()) {
+                right.data = Some(Box::new(ExprData::String(super::StringExpr {
+                    value: string.encode_utf16().collect(),
+                    ..super::StringExpr::default()
+                })));
+            }
+
+            match right.data.as_deref() {
+                Some(ExprData::String(right_string)) => {
+                    let mut value =
+                        Vec::with_capacity(left_string.value.len() + right_string.value.len());
+                    value.extend_from_slice(&left_string.value);
+                    value.extend_from_slice(&right_string.value);
+                    return Some(Expr::new(
+                        left.loc,
+                        ExprData::String(super::StringExpr {
+                            value,
+                            prefer_template: left_string.prefer_template
+                                || right_string.prefer_template,
+                            ..super::StringExpr::default()
+                        }),
+                    ));
+                }
+                Some(ExprData::Template(right_template))
+                    if right_template.tag_or_nil.data.is_none() =>
+                {
+                    let mut head_cooked = Vec::with_capacity(
+                        left_string.value.len() + right_template.head_cooked.len(),
+                    );
+                    head_cooked.extend_from_slice(&left_string.value);
+                    head_cooked.extend_from_slice(&right_template.head_cooked);
+                    return Some(Expr::new(
+                        left.loc,
+                        ExprData::Template(super::TemplateExpr {
+                            head_loc: left.loc,
+                            head_cooked,
+                            parts: right_template.parts.clone(),
+                            ..super::TemplateExpr::default()
+                        }),
+                    ));
+                }
+                _ => {}
+            }
+
+            if left_string.value.is_empty()
+                && known_primitive_type(right.data.as_deref()) == PrimitiveType::String
+            {
+                return Some(right);
+            }
+        }
+        Some(ExprData::Template(left_template)) if left_template.tag_or_nil.data.is_none() => {
+            if let Some(string) = to_string_without_side_effects(right.data.as_deref()) {
+                right.data = Some(Box::new(ExprData::String(super::StringExpr {
+                    value: string.encode_utf16().collect(),
+                    ..super::StringExpr::default()
+                })));
+            }
+
+            match right.data.as_deref() {
+                Some(ExprData::String(right_string)) => {
+                    let mut head_cooked = left_template.head_cooked.clone();
+                    let mut parts = left_template.parts.clone();
+                    if let Some(last) = parts.last_mut() {
+                        last.tail_cooked.extend_from_slice(&right_string.value);
+                    } else {
+                        head_cooked.extend_from_slice(&right_string.value);
+                    }
+                    return Some(Expr::new(
+                        left.loc,
+                        ExprData::Template(super::TemplateExpr {
+                            head_loc: left_template.head_loc,
+                            head_cooked,
+                            parts,
+                            ..super::TemplateExpr::default()
+                        }),
+                    ));
+                }
+                Some(ExprData::Template(right_template))
+                    if right_template.tag_or_nil.data.is_none() =>
+                {
+                    let mut head_cooked = left_template.head_cooked.clone();
+                    let mut parts = left_template.parts.clone();
+                    if let Some(last) = parts.last_mut() {
+                        last.tail_cooked
+                            .extend_from_slice(&right_template.head_cooked);
+                    } else {
+                        head_cooked.extend_from_slice(&right_template.head_cooked);
+                    }
+                    parts.extend_from_slice(&right_template.parts);
+                    return Some(Expr::new(
+                        left.loc,
+                        ExprData::Template(super::TemplateExpr {
+                            head_loc: left_template.head_loc,
+                            head_cooked,
+                            parts,
+                            ..super::TemplateExpr::default()
+                        }),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+
+    if matches!(
+        right.data.as_deref(),
+        Some(ExprData::String(value)) if value.value.is_empty()
+    ) && known_primitive_type(left.data.as_deref()) == PrimitiveType::String
+    {
+        return Some(left);
+    }
+
+    None
+}
+
+#[must_use]
+pub fn inline_primitives_into_template(loc: Loc, template: &super::TemplateExpr) -> Expr {
+    if template.tag_or_nil.data.is_some() {
+        return Expr::new(loc, ExprData::Template(template.clone()));
+    }
+
+    let mut head_cooked = template.head_cooked.clone();
+    let mut parts: Vec<super::TemplatePart> = Vec::with_capacity(template.parts.len());
+    for original_part in &template.parts {
+        let mut part = original_part.clone();
+        if let Some(ExprData::InlinedEnum(value)) = part.value.data.as_deref() {
+            part.value = value.value.clone();
+        }
+        if let Some(string) = to_string_without_side_effects(part.value.data.as_deref()) {
+            part.value.data = Some(Box::new(ExprData::String(super::StringExpr {
+                value: string.encode_utf16().collect(),
+                ..super::StringExpr::default()
+            })));
+        }
+        if let Some(ExprData::String(string)) = part.value.data.as_deref() {
+            let destination = parts
+                .last_mut()
+                .map_or(&mut head_cooked, |previous| &mut previous.tail_cooked);
+            destination.extend_from_slice(&string.value);
+            destination.extend_from_slice(&part.tail_cooked);
+        } else {
+            parts.push(part);
+        }
+    }
+
+    if parts.is_empty() {
+        return Expr::new(
+            loc,
+            ExprData::String(super::StringExpr {
+                value: head_cooked,
+                prefer_template: true,
+                ..super::StringExpr::default()
+            }),
+        );
+    }
+
+    Expr::new(
+        loc,
+        ExprData::Template(super::TemplateExpr {
+            head_loc: template.head_loc,
+            head_cooked,
+            parts,
+            ..super::TemplateExpr::default()
+        }),
+    )
+}
+
 #[must_use]
 pub fn string_to_equivalent_number_value(value: &[u16]) -> Option<f64> {
     if value.is_empty() {
@@ -1397,9 +1631,10 @@ fn format_i32_radix(value: i32, radix: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EqualityKind, PrimitiveType, SideEffects, assign, can_change_strict_to_loose,
-        check_equality_big_int, check_equality_if_no_side_effects, convert_binding_to_expr,
-        fold_binary_operator, inline_spreads_of_array_literals, is_optional_chain,
+        EqualityKind, PrimitiveType, SideEffects, StringAdditionKind, assign,
+        can_change_strict_to_loose, check_equality_big_int, check_equality_if_no_side_effects,
+        convert_binding_to_expr, fold_binary_operator, fold_string_addition,
+        inline_primitives_into_template, inline_spreads_of_array_literals, is_optional_chain,
         join_all_with_comma, known_primitive_type, mangle_object_spread,
         maybe_simplify_equality_comparison, maybe_simplify_not, not,
         should_fold_binary_operator_when_minifying, string_compare_ucs2,
@@ -1413,7 +1648,7 @@ mod tests {
     use crate::internal::js_ast::{
         ArrayBinding, ArrayBindingPattern, ArrayExpr, BinaryExpr, Binding, BindingData, Expr,
         ExprData, IdentifierBinding, IdentifierExpr, ObjectExpr, OpCode, OptionalChain, Property,
-        PropertyKind, SpreadExpr, StringExpr, UnaryExpr,
+        PropertyKind, SpreadExpr, StringExpr, TemplateExpr, TemplatePart, UnaryExpr,
     };
     use crate::internal::logger::Loc;
 
@@ -1974,5 +2209,103 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn folds_string_addition_and_literal_arrays() {
+        let string = |value: &str| {
+            Expr::new(
+                Loc::default(),
+                ExprData::String(StringExpr {
+                    value: value.encode_utf16().collect(),
+                    ..StringExpr::default()
+                }),
+            )
+        };
+        let array = Expr::new(
+            Loc::default(),
+            ExprData::Array(ArrayExpr {
+                items: vec![
+                    number(1.0),
+                    Expr::new(Loc::default(), ExprData::Null),
+                    Expr::new(Loc::default(), ExprData::Boolean(true)),
+                ],
+                ..ArrayExpr::default()
+            }),
+        );
+        let folded = fold_string_addition(array, string("!"), StringAdditionKind::Normal)
+            .expect("literal array should stringify");
+        assert!(matches!(
+            folded.data.as_deref(),
+            Some(ExprData::String(value))
+                if value.value == "1,,true!".encode_utf16().collect::<Vec<_>>()
+        ));
+
+        let folded = fold_string_addition(number(1.0), string("x"), StringAdditionKind::Normal)
+            .expect("safe number should stringify");
+        assert!(matches!(
+            folded.data.as_deref(),
+            Some(ExprData::String(value))
+                if value.value == "1x".encode_utf16().collect::<Vec<_>>()
+        ));
+        assert!(
+            fold_string_addition(number(1.0), string("x"), StringAdditionKind::WithNestedLeft,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn merges_untagged_templates_and_inlines_primitive_substitutions() {
+        let string = |value: &str| {
+            Expr::new(
+                Loc::default(),
+                ExprData::String(StringExpr {
+                    value: value.encode_utf16().collect(),
+                    ..StringExpr::default()
+                }),
+            )
+        };
+        let template = Expr::new(
+            Loc::default(),
+            ExprData::Template(TemplateExpr {
+                head_cooked: "b".encode_utf16().collect(),
+                parts: vec![TemplatePart {
+                    value: Expr::new(
+                        Loc::default(),
+                        ExprData::Identifier(IdentifierExpr::default()),
+                    ),
+                    tail_cooked: "c".encode_utf16().collect(),
+                    ..TemplatePart::default()
+                }],
+                ..TemplateExpr::default()
+            }),
+        );
+        let folded = fold_string_addition(string("a"), template, StringAdditionKind::Normal)
+            .expect("string and template should merge");
+        assert!(matches!(
+            folded.data.as_deref(),
+            Some(ExprData::Template(value))
+                if value.head_cooked == "ab".encode_utf16().collect::<Vec<_>>()
+                    && value.parts.len() == 1
+        ));
+
+        let inlined = inline_primitives_into_template(
+            Loc::default(),
+            &TemplateExpr {
+                head_cooked: "a".encode_utf16().collect(),
+                parts: vec![TemplatePart {
+                    value: string("b"),
+                    tail_cooked: "c".encode_utf16().collect(),
+                    ..TemplatePart::default()
+                }],
+                ..TemplateExpr::default()
+            },
+        );
+        assert!(matches!(
+            inlined.data.as_deref(),
+            Some(ExprData::String(value))
+                if value.value == "abc".encode_utf16().collect::<Vec<_>>()
+                    && value.prefer_template
+        ));
     }
 }
