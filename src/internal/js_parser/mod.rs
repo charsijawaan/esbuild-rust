@@ -3,6 +3,7 @@
 mod control_flow;
 mod dead_control_flow;
 mod deferred_errors;
+mod define;
 mod duplicate_properties;
 mod global_name;
 mod json;
@@ -12,6 +13,7 @@ mod source_map;
 mod standalone_helpers;
 mod symbols;
 
+pub use define::parse_define_expr;
 pub use global_name::parse_global_name;
 pub use json::{JsonOptions, is_valid_json, parse_json};
 pub use options::{Options, options_for_yarn_pnp, options_from_config};
