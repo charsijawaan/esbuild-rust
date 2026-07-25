@@ -1,5 +1,6 @@
 // Port of upstream internal/logger.
 
+use crate::internal::helpers::{REPLACEMENT_CHARACTER, decode_wtf8_rune};
 use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -91,7 +92,7 @@ pub struct MsgData {
 pub struct MsgLocation {
     pub file: PrettyPaths,
     pub namespace: String,
-    pub line_text: String,
+    pub line_text: Vec<u8>,
     pub suggestion: String,
     pub line: usize,
     pub column: usize,
@@ -338,7 +339,7 @@ pub struct Source {
     pub pretty_paths: PrettyPaths,
     pub identifier_name: String,
     /// Raw source bytes. This intentionally supports invalid UTF-8 like Go strings.
-    pub contents: Vec<u8>,
+    pub contents: Arc<[u8]>,
     pub key_path: Path,
     pub index: u32,
 }
@@ -484,6 +485,372 @@ impl Source {
         }
         range_with_len(location, length)
     }
+
+    /// Returns a block comment with common indentation removed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `range` is outside the source.
+    #[must_use]
+    pub fn comment_text_without_indent(&self, range: Range) -> Vec<u8> {
+        let text = self.text_for_range(range);
+        if text.len() < 2 || !text.starts_with(b"/*") {
+            return text.to_vec();
+        }
+
+        let mut prefix_end = range_start(range);
+        let mut indent = 0;
+        while prefix_end > 0 {
+            let (code_point, width) = decode_last_wtf8_rune(&self.contents[..prefix_end]);
+            if matches!(code_point, 0x0d | 0x0a | 0x2028 | 0x2029) {
+                break;
+            }
+            prefix_end -= width;
+            indent += 1;
+        }
+
+        let mut lines: Vec<&[u8]> = Vec::new();
+        let mut start = 0;
+        let mut index = 0;
+        while index < text.len() {
+            let (code_point, width) = decode_wtf8(&text[index..]);
+            match code_point {
+                0x0d | 0x0a => {
+                    if start <= index {
+                        lines.push(&text[start..index]);
+                    }
+                    start = index + width;
+                    if code_point == 0x0d && text.get(start) == Some(&b'\n') {
+                        start += 1;
+                        index += 1;
+                    }
+                }
+                0x2028 | 0x2029 => {
+                    lines.push(&text[start..index]);
+                    start = index + width;
+                }
+                _ => {}
+            }
+            index += width;
+        }
+        lines.push(&text[start..]);
+
+        for line in lines.iter().skip(1) {
+            let line_indent = line
+                .iter()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            indent = indent.min(line_indent);
+        }
+
+        let mut result = Vec::with_capacity(text.len());
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                result.push(b'\n');
+                result.extend_from_slice(&line[indent..]);
+            } else {
+                result.extend_from_slice(line);
+            }
+        }
+        result
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LineColumnTracker {
+    contents: Arc<[u8]>,
+    pretty_paths: PrettyPaths,
+    offset: i32,
+    line: i32,
+    line_start: i32,
+    line_end: i32,
+    has_line_start: bool,
+    has_line_end: bool,
+    has_source: bool,
+}
+
+impl LineColumnTracker {
+    #[must_use]
+    pub fn new(source: Option<&Source>) -> Self {
+        source.map_or_else(Self::default, |source| Self {
+            contents: Arc::clone(&source.contents),
+            pretty_paths: source.pretty_paths.clone(),
+            has_line_start: true,
+            has_source: true,
+            ..Self::default()
+        })
+    }
+
+    #[must_use]
+    pub fn msg_data(&mut self, range: Range, text: impl Into<String>) -> MsgData {
+        MsgData {
+            text: text.into(),
+            location: self.msg_location_or_none(range),
+            ..MsgData::default()
+        }
+    }
+
+    /// # Panics
+    ///
+    /// Panics if `range` starts outside the source.
+    #[must_use]
+    pub fn msg_location_or_none(&mut self, range: Range) -> Option<MsgLocation> {
+        if !self.has_source {
+            return None;
+        }
+        let offset = usize::try_from(range.loc.start).expect("source locations are non-negative");
+        let (line_count, column_count, line_start, line_end) = self.compute_line_and_column(offset);
+        Some(MsgLocation {
+            file: self.pretty_paths.clone(),
+            line: line_count + 1,
+            column: column_count,
+            length: usize::try_from(range.len).expect("source ranges are non-negative"),
+            line_text: self.contents[line_start..line_end].to_vec(),
+            ..MsgLocation::default()
+        })
+    }
+
+    fn scan_to(&mut self, target: i32) {
+        let mut index = self.offset;
+        if index < target {
+            loop {
+                let start = usize::try_from(index).expect("source offsets are non-negative");
+                let (code_point, width) = decode_wtf8(&self.contents[start..]);
+                index += i32::try_from(width).expect("rune width fits in i32");
+                match code_point {
+                    0x0a => {
+                        self.has_line_start = true;
+                        self.has_line_end = false;
+                        self.line_start = index;
+                        let width = i32::try_from(width).expect("rune width fits in i32");
+                        if index == width
+                            || self.contents[usize::try_from(index - width - 1)
+                                .expect("previous byte offset is non-negative")]
+                                != b'\r'
+                        {
+                            self.line += 1;
+                        }
+                    }
+                    0x0d | 0x2028 | 0x2029 => {
+                        self.has_line_start = true;
+                        self.has_line_end = false;
+                        self.line_start = index;
+                        self.line += 1;
+                    }
+                    _ => {}
+                }
+                if index >= target {
+                    self.offset = index;
+                    return;
+                }
+            }
+        }
+
+        if index > target {
+            loop {
+                let end = usize::try_from(index).expect("source offsets are non-negative");
+                let (code_point, width) = decode_last_wtf8_rune(&self.contents[..end]);
+                index -= i32::try_from(width).expect("rune width fits in i32");
+                match code_point {
+                    0x0a => {
+                        self.has_line_start = false;
+                        self.has_line_end = true;
+                        self.line_end = index;
+                        if index == 0
+                            || self.contents[usize::try_from(index - 1)
+                                .expect("previous byte offset is non-negative")]
+                                != b'\r'
+                        {
+                            self.line -= 1;
+                        }
+                    }
+                    0x0d | 0x2028 | 0x2029 => {
+                        self.has_line_start = false;
+                        self.has_line_end = true;
+                        self.line_end = index;
+                        self.line -= 1;
+                    }
+                    _ => {}
+                }
+                if index <= target {
+                    self.offset = index;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn compute_line_and_column(&mut self, offset: usize) -> (usize, usize, usize, usize) {
+        self.scan_to(i32::try_from(offset).expect("source must fit in 32 bits"));
+        if !self.has_line_start {
+            let mut index = usize::try_from(self.offset).expect("source offsets are non-negative");
+            while index > 0 {
+                let (code_point, width) = decode_last_wtf8_rune(&self.contents[..index]);
+                if matches!(code_point, 0x0a | 0x0d | 0x2028 | 0x2029) {
+                    break;
+                }
+                index -= width;
+            }
+            self.has_line_start = true;
+            self.line_start = i32::try_from(index).expect("source must fit in 32 bits");
+        }
+        if !self.has_line_end {
+            let mut index = usize::try_from(self.offset).expect("source offsets are non-negative");
+            while index < self.contents.len() {
+                let (code_point, width) = decode_wtf8(&self.contents[index..]);
+                if matches!(code_point, 0x0a | 0x0d | 0x2028 | 0x2029) {
+                    break;
+                }
+                index += width;
+            }
+            self.has_line_end = true;
+            self.line_end = i32::try_from(index).expect("source must fit in 32 bits");
+        }
+        (
+            usize::try_from(self.line).expect("line count is non-negative"),
+            offset - usize::try_from(self.line_start).expect("line start offset is non-negative"),
+            usize::try_from(self.line_start).expect("line start offset is non-negative"),
+            usize::try_from(self.line_end).expect("line end offset is non-negative"),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StringInJsTableEntry {
+    pub inner_line: i32,
+    pub inner_column: i32,
+    pub inner_loc: Loc,
+    pub outer_loc: Loc,
+}
+
+/// Generates a table for remapping JSON locations embedded in JavaScript.
+///
+/// # Panics
+///
+/// Panics if the outer string syntax is invalid or either source exceeds the
+/// signed 32-bit source-size limit used by esbuild.
+#[must_use]
+pub fn generate_string_in_js_table(
+    outer_contents: &[u8],
+    outer_string_literal_loc: Loc,
+    inner_contents: &[u8],
+) -> Vec<StringInJsTableEntry> {
+    let mut table = Vec::new();
+    let mut index = 0;
+    let mut line = 1;
+    let mut column = 0;
+    let mut location = Loc {
+        start: outer_string_literal_loc.start + 1,
+    };
+
+    while index < inner_contents.len() {
+        loop {
+            let outer_index =
+                usize::try_from(location.start).expect("source locations are non-negative");
+            let (code_point, _) = decode_wtf8(&outer_contents[outer_index..]);
+            if code_point != u32::from(b'\\') {
+                break;
+            }
+            let (escaped, width) = decode_wtf8(&outer_contents[outer_index + 1..]);
+            if !matches!(escaped, 0x0a | 0x0d | 0x2028 | 0x2029) {
+                break;
+            }
+            location.start += 1 + i32::try_from(width).expect("rune width fits in i32");
+            let after = usize::try_from(location.start).expect("source locations are non-negative");
+            if escaped == 0x0d && outer_contents.get(after) == Some(&b'\n') {
+                location.start += 1;
+            }
+        }
+
+        let (code_point, width) = decode_wtf8(&inner_contents[index..]);
+        table.push(StringInJsTableEntry {
+            inner_line: line,
+            inner_column: column,
+            inner_loc: Loc {
+                start: i32::try_from(index).expect("source must fit in 32 bits"),
+            },
+            outer_loc: location,
+        });
+        if table.len() > 1 {
+            let previous = table[table.len() - 2];
+            if line == previous.inner_line
+                && location.start - column == previous.outer_loc.start - previous.inner_column
+            {
+                table.pop();
+            }
+        }
+
+        match code_point {
+            0x0a | 0x0d | 0x2028 | 0x2029 => {
+                line += 1;
+                column = 0;
+                if code_point == 0x0d && inner_contents.get(index + 1) == Some(&b'\n') {
+                    index += 1;
+                }
+            }
+            _ => column += i32::try_from(width).expect("rune width fits in i32"),
+        }
+        index += width;
+
+        let outer_index =
+            usize::try_from(location.start).expect("source locations are non-negative");
+        let (outer_code_point, outer_width) = decode_wtf8(&outer_contents[outer_index..]);
+        if outer_code_point == 0x0d && outer_contents.get(outer_index + 1) == Some(&b'\n') {
+            location.start += 2;
+        } else if outer_code_point != u32::from(b'\\') {
+            location.start += i32::try_from(outer_width).expect("rune width fits in i32");
+        } else {
+            let (escaped, escaped_width) = decode_wtf8(&outer_contents[outer_index + 1..]);
+            match escaped {
+                0x78 => location.start += 3,
+                0x75 => {
+                    location.start += 1;
+                    let escape_index =
+                        usize::try_from(location.start).expect("source locations are non-negative");
+                    if outer_contents[escape_index] == b'{' {
+                        while outer_contents[usize::try_from(location.start)
+                            .expect("source locations are non-negative")]
+                            != b'}'
+                        {
+                            location.start += 1;
+                        }
+                        location.start += 1;
+                    } else {
+                        location.start += 4;
+                    }
+                }
+                0x0a | 0x0d | 0x2028 | 0x2029 => {}
+                _ => {
+                    location.start +=
+                        1 + i32::try_from(escaped_width).expect("rune width fits in i32");
+                }
+            }
+        }
+    }
+    table
+}
+
+/// # Panics
+///
+/// Panics if `table` is empty.
+#[must_use]
+pub fn remap_string_in_js_loc(table: &[StringInJsTableEntry], inner_loc: Loc) -> Loc {
+    let mut count = table.len();
+    let mut index = 0;
+    while count > 0 {
+        let step = count / 2;
+        let candidate = index + step;
+        if candidate + 1 < table.len() && table[candidate + 1].inner_loc.start < inner_loc.start {
+            index = candidate + 1;
+            count -= step + 1;
+            continue;
+        }
+        count = step;
+    }
+    let entry = table[index];
+    Loc {
+        start: entry.outer_loc.start + inner_loc.start - entry.inner_loc.start,
+    }
 }
 
 fn range_start(range: Range) -> usize {
@@ -519,13 +886,37 @@ fn find_last_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .rposition(|item| item == needle)
 }
 
+fn decode_wtf8(bytes: &[u8]) -> (u32, usize) {
+    let (code_point, width) = decode_wtf8_rune(bytes);
+    (code_point, width.max(1))
+}
+
+fn decode_last_wtf8_rune(bytes: &[u8]) -> (u32, usize) {
+    if bytes.is_empty() {
+        return (REPLACEMENT_CHARACTER, 0);
+    }
+    let minimum = bytes.len().saturating_sub(4);
+    for start in (minimum..bytes.len()).rev() {
+        if start > minimum && bytes[start] & 0xc0 == 0x80 {
+            continue;
+        }
+        let (code_point, width) = decode_wtf8(&bytes[start..]);
+        if start + width == bytes.len() {
+            return (code_point, width);
+        }
+    }
+    (REPLACEMENT_CHARACTER, 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ImportAttributes, Loc, PathFlags, PathStyle, PrettyPaths, Range, Source,
-        platform_independent_path_dir_base_ext,
+        ImportAttributes, LineColumnTracker, Loc, PathFlags, PathStyle, PrettyPaths, Range, Source,
+        generate_string_in_js_table, platform_independent_path_dir_base_ext,
+        remap_string_in_js_loc,
     };
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn range_expansion_matches_upstream() {
@@ -577,7 +968,7 @@ mod tests {
     #[test]
     fn source_range_helpers_scan_raw_bytes() {
         let source = Source {
-            contents: br#"  "a\"b" 123_abc \077 `x${y}`"#.to_vec(),
+            contents: Arc::from(&br#"  "a\"b" 123_abc \077 `x${y}`"#[..]),
             ..Source::default()
         };
         assert_eq!(source.loc_before_whitespace(Loc { start: 2 }).start, 0);
@@ -588,6 +979,65 @@ mod tests {
             4
         );
         assert_eq!(source.range_of_string(Loc { start: 22 }).len, 0);
+    }
+
+    #[test]
+    fn removes_common_block_comment_indent() {
+        let source = Source {
+            contents: Arc::from(&b"    /* first\r\n       second\n      third */"[..]),
+            ..Source::default()
+        };
+        let text = source.comment_text_without_indent(Range {
+            loc: Loc { start: 4 },
+            len: i32::try_from(source.contents.len() - 4).unwrap(),
+        });
+        assert_eq!(text, b"/* first\n   second\n  third */");
+    }
+
+    #[test]
+    fn tracks_lines_columns_and_crlf_in_both_directions() {
+        let source = Source {
+            pretty_paths: PrettyPaths {
+                abs: "/a.js".into(),
+                rel: "a.js".into(),
+            },
+            contents: Arc::from(&b"one\r\ntwo\xe2\x80\xa8three\nfour"[..]),
+            ..Source::default()
+        };
+        let mut tracker = LineColumnTracker::new(Some(&source));
+        let third = tracker
+            .msg_location_or_none(Range {
+                loc: Loc { start: 11 },
+                len: 2,
+            })
+            .unwrap();
+        assert_eq!((third.line, third.column), (3, 0));
+        assert_eq!(third.line_text, b"three");
+
+        let second = tracker
+            .msg_location_or_none(Range {
+                loc: Loc { start: 5 },
+                len: 1,
+            })
+            .unwrap();
+        assert_eq!((second.line, second.column), (2, 0));
+        assert_eq!(second.line_text, b"two");
+        assert!(
+            LineColumnTracker::new(None)
+                .msg_location_or_none(Range::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn remaps_locations_inside_javascript_strings() {
+        let table = generate_string_in_js_table(b"prefix \"abc\" suffix", Loc { start: 7 }, b"abc");
+        assert_eq!(table.len(), 1);
+        assert_eq!(table[0].outer_loc.start, 8);
+        assert_eq!(
+            remap_string_in_js_loc(&table, Loc { start: 2 }),
+            Loc { start: 10 }
+        );
     }
 
     #[test]
