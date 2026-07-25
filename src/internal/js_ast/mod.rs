@@ -1,8 +1,10 @@
 //! Port of upstream `internal/js_ast`.
 
+mod helpers;
 mod nodes;
 mod unicode_data;
 
+pub use helpers::*;
 pub use nodes::*;
 use unicode_data::{
     ID_CONTINUE_ES5_AND_ES_NEXT, ID_CONTINUE_ES5_OR_ES_NEXT, ID_START_ES5_AND_ES_NEXT,
