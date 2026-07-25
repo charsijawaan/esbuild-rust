@@ -319,14 +319,42 @@ impl Lexer {
     ///
     /// Always panics with [`LexerPanic`] after logging the diagnostic.
     pub fn expected_string(&mut self, text: &str) -> ! {
+        if self.previous_token_was_await_keyword {
+            let notes = if self.fn_or_arrow_start_loc.start == -1 {
+                Vec::new()
+            } else {
+                let mut note = self.tracker.msg_data(
+                    Range {
+                        loc: self.fn_or_arrow_start_loc,
+                        len: 0,
+                    },
+                    "Consider adding the \"async\" keyword here:",
+                );
+                if let Some(location) = &mut note.location {
+                    "async".clone_into(&mut location.suggestion);
+                }
+                vec![note]
+            };
+            self.add_range_error_with_notes(
+                range_of_identifier(&self.source, self.await_keyword_loc),
+                "\"await\" can only be used inside an \"async\" function",
+                notes,
+            );
+            panic_any(LexerPanic);
+        }
         let found = if self.start == self.source.contents.len() {
             "end of file".to_owned()
         } else {
             format!("{:?}", String::from_utf8_lossy(self.raw()))
         };
-        self.add_range_error(
+        let suggestion = text
+            .strip_prefix('"')
+            .and_then(|text| text.strip_suffix('"'))
+            .unwrap_or_default();
+        self.add_range_error_with_suggestion(
             self.range(),
             format!("Expected {text}{} but found {found}", self.error_suffix),
+            suggestion,
         );
         panic_any(LexerPanic);
     }
@@ -383,6 +411,109 @@ impl Lexer {
         {
             self.expect(Token::Semicolon);
         }
+    }
+
+    /// Consume one `<`, splitting a longer shift/comparison token if needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`LexerPanic`] after logging a mismatch.
+    pub fn expect_less_than(&mut self, is_inside_jsx_element: bool) {
+        match self.token {
+            Token::LessThan => {
+                if is_inside_jsx_element {
+                    self.next_inside_jsx_element();
+                } else {
+                    self.next();
+                }
+            }
+            Token::LessThanEquals => {
+                self.token = Token::Equals;
+                self.start += 1;
+                self.maybe_expand_equals();
+            }
+            Token::LessThanLessThan => {
+                self.token = Token::LessThan;
+                self.start += 1;
+            }
+            Token::LessThanLessThanEquals => {
+                self.token = Token::LessThanEquals;
+                self.start += 1;
+            }
+            _ => self.expected(Token::LessThan),
+        }
+    }
+
+    /// Consume one `>`, splitting a longer shift/comparison token if needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`LexerPanic`] after logging a mismatch.
+    pub fn expect_greater_than(&mut self, is_inside_jsx_element: bool) {
+        match self.token {
+            Token::GreaterThan => {
+                if is_inside_jsx_element {
+                    self.next_inside_jsx_element();
+                } else {
+                    self.next();
+                }
+            }
+            Token::GreaterThanEquals => {
+                self.token = Token::Equals;
+                self.start += 1;
+                self.maybe_expand_equals();
+            }
+            Token::GreaterThanGreaterThan => {
+                self.token = Token::GreaterThan;
+                self.start += 1;
+            }
+            Token::GreaterThanGreaterThanEquals => {
+                self.token = Token::GreaterThanEquals;
+                self.start += 1;
+            }
+            Token::GreaterThanGreaterThanGreaterThan => {
+                self.token = Token::GreaterThanGreaterThan;
+                self.start += 1;
+            }
+            Token::GreaterThanGreaterThanGreaterThanEquals => {
+                self.token = Token::GreaterThanGreaterThanEquals;
+                self.start += 1;
+            }
+            _ => self.expected(Token::GreaterThan),
+        }
+    }
+
+    fn maybe_expand_equals(&mut self) {
+        if self.code_point == u32::from(b'>') {
+            self.token = Token::EqualsGreaterThan;
+            self.step();
+        } else if self.code_point == u32::from(b'=') {
+            self.token = Token::EqualsEquals;
+            self.step();
+            // This comparison intentionally mirrors upstream's token/rune
+            // comparison, which currently makes this branch unreachable.
+            if self.token as u8 == b'=' {
+                self.token = Token::EqualsEqualsEquals;
+                self.step();
+            }
+        }
+    }
+
+    /// Reinterpret the current `}` as a template middle or tail token.
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`LexerPanic`] after logging a mismatch.
+    pub fn rescan_close_brace_as_template_token(&mut self) {
+        if self.token != Token::CloseBrace {
+            self.expected(Token::CloseBrace);
+        }
+        self.rescan_close_brace_as_template_token = true;
+        self.code_point = u32::from(b'`');
+        self.current = self.end;
+        self.end -= 1;
+        self.next();
+        self.rescan_close_brace_as_template_token = false;
     }
 
     /// Scan a regular expression after the parser has interpreted `/` as the
@@ -1785,6 +1916,46 @@ impl Lexer {
         }
     }
 
+    fn add_range_error_with_suggestion(
+        &mut self,
+        range: Range,
+        text: impl Into<String>,
+        suggestion: &str,
+    ) {
+        if range.loc == self.previous_error_loc {
+            return;
+        }
+        self.previous_error_loc = range.loc;
+        if !self.is_log_disabled {
+            let mut data = self.tracker.msg_data(range, text);
+            if let Some(location) = &mut data.location {
+                suggestion.clone_into(&mut location.suggestion);
+            }
+            self.log.add_msg(Msg {
+                data,
+                ..Msg::new(MsgKind::Error, "")
+            });
+        }
+    }
+
+    /// Add one range error with attached notes, suppressing duplicates at the
+    /// same source location.
+    pub fn add_range_error_with_notes(
+        &mut self,
+        range: Range,
+        text: impl Into<String>,
+        notes: Vec<MsgData>,
+    ) {
+        if range.loc == self.previous_error_loc {
+            return;
+        }
+        self.previous_error_loc = range.loc;
+        if !self.is_log_disabled {
+            self.log
+                .add_error_with_notes(Some(&mut self.tracker), range, text.into(), notes);
+        }
+    }
+
     fn step(&mut self) {
         let (mut code_point, width) = decode_wtf8_rune(&self.source.contents[self.current..]);
         if width == 0 {
@@ -2486,6 +2657,47 @@ mod tests {
         lexer.next_jsx_element_child();
         assert_eq!(lexer.token, Token::StringLiteral);
         assert_eq!(log.done().len(), 1);
+    }
+
+    #[test]
+    fn splits_angle_bracket_tokens_for_the_parser() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(log, source(b"<<= >>>= <=="), TsOptions::default());
+        assert_eq!(lexer.token, Token::LessThanLessThanEquals);
+        lexer.expect_less_than(false);
+        assert_eq!(lexer.token, Token::LessThanEquals);
+        lexer.expect_less_than(false);
+        assert_eq!(lexer.token, Token::Equals);
+        lexer.next();
+        assert_eq!(lexer.token, Token::GreaterThanGreaterThanGreaterThanEquals);
+        lexer.expect_greater_than(false);
+        assert_eq!(lexer.token, Token::GreaterThanGreaterThanEquals);
+        lexer.expect_greater_than(false);
+        assert_eq!(lexer.token, Token::GreaterThanEquals);
+        lexer.expect_greater_than(false);
+        assert_eq!(lexer.token, Token::Equals);
+        lexer.next();
+        assert_eq!(lexer.token, Token::LessThanEquals);
+        lexer.expect_less_than(false);
+        assert_eq!(lexer.token, Token::EqualsEquals);
+        assert_eq!(lexer.raw(), b"==");
+    }
+
+    #[test]
+    fn rescans_template_middle_and_tail_tokens() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(log, source(b"`head${value}tail`"), TsOptions::default());
+        assert_eq!(lexer.token, Token::TemplateHead);
+        lexer.next();
+        assert_eq!(lexer.token, Token::Identifier);
+        lexer.next();
+        assert_eq!(lexer.token, Token::CloseBrace);
+        lexer.rescan_close_brace_as_template_token();
+        assert_eq!(lexer.token, Token::TemplateTail);
+        assert_eq!(
+            lexer.string_literal(),
+            "tail".encode_utf16().collect::<Vec<_>>()
+        );
     }
 
     #[test]
