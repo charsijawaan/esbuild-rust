@@ -361,6 +361,205 @@ fn scope_parts(scope: &ScopeRef) -> (Vec<Ref>, Vec<Ref>, Vec<ScopeRef>) {
     )
 }
 
+pub struct NumberRenamer {
+    symbols: SymbolMap,
+    scopes: Vec<NumberScope>,
+    names: Vec<Vec<String>>,
+}
+
+impl NumberRenamer {
+    #[must_use]
+    pub fn new(symbols: SymbolMap, reserved_names: HashMap<String, u32>) -> Self {
+        let names = symbols
+            .symbols_for_source
+            .iter()
+            .map(|symbols| vec![String::new(); symbols.len()])
+            .collect();
+        Self {
+            symbols,
+            scopes: vec![NumberScope {
+                parent: None,
+                name_counts: reserved_names,
+            }],
+            names,
+        }
+    }
+
+    pub fn add_top_level_symbol(&mut self, reference: Ref) {
+        self.assign_name(0, reference);
+    }
+
+    pub fn assign_names_by_scope(&mut self, nested_scopes: &HashMap<u32, Vec<ScopeRef>>) {
+        let mut sources: Vec<_> = nested_scopes.iter().collect();
+        sources.sort_by_key(|(source_index, _)| **source_index);
+        for (&source_index, scopes) in sources {
+            for scope in scopes {
+                self.assign_names_recursive(scope.clone(), source_index, 0);
+            }
+        }
+    }
+
+    fn assign_name(&mut self, scope_index: usize, reference: Ref) {
+        let reference = self.symbols.follow_symbols_const(reference);
+        if !self.names[reference.source_index as usize][reference.inner_index as usize].is_empty() {
+            return;
+        }
+
+        let symbol = self.symbols.get(reference);
+        let namespace = symbol.slot_namespace();
+        if !matches!(
+            namespace,
+            SlotNamespace::Default | SlotNamespace::PrivateName
+        ) {
+            return;
+        }
+        let mut original_name = symbol.original_name.clone();
+        if symbol
+            .flags
+            .contains(SymbolFlags::MUST_START_WITH_CAPITAL_LETTER_FOR_JSX)
+            && original_name
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_lowercase)
+        {
+            original_name.replace_range(0..1, &original_name[..1].to_ascii_uppercase());
+        }
+
+        let name = self.find_unused_name(scope_index, original_name, namespace);
+        self.names[reference.source_index as usize][reference.inner_index as usize] = name;
+    }
+
+    fn assign_names_in_scope(
+        &mut self,
+        scope: &ScopeRef,
+        source_index: u32,
+        parent: usize,
+    ) -> usize {
+        let (mut members, generated, _) = scope_parts(scope);
+        members.sort_by_key(|reference| reference.inner_index);
+        let scope_index = self.scopes.len();
+        self.scopes.push(NumberScope {
+            parent: Some(parent),
+            name_counts: HashMap::new(),
+        });
+        for member in members {
+            self.assign_name(
+                scope_index,
+                Ref {
+                    source_index,
+                    inner_index: member.inner_index,
+                },
+            );
+        }
+        for reference in generated {
+            self.assign_name(scope_index, reference);
+        }
+        scope_index
+    }
+
+    fn assign_names_recursive(
+        &mut self,
+        mut scope: ScopeRef,
+        source_index: u32,
+        mut parent: usize,
+    ) {
+        loop {
+            let (members, generated, children) = scope_parts(&scope);
+            if !members.is_empty() || !generated.is_empty() {
+                parent = self.assign_names_in_scope(&scope, source_index, parent);
+            }
+            if let [only_child] = children.as_slice() {
+                scope = only_child.clone();
+                continue;
+            }
+            for child in children {
+                self.assign_names_recursive(child, source_index, parent);
+            }
+            break;
+        }
+    }
+
+    fn find_name_use(&self, mut scope_index: usize, name: &str) -> NameUse {
+        let original = scope_index;
+        loop {
+            let scope = &self.scopes[scope_index];
+            if scope.name_counts.contains_key(name) {
+                return if scope_index == original {
+                    NameUse::UsedInSameScope
+                } else {
+                    NameUse::Used
+                };
+            }
+            let Some(parent) = scope.parent else {
+                return NameUse::Unused;
+            };
+            scope_index = parent;
+        }
+    }
+
+    fn find_unused_name(
+        &mut self,
+        scope_index: usize,
+        mut name: String,
+        namespace: SlotNamespace,
+    ) -> String {
+        if namespace == SlotNamespace::PrivateName {
+            let identifier = name.strip_prefix('#').unwrap_or(&name);
+            if !crate::internal::js_ast::is_identifier(identifier) {
+                name = crate::internal::js_ast::force_valid_identifier("#", identifier);
+            }
+        } else if !crate::internal::js_ast::is_identifier(&name) {
+            name = crate::internal::js_ast::force_valid_identifier("", &name);
+        }
+
+        let name_use = self.find_name_use(scope_index, &name);
+        if name_use != NameUse::Unused {
+            let prefix = name;
+            let mut tries = if name_use == NameUse::UsedInSameScope {
+                self.scopes[scope_index].name_counts[&prefix]
+            } else {
+                1
+            };
+            loop {
+                tries += 1;
+                name = format!("{prefix}{tries}");
+                if self.find_name_use(scope_index, &name) == NameUse::Unused {
+                    if name_use == NameUse::UsedInSameScope {
+                        self.scopes[scope_index].name_counts.insert(prefix, tries);
+                    }
+                    break;
+                }
+            }
+        }
+        self.scopes[scope_index].name_counts.insert(name.clone(), 1);
+        name
+    }
+}
+
+impl Renamer for NumberRenamer {
+    fn name_for_symbol(&self, reference: Ref) -> String {
+        let reference = self.symbols.follow_symbols_const(reference);
+        let name = &self.names[reference.source_index as usize][reference.inner_index as usize];
+        if name.is_empty() {
+            self.symbols.get(reference).original_name.clone()
+        } else {
+            name.clone()
+        }
+    }
+}
+
+struct NumberScope {
+    parent: Option<usize>,
+    name_counts: HashMap<String, u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NameUse {
+    Unused,
+    Used,
+    UsedInSameScope,
+}
+
 #[derive(Debug, Default)]
 pub struct ExportRenamer {
     used: HashMap<String, u32>,
@@ -396,11 +595,12 @@ impl ExportRenamer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportRenamer, MinifyRenamer, Renamer, StableSymbolCount, assign_nested_scope_slots,
-        compute_reserved_names, new_no_op_renamer, sort_stable_symbol_counts,
+        ExportRenamer, MinifyRenamer, NumberRenamer, Renamer, StableSymbolCount,
+        assign_nested_scope_slots, compute_reserved_names, new_no_op_renamer,
+        sort_stable_symbol_counts,
     };
     use crate::internal::ast::{
-        DEFAULT_NAME_MINIFIER_JS, Ref, SlotCounts, Symbol, SymbolKind, SymbolMap,
+        DEFAULT_NAME_MINIFIER_JS, Ref, SlotCounts, Symbol, SymbolFlags, SymbolKind, SymbolMap,
     };
     use crate::internal::js_ast::{Scope, ScopeMember};
     use crate::internal::logger::Loc;
@@ -581,5 +781,75 @@ mod tests {
         assert_eq!(renamer.next_renamed_name("x"), "x3");
         assert_eq!(renamer.next_minified_name(), "a");
         assert_eq!(renamer.next_minified_name(), "b");
+    }
+
+    #[test]
+    fn numbered_renamer_tracks_scope_collisions_and_reuses_sibling_names() {
+        let references: Vec<_> = (0..5)
+            .map(|inner_index| Ref {
+                source_index: 0,
+                inner_index,
+            })
+            .collect();
+        let mut jsx = Symbol::new(SymbolKind::Other, "widget");
+        jsx.flags |= SymbolFlags::MUST_START_WITH_CAPITAL_LETTER_FOR_JSX;
+        let symbols = symbol_map(vec![
+            Symbol::new(SymbolKind::Other, "foo"),
+            Symbol::new(SymbolKind::Other, "bar"),
+            Symbol::new(SymbolKind::Other, "bar"),
+            jsx,
+            Symbol::new(SymbolKind::PrivateField, "#secret"),
+        ]);
+        let mut renamer = NumberRenamer::new(symbols, HashMap::from([("foo".into(), 1)]));
+        renamer.add_top_level_symbol(references[0]);
+        renamer.add_top_level_symbol(references[3]);
+        renamer.add_top_level_symbol(references[4]);
+        assert_eq!(renamer.name_for_symbol(references[0]), "foo2");
+        assert_eq!(renamer.name_for_symbol(references[3]), "Widget");
+        assert_eq!(renamer.name_for_symbol(references[4]), "#secret");
+
+        let sibling = |reference| {
+            Arc::new(Mutex::new(Scope {
+                members: HashMap::from([(
+                    "bar".into(),
+                    ScopeMember {
+                        reference,
+                        loc: Loc::default(),
+                    },
+                )]),
+                ..Scope::default()
+            }))
+        };
+        renamer.assign_names_by_scope(&HashMap::from([(
+            0,
+            vec![sibling(references[1]), sibling(references[2])],
+        )]));
+        assert_eq!(renamer.name_for_symbol(references[1]), "bar");
+        assert_eq!(renamer.name_for_symbol(references[2]), "bar");
+    }
+
+    #[test]
+    fn numbered_renamer_uses_linear_collision_counters() {
+        let symbols = symbol_map(
+            (0..4)
+                .map(|_| Symbol::new(SymbolKind::Other, "item"))
+                .collect(),
+        );
+        let mut renamer = NumberRenamer::new(symbols, HashMap::new());
+        for inner_index in 0..4 {
+            renamer.add_top_level_symbol(Ref {
+                source_index: 0,
+                inner_index,
+            });
+        }
+        assert_eq!(
+            (0..4)
+                .map(|inner_index| renamer.name_for_symbol(Ref {
+                    source_index: 0,
+                    inner_index,
+                }))
+                .collect::<Vec<_>>(),
+            ["item", "item2", "item3", "item4"]
+        );
     }
 }

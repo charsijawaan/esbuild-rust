@@ -31,7 +31,7 @@ Status values:
 | `internal/js_printer` | not started |
 | `internal/linker` | not started |
 | `internal/logger` | ported |
-| `internal/renamer` | in progress |
+| `internal/renamer` | ported |
 | `internal/resolver` | not started |
 | `internal/runtime` | ported |
 | `internal/sourcemap` | ported |
