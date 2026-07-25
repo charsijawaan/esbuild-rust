@@ -7,9 +7,11 @@ use std::sync::{Arc, Mutex};
 mod filepath;
 mod mock;
 mod real;
+mod zip;
 
 pub use mock::{MockFs, MockKind, mock_fs};
-pub use real::{RealFs, RealFsOptions, real_fs};
+pub use real::{RealFs, RealFsOptions, real_fs, real_fs_without_zip};
+pub use zip::{ZipFs, mangle_yarn_pnp_virtual_path, parse_yarn_pnp_virtual_path};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

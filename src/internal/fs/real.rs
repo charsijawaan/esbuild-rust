@@ -55,7 +55,15 @@ pub struct RealFs {
 /// # Errors
 ///
 /// Returns an error if the configured working directory is not absolute.
-pub fn real_fs(options: RealFsOptions) -> Result<RealFs, FsError> {
+pub fn real_fs(options: RealFsOptions) -> Result<Box<dyn Fs>, FsError> {
+    let real = real_fs_without_zip(options)?;
+    Ok(Box::new(super::ZipFs::new(Box::new(real))))
+}
+
+/// # Errors
+///
+/// Returns an error if the configured working directory is not absolute.
+pub fn real_fs_without_zip(options: RealFsOptions) -> Result<RealFs, FsError> {
     let is_windows = cfg!(windows);
     let configured_working_dir = options.abs_working_dir;
     let mut cwd = configured_working_dir.clone();
@@ -518,7 +526,7 @@ fn fs_error(error: &std::io::Error) -> FsError {
 #[cfg(test)]
 mod tests {
     use super::{RealFsOptions, real_fs};
-    use crate::internal::fs::{EntryKind, Fs};
+    use crate::internal::fs::EntryKind;
     use std::fs;
 
     #[test]
@@ -544,7 +552,7 @@ mod tests {
                 .get("index.js")
                 .0
                 .expect("directory entry")
-                .kind(&file_system),
+                .kind(file_system.as_ref()),
             EntryKind::File
         );
         assert!(file_system.mod_key(&path).is_err());
