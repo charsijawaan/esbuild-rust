@@ -1,7 +1,12 @@
 //! Port of `internal/js_lexer`.
 
+mod lexer;
 mod tables;
 
+pub use lexer::{
+    CommentBefore, JsonFlavor, KeyOrValue, Lexer, LexerPanic, MaybeSubstring, range_of_identifier,
+    range_of_import_assert_or_with,
+};
 pub use tables::{
     JSX_ENTITY_COUNT, T, TOKEN_COUNT, Token, jsx_entity, keyword_token, token_to_string,
 };
