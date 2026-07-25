@@ -127,6 +127,45 @@ pub(crate) fn stmts_care_about_scope(statements: &[Stmt]) -> bool {
     statements.iter().any(stmt_cares_about_scope)
 }
 
+pub(crate) fn is_jump_statement(statement: &StmtData) -> bool {
+    matches!(
+        statement,
+        StmtData::Break(_) | StmtData::Continue(_) | StmtData::Return(_) | StmtData::Throw(_)
+    )
+}
+
+pub(crate) fn jump_stmts_look_the_same(left: &StmtData, right: &StmtData) -> bool {
+    match (left, right) {
+        (StmtData::Break(left), StmtData::Break(right)) => {
+            left.label.as_ref().map(|label| label.reference)
+                == right.label.as_ref().map(|label| label.reference)
+        }
+        (StmtData::Continue(left), StmtData::Continue(right)) => {
+            left.label.as_ref().map(|label| label.reference)
+                == right.label.as_ref().map(|label| label.reference)
+        }
+        (StmtData::Return(left), StmtData::Return(right)) => {
+            match (
+                left.value_or_nil.data.as_deref(),
+                right.value_or_nil.data.as_deref(),
+            ) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    crate::internal::js_ast::values_look_the_same(Some(left), Some(right))
+                }
+                _ => false,
+            }
+        }
+        (StmtData::Throw(left), StmtData::Throw(right)) => {
+            crate::internal::js_ast::values_look_the_same(
+                left.value.data.as_deref(),
+                right.value.data.as_deref(),
+            )
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn duplicate_case_hash(expr: &Expr) -> Option<u32> {
     match expr.data.as_deref()? {
         ExprData::InlinedEnum(value) => duplicate_case_hash(&value.value),
@@ -200,15 +239,16 @@ mod tests {
     use crate::internal::{
         ast::Ref,
         js_ast::{
-            BlockStmt, BreakStmt, DotExpr, Expr, ExprData, IdentifierExpr, InlinedEnumExpr,
-            LocalKind, LocalStmt, Stmt, StmtData, StringExpr, SwitchCase, SwitchStmt,
+            BlockStmt, BreakStmt, ContinueStmt, DotExpr, Expr, ExprData, IdentifierExpr,
+            InlinedEnumExpr, LocalKind, LocalStmt, ReturnStmt, Stmt, StmtData, StringExpr,
+            SwitchCase, SwitchStmt,
         },
         logger::Loc,
     };
 
     use super::{
         LivenessStatus, analyze_switch_cases_for_liveness, case_body_could_have_fall_through,
-        duplicate_case_equals, duplicate_case_hash,
+        duplicate_case_equals, duplicate_case_hash, is_jump_statement, jump_stmts_look_the_same,
     };
 
     fn expr(data: ExprData) -> Expr {
@@ -317,5 +357,26 @@ mod tests {
         }));
         assert_eq!(duplicate_case_hash(&inlined), duplicate_case_hash(&value));
         assert_eq!(duplicate_case_equals(&inlined, &value), (true, false));
+    }
+
+    #[test]
+    fn jump_statement_comparison_uses_labels_and_return_values() {
+        let unlabeled_break = StmtData::Break(BreakStmt::default());
+        let unlabeled_continue = StmtData::Continue(ContinueStmt::default());
+        assert!(is_jump_statement(&unlabeled_break));
+        assert!(!jump_stmts_look_the_same(
+            &unlabeled_break,
+            &unlabeled_continue
+        ));
+
+        let one = StmtData::Return(ReturnStmt {
+            value_or_nil: expr(ExprData::Number(1.0)),
+        });
+        let another_one = StmtData::Return(ReturnStmt {
+            value_or_nil: expr(ExprData::Number(1.0)),
+        });
+        let empty = StmtData::Return(ReturnStmt::default());
+        assert!(jump_stmts_look_the_same(&one, &another_one));
+        assert!(!jump_stmts_look_the_same(&one, &empty));
     }
 }

@@ -5,6 +5,7 @@ mod global_name;
 mod json;
 mod options;
 mod source_map;
+mod symbols;
 
 pub use global_name::parse_global_name;
 pub use json::{JsonOptions, is_valid_json, parse_json};
