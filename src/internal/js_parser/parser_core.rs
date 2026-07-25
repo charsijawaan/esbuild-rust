@@ -11,8 +11,8 @@ use crate::internal::{
     config::{Mode, pretty_print_target_environment},
     helpers::contains_non_bmp_code_point,
     js_ast::{
-        CallExpr, Expr, ExprData, IdentifierExpr, Scope, ScopeKind, ScopeMember, ScopeRef,
-        SymbolUse,
+        CallExpr, DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, NameOfSymbolExpr,
+        OptionalChain, Scope, ScopeKind, ScopeMember, ScopeRef, SymbolUse,
     },
     js_lexer::{MaybeSubstring, range_of_identifier},
     logger::{LineColumnTracker, Loc, Log, Source},
@@ -42,6 +42,8 @@ pub(crate) struct ParserCore {
     pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
     pub(crate) runtime_imports: HashMap<String, LocRef>,
     pub(crate) allocated_names: Vec<Vec<u8>>,
+    pub(crate) mangled_props: HashMap<String, Ref>,
+    pub(crate) reserved_props: HashMap<String, bool>,
     pub(crate) unrepresentable_identifiers: HashMap<String, bool>,
     pub(crate) ts_use_counts: Vec<u32>,
     pub(crate) is_file_considered_esm: bool,
@@ -67,6 +69,8 @@ impl ParserCore {
             symbol_uses: HashMap::new(),
             runtime_imports: HashMap::new(),
             allocated_names: Vec::new(),
+            mangled_props: HashMap::new(),
+            reserved_props: HashMap::new(),
             unrepresentable_identifiers: HashMap::new(),
             ts_use_counts: Vec::new(),
             is_file_considered_esm: false,
@@ -730,6 +734,107 @@ impl ParserCore {
         }
     }
 
+    pub(crate) fn is_mangled_prop(&mut self, name: &str) -> bool {
+        let should_mangle = self
+            .options
+            .mangle_props
+            .as_ref()
+            .is_some_and(|pattern| pattern.is_match(name))
+            && !matches!(name, "__proto__" | "constructor" | "prototype")
+            && self
+                .options
+                .reserve_props
+                .as_ref()
+                .is_none_or(|pattern| !pattern.is_match(name));
+        if should_mangle {
+            return true;
+        }
+        self.reserved_props.insert(name.into(), true);
+        false
+    }
+
+    pub(crate) fn symbol_for_mangled_prop(&mut self, name: &str) -> Ref {
+        let reference = if let Some(reference) = self.mangled_props.get(name).copied() {
+            reference
+        } else {
+            let reference = self.new_symbol(SymbolKind::MangledProp, name);
+            self.mangled_props.insert(name.into(), reference);
+            reference
+        };
+        if !self.is_control_flow_dead {
+            let symbol_index =
+                usize::try_from(reference.inner_index).expect("symbol index fits usize");
+            self.symbols[symbol_index].use_count_estimate = self.symbols[symbol_index]
+                .use_count_estimate
+                .wrapping_add(1);
+        }
+        reference
+    }
+
+    pub(crate) fn dot_or_mangled_prop_parse(
+        &mut self,
+        target: Expr,
+        name: MaybeSubstring,
+        name_loc: Loc,
+        optional_chain: OptionalChain,
+        original: WasOriginallyDotOrIndex,
+    ) -> ExprData {
+        let text = String::from_utf8(name.string.clone())
+            .expect("JavaScript identifier property names must be valid UTF-8");
+        if (original != WasOriginallyDotOrIndex::Index || self.options.mangle_quoted)
+            && self.is_mangled_prop(&text)
+        {
+            ExprData::Index(IndexExpr {
+                target,
+                index: Expr::new(
+                    name_loc,
+                    ExprData::NameOfSymbol(NameOfSymbolExpr {
+                        reference: self.store_name_in_ref(name),
+                        ..NameOfSymbolExpr::default()
+                    }),
+                ),
+                optional_chain,
+                ..IndexExpr::default()
+            })
+        } else {
+            ExprData::Dot(DotExpr {
+                target,
+                name: text,
+                name_loc,
+                optional_chain,
+                ..DotExpr::default()
+            })
+        }
+    }
+
+    pub(crate) fn dot_or_mangled_prop_visit(
+        &mut self,
+        target: Expr,
+        name: &str,
+        name_loc: Loc,
+    ) -> ExprData {
+        if self.is_mangled_prop(name) {
+            ExprData::Index(IndexExpr {
+                target,
+                index: Expr::new(
+                    name_loc,
+                    ExprData::NameOfSymbol(NameOfSymbolExpr {
+                        reference: self.symbol_for_mangled_prop(name),
+                        ..NameOfSymbolExpr::default()
+                    }),
+                ),
+                ..IndexExpr::default()
+            })
+        } else {
+            ExprData::Dot(DotExpr {
+                target,
+                name: name.into(),
+                name_loc,
+                ..DotExpr::default()
+            })
+        }
+    }
+
     fn check_for_unrepresentable_identifier(&mut self, loc: Loc, name: &str) {
         if self.options.ascii_only
             && self
@@ -790,16 +895,24 @@ pub(crate) struct FindSymbolResult {
     pub(crate) is_inside_with_scope: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WasOriginallyDotOrIndex {
+    Dot,
+    Index,
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use super::ParserCore;
+    use regex::Regex;
+
+    use super::{ParserCore, WasOriginallyDotOrIndex};
     use crate::internal::{
         ast::{INVALID_REF, Index32, SymbolFlags, SymbolKind},
         js_ast::{
-            DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, ScopeKind, ScopeMember, StringExpr,
-            TsNamespaceMember, TsNamespaceMemberData, TsNamespaceScope,
+            DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, OptionalChain, ScopeKind,
+            ScopeMember, StringExpr, TsNamespaceMember, TsNamespaceMemberData, TsNamespaceScope,
         },
         js_lexer::MaybeSubstring,
         logger::{Loc, Source},
@@ -1220,5 +1333,52 @@ mod tests {
             parser.store_name_in_ref(MaybeSubstring::from_allocated(b"escaped".to_vec()));
         assert_eq!(parser.load_name_from_ref(allocated_ref), b"escaped");
         assert_eq!(parser.allocated_names.len(), 1);
+    }
+
+    #[test]
+    fn property_mangling_respects_reserved_names_and_quoted_mode() {
+        let mut parser = parser();
+        parser.options.mangle_props = Some(Arc::new(
+            Regex::new("^_").expect("valid regular expression"),
+        ));
+        parser.options.reserve_props = Some(Arc::new(
+            Regex::new("^_keep$").expect("valid regular expression"),
+        ));
+
+        assert!(parser.is_mangled_prop("_value"));
+        assert!(!parser.is_mangled_prop("_keep"));
+        assert!(!parser.is_mangled_prop("constructor"));
+        assert!(parser.reserved_props.contains_key("_keep"));
+        assert!(parser.reserved_props.contains_key("constructor"));
+
+        let mangled = parser.dot_or_mangled_prop_parse(
+            Expr::default(),
+            MaybeSubstring::from_allocated(b"_value".to_vec()),
+            Loc::default(),
+            OptionalChain::None,
+            WasOriginallyDotOrIndex::Dot,
+        );
+        assert!(matches!(mangled, ExprData::Index(_)));
+
+        let quoted = parser.dot_or_mangled_prop_parse(
+            Expr::default(),
+            MaybeSubstring::from_allocated(b"_quoted".to_vec()),
+            Loc::default(),
+            OptionalChain::None,
+            WasOriginallyDotOrIndex::Index,
+        );
+        assert!(matches!(quoted, ExprData::Dot(_)));
+    }
+
+    #[test]
+    fn mangled_property_symbols_are_reused_and_not_counted_in_dead_code() {
+        let mut parser = parser();
+        let first = parser.symbol_for_mangled_prop("_value");
+        let second = parser.symbol_for_mangled_prop("_value");
+        assert_eq!(first, second);
+        assert_eq!(parser.symbols[0].use_count_estimate, 2);
+        parser.is_control_flow_dead = true;
+        assert_eq!(parser.symbol_for_mangled_prop("_value"), first);
+        assert_eq!(parser.symbols[0].use_count_estimate, 2);
     }
 }
