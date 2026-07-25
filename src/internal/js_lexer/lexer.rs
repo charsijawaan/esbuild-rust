@@ -1747,7 +1747,12 @@ impl Lexer {
         }
     }
 
-    fn syntax_error(&mut self) -> ! {
+    /// Report a syntax error at the current scan position.
+    ///
+    /// # Panics
+    ///
+    /// Always panics with [`LexerPanic`] after logging the diagnostic.
+    pub fn syntax_error(&mut self) -> ! {
         let (code_point, _) = decode_wtf8_rune(&self.source.contents[self.end..]);
         let character = char::from_u32(code_point);
         let message = match character {
@@ -1893,6 +1898,7 @@ impl Lexer {
                             let hex_start = index - width - escaped_width - digit_width;
                             let mut is_first = true;
                             let mut is_out_of_range = false;
+                            let mut variable_value = 0_i32;
                             loop {
                                 (digit, digit_width) = decode_wtf8_rune(&text[index..]);
                                 index += digit_width;
@@ -1905,8 +1911,10 @@ impl Lexer {
                                 let Some(value) = hex_value(digit) else {
                                     return Err(start + index - digit_width);
                                 };
-                                code_point = code_point.saturating_mul(16) | value;
-                                is_out_of_range |= code_point > 0x10_FFFF;
+                                variable_value = variable_value.wrapping_mul(16).wrapping_add(
+                                    i32::try_from(value).expect("hex digits fit i32"),
+                                );
+                                is_out_of_range |= variable_value > 0x10_FFFF;
                                 is_first = false;
                             }
                             if is_out_of_range && report_errors {
@@ -1921,6 +1929,13 @@ impl Lexer {
                                 );
                                 panic_any(LexerPanic);
                             }
+                            code_point = if variable_value < 0 {
+                                u32::try_from(variable_value.rem_euclid(65_536))
+                                    .expect("wrapped Unicode escapes fit in u32")
+                            } else {
+                                u32::try_from(variable_value)
+                                    .expect("non-negative Unicode escapes fit in u32")
+                            };
                         } else {
                             for digit_index in 0..4 {
                                 let Some(value) = hex_value(digit) else {
@@ -2294,19 +2309,34 @@ pub fn decode_jsx_entities(text: &[u8]) -> Vec<u16> {
             && length > 0
         {
             let entity = &text[index..index + length];
+            let mut negative_code_unit = None;
             let replacement = if let Some(number) = entity.strip_prefix(b"#") {
                 let (number, radix) = number
                     .strip_prefix(b"x")
                     .map_or((number, 10), |number| (number, 16));
                 std::str::from_utf8(number)
                     .ok()
-                    .and_then(|number| u32::from_str_radix(number, radix).ok())
+                    .and_then(|number| i32::from_str_radix(number, radix).ok())
+                    .and_then(|value| {
+                        if value < 0 {
+                            negative_code_unit =
+                                Some(u16::try_from(value.rem_euclid(65_536)).unwrap_or_default());
+                            None
+                        } else {
+                            u32::try_from(value).ok()
+                        }
+                    })
             } else {
                 std::str::from_utf8(entity)
                     .ok()
                     .and_then(super::jsx_entity)
                     .map(u32::from)
             };
+            if let Some(code_unit) = negative_code_unit {
+                decoded.push(code_unit);
+                index += length + 1;
+                continue;
+            }
             if let Some(replacement) = replacement {
                 code_point = replacement;
                 index += length + 1;
@@ -2437,6 +2467,16 @@ fn scan_for_pragma_arg(
 
 fn is_whitespace(code_point: u32) -> bool {
     char::from_u32(code_point).is_some_and(js_ast::is_whitespace)
+}
+
+#[allow(dead_code)]
+const fn is_upper_ascii(byte: u8) -> bool {
+    byte >= b'A' && byte <= b'Z'
+}
+
+#[allow(dead_code)]
+const fn is_letter_ascii(byte: u8) -> bool {
+    (byte >= b'a' && byte <= b'z') || is_upper_ascii(byte)
 }
 
 #[cfg(test)]
@@ -2831,5 +2871,6 @@ mod tests {
                 .encode_utf16()
                 .collect::<Vec<_>>()
         );
+        assert_eq!(decode_jsx_entities(b"&#-1;"), vec![0xFFFF]);
     }
 }
