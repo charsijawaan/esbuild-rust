@@ -4,7 +4,7 @@ use crate::internal::helpers::{REPLACEMENT_CHARACTER, decode_wtf8_rune};
 use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 mod msg_ids;
 
@@ -80,12 +80,220 @@ pub struct Msg {
     pub id: MsgId,
 }
 
+impl Msg {
+    #[must_use]
+    pub fn new(kind: MsgKind, text: impl Into<String>) -> Self {
+        Self {
+            notes: Vec::new(),
+            plugin_name: String::new(),
+            data: MsgData {
+                text: text.into(),
+                ..MsgData::default()
+            },
+            kind,
+            id: MsgId::None,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct MsgData {
     pub user_detail: Option<Arc<dyn Any + Send + Sync>>,
     pub location: Option<MsgLocation>,
     pub text: String,
     pub disable_maximum_width: bool,
+}
+
+#[derive(Clone)]
+pub struct Log {
+    add_msg_callback: Arc<dyn Fn(Msg) + Send + Sync>,
+    has_errors_callback: Arc<dyn Fn() -> bool + Send + Sync>,
+    peek_callback: Arc<dyn Fn() -> Vec<Msg> + Send + Sync>,
+    done_callback: Arc<dyn Fn() -> Vec<Msg> + Send + Sync>,
+    pub level: LogLevel,
+    pub overrides: Arc<HashMap<MsgId, LogLevel>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DeferLogKind {
+    #[default]
+    All,
+    NoVerboseOrDebug,
+}
+
+#[derive(Default)]
+struct DeferLogState {
+    messages: Vec<Msg>,
+    has_errors: bool,
+}
+
+impl Log {
+    /// # Panics
+    ///
+    /// Operations on the returned log panic if its private mutex is poisoned.
+    #[must_use]
+    pub fn new_defer(kind: DeferLogKind, overrides: HashMap<MsgId, LogLevel>) -> Self {
+        let state = Arc::new(Mutex::new(DeferLogState::default()));
+        let add_state = Arc::clone(&state);
+        let has_errors_state = Arc::clone(&state);
+        let peek_state = Arc::clone(&state);
+        let done_state = Arc::clone(&state);
+        Self {
+            level: LogLevel::Info,
+            overrides: Arc::new(overrides),
+            add_msg_callback: Arc::new(move |message| {
+                if kind == DeferLogKind::NoVerboseOrDebug
+                    && matches!(message.kind, MsgKind::Verbose | MsgKind::Debug)
+                {
+                    return;
+                }
+                let mut state = add_state.lock().expect("deferred log mutex was poisoned");
+                if message.kind == MsgKind::Error {
+                    state.has_errors = true;
+                }
+                state.messages.push(message);
+            }),
+            has_errors_callback: Arc::new(move || {
+                has_errors_state
+                    .lock()
+                    .expect("deferred log mutex was poisoned")
+                    .has_errors
+            }),
+            peek_callback: Arc::new(move || {
+                peek_state
+                    .lock()
+                    .expect("deferred log mutex was poisoned")
+                    .messages
+                    .clone()
+            }),
+            done_callback: Arc::new(move || {
+                let mut state = done_state.lock().expect("deferred log mutex was poisoned");
+                sort_messages(&mut state.messages);
+                state.messages.clone()
+            }),
+        }
+    }
+
+    pub fn add_msg(&self, message: Msg) {
+        (self.add_msg_callback)(message);
+    }
+
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        (self.has_errors_callback)()
+    }
+
+    #[must_use]
+    pub fn peek(&self) -> Vec<Msg> {
+        (self.peek_callback)()
+    }
+
+    #[must_use]
+    pub fn done(&self) -> Vec<Msg> {
+        (self.done_callback)()
+    }
+
+    pub fn add_error(
+        &self,
+        tracker: Option<&mut LineColumnTracker>,
+        range: Range,
+        text: impl Into<String>,
+    ) {
+        self.add_msg(Msg {
+            data: tracked_msg_data(tracker, range, text),
+            ..Msg::new(MsgKind::Error, "")
+        });
+    }
+
+    pub fn add_id(
+        &self,
+        id: MsgId,
+        kind: MsgKind,
+        tracker: Option<&mut LineColumnTracker>,
+        range: Range,
+        text: impl Into<String>,
+    ) {
+        if let Some(overridden_kind) = allow_override(&self.overrides, id, kind) {
+            self.add_msg(Msg {
+                id,
+                kind: overridden_kind,
+                data: tracked_msg_data(tracker, range, text),
+                ..Msg::new(overridden_kind, "")
+            });
+        }
+    }
+
+    pub fn add_error_with_notes(
+        &self,
+        tracker: Option<&mut LineColumnTracker>,
+        range: Range,
+        text: impl Into<String>,
+        notes: Vec<MsgData>,
+    ) {
+        self.add_msg(Msg {
+            notes,
+            data: tracked_msg_data(tracker, range, text),
+            ..Msg::new(MsgKind::Error, "")
+        });
+    }
+
+    pub fn add_id_with_notes(
+        &self,
+        id: MsgId,
+        kind: MsgKind,
+        tracker: Option<&mut LineColumnTracker>,
+        range: Range,
+        text: impl Into<String>,
+        notes: Vec<MsgData>,
+    ) {
+        if let Some(overridden_kind) = allow_override(&self.overrides, id, kind) {
+            self.add_msg(Msg {
+                notes,
+                id,
+                kind: overridden_kind,
+                data: tracked_msg_data(tracker, range, text),
+                ..Msg::new(overridden_kind, "")
+            });
+        }
+    }
+
+    pub fn add_msg_id(&self, id: MsgId, mut message: Msg) {
+        if let Some(overridden_kind) = allow_override(&self.overrides, id, message.kind) {
+            message.id = id;
+            message.kind = overridden_kind;
+            self.add_msg(message);
+        }
+    }
+}
+
+fn tracked_msg_data(
+    tracker: Option<&mut LineColumnTracker>,
+    range: Range,
+    text: impl Into<String>,
+) -> MsgData {
+    let text = text.into();
+    match tracker {
+        Some(tracker) => tracker.msg_data(range, text),
+        None => MsgData {
+            text,
+            ..MsgData::default()
+        },
+    }
+}
+
+fn allow_override(
+    overrides: &HashMap<MsgId, LogLevel>,
+    id: MsgId,
+    kind: MsgKind,
+) -> Option<MsgKind> {
+    overrides.get(&id).map_or(Some(kind), |level| match level {
+        LogLevel::Verbose => Some(MsgKind::Verbose),
+        LogLevel::Debug => Some(MsgKind::Debug),
+        LogLevel::Info => Some(MsgKind::Info),
+        LogLevel::Warning => Some(MsgKind::Warning),
+        LogLevel::Error => Some(MsgKind::Error),
+        LogLevel::None | LogLevel::Silent => None,
+    })
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -911,9 +1119,9 @@ fn decode_last_wtf8_rune(bytes: &[u8]) -> (u32, usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ImportAttributes, LineColumnTracker, Loc, PathFlags, PathStyle, PrettyPaths, Range, Source,
-        generate_string_in_js_table, platform_independent_path_dir_base_ext,
-        remap_string_in_js_loc,
+        DeferLogKind, ImportAttributes, LineColumnTracker, Loc, Log, LogLevel, Msg, MsgId, MsgKind,
+        MsgLocation, PathFlags, PathStyle, PrettyPaths, Range, Source, generate_string_in_js_table,
+        platform_independent_path_dir_base_ext, remap_string_in_js_loc,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1038,6 +1246,89 @@ mod tests {
             remap_string_in_js_loc(&table, Loc { start: 2 }),
             Loc { start: 10 }
         );
+    }
+
+    #[test]
+    fn deferred_logs_track_errors_filter_and_sort() {
+        let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+        log.add_msg(Msg::new(MsgKind::Debug, "hidden"));
+        let mut later = Msg::new(MsgKind::Warning, "later");
+        later.data.location = Some(MsgLocation {
+            file: PrettyPaths {
+                abs: "/b.js".into(),
+                rel: "b.js".into(),
+            },
+            line: 2,
+            ..MsgLocation::default()
+        });
+        log.add_msg(later);
+        let mut earlier = Msg::new(MsgKind::Error, "earlier");
+        earlier.data.location = Some(MsgLocation {
+            file: PrettyPaths {
+                abs: "/a.js".into(),
+                rel: "a.js".into(),
+            },
+            line: 1,
+            ..MsgLocation::default()
+        });
+        log.add_msg(earlier);
+
+        assert!(log.has_errors());
+        assert_eq!(log.peek().len(), 2);
+        let messages = log.done();
+        assert_eq!(messages[0].data.text, "earlier");
+        assert_eq!(messages[1].data.text, "later");
+    }
+
+    #[test]
+    fn message_id_overrides_change_or_silence_diagnostics() {
+        let log = Log::new_defer(
+            DeferLogKind::All,
+            HashMap::from([
+                (MsgId::JsDirectEval, LogLevel::Error),
+                (MsgId::JsBigInt, LogLevel::Silent),
+            ]),
+        );
+        log.add_id(
+            MsgId::JsDirectEval,
+            MsgKind::Warning,
+            None,
+            Range::default(),
+            "promoted",
+        );
+        log.add_id(
+            MsgId::JsBigInt,
+            MsgKind::Warning,
+            None,
+            Range::default(),
+            "hidden",
+        );
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Error);
+        assert_eq!(messages[0].id, MsgId::JsDirectEval);
+        assert!(log.has_errors());
+    }
+
+    #[test]
+    fn deferred_log_is_safe_for_parallel_parsers() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut threads = Vec::new();
+        for thread_index in 0..4 {
+            let log = log.clone();
+            threads.push(std::thread::spawn(move || {
+                for message_index in 0..25 {
+                    log.add_msg(Msg::new(
+                        MsgKind::Info,
+                        format!("{thread_index}:{message_index}"),
+                    ));
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(log.done().len(), 100);
     }
 
     #[test]
