@@ -385,6 +385,111 @@ impl Lexer {
         }
     }
 
+    /// Scan a regular expression after the parser has interpreted `/` as the
+    /// start of a regular-expression literal.
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`LexerPanic`] after logging malformed input.
+    pub fn scan_reg_exp(&mut self) {
+        loop {
+            match char::from_u32(self.code_point) {
+                Some('/') => {
+                    self.step();
+                    let mut bits = 0_u32;
+                    while is_identifier_continue(self.code_point) {
+                        let Some(flag) = char::from_u32(self.code_point) else {
+                            self.syntax_error();
+                        };
+                        if matches!(flag, 'd' | 'g' | 'i' | 'm' | 's' | 'u' | 'v' | 'y') {
+                            let bit = 1_u32 << (self.code_point - u32::from(b'a'));
+                            if bit & bits != 0 {
+                                self.add_duplicate_reg_exp_flag_error(flag);
+                            } else {
+                                bits |= bit;
+                            }
+                            self.step();
+                        } else {
+                            self.syntax_error();
+                        }
+                    }
+                    return;
+                }
+                Some('[') => {
+                    self.step();
+                    while self.code_point != u32::from(b']') {
+                        self.validate_and_step_reg_exp();
+                    }
+                    self.step();
+                }
+                _ => self.validate_and_step_reg_exp(),
+            }
+        }
+    }
+
+    fn validate_and_step_reg_exp(&mut self) {
+        if self.code_point == u32::from(b'\\') {
+            self.step();
+        }
+        if matches!(
+            char::from_u32(self.code_point),
+            None | Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
+        ) {
+            self.add_range_error(
+                Range {
+                    loc: Loc {
+                        start: source_i32(self.end),
+                    },
+                    len: 0,
+                },
+                "Unterminated regular expression",
+            );
+            panic_any(LexerPanic);
+        }
+        self.step();
+    }
+
+    fn add_duplicate_reg_exp_flag_error(&mut self, flag: char) {
+        let mut first = Range {
+            loc: Loc {
+                start: source_i32(self.start),
+            },
+            len: 1,
+        };
+        let duplicate = Range {
+            loc: Loc {
+                start: source_i32(self.end),
+            },
+            len: 1,
+        };
+        let duplicate_start =
+            usize::try_from(duplicate.loc.start).expect("source locations are non-negative");
+        while first.loc.start < duplicate.loc.start {
+            let first_start =
+                usize::try_from(first.loc.start).expect("source locations are non-negative");
+            if self.source.contents[first_start]
+                == u8::try_from(flag as u32).expect("regular expression flags are ASCII")
+            {
+                break;
+            }
+            first.loc.start += 1;
+        }
+        if usize::try_from(first.loc.start).expect("source locations are non-negative")
+            >= duplicate_start
+        {
+            return;
+        }
+        let note = self
+            .tracker
+            .msg_data(first, format!("The first \"{flag}\" was here:"));
+        self.log.add_error_with_notes(
+            Some(&mut self.tracker),
+            duplicate,
+            format!("Duplicate flag \"{flag}\" in regular expression"),
+            vec![note],
+        );
+    }
+
     /// Decode the current string literal to UTF-16.
     ///
     /// # Panics
@@ -2038,6 +2143,40 @@ mod tests {
             }));
             assert!(result.is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn scans_regular_expressions_and_flags() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(
+            log.clone(),
+            source(br"/foo[\/\]]+/gim"),
+            TsOptions::default(),
+        );
+        assert_eq!(lexer.token, Token::Slash);
+        lexer.scan_reg_exp();
+        assert_eq!(lexer.raw(), br"/foo[\/\]]+/gim");
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn regular_expression_duplicate_flags_are_diagnostics() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(log.clone(), source(b"/x/gg"), TsOptions::default());
+        lexer.scan_reg_exp();
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].data.text.contains("Duplicate flag \"g\""));
+    }
+
+    #[test]
+    fn unterminated_regular_expressions_raise_lexer_panic() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let mut lexer = Lexer::new(log, source(b"/unterminated"), TsOptions::default());
+            lexer.scan_reg_exp();
+        }));
+        assert!(result.is_err());
     }
 
     #[test]
