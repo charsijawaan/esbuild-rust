@@ -7,6 +7,455 @@ use crate::internal::ast::Ref;
 use crate::internal::compat::JsFeature;
 use crate::internal::helpers::utf16_equals_wtf8;
 use crate::internal::logger::Loc;
+use std::ops::BitOr;
+
+pub struct HelperContext<F> {
+    is_unbound: F,
+}
+
+#[must_use]
+pub fn make_helper_context<F>(is_unbound: F) -> HelperContext<F>
+where
+    F: Fn(Ref) -> bool,
+{
+    HelperContext { is_unbound }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StmtsCanBeRemovedIfUnusedFlags(u8);
+
+impl StmtsCanBeRemovedIfUnusedFlags {
+    pub const NONE: Self = Self(0);
+    pub const KEEP_EXPORT_CLAUSES: Self = Self(1 << 0);
+    pub const RETURN_CAN_BE_REMOVED_IF_UNUSED: Self = Self(1 << 1);
+
+    #[must_use]
+    pub const fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 != 0
+    }
+}
+
+impl BitOr for StmtsCanBeRemovedIfUnusedFlags {
+    type Output = Self;
+
+    fn bitor(self, right: Self) -> Self::Output {
+        Self(self.0 | right.0)
+    }
+}
+
+impl<F> HelperContext<F>
+where
+    F: Fn(Ref) -> bool,
+{
+    #[must_use]
+    pub fn simplify_boolean_expr(&self, expr: &Expr) -> Expr {
+        simplify_boolean_expr(expr, &|value| self.expr_can_be_removed_if_unused(value))
+    }
+
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    /// # Panics
+    ///
+    /// Panics if a default export contains an invalid internal statement kind.
+    pub fn stmts_can_be_removed_if_unused(
+        &self,
+        statements: &[Stmt],
+        flags: StmtsCanBeRemovedIfUnusedFlags,
+    ) -> bool {
+        for statement in statements {
+            match statement.data.as_deref() {
+                Some(
+                    StmtData::Function(_)
+                    | StmtData::Empty
+                    | StmtData::Import(_)
+                    | StmtData::ExportFrom(_),
+                ) => {}
+                Some(StmtData::Class(value)) => {
+                    if !self.class_can_be_removed_if_unused(&value.class) {
+                        return false;
+                    }
+                }
+                Some(StmtData::Return(value)) => {
+                    if !flags
+                        .contains(StmtsCanBeRemovedIfUnusedFlags::RETURN_CAN_BE_REMOVED_IF_UNUSED)
+                        || (value.value_or_nil.data.is_some()
+                            && !self.expr_can_be_removed_if_unused(&value.value_or_nil))
+                    {
+                        return false;
+                    }
+                }
+                Some(StmtData::Expr(value)) => {
+                    if !self.expr_can_be_removed_if_unused(&value.value)
+                        && !value.is_from_class_or_fn_that_can_be_removed_if_unused
+                    {
+                        return false;
+                    }
+                }
+                Some(StmtData::Local(value)) => {
+                    if value.kind == super::LocalKind::AwaitUsing {
+                        return false;
+                    }
+                    for declaration in &value.declarations {
+                        match declaration.binding.data.as_deref() {
+                            Some(BindingData::Identifier(_)) => {}
+                            Some(BindingData::Array(array))
+                                if matches!(
+                                    declaration.value_or_nil.data.as_deref(),
+                                    Some(ExprData::Array(_))
+                                ) =>
+                            {
+                                for item in &array.items {
+                                    if item.default_value_or_nil.data.is_some()
+                                        && !self.expr_can_be_removed_if_unused(
+                                            &item.default_value_or_nil,
+                                        )
+                                    {
+                                        return false;
+                                    }
+                                    if !matches!(
+                                        item.binding.data.as_deref(),
+                                        Some(BindingData::Identifier(_) | BindingData::Missing)
+                                    ) {
+                                        return false;
+                                    }
+                                }
+                            }
+                            _ => return false,
+                        }
+                        if declaration.value_or_nil.data.is_some() {
+                            if !self.expr_can_be_removed_if_unused(&declaration.value_or_nil) {
+                                return false;
+                            }
+                            if value.kind.is_using()
+                                && !matches!(
+                                    known_primitive_type(declaration.value_or_nil.data.as_deref()),
+                                    PrimitiveType::Null | PrimitiveType::Undefined
+                                )
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                Some(StmtData::Try(value)) => {
+                    if !self.stmts_can_be_removed_if_unused(
+                        &value.block.statements,
+                        StmtsCanBeRemovedIfUnusedFlags::NONE,
+                    ) || value.finally.as_ref().is_some_and(|finally| {
+                        !self.stmts_can_be_removed_if_unused(
+                            &finally.block.statements,
+                            StmtsCanBeRemovedIfUnusedFlags::NONE,
+                        )
+                    }) {
+                        return false;
+                    }
+                }
+                Some(StmtData::ExportClause(_)) => {
+                    if flags.contains(StmtsCanBeRemovedIfUnusedFlags::KEEP_EXPORT_CLAUSES) {
+                        return false;
+                    }
+                }
+                Some(StmtData::ExportDefault(value)) => match value.value.data.as_deref() {
+                    Some(StmtData::Expr(expression)) => {
+                        if !self.expr_can_be_removed_if_unused(&expression.value) {
+                            return false;
+                        }
+                    }
+                    Some(StmtData::Function(_)) => {}
+                    Some(StmtData::Class(class)) => {
+                        if !self.class_can_be_removed_if_unused(&class.class) {
+                            return false;
+                        }
+                    }
+                    _ => panic!("internal error: invalid default export statement"),
+                },
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn class_can_be_removed_if_unused(&self, class: &super::Class) -> bool {
+        if !class.decorators.is_empty() {
+            return false;
+        }
+        if class.extends_or_nil.data.is_some()
+            && !self.expr_can_be_removed_if_unused(&class.extends_or_nil)
+        {
+            return false;
+        }
+
+        for property in &class.properties {
+            if property.kind == PropertyKind::ClassStaticBlock {
+                let Some(block) = &property.class_static_block else {
+                    return false;
+                };
+                if !self.stmts_can_be_removed_if_unused(
+                    &block.block.statements,
+                    StmtsCanBeRemovedIfUnusedFlags::NONE,
+                ) {
+                    return false;
+                }
+                continue;
+            }
+            if !property.decorators.is_empty() {
+                return false;
+            }
+            if property.flags.contains(PropertyFlags::IS_COMPUTED)
+                && !is_primitive_literal(property.key.data.as_deref())
+                && !is_symbol_instance(property.key.data.as_deref())
+            {
+                return false;
+            }
+            if property.kind.is_method_definition()
+                && let Some(ExprData::Function(function)) = property.value_or_nil.data.as_deref()
+                && function
+                    .function
+                    .args
+                    .iter()
+                    .any(|argument| !argument.decorators.is_empty())
+            {
+                return false;
+            }
+            if property.flags.contains(PropertyFlags::IS_STATIC) {
+                if property.value_or_nil.data.is_some()
+                    && !self.expr_can_be_removed_if_unused(&property.value_or_nil)
+                {
+                    return false;
+                }
+                if property.initializer_or_nil.data.is_some()
+                    && !self.expr_can_be_removed_if_unused(&property.initializer_or_nil)
+                {
+                    return false;
+                }
+                if property.kind == PropertyKind::Field && !class.use_define_for_class_fields {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn expr_can_be_removed_if_unused(&self, expr: &Expr) -> bool {
+        match expr.data.as_deref() {
+            Some(ExprData::Annotation(value)) => value
+                .flags
+                .contains(AnnotationFlags::CAN_BE_REMOVED_IF_UNUSED),
+            Some(ExprData::InlinedEnum(value)) => self.expr_can_be_removed_if_unused(&value.value),
+            Some(
+                ExprData::Null
+                | ExprData::Undefined
+                | ExprData::Missing
+                | ExprData::Boolean(_)
+                | ExprData::Number(_)
+                | ExprData::BigInt(_)
+                | ExprData::String(_)
+                | ExprData::This
+                | ExprData::RegExp(_)
+                | ExprData::Function(_)
+                | ExprData::Arrow(_)
+                | ExprData::ImportMeta(_)
+                | ExprData::ImportIdentifier(_),
+            ) => true,
+            Some(ExprData::Dot(value)) => value.can_be_removed_if_unused,
+            Some(ExprData::Class(value)) => self.class_can_be_removed_if_unused(&value.class),
+            Some(ExprData::Identifier(value)) => {
+                !value.must_keep_due_to_with_stmt
+                    && (value.can_be_removed_if_unused || !(self.is_unbound)(value.reference))
+            }
+            Some(ExprData::If(value)) => {
+                self.expr_can_be_removed_if_unused(&value.test)
+                    && (self.is_side_effect_free_unbound_identifier_ref(
+                        &value.yes,
+                        &value.test,
+                        true,
+                    ) || self.expr_can_be_removed_if_unused(&value.yes))
+                    && (self.is_side_effect_free_unbound_identifier_ref(
+                        &value.no,
+                        &value.test,
+                        false,
+                    ) || self.expr_can_be_removed_if_unused(&value.no))
+            }
+            Some(ExprData::Array(value)) => value.items.iter().all(|item| {
+                let item = match item.data.as_deref() {
+                    Some(ExprData::Spread(spread))
+                        if matches!(spread.value.data.as_deref(), Some(ExprData::Array(_))) =>
+                    {
+                        &spread.value
+                    }
+                    _ => item,
+                };
+                self.expr_can_be_removed_if_unused(item)
+            }),
+            Some(ExprData::Object(value)) => value.properties.iter().all(|property| {
+                property.kind != PropertyKind::Spread
+                    && (!property.flags.contains(PropertyFlags::IS_COMPUTED)
+                        || is_primitive_literal(property.key.data.as_deref())
+                        || is_symbol_instance(property.key.data.as_deref()))
+                    && (property.value_or_nil.data.is_none()
+                        || self.expr_can_be_removed_if_unused(&property.value_or_nil))
+            }),
+            Some(ExprData::Call(value)) if value.can_be_unwrapped_if_unused => value
+                .args
+                .iter()
+                .all(|argument| self.expr_can_be_removed_if_unused(argument)),
+            Some(ExprData::New(value)) if value.can_be_unwrapped_if_unused => value
+                .args
+                .iter()
+                .all(|argument| self.expr_can_be_removed_if_unused(argument)),
+            Some(ExprData::Unary(value)) => match value.op {
+                OpCode::UnaryVoid | OpCode::UnaryNot => {
+                    self.expr_can_be_removed_if_unused(&value.value)
+                }
+                OpCode::UnaryNegative
+                    if matches!(value.value.data.as_deref(), Some(ExprData::BigInt(_))) =>
+                {
+                    true
+                }
+                OpCode::UnaryTypeof
+                    if value.was_originally_typeof_identifier
+                        && matches!(value.value.data.as_deref(), Some(ExprData::Identifier(_))) =>
+                {
+                    true
+                }
+                OpCode::UnaryTypeof => self.expr_can_be_removed_if_unused(&value.value),
+                _ => false,
+            },
+            Some(ExprData::Binary(value)) => match value.op {
+                OpCode::BinaryStrictEqual
+                | OpCode::BinaryStrictNotEqual
+                | OpCode::BinaryComma
+                | OpCode::BinaryNullishCoalescing => {
+                    self.expr_can_be_removed_if_unused(&value.left)
+                        && self.expr_can_be_removed_if_unused(&value.right)
+                }
+                OpCode::BinaryLogicalOr => {
+                    self.expr_can_be_removed_if_unused(&value.left)
+                        && (self.is_side_effect_free_unbound_identifier_ref(
+                            &value.right,
+                            &value.left,
+                            false,
+                        ) || self.expr_can_be_removed_if_unused(&value.right))
+                }
+                OpCode::BinaryLogicalAnd => {
+                    self.expr_can_be_removed_if_unused(&value.left)
+                        && (self.is_side_effect_free_unbound_identifier_ref(
+                            &value.right,
+                            &value.left,
+                            true,
+                        ) || self.expr_can_be_removed_if_unused(&value.right))
+                }
+                OpCode::BinaryLooseEqual | OpCode::BinaryLooseNotEqual => {
+                    can_change_strict_to_loose(&value.left, &value.right)
+                        && self.expr_can_be_removed_if_unused(&value.left)
+                        && self.expr_can_be_removed_if_unused(&value.right)
+                }
+                OpCode::BinaryLessThan
+                | OpCode::BinaryGreaterThan
+                | OpCode::BinaryLessThanOrEqual
+                | OpCode::BinaryGreaterThanOrEqual => {
+                    let left = known_primitive_type(value.left.data.as_deref());
+                    matches!(
+                        left,
+                        PrimitiveType::String | PrimitiveType::Number | PrimitiveType::BigInt
+                    ) && known_primitive_type(value.right.data.as_deref()) == left
+                        && self.expr_can_be_removed_if_unused(&value.left)
+                        && self.expr_can_be_removed_if_unused(&value.right)
+                }
+                _ => false,
+            },
+            Some(ExprData::Template(value))
+                if value.tag_or_nil.data.is_none() || value.can_be_unwrapped_if_unused =>
+            {
+                value.parts.iter().all(|part| {
+                    self.expr_can_be_removed_if_unused(&part.value)
+                        && known_primitive_type(part.value.data.as_deref())
+                            != PrimitiveType::Unknown
+                })
+            }
+            _ => false,
+        }
+    }
+
+    fn is_side_effect_free_unbound_identifier_ref(
+        &self,
+        value: &Expr,
+        guard_condition: &Expr,
+        mut is_yes_branch: bool,
+    ) -> bool {
+        let Some(ExprData::Identifier(identifier)) = value.data.as_deref() else {
+            return false;
+        };
+        if !(self.is_unbound)(identifier.reference) {
+            return false;
+        }
+        let Some(ExprData::Binary(binary)) = guard_condition.data.as_deref() else {
+            return false;
+        };
+
+        match binary.op {
+            OpCode::BinaryStrictEqual
+            | OpCode::BinaryStrictNotEqual
+            | OpCode::BinaryLooseEqual
+            | OpCode::BinaryLooseNotEqual => {
+                let (mut typeof_expr, mut string_expr) = (&binary.left, &binary.right);
+                if matches!(typeof_expr.data.as_deref(), Some(ExprData::String(_))) {
+                    std::mem::swap(&mut typeof_expr, &mut string_expr);
+                }
+                if let (Some(ExprData::Unary(unary)), Some(ExprData::String(text))) =
+                    (typeof_expr.data.as_deref(), string_expr.data.as_deref())
+                    && unary.op == OpCode::UnaryTypeof
+                    && unary.was_originally_typeof_identifier
+                    && (utf16_equals_wtf8(&text.value, b"undefined") == is_yes_branch)
+                        == matches!(
+                            binary.op,
+                            OpCode::BinaryStrictNotEqual | OpCode::BinaryLooseNotEqual
+                        )
+                    && matches!(
+                        unary.value.data.as_deref(),
+                        Some(ExprData::Identifier(guarded))
+                            if guarded.reference == identifier.reference
+                    )
+                {
+                    return true;
+                }
+            }
+            OpCode::BinaryLessThan
+            | OpCode::BinaryGreaterThan
+            | OpCode::BinaryLessThanOrEqual
+            | OpCode::BinaryGreaterThanOrEqual => {
+                let (mut typeof_expr, mut string_expr) = (&binary.left, &binary.right);
+                if matches!(typeof_expr.data.as_deref(), Some(ExprData::String(_))) {
+                    std::mem::swap(&mut typeof_expr, &mut string_expr);
+                    is_yes_branch = !is_yes_branch;
+                }
+                if let (Some(ExprData::Unary(unary)), Some(ExprData::String(text))) =
+                    (typeof_expr.data.as_deref(), string_expr.data.as_deref())
+                    && unary.op == OpCode::UnaryTypeof
+                    && unary.was_originally_typeof_identifier
+                    && utf16_equals_wtf8(&text.value, b"u")
+                    && is_yes_branch
+                        == matches!(
+                            binary.op,
+                            OpCode::BinaryLessThan | OpCode::BinaryLessThanOrEqual
+                        )
+                    && matches!(
+                        unary.value.data.as_deref(),
+                        Some(ExprData::Identifier(guarded))
+                            if guarded.reference == identifier.reference
+                    )
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+}
 
 #[must_use]
 pub fn is_property_access(expr: &Expr) -> bool {
@@ -1836,12 +2285,12 @@ fn format_i32_radix(value: i32, radix: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EqualityKind, PrimitiveType, SideEffects, StringAdditionKind, assign,
-        can_change_strict_to_loose, check_equality_big_int, check_equality_if_no_side_effects,
-        convert_binding_to_expr, fold_binary_operator, fold_string_addition,
-        for_each_identifier_binding, inline_primitives_into_template,
+        EqualityKind, PrimitiveType, SideEffects, StmtsCanBeRemovedIfUnusedFlags,
+        StringAdditionKind, assign, can_change_strict_to_loose, check_equality_big_int,
+        check_equality_if_no_side_effects, convert_binding_to_expr, fold_binary_operator,
+        fold_string_addition, for_each_identifier_binding, inline_primitives_into_template,
         inline_spreads_of_array_literals, is_binary_null_and_undefined, is_optional_chain,
-        join_all_with_comma, known_primitive_type, mangle_object_spread,
+        join_all_with_comma, known_primitive_type, make_helper_context, mangle_object_spread,
         maybe_simplify_equality_comparison, maybe_simplify_not, not,
         should_fold_binary_operator_when_minifying, simplify_boolean_expr, string_compare_ucs2,
         string_to_equivalent_number_value, to_boolean_with_side_effects, to_int32,
@@ -1852,10 +2301,11 @@ mod tests {
     use crate::internal::ast::Ref;
     use crate::internal::compat::JsFeature;
     use crate::internal::js_ast::{
-        ArrayBinding, ArrayBindingPattern, ArrayExpr, BinaryExpr, Binding, BindingData, Expr,
-        ExprData, IdentifierBinding, IdentifierExpr, IfExpr, ObjectBindingPattern, ObjectExpr,
-        OpCode, OptionalChain, Property, PropertyBinding, PropertyKind, SpreadExpr, StringExpr,
-        TemplateExpr, TemplatePart, UnaryExpr,
+        ArrayBinding, ArrayBindingPattern, ArrayExpr, BinaryExpr, Binding, BindingData, CallExpr,
+        Class, Decl, Expr, ExprData, ExprStmt, IdentifierBinding, IdentifierExpr, IfExpr,
+        LocalKind, LocalStmt, ObjectBindingPattern, ObjectExpr, OpCode, OptionalChain, Property,
+        PropertyBinding, PropertyFlags, PropertyKind, ReturnStmt, SpreadExpr, Stmt, StmtData,
+        StringExpr, TemplateExpr, TemplatePart, UnaryExpr,
     };
     use crate::internal::logger::Loc;
 
@@ -2641,6 +3091,174 @@ mod tests {
                     Some(BindingData::Identifier(identifier))
                         if identifier.reference.inner_index == 3
                 )
+        ));
+    }
+
+    #[test]
+    fn determines_when_expressions_are_safe_to_tree_shake() {
+        let reference = Ref {
+            source_index: 4,
+            inner_index: 5,
+        };
+        let context = make_helper_context(move |candidate| candidate == reference);
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference,
+                ..IdentifierExpr::default()
+            }),
+        );
+        assert!(!context.expr_can_be_removed_if_unused(&identifier));
+        assert!(context.expr_can_be_removed_if_unused(&number(1.0)));
+
+        let typeof_identifier = Expr::new(
+            Loc::default(),
+            ExprData::Unary(UnaryExpr {
+                value: identifier.clone(),
+                op: OpCode::UnaryTypeof,
+                was_originally_typeof_identifier: true,
+                ..UnaryExpr::default()
+            }),
+        );
+        assert!(context.expr_can_be_removed_if_unused(&typeof_identifier));
+
+        let pure_call = Expr::new(
+            Loc::default(),
+            ExprData::Call(CallExpr {
+                target: identifier.clone(),
+                args: vec![number(1.0)],
+                can_be_unwrapped_if_unused: true,
+                ..CallExpr::default()
+            }),
+        );
+        assert!(context.expr_can_be_removed_if_unused(&pure_call));
+
+        let object_spread = Expr::new(
+            Loc::default(),
+            ExprData::Object(ObjectExpr {
+                properties: vec![Property {
+                    kind: PropertyKind::Spread,
+                    value_or_nil: number(1.0),
+                    ..Property::default()
+                }],
+                ..ObjectExpr::default()
+            }),
+        );
+        assert!(!context.expr_can_be_removed_if_unused(&object_spread));
+    }
+
+    #[test]
+    fn recognizes_typeof_guards_for_unbound_identifiers() {
+        let reference = Ref {
+            source_index: 8,
+            inner_index: 9,
+        };
+        let context = make_helper_context(move |candidate| candidate == reference);
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference,
+                ..IdentifierExpr::default()
+            }),
+        );
+        let guard = Expr::new(
+            Loc::default(),
+            ExprData::Binary(BinaryExpr {
+                left: Expr::new(
+                    Loc::default(),
+                    ExprData::Unary(UnaryExpr {
+                        value: identifier.clone(),
+                        op: OpCode::UnaryTypeof,
+                        was_originally_typeof_identifier: true,
+                        ..UnaryExpr::default()
+                    }),
+                ),
+                right: Expr::new(
+                    Loc::default(),
+                    ExprData::String(StringExpr {
+                        value: "undefined".encode_utf16().collect(),
+                        ..StringExpr::default()
+                    }),
+                ),
+                op: OpCode::BinaryStrictNotEqual,
+            }),
+        );
+        let guarded = Expr::new(
+            Loc::default(),
+            ExprData::Binary(BinaryExpr {
+                left: guard,
+                right: identifier,
+                op: OpCode::BinaryLogicalAnd,
+            }),
+        );
+        assert!(context.expr_can_be_removed_if_unused(&guarded));
+    }
+
+    #[test]
+    fn analyzes_classes_and_statements_for_tree_shaking() {
+        let context = make_helper_context(|_| false);
+        let mut class = Class {
+            use_define_for_class_fields: true,
+            properties: vec![Property {
+                kind: PropertyKind::Field,
+                flags: PropertyFlags::IS_STATIC,
+                value_or_nil: number(1.0),
+                ..Property::default()
+            }],
+            ..Class::default()
+        };
+        assert!(context.class_can_be_removed_if_unused(&class));
+        class.use_define_for_class_fields = false;
+        assert!(!context.class_can_be_removed_if_unused(&class));
+
+        let return_statement = Stmt::new(
+            Loc::default(),
+            StmtData::Return(ReturnStmt {
+                value_or_nil: number(1.0),
+            }),
+        );
+        assert!(!context.stmts_can_be_removed_if_unused(
+            std::slice::from_ref(&return_statement),
+            StmtsCanBeRemovedIfUnusedFlags::NONE,
+        ));
+        assert!(context.stmts_can_be_removed_if_unused(
+            std::slice::from_ref(&return_statement),
+            StmtsCanBeRemovedIfUnusedFlags::RETURN_CAN_BE_REMOVED_IF_UNUSED,
+        ));
+
+        let using_null = Stmt::new(
+            Loc::default(),
+            StmtData::Local(LocalStmt {
+                kind: LocalKind::Using,
+                declarations: vec![Decl {
+                    binding: Binding {
+                        data: Some(Box::new(BindingData::Identifier(
+                            IdentifierBinding::default(),
+                        ))),
+                        ..Binding::default()
+                    },
+                    value_or_nil: Expr::new(Loc::default(), ExprData::Null),
+                }],
+                ..LocalStmt::default()
+            }),
+        );
+        assert!(
+            context.stmts_can_be_removed_if_unused(
+                &[using_null],
+                StmtsCanBeRemovedIfUnusedFlags::NONE,
+            )
+        );
+
+        let generated_effect = Stmt::new(
+            Loc::default(),
+            StmtData::Expr(ExprStmt {
+                value: Expr::new(Loc::default(), ExprData::Call(CallExpr::default())),
+                is_from_class_or_fn_that_can_be_removed_if_unused: true,
+            }),
+        );
+        assert!(context.stmts_can_be_removed_if_unused(
+            &[generated_effect],
+            StmtsCanBeRemovedIfUnusedFlags::NONE,
         ));
     }
 }
