@@ -956,10 +956,11 @@ impl Lexer {
         (MaybeSubstring::from_allocated(text), token)
     }
 
+    #[allow(clippy::if_not_else, clippy::too_many_lines)]
     fn parse_numeric_literal_or_dot(&mut self) {
-        let first = char::from_u32(self.code_point).expect("number starts with a scalar");
+        let first = self.code_point;
         self.step();
-        if first == '.' && !char::from_u32(self.code_point).is_some_and(|c| c.is_ascii_digit()) {
+        if first == u32::from(b'.') && !is_decimal_digit(self.code_point) {
             if self.code_point == u32::from(b'.')
                 && self.source.contents.get(self.current) == Some(&b'.')
             {
@@ -972,52 +973,222 @@ impl Lexer {
             return;
         }
 
+        let mut underscore_count = 0;
+        let mut last_underscore_end = None;
+        let mut has_dot_or_exponent = first == u32::from(b'.');
+        let mut is_missing_digit_after_dot = false;
+        let mut base = 0_u32;
+        self.is_legacy_octal_literal = false;
         self.token = Token::NumericLiteral;
-        while char::from_u32(self.code_point)
-            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.'))
-        {
-            self.step();
-        }
-        if matches!(char::from_u32(self.code_point), Some('+' | '-'))
-            && self.end > self.start
-            && matches!(self.source.contents[self.end - 1], b'e' | b'E')
-        {
-            self.step();
-            while char::from_u32(self.code_point).is_some_and(|c| c.is_ascii_digit() || c == '_') {
-                self.step();
+
+        if first == u32::from(b'0') {
+            match char::from_u32(self.code_point) {
+                Some('b' | 'B') => base = 2,
+                Some('o' | 'O') => base = 8,
+                Some('x' | 'X') => base = 16,
+                Some('0'..='7' | '_') => {
+                    base = 8;
+                    self.is_legacy_octal_literal = true;
+                }
+                Some('8' | '9') => self.is_legacy_octal_literal = true,
+                _ => {}
             }
         }
 
-        let mut text = self.raw().to_vec();
-        let is_big_integer = text.last() == Some(&b'n');
-        if is_big_integer {
-            text.pop();
-            self.token = Token::BigIntegerLiteral;
-        }
-        text.retain(|byte| *byte != b'_');
-        if is_big_integer {
-            self.identifier = MaybeSubstring::from_allocated(text);
-            return;
-        }
-        let value_text = std::str::from_utf8(&text).unwrap_or("");
-        self.number = if let Some(hex) = value_text
-            .strip_prefix("0x")
-            .or_else(|| value_text.strip_prefix("0X"))
-        {
-            parse_radix_f64(hex.as_bytes(), 16)
-        } else if let Some(octal) = value_text
-            .strip_prefix("0o")
-            .or_else(|| value_text.strip_prefix("0O"))
-        {
-            parse_radix_f64(octal.as_bytes(), 8)
-        } else if let Some(binary) = value_text
-            .strip_prefix("0b")
-            .or_else(|| value_text.strip_prefix("0B"))
-        {
-            parse_radix_f64(binary.as_bytes(), 2)
+        if base != 0 {
+            let mut is_first = true;
+            let mut is_invalid_legacy_octal_literal = false;
+            self.number = 0.0;
+            if !self.is_legacy_octal_literal {
+                self.step();
+            }
+            loop {
+                match char::from_u32(self.code_point) {
+                    Some('_') => {
+                        if last_underscore_end.is_some_and(|last| self.end == last + 1)
+                            || is_first
+                            || self.is_legacy_octal_literal
+                        {
+                            self.syntax_error();
+                        }
+                        last_underscore_end = Some(self.end);
+                        underscore_count += 1;
+                    }
+                    Some('0' | '1') => {
+                        self.number = self.number * f64::from(base)
+                            + f64::from(self.code_point - u32::from(b'0'));
+                    }
+                    Some('2'..='7') => {
+                        if base == 2 {
+                            self.syntax_error();
+                        }
+                        self.number = self.number * f64::from(base)
+                            + f64::from(self.code_point - u32::from(b'0'));
+                    }
+                    Some('8' | '9') => {
+                        if self.is_legacy_octal_literal {
+                            is_invalid_legacy_octal_literal = true;
+                        } else if base < 10 {
+                            self.syntax_error();
+                        }
+                        self.number = self.number * f64::from(base)
+                            + f64::from(self.code_point - u32::from(b'0'));
+                    }
+                    Some('A'..='F') => {
+                        if base != 16 {
+                            self.syntax_error();
+                        }
+                        self.number = self.number * f64::from(base)
+                            + f64::from(self.code_point + 10 - u32::from(b'A'));
+                    }
+                    Some('a'..='f') => {
+                        if base != 16 {
+                            self.syntax_error();
+                        }
+                        self.number = self.number * f64::from(base)
+                            + f64::from(self.code_point + 10 - u32::from(b'a'));
+                    }
+                    _ => {
+                        if is_first {
+                            self.syntax_error();
+                        }
+                        break;
+                    }
+                }
+                self.step();
+                is_first = false;
+            }
+
+            let is_big_integer_literal = self.code_point == u32::from(b'n') && !has_dot_or_exponent;
+            if is_big_integer_literal || is_invalid_legacy_octal_literal {
+                let mut text = self.raw_identifier();
+                if is_big_integer_literal && self.is_legacy_octal_literal {
+                    self.syntax_error();
+                }
+                if underscore_count > 0 {
+                    text = without_underscores(text);
+                }
+                if is_big_integer_literal {
+                    self.identifier = text;
+                } else {
+                    self.number = parse_decimal_f64(&text.string);
+                }
+            }
         } else {
-            value_text.parse().unwrap_or(f64::NAN)
-        };
+            let is_invalid_legacy_octal_literal = first == u32::from(b'0')
+                && matches!(char::from_u32(self.code_point), Some('8' | '9'));
+
+            loop {
+                if !is_decimal_digit(self.code_point) {
+                    if self.code_point != u32::from(b'_') {
+                        break;
+                    }
+                    if last_underscore_end.is_some_and(|last| self.end == last + 1)
+                        || is_invalid_legacy_octal_literal
+                    {
+                        self.syntax_error();
+                    }
+                    last_underscore_end = Some(self.end);
+                    underscore_count += 1;
+                }
+                self.step();
+            }
+
+            if first != u32::from(b'.') && self.code_point == u32::from(b'.') {
+                if last_underscore_end.is_some_and(|last| self.end == last + 1) {
+                    self.end -= 1;
+                    self.syntax_error();
+                }
+                has_dot_or_exponent = true;
+                self.step();
+                if self.code_point == u32::from(b'_') {
+                    self.syntax_error();
+                }
+                is_missing_digit_after_dot = true;
+                loop {
+                    if is_decimal_digit(self.code_point) {
+                        is_missing_digit_after_dot = false;
+                    } else {
+                        if self.code_point != u32::from(b'_') {
+                            break;
+                        }
+                        if last_underscore_end.is_some_and(|last| self.end == last + 1) {
+                            self.syntax_error();
+                        }
+                        last_underscore_end = Some(self.end);
+                        underscore_count += 1;
+                    }
+                    self.step();
+                }
+            }
+
+            if matches!(char::from_u32(self.code_point), Some('e' | 'E')) {
+                if last_underscore_end.is_some_and(|last| self.end == last + 1) {
+                    self.end -= 1;
+                    self.syntax_error();
+                }
+                has_dot_or_exponent = true;
+                self.step();
+                if matches!(char::from_u32(self.code_point), Some('+' | '-')) {
+                    self.step();
+                }
+                if !is_decimal_digit(self.code_point) {
+                    self.syntax_error();
+                }
+                loop {
+                    if !is_decimal_digit(self.code_point) {
+                        if self.code_point != u32::from(b'_') {
+                            break;
+                        }
+                        if last_underscore_end.is_some_and(|last| self.end == last + 1) {
+                            self.syntax_error();
+                        }
+                        last_underscore_end = Some(self.end);
+                        underscore_count += 1;
+                    }
+                    self.step();
+                }
+            }
+
+            let mut text = self.raw_identifier();
+            if underscore_count > 0 {
+                text = without_underscores(text);
+            }
+            if self.code_point == u32::from(b'n') && !has_dot_or_exponent {
+                if text.string.len() > 1 && first == u32::from(b'0') {
+                    self.syntax_error();
+                }
+                self.identifier = text;
+            } else if !has_dot_or_exponent && self.end - self.start < 10 {
+                let mut number = 0_u32;
+                for byte in text.string {
+                    number = number * 10 + u32::from(byte - b'0');
+                }
+                self.number = f64::from(number);
+            } else {
+                self.number = parse_decimal_f64(&text.string);
+            }
+        }
+
+        if last_underscore_end.is_some_and(|last| self.end == last + 1) {
+            self.end -= 1;
+            self.syntax_error();
+        }
+        if self.code_point == u32::from(b'n') && !has_dot_or_exponent {
+            self.token = Token::BigIntegerLiteral;
+            self.step();
+        }
+        if is_identifier_start(self.code_point) {
+            self.syntax_error();
+        }
+        if self.json == JsonFlavor::Json
+            && (first == u32::from(b'.')
+                || base != 0
+                || underscore_count > 0
+                || is_missing_digit_after_dot)
+        {
+            self.unexpected();
+        }
     }
 
     fn syntax_error(&mut self) -> ! {
@@ -1469,15 +1640,21 @@ fn is_identifier_bytes(text: &[u8]) -> bool {
     true
 }
 
-fn parse_radix_f64(text: &[u8], radix: u8) -> f64 {
-    let mut value = 0.0;
-    for byte in text {
-        let Some(digit) = char::from(*byte).to_digit(u32::from(radix)) else {
-            return f64::NAN;
-        };
-        value = value * f64::from(radix) + f64::from(digit);
-    }
-    value
+fn is_decimal_digit(code_point: u32) -> bool {
+    (u32::from(b'0')..=u32::from(b'9')).contains(&code_point)
+}
+
+fn without_underscores(mut text: MaybeSubstring) -> MaybeSubstring {
+    text.string.retain(|byte| *byte != b'_');
+    text.start = Index32::default();
+    text
+}
+
+fn parse_decimal_f64(text: &[u8]) -> f64 {
+    std::str::from_utf8(text)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(f64::NAN)
 }
 
 fn source_i32(value: usize) -> i32 {
@@ -1799,6 +1976,68 @@ mod tests {
         lexer.next();
         assert_eq!(lexer.token, Token::PrivateIdentifier);
         assert_eq!(lexer.identifier.string, b"#private");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn numeric_literals_match_upstream_forms() {
+        let cases = [
+            ("0", 0.0),
+            ("000", 0.0),
+            ("010", 8.0),
+            ("0123", 83.0),
+            ("0987.6543", 987.6543),
+            ("0b00101", 5.0),
+            ("0B101110", 46.0),
+            ("0o12345", 5349.0),
+            ("0x12345678", 305_419_896.0),
+            ("123.", 123.0),
+            (".0123", 0.0123),
+            ("1e+1", 10.0),
+            (".1e-1", 0.01),
+            ("1_2.3_4e2", 1234.0),
+            ("0b1_0", 2.0),
+            ("0o1_2", 10.0),
+            ("0x1_2", 18.0),
+        ];
+        for (text, expected) in cases {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let lexer = Lexer::new(log, source(text.as_bytes()), TsOptions::default());
+            assert_eq!(lexer.token, Token::NumericLiteral, "{text}");
+            assert_eq!(lexer.number, expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn bigint_literals_preserve_exact_text() {
+        let cases = [
+            ("0n", "0"),
+            ("9007199254740993n", "9007199254740993"),
+            ("0b1_0_1n", "0b101"),
+            ("0o1_2_3n", "0o123"),
+            ("0x1_2_3n", "0x123"),
+        ];
+        for (text, expected) in cases {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let lexer = Lexer::new(log, source(text.as_bytes()), TsOptions::default());
+            assert_eq!(lexer.token, Token::BigIntegerLiteral, "{text}");
+            assert_eq!(lexer.identifier.string, expected.as_bytes(), "{text}");
+        }
+    }
+
+    #[test]
+    fn malformed_numeric_literals_raise_lexer_panic() {
+        let cases = [
+            "0b", "0b012", "0o018", "0xGF", "1e", "1e+", "1e+-1", "1z", "1__2", "1_", "1._",
+            "0b_1", "0x1_", "1e2n", "1.0n", "000n",
+        ];
+        for text in cases {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+                Lexer::new(log, source(text.as_bytes()), TsOptions::default())
+            }));
+            assert!(result.is_err(), "{text}");
+        }
     }
 
     #[test]
