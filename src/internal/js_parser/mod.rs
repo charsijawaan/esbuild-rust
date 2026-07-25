@@ -5,6 +5,7 @@ mod duplicate_properties;
 mod global_name;
 mod json;
 mod options;
+mod parser_core;
 mod source_map;
 mod symbols;
 
