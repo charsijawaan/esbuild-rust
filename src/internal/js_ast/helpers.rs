@@ -54,6 +54,380 @@ where
 
     #[must_use]
     #[allow(clippy::too_many_lines)]
+    pub fn simplify_unused_expr(&self, expr: &Expr, unsupported_features: JsFeature) -> Expr {
+        match expr.data.as_deref() {
+            Some(ExprData::Annotation(value))
+                if value
+                    .flags
+                    .contains(AnnotationFlags::CAN_BE_REMOVED_IF_UNUSED) =>
+            {
+                return Expr::default();
+            }
+            Some(ExprData::InlinedEnum(value)) => {
+                return self.simplify_unused_expr(&value.value, unsupported_features);
+            }
+            Some(
+                ExprData::Null
+                | ExprData::Undefined
+                | ExprData::Missing
+                | ExprData::Boolean(_)
+                | ExprData::Number(_)
+                | ExprData::BigInt(_)
+                | ExprData::String(_)
+                | ExprData::This
+                | ExprData::RegExp(_)
+                | ExprData::Function(_)
+                | ExprData::Arrow(_)
+                | ExprData::ImportMeta(_),
+            ) => return Expr::default(),
+            Some(ExprData::Dot(value)) if value.can_be_removed_if_unused => {
+                return Expr::default();
+            }
+            Some(ExprData::Identifier(value))
+                if !value.must_keep_due_to_with_stmt
+                    && (value.can_be_removed_if_unused || !(self.is_unbound)(value.reference)) =>
+            {
+                return Expr::default();
+            }
+            Some(ExprData::Template(value)) if value.tag_or_nil.data.is_none() => {
+                let mut comma = Expr::default();
+                let mut pending_template: Option<(Loc, super::TemplateExpr)> = None;
+                for part in &value.parts {
+                    if known_primitive_type(part.value.data.as_deref()) == PrimitiveType::Unknown {
+                        let (_, template) = pending_template.get_or_insert_with(|| {
+                            (part.value.loc, super::TemplateExpr::default())
+                        });
+                        template.parts.push(super::TemplatePart {
+                            value: part.value.clone(),
+                            ..super::TemplatePart::default()
+                        });
+                    } else {
+                        if let Some((loc, template)) = pending_template.take() {
+                            comma = join_with_comma(
+                                comma,
+                                Expr::new(loc, ExprData::Template(template)),
+                            );
+                        }
+                        comma = join_with_comma(
+                            comma,
+                            self.simplify_unused_expr(&part.value, unsupported_features),
+                        );
+                    }
+                }
+                if let Some((loc, template)) = pending_template {
+                    comma = join_with_comma(comma, Expr::new(loc, ExprData::Template(template)));
+                }
+                return comma;
+            }
+            Some(ExprData::Template(value)) if value.can_be_unwrapped_if_unused => {
+                return join_all_with_comma(
+                    value
+                        .parts
+                        .iter()
+                        .map(|part| self.simplify_unused_expr(&part.value, unsupported_features)),
+                );
+            }
+            Some(ExprData::Array(value)) => {
+                if value
+                    .items
+                    .iter()
+                    .any(|item| matches!(item.data.as_deref(), Some(ExprData::Spread(_))))
+                {
+                    let items = value
+                        .items
+                        .iter()
+                        .map(|item| self.simplify_unused_expr(item, unsupported_features))
+                        .filter(|item| item.data.is_some())
+                        .collect();
+                    return Expr::new(
+                        expr.loc,
+                        ExprData::Array(ArrayExpr {
+                            items,
+                            ..value.clone()
+                        }),
+                    );
+                }
+                return join_all_with_comma(
+                    value
+                        .items
+                        .iter()
+                        .map(|item| self.simplify_unused_expr(item, unsupported_features)),
+                );
+            }
+            Some(ExprData::Object(value)) => {
+                if value
+                    .properties
+                    .iter()
+                    .any(|property| property.kind == PropertyKind::Spread)
+                {
+                    let mut properties = Vec::with_capacity(value.properties.len());
+                    for original in &value.properties {
+                        let mut property = original.clone();
+                        if property.kind != PropertyKind::Spread {
+                            let simplified = self
+                                .simplify_unused_expr(&property.value_or_nil, unsupported_features);
+                            if simplified.data.is_some() {
+                                property.value_or_nil = simplified;
+                            } else if !property.flags.contains(PropertyFlags::IS_COMPUTED) {
+                                continue;
+                            } else {
+                                property.value_or_nil =
+                                    Expr::new(property.value_or_nil.loc, ExprData::Number(0.0));
+                            }
+                        }
+                        properties.push(property);
+                    }
+                    return Expr::new(
+                        expr.loc,
+                        ExprData::Object(ObjectExpr {
+                            properties,
+                            ..value.clone()
+                        }),
+                    );
+                }
+
+                let mut result = Expr::default();
+                for property in &value.properties {
+                    if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+                        result = join_with_comma(
+                            result,
+                            Expr::new(
+                                property.key.loc,
+                                ExprData::Binary(BinaryExpr {
+                                    left: property.key.clone(),
+                                    right: Expr::new(
+                                        property.key.loc,
+                                        ExprData::String(super::StringExpr::default()),
+                                    ),
+                                    op: OpCode::BinaryAdd,
+                                }),
+                            ),
+                        );
+                    }
+                    result = join_with_comma(
+                        result,
+                        self.simplify_unused_expr(&property.value_or_nil, unsupported_features),
+                    );
+                }
+                return result;
+            }
+            Some(ExprData::If(value)) => {
+                let yes = self.simplify_unused_expr(&value.yes, unsupported_features);
+                let no = self.simplify_unused_expr(&value.no, unsupported_features);
+                if yes.data.is_none() && no.data.is_none() {
+                    return self.simplify_unused_expr(&value.test, unsupported_features);
+                }
+                if yes.data.is_none() {
+                    return join_with_left_associative_op(
+                        OpCode::BinaryLogicalOr,
+                        value.test.clone(),
+                        no,
+                    );
+                }
+                if no.data.is_none() {
+                    return join_with_left_associative_op(
+                        OpCode::BinaryLogicalAnd,
+                        value.test.clone(),
+                        yes,
+                    );
+                }
+                return Expr::new(
+                    expr.loc,
+                    ExprData::If(super::IfExpr {
+                        test: value.test.clone(),
+                        yes,
+                        no,
+                    }),
+                );
+            }
+            Some(ExprData::Unary(value)) => match value.op {
+                OpCode::UnaryNegative
+                    if matches!(value.value.data.as_deref(), Some(ExprData::BigInt(_))) =>
+                {
+                    return Expr::default();
+                }
+                OpCode::UnaryTypeof
+                    if value.was_originally_typeof_identifier
+                        && matches!(value.value.data.as_deref(), Some(ExprData::Identifier(_))) =>
+                {
+                    return Expr::default();
+                }
+                OpCode::UnaryVoid | OpCode::UnaryNot | OpCode::UnaryTypeof => {
+                    return self.simplify_unused_expr(&value.value, unsupported_features);
+                }
+                _ => {}
+            },
+            Some(ExprData::Binary(value)) => {
+                let mut left = value.left.clone();
+                let mut right = value.right.clone();
+                match value.op {
+                    OpCode::BinaryStrictEqual
+                    | OpCode::BinaryStrictNotEqual
+                    | OpCode::BinaryComma => {
+                        return join_with_comma(
+                            self.simplify_unused_expr(&left, unsupported_features),
+                            self.simplify_unused_expr(&right, unsupported_features),
+                        );
+                    }
+                    OpCode::BinaryLooseEqual | OpCode::BinaryLooseNotEqual
+                        if merged_known_primitive_types(&left, &right)
+                            != PrimitiveType::Unknown =>
+                    {
+                        return join_with_comma(
+                            self.simplify_unused_expr(&left, unsupported_features),
+                            self.simplify_unused_expr(&right, unsupported_features),
+                        );
+                    }
+                    OpCode::BinaryLogicalAnd
+                    | OpCode::BinaryLogicalOr
+                    | OpCode::BinaryNullishCoalescing => {
+                        if value.op != OpCode::BinaryNullishCoalescing {
+                            left = self.simplify_boolean_expr(&left);
+                        }
+                        right = self.simplify_unused_expr(&right, unsupported_features);
+                        if right.data.is_none() {
+                            return self.simplify_unused_expr(&left, unsupported_features);
+                        }
+
+                        if !unsupported_features.contains(JsFeature::OPTIONAL_CHAIN)
+                            && let Some(ExprData::Binary(comparison)) = left.data.as_deref()
+                            && ((comparison.op == OpCode::BinaryLooseNotEqual
+                                && value.op == OpCode::BinaryLogicalAnd)
+                                || (comparison.op == OpCode::BinaryLooseEqual
+                                    && value.op == OpCode::BinaryLogicalOr))
+                        {
+                            let test =
+                                if matches!(comparison.right.data.as_deref(), Some(ExprData::Null))
+                                {
+                                    Some(&comparison.left)
+                                } else if matches!(
+                                    comparison.left.data.as_deref(),
+                                    Some(ExprData::Null)
+                                ) {
+                                    Some(&comparison.right)
+                                } else {
+                                    None
+                                };
+                            if let Some(test) = test
+                                && matches!(
+                                    test.data.as_deref(),
+                                    Some(ExprData::Identifier(identifier))
+                                        if !identifier.must_keep_due_to_with_stmt
+                                )
+                                && try_to_insert_optional_chain(test, &mut right)
+                            {
+                                return right;
+                            }
+                        }
+                    }
+                    OpCode::BinaryAdd => {
+                        let (result, is_string_addition) =
+                            simplify_unused_string_addition_chain(expr);
+                        if is_string_addition {
+                            return result;
+                        }
+                    }
+                    _ => {}
+                }
+                return Expr::new(
+                    expr.loc,
+                    ExprData::Binary(BinaryExpr {
+                        left,
+                        right,
+                        ..value.clone()
+                    }),
+                );
+            }
+            Some(ExprData::Call(value)) if value.can_be_unwrapped_if_unused => {
+                return join_all_with_comma(value.args.iter().map(|argument| {
+                    let argument = if matches!(argument.data.as_deref(), Some(ExprData::Spread(_)))
+                    {
+                        Expr::new(
+                            argument.loc,
+                            ExprData::Array(ArrayExpr {
+                                items: vec![argument.clone()],
+                                is_single_line: true,
+                                ..ArrayExpr::default()
+                            }),
+                        )
+                    } else {
+                        argument.clone()
+                    };
+                    self.simplify_unused_expr(&argument, unsupported_features)
+                }));
+            }
+            Some(ExprData::Call(value)) if value.args.is_empty() => {
+                match value.target.data.as_deref() {
+                    Some(ExprData::Function(target))
+                        if target.function.args.is_empty()
+                            && target.function.body.block.statements.is_empty() =>
+                    {
+                        return Expr::default();
+                    }
+                    Some(ExprData::Arrow(target)) if target.args.is_empty() => {
+                        if target.body.block.statements.is_empty() {
+                            return Expr::default();
+                        }
+                        if let [statement] = target.body.block.statements.as_slice() {
+                            match statement.data.as_deref() {
+                                Some(StmtData::Expr(statement)) if !target.is_async => {
+                                    return statement.value.clone();
+                                }
+                                Some(StmtData::Expr(statement)) => {
+                                    let mut target = target.clone();
+                                    target.body.block.statements[0] = Stmt::new(
+                                        statement.value.loc,
+                                        StmtData::Return(super::ReturnStmt {
+                                            value_or_nil: statement.value.clone(),
+                                        }),
+                                    );
+                                    target.prefer_expr = true;
+                                    return Expr::new(
+                                        expr.loc,
+                                        ExprData::Call(super::CallExpr {
+                                            target: Expr::new(
+                                                value.target.loc,
+                                                ExprData::Arrow(target),
+                                            ),
+                                            ..super::CallExpr::default()
+                                        }),
+                                    );
+                                }
+                                Some(StmtData::Return(statement)) if !target.is_async => {
+                                    return statement.value_or_nil.clone();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some(ExprData::New(value)) if value.can_be_unwrapped_if_unused => {
+                return join_all_with_comma(value.args.iter().map(|argument| {
+                    let argument = if matches!(argument.data.as_deref(), Some(ExprData::Spread(_)))
+                    {
+                        Expr::new(
+                            argument.loc,
+                            ExprData::Array(ArrayExpr {
+                                items: vec![argument.clone()],
+                                is_single_line: true,
+                                ..ArrayExpr::default()
+                            }),
+                        )
+                    } else {
+                        argument.clone()
+                    };
+                    self.simplify_unused_expr(&argument, unsupported_features)
+                }));
+            }
+            _ => {}
+        }
+        expr.clone()
+    }
+
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
     /// # Panics
     ///
     /// Panics if a default export contains an invalid internal statement kind.
@@ -1609,6 +1983,52 @@ pub fn simplify_boolean_expr(
     }
 }
 
+fn simplify_unused_string_addition_chain(expr: &Expr) -> (Expr, bool) {
+    match expr.data.as_deref() {
+        Some(ExprData::String(_)) => (
+            Expr::new(expr.loc, ExprData::String(super::StringExpr::default())),
+            true,
+        ),
+        Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryAdd => {
+            let (left, left_is_string_addition) =
+                simplify_unused_string_addition_chain(&binary.left);
+            if let Some(ExprData::String(right)) = binary.right.data.as_deref() {
+                if left_is_string_addition {
+                    return (left, true);
+                }
+                if !right.value.is_empty() {
+                    return (
+                        Expr::new(
+                            expr.loc,
+                            ExprData::Binary(BinaryExpr {
+                                left,
+                                right: Expr::new(
+                                    binary.right.loc,
+                                    ExprData::String(super::StringExpr::default()),
+                                ),
+                                op: OpCode::BinaryAdd,
+                            }),
+                        ),
+                        true,
+                    );
+                }
+            }
+            (
+                Expr::new(
+                    expr.loc,
+                    ExprData::Binary(BinaryExpr {
+                        left,
+                        right: binary.right.clone(),
+                        ..binary.clone()
+                    }),
+                ),
+                left_is_string_addition,
+            )
+        }
+        _ => (expr.clone(), false),
+    }
+}
+
 #[must_use]
 pub fn is_binary_null_and_undefined(left: &Expr, right: &Expr, op: OpCode) -> Option<(Expr, Expr)> {
     let Some(ExprData::Binary(left_binary)) = left.data.as_deref() else {
@@ -2302,10 +2722,10 @@ mod tests {
     use crate::internal::compat::JsFeature;
     use crate::internal::js_ast::{
         ArrayBinding, ArrayBindingPattern, ArrayExpr, BinaryExpr, Binding, BindingData, CallExpr,
-        Class, Decl, Expr, ExprData, ExprStmt, IdentifierBinding, IdentifierExpr, IfExpr,
-        LocalKind, LocalStmt, ObjectBindingPattern, ObjectExpr, OpCode, OptionalChain, Property,
-        PropertyBinding, PropertyFlags, PropertyKind, ReturnStmt, SpreadExpr, Stmt, StmtData,
-        StringExpr, TemplateExpr, TemplatePart, UnaryExpr,
+        Class, Decl, Expr, ExprData, ExprStmt, Function, FunctionExpr, IdentifierBinding,
+        IdentifierExpr, IfExpr, LocalKind, LocalStmt, ObjectBindingPattern, ObjectExpr, OpCode,
+        OptionalChain, Property, PropertyBinding, PropertyFlags, PropertyKind, ReturnStmt,
+        SpreadExpr, Stmt, StmtData, StringExpr, TemplateExpr, TemplatePart, UnaryExpr,
     };
     use crate::internal::logger::Loc;
 
@@ -3260,5 +3680,195 @@ mod tests {
             &[generated_effect],
             StmtsCanBeRemovedIfUnusedFlags::NONE,
         ));
+    }
+
+    #[test]
+    fn simplifies_unused_literals_arrays_and_conditionals() {
+        let context = make_helper_context(|_| false);
+        assert!(
+            context
+                .simplify_unused_expr(&number(1.0), JsFeature::NONE)
+                .data
+                .is_none()
+        );
+
+        let call = Expr::new(Loc::default(), ExprData::Call(CallExpr::default()));
+        let array = Expr::new(
+            Loc::default(),
+            ExprData::Array(ArrayExpr {
+                items: vec![number(1.0), call.clone()],
+                ..ArrayExpr::default()
+            }),
+        );
+        assert!(matches!(
+            context
+                .simplify_unused_expr(&array, JsFeature::NONE)
+                .data
+                .as_deref(),
+            Some(ExprData::Call(_))
+        ));
+
+        let conditional = Expr::new(
+            Loc::default(),
+            ExprData::If(IfExpr {
+                test: Expr::new(
+                    Loc::default(),
+                    ExprData::Identifier(IdentifierExpr::default()),
+                ),
+                yes: number(1.0),
+                no: call,
+            }),
+        );
+        assert!(matches!(
+            context
+                .simplify_unused_expr(&conditional, JsFeature::NONE)
+                .data
+                .as_deref(),
+            Some(ExprData::Binary(BinaryExpr {
+                op: OpCode::BinaryLogicalOr,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn preserves_spread_and_computed_key_evaluation_when_unused() {
+        let context = make_helper_context(|_| false);
+        let spread = Expr::new(
+            Loc::default(),
+            ExprData::Spread(SpreadExpr {
+                value: Expr::new(
+                    Loc::default(),
+                    ExprData::Identifier(IdentifierExpr::default()),
+                ),
+            }),
+        );
+        let array = Expr::new(
+            Loc::default(),
+            ExprData::Array(ArrayExpr {
+                items: vec![number(1.0), spread],
+                ..ArrayExpr::default()
+            }),
+        );
+        assert!(matches!(
+            context
+                .simplify_unused_expr(&array, JsFeature::NONE)
+                .data
+                .as_deref(),
+            Some(ExprData::Array(value)) if value.items.len() == 1
+        ));
+
+        let object = Expr::new(
+            Loc::default(),
+            ExprData::Object(ObjectExpr {
+                properties: vec![Property {
+                    key: Expr::new(
+                        Loc::default(),
+                        ExprData::Identifier(IdentifierExpr::default()),
+                    ),
+                    value_or_nil: number(1.0),
+                    flags: PropertyFlags::IS_COMPUTED,
+                    ..Property::default()
+                }],
+                ..ObjectExpr::default()
+            }),
+        );
+        assert!(matches!(
+            context
+                .simplify_unused_expr(&object, JsFeature::NONE)
+                .data
+                .as_deref(),
+            Some(ExprData::Binary(BinaryExpr {
+                op: OpCode::BinaryAdd,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn simplifies_null_checks_into_optional_chains() {
+        let reference = Ref {
+            source_index: 11,
+            inner_index: 12,
+        };
+        let context = make_helper_context(|_| false);
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference,
+                ..IdentifierExpr::default()
+            }),
+        );
+        let expression = Expr::new(
+            Loc::default(),
+            ExprData::Binary(BinaryExpr {
+                left: Expr::new(
+                    Loc::default(),
+                    ExprData::Binary(BinaryExpr {
+                        left: identifier.clone(),
+                        right: Expr::new(Loc::default(), ExprData::Null),
+                        op: OpCode::BinaryLooseNotEqual,
+                    }),
+                ),
+                right: Expr::new(
+                    Loc::default(),
+                    ExprData::Dot(crate::internal::js_ast::DotExpr {
+                        target: identifier,
+                        name: "value".into(),
+                        ..crate::internal::js_ast::DotExpr::default()
+                    }),
+                ),
+                op: OpCode::BinaryLogicalAnd,
+            }),
+        );
+        assert!(matches!(
+            context
+                .simplify_unused_expr(&expression, JsFeature::NONE)
+                .data
+                .as_deref(),
+            Some(ExprData::Dot(value))
+                if value.optional_chain == OptionalChain::Start
+        ));
+    }
+
+    #[test]
+    fn unwraps_pure_calls_and_empty_iifes_when_unused() {
+        let context = make_helper_context(|_| false);
+        let effect = Expr::new(Loc::default(), ExprData::Call(CallExpr::default()));
+        let pure = Expr::new(
+            Loc::default(),
+            ExprData::Call(CallExpr {
+                args: vec![number(1.0), effect],
+                can_be_unwrapped_if_unused: true,
+                ..CallExpr::default()
+            }),
+        );
+        assert!(matches!(
+            context
+                .simplify_unused_expr(&pure, JsFeature::NONE)
+                .data
+                .as_deref(),
+            Some(ExprData::Call(_))
+        ));
+
+        let empty_iife = Expr::new(
+            Loc::default(),
+            ExprData::Call(CallExpr {
+                target: Expr::new(
+                    Loc::default(),
+                    ExprData::Function(FunctionExpr {
+                        function: Function::default(),
+                        ..FunctionExpr::default()
+                    }),
+                ),
+                ..CallExpr::default()
+            }),
+        );
+        assert!(
+            context
+                .simplify_unused_expr(&empty_iife, JsFeature::NONE)
+                .data
+                .is_none()
+        );
     }
 }
