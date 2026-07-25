@@ -6,7 +6,7 @@ use crate::internal::{
     config::TsOptions,
     helpers::decode_wtf8_rune,
     js_ast,
-    logger::{LineColumnTracker, Loc, Log, Msg, MsgData, MsgKind, Range, Source, Span},
+    logger::{LineColumnTracker, Loc, Log, Msg, MsgData, MsgId, MsgKind, Range, Source, Span},
 };
 
 use super::Token;
@@ -1078,13 +1078,43 @@ impl Lexer {
                     Token::PlusPlus,
                     Token::PlusPlus,
                 ),
-                '-' => self.scan_pair_or_equals(
-                    b'-',
-                    Token::Minus,
-                    Token::MinusEquals,
-                    Token::MinusMinus,
-                    Token::MinusMinus,
-                ),
+                '-' => {
+                    self.step();
+                    if self.code_point == u32::from(b'=') {
+                        self.step();
+                        self.token = Token::MinusEquals;
+                    } else if self.code_point == u32::from(b'-') {
+                        self.step();
+                        if self.code_point == u32::from(b'>') && self.has_newline_before {
+                            self.step();
+                            let range = self.range();
+                            self.legacy_html_comment_range = range;
+                            self.log.add_id(
+                                MsgId::JsHtmlCommentInJs,
+                                MsgKind::Warning,
+                                Some(&mut self.tracker),
+                                range,
+                                "Treating \"-->\" as the start of a legacy HTML single-line comment",
+                            );
+                            while !matches!(
+                                char::from_u32(self.code_point),
+                                None | Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
+                            ) {
+                                self.step();
+                            }
+                            continue;
+                        }
+                        self.token = Token::MinusMinus;
+                    } else {
+                        self.token = Token::Minus;
+                        if self.json == JsonFlavor::Json
+                            && self.code_point != u32::from(b'.')
+                            && !is_decimal_digit(self.code_point)
+                        {
+                            self.unexpected();
+                        }
+                    }
+                }
                 '*' => self.scan_pair_or_equals(
                     b'*',
                     Token::Asterisk,
@@ -1168,7 +1198,45 @@ impl Lexer {
                         self.token = Token::Equals;
                     }
                 }
-                '<' => self.scan_less_than(),
+                '<' => {
+                    self.step();
+                    if self.code_point == u32::from(b'=') {
+                        self.step();
+                        self.token = Token::LessThanEquals;
+                    } else if self.code_point == u32::from(b'<') {
+                        self.step();
+                        if self.code_point == u32::from(b'=') {
+                            self.step();
+                            self.token = Token::LessThanLessThanEquals;
+                        } else {
+                            self.token = Token::LessThanLessThan;
+                        }
+                    } else if self.code_point == u32::from(b'!')
+                        && self.source.contents[self.start..].starts_with(b"<!--")
+                    {
+                        self.step();
+                        self.step();
+                        self.step();
+                        let range = self.range();
+                        self.legacy_html_comment_range = range;
+                        self.log.add_id(
+                            MsgId::JsHtmlCommentInJs,
+                            MsgKind::Warning,
+                            Some(&mut self.tracker),
+                            range,
+                            "Treating \"<!--\" as the start of a legacy HTML single-line comment",
+                        );
+                        while !matches!(
+                            char::from_u32(self.code_point),
+                            None | Some('\r' | '\n' | '\u{2028}' | '\u{2029}')
+                        ) {
+                            self.step();
+                        }
+                        continue;
+                    } else {
+                        self.token = Token::LessThan;
+                    }
+                }
                 '>' => self.scan_greater_than(),
                 '!' => {
                     self.step();
@@ -1247,24 +1315,6 @@ impl Lexer {
         }
     }
 
-    fn scan_less_than(&mut self) {
-        self.step();
-        if self.code_point == u32::from(b'=') {
-            self.step();
-            self.token = Token::LessThanEquals;
-        } else if self.code_point == u32::from(b'<') {
-            self.step();
-            if self.code_point == u32::from(b'=') {
-                self.step();
-                self.token = Token::LessThanLessThanEquals;
-            } else {
-                self.token = Token::LessThanLessThan;
-            }
-        } else {
-            self.token = Token::LessThan;
-        }
-    }
-
     fn scan_greater_than(&mut self) {
         self.step();
         if self.code_point == u32::from(b'=') {
@@ -1312,6 +1362,13 @@ impl Lexer {
                     self.step();
                     if self.code_point == END_OF_FILE {
                         self.unterminated_string();
+                    }
+                    if self.code_point == u32::from(b'\r') && self.json != JsonFlavor::Json {
+                        self.step();
+                        if self.code_point == u32::from(b'\n') {
+                            self.step();
+                        }
+                        continue;
                     }
                     self.step();
                 }
@@ -2698,6 +2755,42 @@ mod tests {
             lexer.string_literal(),
             "tail".encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn legacy_html_comments_are_skipped_with_warnings() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(
+            log.clone(),
+            source(b"<!-- open\nfirst\n--> close\nsecond"),
+            TsOptions::default(),
+        );
+        assert_eq!(lexer.token, Token::Identifier);
+        assert_eq!(lexer.raw(), b"first");
+        lexer.next();
+        assert_eq!(lexer.token, Token::Identifier);
+        assert_eq!(lexer.raw(), b"second");
+        assert_eq!(log.done().len(), 2);
+    }
+
+    #[test]
+    fn escaped_windows_newlines_are_string_line_continuations() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(log, source(b"'a\\\r\nb'"), TsOptions::default());
+        assert_eq!(lexer.token, Token::StringLiteral);
+        assert_eq!(
+            lexer.string_literal(),
+            "ab".encode_utf16().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn json_minus_must_precede_a_number() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            Lexer::new_json(log, source(b"-value"), JsonFlavor::Json, "")
+        }));
+        assert!(result.is_err());
     }
 
     #[test]
