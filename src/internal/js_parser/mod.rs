@@ -9,6 +9,7 @@ mod global_name;
 mod json;
 mod options;
 mod parser_core;
+mod parser_types;
 mod source_map;
 mod standalone_helpers;
 mod symbols;
