@@ -1,7 +1,10 @@
 // Port of upstream internal/sourcemap.
 
 use crate::internal::ast::Index32;
-use crate::internal::helpers::Joiner;
+use crate::internal::helpers::{Joiner, quote_for_json};
+use crate::internal::logger::Loc;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Mapping {
@@ -447,12 +450,358 @@ fn append_mapping_to_buffer(
     (buffer, name_offset)
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LineOffsetTable {
+    columns_for_non_ascii: Option<Vec<i32>>,
+    byte_offset_to_first_non_ascii: i32,
+    byte_offset_to_start_of_line: i32,
+}
+
+/// # Panics
+///
+/// Panics if the source is larger than the signed 32-bit size limit.
+#[must_use]
+pub fn generate_line_offset_tables(
+    contents: &[u8],
+    approximate_line_count: i32,
+) -> Vec<LineOffsetTable> {
+    let mut columns_for_non_ascii: Option<Vec<i32>> = None;
+    let mut byte_offset_to_first_non_ascii = 0;
+    let mut line_byte_offset = 0;
+    let mut column_byte_offset = 0;
+    let mut column = 0;
+    let mut tables = Vec::with_capacity(
+        usize::try_from(approximate_line_count).expect("line count must be non-negative"),
+    );
+
+    let mut index = 0;
+    while index < contents.len() {
+        let (character, width) = decode_utf8_rune(&contents[index..]);
+        if column == 0 {
+            line_byte_offset = index;
+        }
+
+        if u32::from(character) > 0x7f && columns_for_non_ascii.is_none() {
+            column_byte_offset = index - line_byte_offset;
+            byte_offset_to_first_non_ascii =
+                i32::try_from(column_byte_offset).expect("source must fit in 32 bits");
+            columns_for_non_ascii = Some(Vec::new());
+        }
+
+        if let Some(columns) = &mut columns_for_non_ascii {
+            let line_bytes_so_far = index - line_byte_offset;
+            while column_byte_offset <= line_bytes_so_far {
+                columns.push(column);
+                column_byte_offset += 1;
+            }
+        }
+
+        match character {
+            '\r' | '\n' | '\u{2028}' | '\u{2029}' => {
+                if character == '\r' && contents.get(index + 1) == Some(&b'\n') {
+                    column += 1;
+                    index += width;
+                    continue;
+                }
+
+                tables.push(LineOffsetTable {
+                    byte_offset_to_start_of_line: i32::try_from(line_byte_offset)
+                        .expect("source must fit in 32 bits"),
+                    byte_offset_to_first_non_ascii,
+                    columns_for_non_ascii,
+                });
+                column_byte_offset = 0;
+                byte_offset_to_first_non_ascii = 0;
+                columns_for_non_ascii = None;
+                column = 0;
+            }
+            _ => {
+                column += if u32::from(character) <= 0xffff { 1 } else { 2 };
+            }
+        }
+        index += width;
+    }
+
+    if column == 0 {
+        line_byte_offset = contents.len();
+    }
+    if let Some(columns) = &mut columns_for_non_ascii {
+        let line_bytes_so_far = contents.len() - line_byte_offset;
+        while column_byte_offset <= line_bytes_so_far {
+            columns.push(column);
+            column_byte_offset += 1;
+        }
+    }
+    tables.push(LineOffsetTable {
+        byte_offset_to_start_of_line: i32::try_from(line_byte_offset)
+            .expect("source must fit in 32 bits"),
+        byte_offset_to_first_non_ascii,
+        columns_for_non_ascii,
+    });
+    tables
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Chunk {
+    pub buffer: MappingsBuffer,
+    pub quoted_names: Vec<Vec<u8>>,
+    pub end_state: SourceMapState,
+    pub final_generated_column: i32,
+    pub should_ignore: bool,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug)]
+pub struct ChunkBuilder {
+    input_source_map: Option<Arc<SourceMap>>,
+    source_map: Vec<u8>,
+    quoted_names: Vec<Vec<u8>>,
+    names_map: HashMap<String, u32>,
+    line_offset_tables: Vec<LineOffsetTable>,
+    previous_original_name: String,
+    previous_state: SourceMapState,
+    last_generated_update: usize,
+    generated_column: i32,
+    previous_generated_len: usize,
+    previous_original_location: Loc,
+    first_name_offset: Index32,
+    has_previous_state: bool,
+    ascii_only: bool,
+    line_starts_with_mapping: bool,
+    cover_lines_without_mappings: bool,
+}
+
+#[must_use]
+pub fn make_chunk_builder(
+    input_source_map: Option<Arc<SourceMap>>,
+    line_offset_tables: Vec<LineOffsetTable>,
+    ascii_only: bool,
+) -> ChunkBuilder {
+    let cover_lines_without_mappings = input_source_map.is_none();
+    ChunkBuilder {
+        input_source_map,
+        source_map: Vec::new(),
+        quoted_names: Vec::new(),
+        names_map: HashMap::new(),
+        line_offset_tables,
+        previous_original_name: String::new(),
+        previous_state: SourceMapState::default(),
+        last_generated_update: 0,
+        generated_column: 0,
+        previous_generated_len: 0,
+        previous_original_location: Loc { start: -1 },
+        first_name_offset: Index32::default(),
+        has_previous_state: false,
+        ascii_only,
+        line_starts_with_mapping: false,
+        cover_lines_without_mappings,
+    }
+}
+
+impl ChunkBuilder {
+    /// # Panics
+    ///
+    /// Panics if `original_location` is outside the source, line-offset tables
+    /// are missing, or `output` shrinks between calls.
+    pub fn add_source_mapping(
+        &mut self,
+        original_location: Loc,
+        original_name: &str,
+        output: &[u8],
+    ) {
+        if original_location == self.previous_original_location
+            && (self.previous_generated_len == output.len()
+                || self.previous_original_name == original_name)
+        {
+            return;
+        }
+        self.previous_original_location = original_location;
+        self.previous_generated_len = output.len();
+        original_name.clone_into(&mut self.previous_original_name);
+
+        let mut count = self.line_offset_tables.len();
+        let mut original_line = 0;
+        while count > 0 {
+            let step = count / 2;
+            let candidate = original_line + step;
+            if self.line_offset_tables[candidate].byte_offset_to_start_of_line
+                <= original_location.start
+            {
+                original_line = candidate + 1;
+                count -= step + 1;
+            } else {
+                count = step;
+            }
+        }
+        original_line -= 1;
+
+        let line = &self.line_offset_tables[original_line];
+        let mut original_column =
+            usize::try_from(original_location.start - line.byte_offset_to_start_of_line)
+                .expect("original column must be non-negative");
+        if let Some(columns) = &line.columns_for_non_ascii
+            && original_column
+                >= usize::try_from(line.byte_offset_to_first_non_ascii)
+                    .expect("non-ASCII offset must be non-negative")
+        {
+            original_column = usize::try_from(
+                columns[original_column
+                    - usize::try_from(line.byte_offset_to_first_non_ascii)
+                        .expect("non-ASCII offset must be non-negative")],
+            )
+            .expect("UTF-16 column must be non-negative");
+        }
+
+        self.update_generated_line_and_column(output);
+        if self.cover_lines_without_mappings
+            && !self.line_starts_with_mapping
+            && self.generated_column > 0
+            && self.has_previous_state
+        {
+            self.append_mapping_without_remapping(SourceMapState {
+                generated_line: self.previous_state.generated_line,
+                generated_column: 0,
+                source_index: self.previous_state.source_index,
+                original_line: self.previous_state.original_line,
+                original_column: self.previous_state.original_column,
+                ..SourceMapState::default()
+            });
+        }
+
+        self.append_mapping(
+            original_name,
+            SourceMapState {
+                generated_line: self.previous_state.generated_line,
+                generated_column: self.generated_column,
+                original_line: i32::try_from(original_line)
+                    .expect("line index must fit in 32 bits"),
+                original_column: i32::try_from(original_column)
+                    .expect("column must fit in 32 bits"),
+                ..SourceMapState::default()
+            },
+        );
+        self.line_starts_with_mapping = true;
+    }
+
+    /// # Panics
+    ///
+    /// Panics if `output` shrinks after the last mapping.
+    #[must_use]
+    pub fn generate_chunk(mut self, output: &[u8]) -> Chunk {
+        self.update_generated_line_and_column(output);
+        let should_ignore = self.source_map.iter().all(|byte| *byte == b';');
+        Chunk {
+            buffer: MappingsBuffer {
+                data: self.source_map,
+                first_name_offset: self.first_name_offset,
+            },
+            quoted_names: self.quoted_names,
+            end_state: self.previous_state,
+            final_generated_column: self.generated_column,
+            should_ignore,
+        }
+    }
+
+    fn update_generated_line_and_column(&mut self, output: &[u8]) {
+        let mut index = self.last_generated_update;
+        while index < output.len() {
+            let (character, width) = decode_utf8_rune(&output[index..]);
+            match character {
+                '\r' | '\n' | '\u{2028}' | '\u{2029}' => {
+                    if character == '\r' && output.get(index + 1) == Some(&b'\n') {
+                        index += width;
+                        continue;
+                    }
+                    if self.cover_lines_without_mappings
+                        && !self.line_starts_with_mapping
+                        && self.has_previous_state
+                    {
+                        self.append_mapping_without_remapping(SourceMapState {
+                            generated_line: self.previous_state.generated_line,
+                            generated_column: 0,
+                            source_index: self.previous_state.source_index,
+                            original_line: self.previous_state.original_line,
+                            original_column: self.previous_state.original_column,
+                            ..SourceMapState::default()
+                        });
+                    }
+                    self.previous_state.generated_line += 1;
+                    self.previous_state.generated_column = 0;
+                    self.generated_column = 0;
+                    self.source_map.push(b';');
+                    self.line_starts_with_mapping = false;
+                }
+                _ => {
+                    self.generated_column += if u32::from(character) <= 0xffff { 1 } else { 2 };
+                }
+            }
+            index += width;
+        }
+        self.last_generated_update = output.len();
+    }
+
+    fn append_mapping(&mut self, original_name: &str, mut current_state: SourceMapState) {
+        let mut original_name = original_name;
+        if let Some(input_source_map) = &self.input_source_map {
+            let Some(mapping) =
+                input_source_map.find(current_state.original_line, current_state.original_column)
+            else {
+                return;
+            };
+            current_state.source_index = mapping.source_index;
+            current_state.original_line = mapping.original_line;
+            current_state.original_column = mapping.original_column;
+            if mapping.original_name.is_valid() {
+                original_name =
+                    &input_source_map.names[usize::try_from(mapping.original_name.get_index())
+                        .expect("name index must fit in usize")];
+            }
+        }
+
+        if !original_name.is_empty() {
+            let index = if let Some(index) = self.names_map.get(original_name) {
+                *index
+            } else {
+                let index =
+                    u32::try_from(self.quoted_names.len()).expect("name count must fit in 32 bits");
+                self.quoted_names
+                    .push(quote_for_json(original_name.as_bytes(), self.ascii_only));
+                self.names_map.insert(original_name.to_string(), index);
+                index
+            };
+            current_state.original_name = i32::try_from(index).expect("name index must fit in i32");
+            current_state.has_original_name = true;
+        }
+        self.append_mapping_without_remapping(current_state);
+    }
+
+    fn append_mapping_without_remapping(&mut self, current_state: SourceMapState) {
+        let last_byte = self.source_map.last().copied().unwrap_or(0);
+        let (source_map, name_offset) = append_mapping_to_buffer(
+            std::mem::take(&mut self.source_map),
+            last_byte,
+            self.previous_state,
+            current_state,
+            false,
+        );
+        self.source_map = source_map;
+        let previous_original_name = self.previous_state.original_name;
+        self.previous_state = current_state;
+        if !current_state.has_original_name {
+            self.previous_state.original_name = previous_original_name;
+        } else if !self.first_name_offset.is_valid() {
+            self.first_name_offset = name_offset;
+        }
+        self.has_previous_state = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         LineColumnOffset, Mapping, MappingsBuffer, SourceMap, SourceMapPieces, SourceMapShift,
         SourceMapState, append_mapping_to_buffer, append_source_map_chunk, decode_vlq,
-        decode_vlq_utf16, encode_vlq,
+        decode_vlq_utf16, encode_vlq, generate_line_offset_tables, make_chunk_builder,
     };
     use crate::internal::helpers::Joiner;
 
@@ -619,5 +968,39 @@ mod tests {
         index = next;
         let (name, _) = decode_vlq(&output, index);
         assert_eq!((generated, source, line, column, name), (1, 12, 23, 34, 44));
+    }
+
+    #[test]
+    fn line_tables_convert_byte_offsets_to_utf16_columns() {
+        let tables = generate_line_offset_tables("a🙂b\r\nxé".as_bytes(), 2);
+        assert_eq!(tables.len(), 2);
+
+        let mut builder = make_chunk_builder(None, tables, false);
+        builder.add_source_mapping(crate::internal::logger::Loc { start: 0 }, "", b"");
+        builder.add_source_mapping(crate::internal::logger::Loc { start: 5 }, "", b"x");
+        let chunk = builder.generate_chunk(b"x");
+        assert_eq!(chunk.buffer.data, b"AAAA,CAAG");
+        assert_eq!(chunk.final_generated_column, 1);
+    }
+
+    #[test]
+    fn chunk_builder_covers_unmapped_line_starts_and_quotes_names() {
+        let tables = generate_line_offset_tables(b"abcdef", 1);
+        let mut builder = make_chunk_builder(None, tables, false);
+        builder.add_source_mapping(crate::internal::logger::Loc { start: 0 }, "first", b"");
+        builder.add_source_mapping(
+            crate::internal::logger::Loc { start: 5 },
+            "second",
+            "x🙂\nq".as_bytes(),
+        );
+        let chunk = builder.generate_chunk("x🙂\nq".as_bytes());
+        assert_eq!(chunk.buffer.data, b"AAAAA;AAAA,CAAKC");
+        assert_eq!(
+            chunk.quoted_names,
+            [b"\"first\"".to_vec(), b"\"second\"".to_vec()]
+        );
+        assert_eq!(chunk.final_generated_column, 1);
+        assert!(!chunk.should_ignore);
+        assert!(chunk.buffer.first_name_offset.is_valid());
     }
 }
