@@ -17,6 +17,7 @@ name = "esbuild"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22.1"
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -24,4 +25,3 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
-

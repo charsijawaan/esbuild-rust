@@ -24,7 +24,7 @@ Status values:
 | `internal/css_printer` | not started |
 | `internal/fs` | not started |
 | `internal/graph` | not started |
-| `internal/helpers` | not started |
+| `internal/helpers` | in progress |
 | `internal/js_ast` | not started |
 | `internal/js_lexer` | not started |
 | `internal/js_parser` | not started |
@@ -36,4 +36,3 @@ Status values:
 | `internal/runtime` | not started |
 | `internal/sourcemap` | not started |
 | `internal/xxhash` | not started |
-
