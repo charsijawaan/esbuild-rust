@@ -2,6 +2,8 @@
 
 mod lexer;
 mod tables;
+#[cfg(test)]
+mod upstream_tests;
 
 pub use lexer::{
     CommentBefore, JsonFlavor, KeyOrValue, Lexer, LexerPanic, MaybeSubstring, decode_jsx_entities,

@@ -720,6 +720,7 @@ impl Lexer {
                     }
                     if self.code_point == u32::from(b'*') {
                         self.step();
+                        let start_range = self.range();
                         loop {
                             match char::from_u32(self.code_point) {
                                 Some('*') => {
@@ -734,12 +735,18 @@ impl Lexer {
                                     self.has_newline_before = true;
                                 }
                                 None => {
-                                    self.add_range_error(
+                                    self.start = self.end;
+                                    let note = self.tracker.msg_data(
+                                        start_range,
+                                        "The multi-line comment starts here:",
+                                    );
+                                    self.add_range_error_with_notes(
                                         Range {
                                             loc: self.loc(),
                                             len: 0,
                                         },
                                         "Expected \"*/\" to terminate multi-line comment",
+                                        vec![note],
                                     );
                                     panic_any(LexerPanic);
                                 }
@@ -1146,6 +1153,7 @@ impl Lexer {
                         continue;
                     } else if self.code_point == u32::from(b'*') {
                         self.step();
+                        let start_range = self.range();
                         loop {
                             match char::from_u32(self.code_point) {
                                 Some('*') => {
@@ -1160,12 +1168,18 @@ impl Lexer {
                                     self.has_newline_before = true;
                                 }
                                 None => {
-                                    self.add_range_error(
+                                    self.start = self.end;
+                                    let note = self.tracker.msg_data(
+                                        start_range,
+                                        "The multi-line comment starts here:",
+                                    );
+                                    self.add_range_error_with_notes(
                                         Range {
                                             loc: self.loc(),
                                             len: 0,
                                         },
                                         "Expected \"*/\" to terminate multi-line comment",
+                                        vec![note],
                                     );
                                     panic_any(LexerPanic);
                                 }
