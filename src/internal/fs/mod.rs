@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
 mod filepath;
 mod mock;
@@ -281,9 +281,103 @@ pub struct ModKey {
     pub uid: u32,
 }
 
+const FILE_OPEN_LIMIT: usize = 32;
+static OPEN_FILES: LazyLock<(Mutex<usize>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(0), Condvar::new()));
+
+pub fn before_file_open() {
+    let (count, available) = &*OPEN_FILES;
+    let mut count = count
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while *count >= FILE_OPEN_LIMIT {
+        count = available
+            .wait(count)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    *count += 1;
+}
+
+pub fn after_file_close() {
+    let (count, available) = &*OPEN_FILES;
+    let mut count = count
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *count = count.saturating_sub(1);
+    available.notify_one();
+}
+
+pub(crate) struct FileOpenGuard;
+
+impl FileOpenGuard {
+    pub(crate) fn acquire() -> Self {
+        before_file_open();
+        Self
+    }
+}
+
+impl Drop for FileOpenGuard {
+    fn drop(&mut self) {
+        after_file_close();
+    }
+}
+
+#[must_use]
+pub const fn check_if_windows() -> bool {
+    cfg!(windows)
+}
+
+/// Recursively creates a directory hierarchy with the supplied Unix mode.
+///
+/// # Errors
+///
+/// Returns an error if an existing path is not a directory or creation fails.
+pub fn mkdir_all(file_system: &dyn Fs, path: &str, mode: u32) -> Result<(), FsError> {
+    let path = file_system.join(&[path]);
+    mkdir_all_recursive(file_system, &path, mode)
+}
+
+fn mkdir_all_recursive(file_system: &dyn Fs, path: &str, mode: u32) -> Result<(), FsError> {
+    if let Ok(metadata) = std::fs::metadata(path) {
+        return if metadata.is_dir() {
+            Ok(())
+        } else {
+            Err(FsError::new(
+                FsErrorKind::NotDirectory,
+                format!("cannot create directory because a file exists: {path}"),
+            ))
+        };
+    }
+    let parent = file_system.dir(path);
+    if parent != path {
+        mkdir_all_recursive(file_system, &parent, mode)?;
+    }
+    match create_directory(path, mode) {
+        Ok(()) => Ok(()),
+        Err(_) if std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) => Ok(()),
+        Err(error) => Err(FsError::new(FsErrorKind::Other, error.to_string())),
+    }
+}
+
+#[cfg(unix)]
+fn create_directory(path: &str, mode: u32) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(mode);
+    builder.create(path)
+}
+
+#[cfg(not(unix))]
+fn create_directory(path: &str, _mode: u32) -> Result<(), std::io::Error> {
+    std::fs::create_dir(path)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DirEntries, Entry, EntryKind, Fs, InMemoryOpenedFile, OpenedFile};
+    use super::{
+        DirEntries, Entry, EntryKind, Fs, InMemoryOpenedFile, OpenedFile, RealFsOptions, mkdir_all,
+        real_fs_without_zip,
+    };
 
     #[test]
     fn directory_entries_track_case_and_sorting() {
@@ -309,6 +403,22 @@ mod tests {
         assert_eq!(file.read(1, 4).expect("read"), b"ell");
         assert!(file.read(4, 6).is_err());
         file.close().expect("close");
+    }
+
+    #[test]
+    fn recursive_directory_creation_matches_upstream() {
+        let root = std::env::temp_dir().join(format!("esbuild-rs-mkdir-{}", std::process::id()));
+        let file_system = real_fs_without_zip(RealFsOptions {
+            abs_working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            do_not_cache: true,
+            ..RealFsOptions::default()
+        })
+        .expect("real file system");
+        let nested = root.join("a/b");
+        mkdir_all(&file_system, &nested.to_string_lossy(), 0o755)
+            .expect("create nested directories");
+        assert!(nested.is_dir());
+        std::fs::remove_dir_all(root).expect("remove temp directory");
     }
 
     // Keep the object-safety requirement explicit because all higher-level

@@ -93,7 +93,8 @@ impl Fs for ZipFs {
         let archive = archive
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(directory) = archive.dirs.get(&path_tail.to_lowercase()) else {
+        let directory_key = path_tail.trim_end_matches('/').to_lowercase();
+        let Some(directory) = archive.dirs.get(&directory_key) else {
             return missing_directory(&path);
         };
         let mut entries = DirEntries::empty(&path);
@@ -291,7 +292,7 @@ pub fn parse_yarn_pnp_virtual_path(path: &str) -> Option<(String, String)> {
         } else {
             (&path[count_start..], "")
         };
-        let Ok(mut count) = count.parse::<u64>() else {
+        let Ok(mut count) = count.parse::<i64>() else {
             continue;
         };
         let mut prefix = path[..start].to_owned();
@@ -367,6 +368,10 @@ mod tests {
             "/project/foo.js"
         );
         assert_eq!(parse_yarn_pnp_virtual_path("/ordinary/path"), None);
+        assert_eq!(
+            parse_yarn_pnp_virtual_path("/a/__virtual__/hash/-1/b"),
+            Some(("/a/".into(), "b".into()))
+        );
     }
 
     #[test]
@@ -400,6 +405,13 @@ mod tests {
                 .expect("zip entry")
                 .kind(&file_system),
             EntryKind::File
+        );
+        assert_eq!(
+            file_system
+                .read_directory(&format!("{virtual_dir}/"))
+                .0
+                .peek_entry_count(),
+            1
         );
         fs::remove_dir_all(root).expect("remove temp directory");
     }

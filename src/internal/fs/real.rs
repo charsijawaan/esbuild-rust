@@ -1,6 +1,6 @@
 use super::filepath::GoFilepath;
 use super::{
-    AccessedEntries, DirEntries, Entry, EntryKind, Fs, FsError, FsErrorKind, ModKey,
+    AccessedEntries, DirEntries, Entry, EntryKind, FileOpenGuard, Fs, FsError, FsErrorKind, ModKey,
     OpenFileResult, OpenedFile, ReadDirectoryResult, ReadFileResult, WatchCallback, WatchData,
 };
 use std::collections::HashMap;
@@ -121,6 +121,7 @@ impl Fs for RealFs {
             }
         }
 
+        let _permit = FileOpenGuard::acquire();
         let result = fs::read_dir(dir);
         let mut entries = DirEntries::empty(dir);
         let (canonical_error, original_error) = match result {
@@ -175,6 +176,7 @@ impl Fs for RealFs {
     }
 
     fn read_file(&self, path: &str) -> ReadFileResult {
+        let _permit = FileOpenGuard::acquire();
         let result = fs::read(path);
         let (contents, canonical_error, original_error) = match result {
             Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), None, None),
@@ -203,11 +205,12 @@ impl Fs for RealFs {
     }
 
     fn open_file(&self, path: &str) -> OpenFileResult {
+        let _permit = FileOpenGuard::acquire();
         match File::open(path) {
             Ok(file) => match file.metadata() {
                 Ok(metadata) => (
                     Some(Box::new(RealOpenedFile {
-                        file,
+                        file: Some(file),
                         len: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
                     })),
                     None,
@@ -226,6 +229,7 @@ impl Fs for RealFs {
     }
 
     fn mod_key(&self, path: &str) -> Result<ModKey, FsError> {
+        let _permit = FileOpenGuard::acquire();
         let result = modification_key(path);
         if let Some(watch_data) = &self.watch_data {
             let mut watch_data = watch_data
@@ -290,6 +294,7 @@ impl Fs for RealFs {
     }
 
     fn kind(&self, dir: &str, base: &str) -> (String, EntryKind) {
+        let _permit = FileOpenGuard::acquire();
         let path = self.filepath.join(&[dir, base]);
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             return (String::new(), EntryKind::None);
@@ -399,7 +404,7 @@ impl Fs for RealFs {
 }
 
 struct RealOpenedFile {
-    file: File,
+    file: Option<File>,
     len: usize,
 }
 
@@ -412,17 +417,20 @@ impl OpenedFile for RealOpenedFile {
         let size = end
             .checked_sub(start)
             .ok_or_else(|| FsError::new(FsErrorKind::InvalidInput, "invalid read range"))?;
-        self.file
-            .seek(SeekFrom::Start(start as u64))
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| FsError::new(FsErrorKind::InvalidInput, "file is closed"))?;
+        file.seek(SeekFrom::Start(start as u64))
             .map_err(|error| fs_error(&error))?;
         let mut bytes = vec![0; size];
-        self.file
-            .read_exact(&mut bytes)
+        file.read_exact(&mut bytes)
             .map_err(|error| fs_error(&error))?;
         Ok(bytes)
     }
 
     fn close(&mut self) -> Result<(), FsError> {
+        self.file.take();
         Ok(())
     }
 }
@@ -505,11 +513,15 @@ fn readdir_canonical_error(error: &std::io::Error) -> FsError {
 }
 
 fn canonical_file_error(error: &std::io::Error) -> FsError {
-    let mut error = fs_error(error);
-    if error.kind == FsErrorKind::NotDirectory {
-        error.kind = FsErrorKind::NotFound;
+    let invalid_windows_name = cfg!(windows) && error.raw_os_error() == Some(123);
+    let mut mapped = fs_error(error);
+    if invalid_windows_name {
+        mapped.kind = FsErrorKind::NotFound;
     }
-    error
+    if mapped.kind == FsErrorKind::NotDirectory {
+        mapped.kind = FsErrorKind::NotFound;
+    }
+    mapped
 }
 
 fn fs_error(error: &std::io::Error) -> FsError {
@@ -546,6 +558,8 @@ mod tests {
         assert_eq!(file_system.read_file(&path).0, "let x = 1");
         let mut opened = file_system.open_file(&path).0.expect("open");
         assert_eq!(opened.read(4, 9).expect("range"), b"x = 1");
+        opened.close().expect("close");
+        assert!(opened.read(0, 1).is_err());
         let entries = file_system.read_directory(&source.to_string_lossy()).0;
         assert_eq!(
             entries
