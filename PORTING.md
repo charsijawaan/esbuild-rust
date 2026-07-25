@@ -27,7 +27,7 @@ Status values:
 | `internal/helpers` | ported |
 | `internal/js_ast` | ported |
 | `internal/js_lexer` | ported |
-| `internal/js_parser` | not started |
+| `internal/js_parser` | in progress |
 | `internal/js_printer` | not started |
 | `internal/linker` | not started |
 | `internal/logger` | ported |
