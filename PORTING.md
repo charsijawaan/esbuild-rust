@@ -34,5 +34,5 @@ Status values:
 | `internal/renamer` | not started |
 | `internal/resolver` | not started |
 | `internal/runtime` | not started |
-| `internal/sourcemap` | not started |
+| `internal/sourcemap` | ported |
 | `internal/xxhash` | ported |

@@ -106,7 +106,7 @@ pub fn decode_vlq(encoded: &[u8], mut start: usize) -> (i32, usize) {
     let mut vlq = 0_i64;
     while let Some(index) = BASE64.iter().position(|digit| *digit == encoded[start]) {
         let digit = u8::try_from(index & 31).unwrap_or_default();
-        vlq |= i64::from(digit) << shift;
+        vlq |= i64::from(digit).checked_shl(shift).unwrap_or(0);
         start += 1;
         shift += 5;
         if index & 32 == 0 {
@@ -144,7 +144,7 @@ pub fn decode_vlq_utf16(encoded: &[u16]) -> (i32, usize, bool) {
             return (0, 0, false);
         };
         let digit = u8::try_from(index & 31).unwrap_or_default();
-        vlq |= i32::from(digit) << shift;
+        vlq |= i32::from(digit).checked_shl(shift).unwrap_or(0);
         current += 1;
         shift += 5;
         if index & 32 == 0 {
@@ -804,6 +804,7 @@ mod tests {
         decode_vlq_utf16, encode_vlq, generate_line_offset_tables, make_chunk_builder,
     };
     use crate::internal::helpers::Joiner;
+    use std::sync::Arc;
 
     #[test]
     fn source_map_find_uses_greatest_lower_bound_on_same_line() {
@@ -1002,5 +1003,31 @@ mod tests {
         assert_eq!(chunk.final_generated_column, 1);
         assert!(!chunk.should_ignore);
         assert!(chunk.buffer.first_name_offset.is_valid());
+    }
+
+    #[test]
+    fn chunk_builder_remaps_through_nested_source_maps() {
+        let input_source_map = Arc::new(SourceMap {
+            mappings: vec![Mapping {
+                generated_line: 0,
+                generated_column: 0,
+                source_index: 7,
+                original_line: 8,
+                original_column: 9,
+                original_name: crate::internal::ast::Index32::new(0),
+            }],
+            names: vec!["π".into()],
+            ..SourceMap::default()
+        });
+        let tables = generate_line_offset_tables(b"intermediate", 1);
+        let mut builder = make_chunk_builder(Some(input_source_map), tables, true);
+        builder.add_source_mapping(
+            crate::internal::logger::Loc { start: 0 },
+            "intermediate",
+            b"",
+        );
+        let chunk = builder.generate_chunk(b"");
+        assert_eq!(chunk.buffer.data, b"AOQSA");
+        assert_eq!(chunk.quoted_names, [br#""\u03C0""#.to_vec()]);
     }
 }
