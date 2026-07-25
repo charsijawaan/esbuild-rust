@@ -30,7 +30,7 @@ Status values:
 | `internal/js_parser` | not started |
 | `internal/js_printer` | not started |
 | `internal/linker` | not started |
-| `internal/logger` | in progress |
+| `internal/logger` | ported |
 | `internal/renamer` | not started |
 | `internal/resolver` | not started |
 | `internal/runtime` | not started |

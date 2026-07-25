@@ -4,7 +4,11 @@ use crate::internal::helpers::{REPLACEMENT_CHARACTER, decode_wtf8_rune};
 use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 mod msg_ids;
 
@@ -1257,11 +1261,94 @@ pub fn render_tab_stops(with_tabs: &str, spaces_per_tab: usize) -> String {
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 const EXTRA_MARGIN_CHARS: usize = 9;
 
+fn plural(prefix: &str, count: usize, shown: usize, some_are_missing: bool) -> String {
+    let mut text = format!("{count} {prefix}{}", if count == 1 { "" } else { "s" });
+    if shown < count {
+        text = format!("{shown} of {text}");
+    } else if some_are_missing && count > 1 {
+        text = format!("all {text}");
+    }
+    text
+}
+
+fn error_and_warning_summary(
+    errors: usize,
+    warnings: usize,
+    shown_errors: usize,
+    shown_warnings: usize,
+) -> String {
+    let some_are_missing = shown_warnings < warnings || shown_errors < errors;
+    if errors == 0 {
+        plural("warning", warnings, shown_warnings, some_are_missing)
+    } else if warnings == 0 {
+        plural("error", errors, shown_errors, some_are_missing)
+    } else {
+        format!(
+            "{} and {}",
+            plural("warning", warnings, shown_warnings, some_are_missing),
+            plural("error", errors, shown_errors, some_are_missing)
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ApiKind {
+    #[default]
+    Go,
+    Cli,
+    Js,
+}
+
+pub static API: AtomicU8 = AtomicU8::new(ApiKind::Go as u8);
+
+pub fn set_api_kind(kind: ApiKind) {
+    API.store(kind as u8, AtomicOrdering::Relaxed);
+}
+
+#[must_use]
+pub fn api_kind() -> ApiKind {
+    match API.load(AtomicOrdering::Relaxed) {
+        1 => ApiKind::Cli,
+        2 => ApiKind::Js,
+        _ => ApiKind::Go,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TerminalInfo {
     pub is_tty: bool,
     pub use_color_escapes: bool,
     pub width: usize,
+    pub height: usize,
+}
+
+pub const SUPPORTS_COLOR_ESCAPES: bool = cfg!(any(unix, windows));
+
+fn terminal_dimension(name: &str) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+#[must_use]
+pub fn get_terminal_info<T: IsTerminal>(file: &T) -> TerminalInfo {
+    let is_tty = file.is_terminal();
+    TerminalInfo {
+        is_tty,
+        use_color_escapes: is_tty && std::env::var_os("NO_COLOR").is_none(),
+        width: if is_tty {
+            terminal_dimension("COLUMNS")
+        } else {
+            0
+        },
+        height: if is_tty {
+            terminal_dimension("LINES")
+        } else {
+            0
+        },
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1345,6 +1432,435 @@ pub const TERMINAL_COLORS: Colors = Colors {
     yellow_bg_yellow: "\x1b[43;33m",
     yellow_bg_black: "\x1b[43;30m",
 };
+
+#[derive(Default)]
+struct OutputLogState {
+    messages: Vec<Msg>,
+    errors: usize,
+    warnings: usize,
+    shown_errors: usize,
+    shown_warnings: usize,
+    has_errors: bool,
+    remaining_messages_before_limit: usize,
+    deferred_warnings: Vec<Msg>,
+}
+
+type WriteLogBytes = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+#[allow(clippy::too_many_lines)]
+fn new_output_log(
+    options: OutputOptions,
+    mut terminal_info: TerminalInfo,
+    write: &WriteLogBytes,
+) -> Log {
+    match options.color {
+        UseColor::Never => terminal_info.use_color_escapes = false,
+        UseColor::Always => terminal_info.use_color_escapes = SUPPORTS_COLOR_ESCAPES,
+        UseColor::IfTerminal => {}
+    }
+
+    let state = Arc::new(Mutex::new(OutputLogState {
+        remaining_messages_before_limit: if options.message_limit == 0 {
+            usize::MAX
+        } else {
+            options.message_limit
+        },
+        ..OutputLogState::default()
+    }));
+    let options = Arc::new(options);
+
+    let add_state = Arc::clone(&state);
+    let add_options = Arc::clone(&options);
+    let add_write = Arc::clone(write);
+    let add_msg_callback = Arc::new(move |message: Msg| {
+        let mut state = add_state.lock().expect("stderr log mutex was poisoned");
+        state.messages.push(message.clone());
+
+        match message.kind {
+            MsgKind::Verbose if add_options.log_level <= LogLevel::Verbose => {
+                add_write(&message.to_bytes(&add_options, terminal_info));
+            }
+            MsgKind::Debug if add_options.log_level <= LogLevel::Debug => {
+                add_write(&message.to_bytes(&add_options, terminal_info));
+            }
+            MsgKind::Info if add_options.log_level <= LogLevel::Info => {
+                add_write(&message.to_bytes(&add_options, terminal_info));
+            }
+            MsgKind::Error => {
+                state.has_errors = true;
+                if add_options.log_level <= LogLevel::Error {
+                    state.errors += 1;
+                }
+            }
+            MsgKind::Warning if add_options.log_level <= LogLevel::Warning => {
+                state.warnings += 1;
+            }
+            MsgKind::Verbose
+            | MsgKind::Debug
+            | MsgKind::Info
+            | MsgKind::Warning
+            | MsgKind::Note => {}
+        }
+
+        if state.remaining_messages_before_limit == 0 {
+            return;
+        }
+        match message.kind {
+            MsgKind::Error if add_options.log_level <= LogLevel::Error => {
+                state.shown_errors += 1;
+                add_write(&message.to_bytes(&add_options, terminal_info));
+                state.remaining_messages_before_limit -= 1;
+            }
+            MsgKind::Warning if add_options.log_level <= LogLevel::Warning => {
+                if state.remaining_messages_before_limit > add_options.message_limit.div_ceil(2) {
+                    state.shown_warnings += 1;
+                    add_write(&message.to_bytes(&add_options, terminal_info));
+                    state.remaining_messages_before_limit -= 1;
+                } else {
+                    state.deferred_warnings.push(message);
+                }
+            }
+            _ => {}
+        }
+    });
+
+    let has_errors_state = Arc::clone(&state);
+    let peek_state = Arc::clone(&state);
+    let done_state = Arc::clone(&state);
+    let done_options = Arc::clone(&options);
+    let done_write = Arc::clone(write);
+    Log {
+        add_msg_callback,
+        has_errors_callback: Arc::new(move || {
+            has_errors_state
+                .lock()
+                .expect("stderr log mutex was poisoned")
+                .has_errors
+        }),
+        peek_callback: Arc::new(move || {
+            let mut messages = peek_state
+                .lock()
+                .expect("stderr log mutex was poisoned")
+                .messages
+                .clone();
+            sort_messages(&mut messages);
+            messages
+        }),
+        done_callback: Arc::new(move || {
+            let mut state = done_state.lock().expect("stderr log mutex was poisoned");
+            while state.remaining_messages_before_limit > 0 && !state.deferred_warnings.is_empty() {
+                state.shown_warnings += 1;
+                done_write(&state.deferred_warnings[0].to_bytes(&done_options, terminal_info));
+                state.deferred_warnings.remove(0);
+                state.remaining_messages_before_limit -= 1;
+            }
+
+            if done_options.message_limit > 0
+                && state.errors + state.warnings > done_options.message_limit
+            {
+                let summary = error_and_warning_summary(
+                    state.errors,
+                    state.warnings,
+                    state.shown_errors,
+                    state.shown_warnings,
+                );
+                done_write(
+                    format!("{summary} shown (disable the message limit with --log-limit=0)\n")
+                        .as_bytes(),
+                );
+            } else if done_options.log_level <= LogLevel::Info
+                && (state.warnings != 0 || state.errors != 0)
+            {
+                done_write(
+                    format!(
+                        "{}\n",
+                        error_and_warning_summary(
+                            state.errors,
+                            state.warnings,
+                            state.shown_errors,
+                            state.shown_warnings,
+                        )
+                    )
+                    .as_bytes(),
+                );
+            }
+
+            sort_messages(&mut state.messages);
+            state.messages.clone()
+        }),
+        level: options.log_level,
+        overrides: Arc::new(options.overrides.clone()),
+    }
+}
+
+/// Creates a log that writes diagnostics to standard error.
+///
+/// # Panics
+///
+/// Operations on the returned log panic if its private mutex is poisoned.
+#[must_use]
+pub fn new_stderr_log(options: OutputOptions) -> Log {
+    let terminal_info = get_terminal_info(&io::stderr());
+    let write: WriteLogBytes = Arc::new(|bytes| {
+        let _ = io::stderr().lock().write_all(bytes);
+    });
+    new_output_log(options, terminal_info, &write)
+}
+
+#[must_use]
+pub fn output_options_for_args(os_args: &[String]) -> OutputOptions {
+    let mut options = OutputOptions {
+        include_source: true,
+        ..OutputOptions::default()
+    };
+    for argument in os_args {
+        match argument.as_str() {
+            "--color=false" => options.color = UseColor::Never,
+            "--color=true" | "--color" => options.color = UseColor::Always,
+            "--log-level=info" => options.log_level = LogLevel::Info,
+            "--log-level=warning" => options.log_level = LogLevel::Warning,
+            "--log-level=error" => options.log_level = LogLevel::Error,
+            "--log-level=silent" => options.log_level = LogLevel::Silent,
+            _ => {}
+        }
+    }
+    options
+}
+
+pub fn print_message_to_stderr(os_args: &[String], message: Msg) {
+    let log = new_stderr_log(output_options_for_args(os_args));
+    log.add_msg(message);
+    let _ = log.done();
+}
+
+pub fn print_error_to_stderr(os_args: &[String], text: impl Into<String>) {
+    print_message_to_stderr(os_args, Msg::new(MsgKind::Error, text));
+}
+
+pub fn print_error_with_note_to_stderr(
+    os_args: &[String],
+    text: impl Into<String>,
+    note: impl Into<String>,
+) {
+    let mut message = Msg::new(MsgKind::Error, text);
+    let note = note.into();
+    if !note.is_empty() {
+        message.notes.push(MsgData {
+            text: note,
+            ..MsgData::default()
+        });
+    }
+    print_message_to_stderr(os_args, message);
+}
+
+/// Writes callback-generated text with the requested color mode.
+///
+/// # Errors
+///
+/// Returns an error if writing the generated text fails.
+pub fn print_text_with_color<T: IsTerminal + Write>(
+    file: &mut T,
+    use_color: UseColor,
+    callback: impl FnOnce(Colors) -> String,
+) -> io::Result<()> {
+    let use_color_escapes = match use_color {
+        UseColor::Never => false,
+        UseColor::Always => SUPPORTS_COLOR_ESCAPES,
+        UseColor::IfTerminal => get_terminal_info(file).use_color_escapes,
+    };
+    let colors = if use_color_escapes {
+        TERMINAL_COLORS
+    } else {
+        Colors::default()
+    };
+    file.write_all(callback(colors).as_bytes())
+}
+
+/// Writes callback-generated text unless the requested log level is disabled.
+///
+/// # Errors
+///
+/// Returns an error if writing the generated text fails.
+pub fn print_text<T: IsTerminal + Write>(
+    file: &mut T,
+    level: LogLevel,
+    os_args: &[String],
+    callback: impl FnOnce(Colors) -> String,
+) -> io::Result<()> {
+    let options = output_options_for_args(os_args);
+    if options.log_level > level {
+        return Ok(());
+    }
+    print_text_with_color(file, options.color, callback)
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SummaryTableEntry {
+    pub dir: String,
+    pub base: String,
+    pub size: String,
+    pub bytes: usize,
+    pub is_source_map: bool,
+}
+
+const SIZE_WARNING_THRESHOLD: usize = 1024 * 1024;
+
+fn sort_summary_table(table: &mut [SummaryTableEntry]) {
+    table.sort_by(|left, right| {
+        left.is_source_map
+            .cmp(&right.is_source_map)
+            .then_with(|| right.bytes.cmp(&left.bytes))
+            .then_with(|| left.dir.cmp(&right.dir))
+            .then_with(|| left.base.cmp(&right.base))
+    });
+}
+
+fn prefix_bytes(text: &str, maximum: usize) -> &str {
+    let mut end = maximum.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn suffix_bytes(text: &str, maximum: usize) -> &str {
+    let mut start = text.len().saturating_sub(maximum);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
+#[must_use]
+pub fn render_summary(
+    colors: Colors,
+    mut table: Vec<SummaryTableEntry>,
+    terminal_info: TerminalInfo,
+    elapsed: Option<Duration>,
+) -> String {
+    let windows_command_prompt = cfg!(windows) && std::env::var_os("WT_SESSION").is_none();
+    let mut output = String::new();
+
+    if !table.is_empty() {
+        let max_length = if terminal_info.height == 0 {
+            20
+        } else {
+            (terminal_info.height / 2).max(5)
+        };
+        let length = table.len();
+        sort_summary_table(&mut table);
+        table.truncate(max_length);
+
+        let spacing_between_columns = 2;
+        let mut has_size_warning = false;
+        let mut max_path = 0;
+        let mut max_size = 0;
+        for entry in &table {
+            max_path = max_path.max(entry.dir.len() + entry.base.len());
+            max_size = max_size.max(entry.size.len() + spacing_between_columns);
+            if !entry.is_source_map && entry.bytes >= SIZE_WARNING_THRESHOLD {
+                has_size_warning = true;
+            }
+        }
+
+        let margin = "  ";
+        let mut layout_width = if terminal_info.width < 1 {
+            DEFAULT_TERMINAL_WIDTH
+        } else {
+            terminal_info.width
+        };
+        layout_width = layout_width.saturating_sub(2 * margin.len());
+        if has_size_warning {
+            layout_width = layout_width.saturating_sub(2);
+        }
+        layout_width = layout_width.min(max_path + max_size);
+        output.push('\n');
+
+        for entry in &table {
+            let mut dir = entry.dir.clone();
+            let mut base = entry.base.clone();
+            let path_width = layout_width.saturating_sub(max_size);
+
+            if dir.len() + base.len() > path_width {
+                if !dir.is_empty() {
+                    let count = path_width.saturating_sub(base.len() + 3).max(1);
+                    dir = format!("...{}", suffix_bytes(&dir, count));
+                }
+                if dir.len() + base.len() > path_width {
+                    let count = path_width.saturating_sub(dir.len() + 3);
+                    base = format!("{}...", prefix_bytes(&base, count));
+                }
+            }
+
+            let spacer = layout_width.saturating_sub(entry.size.len() + dir.len() + base.len());
+            let mut size_color = colors.cyan;
+            let mut size_warning = "";
+            if !entry.is_source_map && entry.bytes >= SIZE_WARNING_THRESHOLD {
+                size_color = colors.yellow;
+                if !windows_command_prompt {
+                    size_warning = " ⚠️";
+                }
+            }
+
+            output.push_str(margin);
+            output.push_str(colors.dim);
+            output.push_str(&dir);
+            output.push_str(colors.reset);
+            output.push_str(colors.bold);
+            output.push_str(&base);
+            output.push_str(colors.reset);
+            output.push_str(&" ".repeat(spacer));
+            output.push_str(size_color);
+            output.push_str(&entry.size);
+            output.push_str(size_warning);
+            output.push_str(colors.reset);
+            output.push('\n');
+        }
+
+        if length > max_length {
+            let remaining = length - max_length;
+            output.push_str(margin);
+            output.push_str(colors.dim);
+            let _ = write!(
+                output,
+                "...and {remaining} more output file{}...",
+                if remaining == 1 { "" } else { "s" }
+            );
+            output.push_str(colors.reset);
+            output.push('\n');
+        }
+    }
+    output.push('\n');
+
+    if let Some(elapsed) = elapsed {
+        if !windows_command_prompt {
+            output.push_str("⚡ ");
+        }
+        output.push_str(colors.green);
+        let _ = write!(output, "Done in {}ms", elapsed.as_millis());
+        output.push_str(colors.reset);
+        output.push('\n');
+    }
+    output
+}
+
+/// Prints the build output table and optional elapsed time to standard error.
+///
+/// # Errors
+///
+/// Returns an error if writing to standard error fails.
+pub fn print_summary(
+    use_color: UseColor,
+    table: Vec<SummaryTableEntry>,
+    start: Option<Instant>,
+) -> io::Result<()> {
+    let mut stderr = io::stderr();
+    let terminal_info = get_terminal_info(&stderr);
+    let elapsed = start.map(|start| start.elapsed());
+    print_text_with_color(&mut stderr, use_color, |colors| {
+        render_summary(colors, table, terminal_info, elapsed)
+    })
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MsgDetail {
@@ -1791,14 +2307,17 @@ fn decode_last_wtf8_rune(bytes: &[u8]) -> (u32, usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeferLogKind, ImportAttributes, LineColumnTracker, Loc, Log, LogLevel, Msg, MsgData, MsgId,
-        MsgKind, MsgLocation, OutputOptions, PathFlags, PathStyle, PrettyPaths, Range, Source,
-        TerminalInfo, estimate_width_in_terminal, generate_string_in_js_table, linkify_text,
-        message_detail, new_string_in_js_log, platform_independent_path_dir_base_ext,
-        remap_string_in_js_loc, render_tab_stops, wrap_words_in_string,
+        Colors, DeferLogKind, ImportAttributes, LineColumnTracker, Loc, Log, LogLevel, Msg,
+        MsgData, MsgId, MsgKind, MsgLocation, OutputOptions, PathFlags, PathStyle, PrettyPaths,
+        Range, Source, SummaryTableEntry, TerminalInfo, UseColor, WriteLogBytes,
+        error_and_warning_summary, estimate_width_in_terminal, generate_string_in_js_table,
+        linkify_text, message_detail, new_output_log, new_string_in_js_log,
+        output_options_for_args, platform_independent_path_dir_base_ext, remap_string_in_js_loc,
+        render_summary, render_tab_stops, wrap_words_in_string,
     };
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[test]
     fn range_expansion_matches_upstream() {
@@ -1956,6 +2475,96 @@ mod tests {
             (1, 10, 1)
         );
         assert_eq!(location.suggestion, "c");
+    }
+
+    #[test]
+    fn parses_early_output_options_from_arguments() {
+        let options = output_options_for_args(&[
+            "esbuild".into(),
+            "--color".into(),
+            "--log-level=warning".into(),
+        ]);
+        assert!(options.include_source);
+        assert_eq!(options.color, UseColor::Always);
+        assert_eq!(options.log_level, LogLevel::Warning);
+    }
+
+    #[test]
+    fn output_log_reserves_limited_slots_for_errors() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let output_for_writer = Arc::clone(&output);
+        let writer: WriteLogBytes = Arc::new(move |bytes| {
+            output_for_writer.lock().unwrap().extend_from_slice(bytes);
+        });
+        let log = new_output_log(
+            OutputOptions {
+                message_limit: 2,
+                log_level: LogLevel::Info,
+                ..OutputOptions::default()
+            },
+            TerminalInfo::default(),
+            &writer,
+        );
+        log.add_msg(Msg::new(MsgKind::Warning, "first"));
+        log.add_msg(Msg::new(MsgKind::Warning, "second"));
+        log.add_msg(Msg::new(MsgKind::Warning, "third"));
+        log.add_msg(Msg::new(MsgKind::Error, "failure"));
+        assert!(log.has_errors());
+        assert_eq!(log.done().len(), 4);
+
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("WARNING: first\n"));
+        assert!(!output.contains("WARNING: second\n"));
+        assert!(!output.contains("WARNING: third\n"));
+        assert!(output.contains("ERROR: failure\n"));
+        assert!(output.ends_with(
+            "1 of 3 warnings and 1 error shown (disable the message limit with --log-limit=0)\n"
+        ));
+    }
+
+    #[test]
+    fn renders_sorted_summary_and_elapsed_time() {
+        let summary = render_summary(
+            Colors::default(),
+            vec![
+                SummaryTableEntry {
+                    base: "small.js".into(),
+                    size: "1kb".into(),
+                    bytes: 1024,
+                    ..SummaryTableEntry::default()
+                },
+                SummaryTableEntry {
+                    base: "big.js.map".into(),
+                    size: "2mb".into(),
+                    bytes: 2 * 1024 * 1024,
+                    is_source_map: true,
+                    ..SummaryTableEntry::default()
+                },
+                SummaryTableEntry {
+                    base: "big.js".into(),
+                    size: "2mb".into(),
+                    bytes: 2 * 1024 * 1024,
+                    ..SummaryTableEntry::default()
+                },
+            ],
+            TerminalInfo {
+                width: 80,
+                height: 24,
+                ..TerminalInfo::default()
+            },
+            Some(Duration::from_millis(123)),
+        );
+        let big = summary.find("big.js").unwrap();
+        let small = summary.find("small.js").unwrap();
+        let source_map = summary.find("big.js.map").unwrap();
+        assert!(big < small);
+        assert!(small < source_map);
+        assert!(summary.contains("⚠️"));
+        assert!(summary.ends_with("\n⚡ Done in 123ms\n"));
+        assert_eq!(
+            error_and_warning_summary(2, 3, 1, 3),
+            "all 3 warnings and 1 of 2 errors"
+        );
     }
 
     #[test]
