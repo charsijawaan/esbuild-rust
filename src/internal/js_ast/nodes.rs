@@ -1,4 +1,5 @@
-use crate::internal::logger::platform_independent_path_dir_base_ext;
+use crate::internal::ast::{ImportPhase, LocRef, Ref};
+use crate::internal::logger::{Loc, Range, platform_independent_path_dir_base_ext};
 use std::ops::{BitOr, BitOrAssign};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -421,6 +422,537 @@ pub struct ConstValue {
     pub kind: ConstValueKind,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct Decorator {
+    pub value: Expr,
+    pub at_loc: Loc,
+    pub omit_newline_after: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ClassStaticBlock {
+    pub block: BlockStmt,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Property {
+    pub class_static_block: Option<Box<ClassStaticBlock>>,
+    pub key: Expr,
+    pub value_or_nil: Expr,
+    pub initializer_or_nil: Expr,
+    pub decorators: Vec<Decorator>,
+    pub loc: Loc,
+    pub close_bracket_loc: Loc,
+    pub kind: PropertyKind,
+    pub flags: PropertyFlags,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PropertyBinding {
+    pub key: Expr,
+    pub value: Binding,
+    pub default_value_or_nil: Expr,
+    pub loc: Loc,
+    pub close_bracket_loc: Loc,
+    pub is_computed: bool,
+    pub is_spread: bool,
+    pub prefer_quoted_key: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Arg {
+    pub binding: Binding,
+    pub default_or_nil: Expr,
+    pub decorators: Vec<Decorator>,
+    pub is_typescript_ctor_field: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct Function {
+    pub name: Option<LocRef>,
+    pub args: Vec<Arg>,
+    pub body: FunctionBody,
+    pub arguments_ref: Ref,
+    pub open_paren_loc: Loc,
+    pub is_async: bool,
+    pub is_generator: bool,
+    pub has_rest_arg: bool,
+    pub has_if_scope: bool,
+    pub has_no_side_effects_comment: bool,
+    pub is_unique_formal_parameters: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FunctionBody {
+    pub block: BlockStmt,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Class {
+    pub decorators: Vec<Decorator>,
+    pub name: Option<LocRef>,
+    pub extends_or_nil: Expr,
+    pub properties: Vec<Property>,
+    pub class_keyword: Range,
+    pub body_loc: Loc,
+    pub close_brace_loc: Loc,
+    pub should_lower_standard_decorators: bool,
+    pub use_define_for_class_fields: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ArrayBinding {
+    pub binding: Binding,
+    pub default_value_or_nil: Expr,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Binding {
+    pub data: Option<Box<BindingData>>,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug)]
+pub enum BindingData {
+    Missing,
+    Identifier(IdentifierBinding),
+    Array(ArrayBindingPattern),
+    Object(ObjectBindingPattern),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IdentifierBinding {
+    pub reference: Ref,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ArrayBindingPattern {
+    pub items: Vec<ArrayBinding>,
+    pub close_bracket_loc: Loc,
+    pub has_spread: bool,
+    pub is_single_line: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ObjectBindingPattern {
+    pub properties: Vec<PropertyBinding>,
+    pub close_brace_loc: Loc,
+    pub is_single_line: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Expr {
+    pub data: Option<Box<ExprData>>,
+    pub loc: Loc,
+}
+
+impl Expr {
+    #[must_use]
+    pub fn new(loc: Loc, data: ExprData) -> Self {
+        Self {
+            data: Some(Box::new(data)),
+            loc,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprData {
+    Array(ArrayExpr),
+    Unary(UnaryExpr),
+    Binary(BinaryExpr),
+    Boolean(bool),
+    Super,
+    Null,
+    Undefined,
+    This,
+    New(NewExpr),
+    NewTarget(NewTargetExpr),
+    ImportMeta(ImportMetaExpr),
+    Call(CallExpr),
+    Dot(DotExpr),
+    Index(IndexExpr),
+    Arrow(ArrowExpr),
+    Function(FunctionExpr),
+    Class(ClassExpr),
+    Identifier(IdentifierExpr),
+    ImportIdentifier(ImportIdentifierExpr),
+    PrivateIdentifier(PrivateIdentifierExpr),
+    NameOfSymbol(NameOfSymbolExpr),
+    JsxElement(JsxElementExpr),
+    JsxText(JsxTextExpr),
+    Missing,
+    Number(f64),
+    BigInt(String),
+    Object(ObjectExpr),
+    Spread(SpreadExpr),
+    String(StringExpr),
+    Template(TemplateExpr),
+    RegExp(String),
+    InlinedEnum(InlinedEnumExpr),
+    Annotation(AnnotationExpr),
+    Await(AwaitExpr),
+    Yield(YieldExpr),
+    If(IfExpr),
+    RequireString(RequireStringExpr),
+    RequireResolveString(RequireResolveStringExpr),
+    ImportString(ImportStringExpr),
+    ImportCall(ImportCallExpr),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ArrayExpr {
+    pub items: Vec<Expr>,
+    pub comma_after_spread: Loc,
+    pub close_bracket_loc: Loc,
+    pub is_single_line: bool,
+    pub is_parenthesized: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UnaryExpr {
+    pub value: Expr,
+    pub op: OpCode,
+    pub was_originally_typeof_identifier: bool,
+    pub was_originally_delete_of_identifier_or_property_access: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BinaryExpr {
+    pub left: Expr,
+    pub right: Expr,
+    pub op: OpCode,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NewTargetExpr {
+    pub range: Range,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ImportMetaExpr {
+    pub range_len: i32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NewExpr {
+    pub target: Expr,
+    pub args: Vec<Expr>,
+    pub close_paren_loc: Loc,
+    pub is_multi_line: bool,
+    pub can_be_unwrapped_if_unused: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CallExpr {
+    pub target: Expr,
+    pub args: Vec<Expr>,
+    pub close_paren_loc: Loc,
+    pub optional_chain: OptionalChain,
+    pub kind: CallKind,
+    pub is_multi_line: bool,
+    pub can_be_unwrapped_if_unused: bool,
+}
+
+impl CallExpr {
+    #[must_use]
+    pub fn has_same_flags_as(&self, other: &Self) -> bool {
+        self.optional_chain == other.optional_chain
+            && self.kind == other.kind
+            && self.can_be_unwrapped_if_unused == other.can_be_unwrapped_if_unused
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DotExpr {
+    pub target: Expr,
+    pub name: String,
+    pub name_loc: Loc,
+    pub optional_chain: OptionalChain,
+    pub can_be_removed_if_unused: bool,
+    pub call_can_be_unwrapped_if_unused: bool,
+    pub is_symbol_instance: bool,
+}
+
+impl DotExpr {
+    #[must_use]
+    pub fn has_same_flags_as(&self, other: &Self) -> bool {
+        self.optional_chain == other.optional_chain
+            && self.can_be_removed_if_unused == other.can_be_removed_if_unused
+            && self.call_can_be_unwrapped_if_unused == other.call_can_be_unwrapped_if_unused
+            && self.is_symbol_instance == other.is_symbol_instance
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IndexExpr {
+    pub target: Expr,
+    pub index: Expr,
+    pub close_bracket_loc: Loc,
+    pub optional_chain: OptionalChain,
+    pub can_be_removed_if_unused: bool,
+    pub call_can_be_unwrapped_if_unused: bool,
+    pub is_symbol_instance: bool,
+}
+
+impl IndexExpr {
+    #[must_use]
+    pub fn has_same_flags_as(&self, other: &Self) -> bool {
+        self.optional_chain == other.optional_chain
+            && self.can_be_removed_if_unused == other.can_be_removed_if_unused
+            && self.call_can_be_unwrapped_if_unused == other.call_can_be_unwrapped_if_unused
+            && self.is_symbol_instance == other.is_symbol_instance
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ArrowExpr {
+    pub args: Vec<Arg>,
+    pub body: FunctionBody,
+    pub is_async: bool,
+    pub has_rest_arg: bool,
+    pub prefer_expr: bool,
+    pub is_parenthesized: bool,
+    pub has_no_side_effects_comment: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FunctionExpr {
+    pub function: Function,
+    pub is_parenthesized: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ClassExpr {
+    pub class: Class,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IdentifierExpr {
+    pub reference: Ref,
+    pub must_keep_due_to_with_stmt: bool,
+    pub can_be_removed_if_unused: bool,
+    pub call_can_be_unwrapped_if_unused: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ImportIdentifierExpr {
+    pub reference: Ref,
+    pub prefer_quoted_key: bool,
+    pub was_originally_identifier: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PrivateIdentifierExpr {
+    pub reference: Ref,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NameOfSymbolExpr {
+    pub reference: Ref,
+    pub has_property_key_comment: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct JsxElementExpr {
+    pub tag_or_nil: Expr,
+    pub properties: Vec<Property>,
+    pub nullable_children: Vec<Expr>,
+    pub close_loc: Loc,
+    pub is_tag_single_line: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct JsxTextExpr {
+    pub raw: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ObjectExpr {
+    pub properties: Vec<Property>,
+    pub comma_after_spread: Loc,
+    pub close_brace_loc: Loc,
+    pub is_single_line: bool,
+    pub is_parenthesized: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SpreadExpr {
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StringExpr {
+    pub value: Vec<u16>,
+    pub legacy_octal_loc: Loc,
+    pub prefer_template: bool,
+    pub has_property_key_comment: bool,
+    pub contains_unique_key: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TemplatePart {
+    pub value: Expr,
+    pub tail_raw: String,
+    pub tail_cooked: Vec<u16>,
+    pub tail_loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TemplateExpr {
+    pub tag_or_nil: Expr,
+    pub head_raw: String,
+    pub head_cooked: Vec<u16>,
+    pub parts: Vec<TemplatePart>,
+    pub head_loc: Loc,
+    pub legacy_octal_loc: Loc,
+    pub can_be_unwrapped_if_unused: bool,
+    pub tag_was_originally_property_access: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InlinedEnumExpr {
+    pub value: Expr,
+    pub comment: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AnnotationExpr {
+    pub value: Expr,
+    pub flags: AnnotationFlags,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AwaitExpr {
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct YieldExpr {
+    pub value_or_nil: Expr,
+    pub is_star: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IfExpr {
+    pub test: Expr,
+    pub yes: Expr,
+    pub no: Expr,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RequireStringExpr {
+    pub import_record_index: u32,
+    pub close_paren_loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RequireResolveStringExpr {
+    pub import_record_index: u32,
+    pub close_paren_loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ImportStringExpr {
+    pub import_record_index: u32,
+    pub close_paren_loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ImportCallExpr {
+    pub expr: Expr,
+    pub options_or_nil: Expr,
+    pub close_paren_loc: Loc,
+    pub phase: ImportPhase,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Stmt {
+    pub data: Option<Box<StmtData>>,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug)]
+pub enum StmtData {
+    Placeholder,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BlockStmt {
+    pub statements: Vec<Stmt>,
+    pub close_brace_loc: Loc,
+}
+
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::float_cmp
+)]
+pub fn expr_to_const_value(expr: &Expr) -> ConstValue {
+    let Some(data) = expr.data.as_deref() else {
+        return ConstValue::default();
+    };
+    match data {
+        ExprData::Null => ConstValue {
+            kind: ConstValueKind::Null,
+            ..ConstValue::default()
+        },
+        ExprData::Undefined => ConstValue {
+            kind: ConstValueKind::Undefined,
+            ..ConstValue::default()
+        },
+        ExprData::Boolean(value) => ConstValue {
+            kind: if *value {
+                ConstValueKind::True
+            } else {
+                ConstValueKind::False
+            },
+            ..ConstValue::default()
+        },
+        ExprData::Number(value)
+            if *value == (*value as i64) as f64 || value.to_string().chars().count() <= 8 =>
+        {
+            ConstValue {
+                number: *value,
+                kind: ConstValueKind::Number,
+                ..ConstValue::default()
+            }
+        }
+        ExprData::String(value) if value.value.len() <= 3 => ConstValue {
+            string: value.value.clone(),
+            kind: ConstValueKind::String,
+            ..ConstValue::default()
+        },
+        _ => ConstValue::default(),
+    }
+}
+
+/// # Panics
+///
+/// Panics if `value.kind` is `None`.
+#[must_use]
+pub fn const_value_to_expr(loc: Loc, value: &ConstValue) -> Expr {
+    let data = match value.kind {
+        ConstValueKind::Null => ExprData::Null,
+        ConstValueKind::Undefined => ExprData::Undefined,
+        ConstValueKind::True => ExprData::Boolean(true),
+        ConstValueKind::False => ExprData::Boolean(false),
+        ConstValueKind::Number => ExprData::Number(value.number),
+        ConstValueKind::String => ExprData::String(StringExpr {
+            value: value.string.clone(),
+            ..StringExpr::default()
+        }),
+        ConstValueKind::None => panic!("internal error: invalid constant value"),
+    };
+    Expr::new(loc, data)
+}
+
 #[must_use]
 pub fn generate_non_unique_name_from_path(path: &str) -> String {
     let (directory, mut base, _) = platform_independent_path_dir_base_ext(path);
@@ -461,10 +993,12 @@ pub fn ensure_valid_identifier(base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnnotationFlags, AssignTarget, ExportsKind, LocalKind, ModuleType, OP_TABLE, OpCode,
-        Precedence, PropertyFlags, PropertyKind, ScopeKind, ensure_valid_identifier,
-        generate_non_unique_name_from_path,
+        AnnotationFlags, AssignTarget, CallExpr, CallKind, ConstValueKind, DotExpr, ExportsKind,
+        Expr, ExprData, LocalKind, ModuleType, OP_TABLE, OpCode, OptionalChain, Precedence,
+        PropertyFlags, PropertyKind, ScopeKind, StringExpr, const_value_to_expr,
+        ensure_valid_identifier, expr_to_const_value, generate_non_unique_name_from_path,
     };
+    use crate::internal::logger::Loc;
 
     #[test]
     fn operator_table_order_and_metadata_match_enum_order() {
@@ -542,6 +1076,65 @@ mod tests {
         assert_eq!(
             generate_non_unique_name_from_path("C:\\src\\hello-world.ts"),
             "hello_world"
+        );
+    }
+
+    #[test]
+    fn expression_flags_and_constant_conversion_match_upstream() {
+        let call = CallExpr {
+            optional_chain: OptionalChain::Start,
+            kind: CallKind::DirectEval,
+            can_be_unwrapped_if_unused: true,
+            ..CallExpr::default()
+        };
+        assert!(call.has_same_flags_as(&call.clone()));
+        let mut other = call.clone();
+        other.is_multi_line = true;
+        assert!(call.has_same_flags_as(&other));
+        other.optional_chain = OptionalChain::None;
+        assert!(!call.has_same_flags_as(&other));
+
+        let mut dot = DotExpr {
+            can_be_removed_if_unused: true,
+            ..DotExpr::default()
+        };
+        assert!(dot.has_same_flags_as(&dot.clone()));
+        let mut other_dot = dot.clone();
+        other_dot.name = "ignored".into();
+        assert!(dot.has_same_flags_as(&other_dot));
+        dot.is_symbol_instance = true;
+        assert!(!dot.has_same_flags_as(&other_dot));
+
+        let number = Expr::new(Loc::default(), ExprData::Number(123.0));
+        let value = expr_to_const_value(&number);
+        assert_eq!(value.kind, ConstValueKind::Number);
+        assert!(matches!(
+            const_value_to_expr(Loc::default(), &value).data.as_deref(),
+            Some(ExprData::Number(123.0))
+        ));
+
+        let short_string = Expr::new(
+            Loc::default(),
+            ExprData::String(StringExpr {
+                value: vec![1, 2, 3],
+                ..StringExpr::default()
+            }),
+        );
+        assert_eq!(
+            expr_to_const_value(&short_string).kind,
+            ConstValueKind::String
+        );
+        let long_string = Expr::new(
+            Loc::default(),
+            ExprData::String(StringExpr {
+                value: vec![1, 2, 3, 4],
+                ..StringExpr::default()
+            }),
+        );
+        assert_eq!(expr_to_const_value(&long_string).kind, ConstValueKind::None);
+        assert_eq!(
+            expr_to_const_value(&Expr::new(Loc::default(), ExprData::Number(1e100))).kind,
+            ConstValueKind::None
         );
     }
 }
