@@ -5,8 +5,10 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 mod declarations;
+mod nodes;
 
 pub use declarations::Declaration;
+pub use nodes::*;
 
 pub static KNOWN_DECLARATIONS: LazyLock<HashMap<&'static str, Declaration>> = LazyLock::new(|| {
     declarations::KNOWN_DECLARATION_PAIRS

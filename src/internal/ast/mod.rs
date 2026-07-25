@@ -442,6 +442,22 @@ impl SymbolMap {
             [reference.inner_index as usize]
     }
 
+    /// Follows symbol links without path compression.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any traversed reference is outside this symbol map.
+    #[must_use]
+    pub fn follow_symbols_const(&self, mut reference: Ref) -> Ref {
+        loop {
+            let link = self.get(reference).link;
+            if link == INVALID_REF {
+                return reference;
+            }
+            reference = link;
+        }
+    }
+
     /// Returns the canonical reference and compresses the traversed path.
     ///
     /// # Panics
