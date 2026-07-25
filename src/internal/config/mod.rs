@@ -655,14 +655,63 @@ pub const fn should_call_runtime_require(mode: Mode, output_format: Format) -> b
     matches!(mode, Mode::Bundle) && !matches!(output_format, Format::CommonJs)
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TsAlwaysStrict {
+    pub name: String,
+    pub source: crate::internal::logger::Source,
+    pub range: crate::internal::logger::Range,
+    pub value: bool,
+}
+
+#[must_use]
+pub fn pretty_print_target_environment(
+    original_target_environment: &str,
+    unsupported_js_feature_overrides_mask: crate::internal::compat::JsFeature,
+) -> String {
+    let mut result = "the configured target environment".to_string();
+    let count = unsupported_js_feature_overrides_mask.count();
+    let overrides = if count == 0 {
+        String::new()
+    } else if count == 1 {
+        " + 1 override".to_string()
+    } else {
+        format!(" + {count} overrides")
+    };
+    if !original_target_environment.is_empty() {
+        result.push_str(" (");
+        result.push_str(original_target_environment);
+        result.push_str(&overrides);
+        result.push(')');
+    }
+    result
+}
+
+simple_enum!(MetafileFormat {
+    Unminified,
+    Minified
+});
+
+impl MetafileFormat {
+    #[must_use]
+    pub fn maybe_remove_whitespace(self, text: &str) -> String {
+        if self == Self::Minified {
+            text.chars()
+                .filter(|character| !matches!(character, ' ' | '\n'))
+                .collect()
+        } else {
+            text.to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DefineData, DefineExpr, DefineFlags, Format, JsxOptions, Loader, MaybeBool,
+        DefineData, DefineExpr, DefineFlags, Format, JsxOptions, Loader, MaybeBool, MetafileFormat,
         PathPlaceholder, PathPlaceholders, PathTemplate, TsConfig, TsConfigJsx,
         TsImportsNotUsedAsValues, TsJsx, TsUnusedImportFlags, has_placeholder,
-        loader_from_file_extension, process_defines, should_call_runtime_require,
-        substitute_template, template_to_string,
+        loader_from_file_extension, pretty_print_target_environment, process_defines,
+        should_call_runtime_require, substitute_template, template_to_string,
     };
     use std::collections::HashMap;
 
@@ -807,6 +856,24 @@ mod tests {
             defines.identifier_defines["window"]
                 .flags
                 .contains(DefineFlags::CAN_BE_REMOVED_IF_UNUSED)
+        );
+    }
+
+    #[test]
+    fn target_environment_and_metafile_formatting_match_upstream() {
+        let overrides = crate::internal::compat::JsFeature::ARROW
+            | crate::internal::compat::JsFeature::ASYNC_AWAIT;
+        assert_eq!(
+            pretty_print_target_environment("chrome100", overrides),
+            "the configured target environment (chrome100 + 2 overrides)"
+        );
+        assert_eq!(
+            pretty_print_target_environment("", overrides),
+            "the configured target environment"
+        );
+        assert_eq!(
+            MetafileFormat::Minified.maybe_remove_whitespace("{\n \"x\": 1\n}"),
+            "{\"x\":1}"
         );
     }
 }

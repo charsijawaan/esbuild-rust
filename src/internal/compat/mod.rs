@@ -230,6 +230,11 @@ impl JsFeature {
     }
 
     #[must_use]
+    pub const fn count(self) -> u32 {
+        self.0.count_ones()
+    }
+
+    #[must_use]
     pub const fn apply_overrides(self, overrides: Self, mask: Self) -> Self {
         Self((self.0 & !mask.0) | (overrides.0 & mask.0))
     }
