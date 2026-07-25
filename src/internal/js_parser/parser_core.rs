@@ -15,7 +15,7 @@ use crate::internal::{
         OptionalChain, Scope, ScopeKind, ScopeMember, ScopeRef, SymbolUse,
     },
     js_lexer::{MaybeSubstring, range_of_identifier},
-    logger::{LineColumnTracker, Loc, Log, Source},
+    logger::{LineColumnTracker, Loc, Log, Range, Source},
 };
 
 use super::{
@@ -51,6 +51,7 @@ pub(crate) struct ParserCore {
     pub(crate) promise_ref: Ref,
     pub(crate) reg_exp_ref: Ref,
     pub(crate) big_int_ref: Ref,
+    pub(crate) legacy_octal_literals: HashMap<Loc, Range>,
 }
 
 impl ParserCore {
@@ -78,6 +79,7 @@ impl ParserCore {
             promise_ref: INVALID_REF,
             reg_exp_ref: INVALID_REF,
             big_int_ref: INVALID_REF,
+            legacy_octal_literals: HashMap::new(),
         }
     }
 

@@ -43,6 +43,25 @@ pub(crate) fn parse_big_int_or_string_if_unsupported(core: &ParserCore, lexer: &
     }
 }
 
+pub(crate) fn parse_numeric_literal(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
+    let loc = lexer.loc();
+    let value = Expr::new(loc, ExprData::Number(lexer.number));
+    if lexer.is_legacy_octal_literal {
+        core.legacy_octal_literals.insert(loc, lexer.range());
+    }
+    lexer.next();
+    value
+}
+
+pub(crate) fn parse_regular_expression_literal(lexer: &mut Lexer) -> Expr {
+    let loc = lexer.loc();
+    lexer.scan_reg_exp();
+    let value = String::from_utf8(lexer.raw().to_vec())
+        .expect("regular expression source must be valid UTF-8");
+    lexer.next();
+    Expr::new(loc, ExprData::RegExp(value))
+}
+
 pub(crate) fn parse_string_literal(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
     let loc = lexer.loc();
     let text = lexer.string_literal().to_vec();
@@ -91,7 +110,10 @@ mod tests {
 
     use regex::Regex;
 
-    use super::{parse_big_int_or_string_if_unsupported, parse_string_literal};
+    use super::{
+        parse_big_int_or_string_if_unsupported, parse_numeric_literal,
+        parse_regular_expression_literal, parse_string_literal,
+    };
     use crate::internal::{
         config::TsOptions,
         js_ast::ExprData,
@@ -160,5 +182,39 @@ mod tests {
             Some(ExprData::String(value))
                 if value.value == "18446744073709551617".encode_utf16().collect::<Vec<_>>()
         ));
+    }
+
+    #[test]
+    fn parses_numbers_and_tracks_legacy_octal_literals() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"0123 + 1"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let expr = parse_numeric_literal(&mut core, &mut lexer);
+        assert!(matches!(
+            expr.data.as_deref(),
+            Some(ExprData::Number(value)) if value.to_bits() == 83.0_f64.to_bits()
+        ));
+        assert_eq!(core.legacy_octal_literals.len(), 1);
+        assert_eq!(lexer.token, Token::Plus);
+    }
+
+    #[test]
+    fn rescans_slash_tokens_as_regular_expressions() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&br"/a[b/]c/gi + 1"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source, TsOptions::default());
+        let expr = parse_regular_expression_literal(&mut lexer);
+        assert!(matches!(
+            expr.data.as_deref(),
+            Some(ExprData::RegExp(value)) if value == "/a[b/]c/gi"
+        ));
+        assert_eq!(lexer.token, Token::Plus);
     }
 }
