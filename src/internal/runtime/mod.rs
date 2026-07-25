@@ -1,0 +1,599 @@
+//! Port of `internal/runtime`.
+//!
+//! Generated from the pinned upstream `runtime.go`; do not edit by hand.
+#![allow(
+    clippy::if_not_else,
+    clippy::needless_raw_string_hashes,
+    clippy::too_many_lines
+)]
+
+use crate::internal::compat::JsFeature;
+use crate::internal::logger::{Path, PrettyPaths, Source};
+use std::sync::Arc;
+
+pub const SOURCE_INDEX: u32 = 0;
+
+#[must_use]
+pub fn source(unsupported_js_features: JsFeature) -> Source {
+    let mut text = String::new();
+    text.push_str(r#"
+		var __create = Object.create
+		var __freeze = Object.freeze
+		var __defProp = Object.defineProperty
+		var __defProps = Object.defineProperties
+		var __getOwnPropDesc = Object.getOwnPropertyDescriptor // Note: can return "undefined" due to a Safari bug
+		var __getOwnPropDescs = Object.getOwnPropertyDescriptors
+		var __getOwnPropNames = Object.getOwnPropertyNames
+		var __getOwnPropSymbols = Object.getOwnPropertySymbols
+		var __getProtoOf = Object.getPrototypeOf
+		var __hasOwnProp = Object.prototype.hasOwnProperty
+		var __propIsEnum = Object.prototype.propertyIsEnumerable
+		var __reflectGet = Reflect.get
+		var __reflectSet = Reflect.set
+
+		var __knownSymbol = (name, symbol) => (symbol = Symbol[name]) ? symbol : Symbol.for('Symbol.' + name)
+		var __typeError = msg => { throw TypeError(msg) }
+
+		export var __pow = Math.pow
+
+		var __defNormalProp = (obj, key, value) => key in obj
+			? __defProp(obj, key, {enumerable: true, configurable: true, writable: true, value})
+			: obj[key] = value
+
+		export var __spreadValues = (a, b) => {
+			for (var prop in b ||= {})
+				if (__hasOwnProp.call(b, prop))
+					__defNormalProp(a, prop, b[prop])
+			if (__getOwnPropSymbols)
+		"#);
+    if !unsupported_js_features.contains(JsFeature::FOR_OF) {
+        text.push_str(
+            r#"
+				for (var prop of __getOwnPropSymbols(b)) {
+		"#,
+        );
+    } else {
+        text.push_str(
+            r#"
+				for (var props = __getOwnPropSymbols(b), i = 0, n = props.length, prop; i < n; i++) {
+					prop = props[i]
+		"#,
+        );
+    }
+    text.push_str(
+        r#"
+					if (__propIsEnum.call(b, prop))
+						__defNormalProp(a, prop, b[prop])
+				}
+			return a
+		}
+		export var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b))
+
+		// Update the "name" property on the function or class for "--keep-names"
+		export var __name = (target, value) => __defProp(target, 'name', { value, configurable: true })
+
+		// This fallback "require" function exists so that "typeof require" can
+		// naturally be "function" even in non-CommonJS environments since esbuild
+		// emulates a CommonJS environment (issue #1202). However, people want this
+		// shim to fall back to "globalThis.require" even if it's defined later
+		// (including property accesses such as "require.resolve") so we need to
+		// use a proxy (issue #1614).
+		export var __require =
+			/* @__PURE__ */ (x =>
+				typeof require !== 'undefined' ? require :
+				typeof Proxy !== 'undefined' ? new Proxy(x, {
+					get: (a, b) => (typeof require !== 'undefined' ? require : a)[b]
+				}) : x
+			)(function(x) {
+				if (typeof require !== 'undefined') return require.apply(this, arguments)
+				throw Error('Dynamic require of "' + x + '" is not supported')
+			})
+
+		// This is used for glob imports
+		export var __glob = map => path => {
+			var fn = map[path]
+			if (fn) return fn()
+			throw new Error('Module not found in bundle: ' + path)
+		}
+
+		// For object rest patterns
+		export var __restKey = key => typeof key === 'symbol' ? key : key + ''
+		export var __objRest = (source, exclude) => {
+			var target = {}
+			for (var prop in source)
+				if (__hasOwnProp.call(source, prop) && exclude.indexOf(prop) < 0)
+					target[prop] = source[prop]
+			if (source != null && __getOwnPropSymbols)
+	"#,
+    );
+    if !unsupported_js_features.contains(JsFeature::FOR_OF) {
+        text.push_str(
+            r#"
+				for (var prop of __getOwnPropSymbols(source)) {
+		"#,
+        );
+    } else {
+        text.push_str(
+            r#"
+				for (var props = __getOwnPropSymbols(source), i = 0, n = props.length, prop; i < n; i++) {
+					prop = props[i]
+		"#,
+        );
+    }
+    text.push_str(r#"
+					if (exclude.indexOf(prop) < 0 && __propIsEnum.call(source, prop))
+						target[prop] = source[prop]
+				}
+			return target
+		}
+
+		// This is for lazily-initialized ESM code. This has two implementations, a
+		// compact one for minified code and a verbose one that generates friendly
+		// names in V8's profiler and in stack traces.
+		export var __esm = (fn, res, err) => function __init() {
+			if (err) throw err[0]
+			try {
+				return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res
+			} catch (e) {
+				throw err = [e], e
+			}
+		}
+		export var __esmMin = (fn, res, err) => () => {
+			if (err) throw err[0]
+			try {
+				return fn && (res = fn(fn = 0)), res
+			} catch (e) {
+				throw err = [e], e
+			}
+		}
+
+		// Wraps a CommonJS closure and returns a require() function. This has two
+		// implementations, a compact one for minified code and a verbose one that
+		// generates friendly names in V8's profiler and in stack traces.
+		export var __commonJS = (cb, mod) => function __require() {
+			try {
+				return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports
+			} catch (e) {
+				throw mod = 0, e
+			}
+		}
+		export var __commonJSMin = (cb, mod) => () => {
+			try {
+				return mod || cb((mod = { exports: {} }).exports, mod), mod.exports
+			} catch (e) {
+				throw mod = 0, e
+			}
+		}
+
+		// Used to implement ESM exports both for "require()" and "import * as"
+		export var __export = (target, all) => {
+			for (var name in all)
+				__defProp(target, name, { get: all[name], enumerable: true })
+		}
+
+		var __copyProps = (to, from, except, desc) => {
+			if (from && typeof from === 'object' || typeof from === 'function')
+	"#);
+    if !unsupported_js_features.contains(JsFeature::FOR_OF)
+        && !unsupported_js_features.contains(JsFeature::CONST_AND_LET)
+    {
+        text.push_str(r#"
+				for (let key of __getOwnPropNames(from))
+					if (!__hasOwnProp.call(to, key) && key !== except)
+						__defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable })
+		"#);
+    } else {
+        text.push_str(r#"
+				for (var keys = __getOwnPropNames(from), i = 0, n = keys.length, key; i < n; i++) {
+					key = keys[i]
+					if (!__hasOwnProp.call(to, key) && key !== except)
+						__defProp(to, key, { get: (k => from[k]).bind(null, key), enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable })
+				}
+		"#);
+    }
+    text.push_str(r#"
+			return to
+		}
+
+		// This is used to implement "export * from" statements. It copies properties
+		// from the imported module to the current module's ESM export object. If the
+		// current module is an entry point and the target format is CommonJS, we
+		// also copy the properties to "module.exports" in addition to our module's
+		// internal ESM export object.
+		export var __reExport = (target, mod, secondTarget) => (
+			__copyProps(target, mod, 'default'),
+			secondTarget && __copyProps(secondTarget, mod, 'default')
+		)
+
+		// Converts the module from CommonJS to ESM. When in node mode (i.e. in an
+		// ".mjs" file, package.json has "type: module", or the "__esModule" export
+		// in the CommonJS file is falsy or missing), the "default" property is
+		// overridden to point to the original CommonJS exports object instead.
+		export var __toESM = (mod, isNodeMode, target) => (
+			target = mod != null ? __create(__getProtoOf(mod)) : {},
+			__copyProps(
+				// If the importer is in node compatibility mode or this is not an ESM
+				// file that has been converted to a CommonJS file using a Babel-
+				// compatible transform (i.e. "__esModule" has not been set), then set
+				// "default" to the CommonJS "module.exports" for node compatibility.
+				isNodeMode || !mod || !mod.__esModule
+					? __defProp(target, 'default', { value: mod, enumerable: true })
+					: target,
+				mod)
+		)
+
+		// Converts the module from ESM to CommonJS. This clones the input module
+		// object with the addition of a non-enumerable "__esModule" property set
+		// to "true", which overwrites any existing export named "__esModule".
+		export var __toCommonJS = mod => __copyProps(__defProp({}, '__esModule', { value: true }), mod)
+
+		// For TypeScript experimental decorators
+		// - kind === undefined: class
+		// - kind === 1: method, parameter
+		// - kind === 2: field
+		export var __decorateClass = (decorators, target, key, kind) => {
+			var result = kind > 1 ? void 0 : kind ? __getOwnPropDesc(target, key) : target
+			for (var i = decorators.length - 1, decorator; i >= 0; i--)
+				if (decorator = decorators[i])
+					result = (kind ? decorator(target, key, result) : decorator(result)) || result
+			if (kind && result) __defProp(target, key, result)
+			return result
+		}
+		export var __decorateParam = (index, decorator) => (target, key) => decorator(target, key, index)
+
+		// For JavaScript decorators
+		export var __decoratorStart = base => [, , , __create(base?.[__knownSymbol('metadata')] ?? null)]
+		var __decoratorStrings = ['class', 'method', 'getter', 'setter', 'accessor', 'field', 'value', 'get', 'set']
+		var __expectFn = fn => fn !== void 0 && typeof fn !== 'function' ? __typeError('Function expected') : fn
+		var __decoratorContext = (kind, name, done, metadata, fns) => ({ kind: __decoratorStrings[kind], name, metadata, addInitializer: fn =>
+			done._ ? __typeError('Already initialized') : fns.push(__expectFn(fn || null)) })
+		export var __decoratorMetadata = (array, target) => __defNormalProp(target, __knownSymbol('metadata'), array[3])
+		export var __runInitializers = (array, flags, self, value) => {
+			for (var i = 0, fns = array[flags >> 1], n = fns && fns.length; i < n; i++) flags & 1 ? fns[i].call(self) : value = fns[i].call(self, value)
+			return value
+		}
+		export var __decorateElement = (array, flags, name, decorators, target, extra) => {
+			var fn, it, done, ctx, access, k = flags & 7, s = !!(flags & 8), p = !!(flags & 16)
+			var j = k > 3 ? array.length + 1 : k ? s ? 1 : 2 : 0, key = __decoratorStrings[k + 5]
+			var initializers = k > 3 && (array[j - 1] = []), extraInitializers = array[j] || (array[j] = [])
+			var desc = k && (
+				!p && !s && (target = target.prototype),
+				k < 5 && (k > 3 || !p) &&
+			"#);
+    if !unsupported_js_features.contains(JsFeature::OBJECT_EXTENSIONS)
+        && !unsupported_js_features.contains(JsFeature::OBJECT_ACCESSORS)
+    {
+        text.push_str(r#"__getOwnPropDesc(k < 4 ? target : { get [name]() { return __privateGet(this, extra) }, set [name](x) { return __privateSet(this, extra, x) } }, name)"#);
+    } else {
+        text.push_str(r#"(k < 4 ? __getOwnPropDesc(target, name) : { get: () => __privateGet(this, extra), set: x => __privateSet(this, extra, x) })"#);
+    }
+    text.push_str(r#"
+			)
+			k ? p && k < 4 && __name(extra, (k > 2 ? 'set ' : k > 1 ? 'get ' : '') + name) : __name(target, name)
+
+			for (var i = decorators.length - 1; i >= 0; i--) {
+				ctx = __decoratorContext(k, name, done = {}, array[3], extraInitializers)
+
+				if (k) {
+					ctx.static = s, ctx.private = p, access = ctx.access = { has: p ? x => __privateIn(target, x) : x => name in x }
+					if (k ^ 3) access.get = p ? x => (k ^ 1 ? __privateGet : __privateMethod)(x, target, k ^ 4 ? extra : desc.get) : x => x[name]
+					if (k > 2) access.set = p ? (x, y) => __privateSet(x, target, y, k ^ 4 ? extra : desc.set) : (x, y) => x[name] = y
+				}
+
+				it = (0, decorators[i])(k ? k < 4 ? p ? extra : desc[key] : k > 4 ? void 0 : { get: desc.get, set: desc.set } : target, ctx), done._ = 1
+
+				if (k ^ 4 || it === void 0) __expectFn(it) && (k > 4 ? initializers.unshift(it) : k ? p ? extra = it : desc[key] = it : target = it)
+				else if (typeof it !== 'object' || it === null) __typeError('Object expected')
+				else __expectFn(fn = it.get) && (desc.get = fn), __expectFn(fn = it.set) && (desc.set = fn), __expectFn(fn = it.init) && initializers.unshift(fn)
+			}
+
+			return k || __decoratorMetadata(array, target),
+				desc && __defProp(target, name, desc),
+				p ? k ^ 4 ? extra : desc : target
+		}
+
+		// For class members
+		export var __publicField = (obj, key, value) => (
+			__defNormalProp(obj, typeof key !== 'symbol' ? key + '' : key, value)
+		)
+		var __accessCheck = (obj, member, msg) => (
+			member.has(obj) || __typeError('Cannot ' + msg)
+		)
+		export var __privateIn = (member, obj) => (
+			Object(obj) !== obj ? __typeError('Cannot use the "in" operator on this value') :
+			member.has(obj)
+		)
+		export var __privateGet = (obj, member, getter) => (
+			__accessCheck(obj, member, 'read from private field'),
+			getter ? getter.call(obj) : member.get(obj)
+		)
+		export var __privateAdd = (obj, member, value) => (
+			member.has(obj) ? __typeError('Cannot add the same private member more than once') :
+			member instanceof WeakSet ? member.add(obj) : member.set(obj, value)
+		)
+		export var __privateSet = (obj, member, value, setter) => (
+			__accessCheck(obj, member, 'write to private field'),
+			setter ? setter.call(obj, value) : member.set(obj, value),
+			value
+		)
+		export var __privateMethod = (obj, member, method) => (
+			__accessCheck(obj, member, 'access private method'),
+			method
+		)
+		export var __earlyAccess = (name) => {
+			throw ReferenceError('Cannot access "' + name + '" before initialization')
+		}
+	"#);
+    if !unsupported_js_features.contains(JsFeature::OBJECT_ACCESSORS) {
+        text.push_str(
+            r#"
+			export var __privateWrapper = (obj, member, setter, getter) => ({
+				set _(value) { __privateSet(obj, member, value, setter) },
+				get _() { return __privateGet(obj, member, getter) },
+			})
+		"#,
+        );
+    } else {
+        text.push_str(
+            r#"
+		export var __privateWrapper = (obj, member, setter, getter) => __defProp({}, '_', {
+			set: value => __privateSet(obj, member, value, setter),
+			get: () => __privateGet(obj, member, getter),
+		})
+		"#,
+        );
+    }
+    text.push_str(r#"
+		// For "super" property accesses
+		export var __superGet = (cls, obj, key) => __reflectGet(__getProtoOf(cls), key, obj)
+		export var __superSet = (cls, obj, key, val) => (__reflectSet(__getProtoOf(cls), key, val, obj), val)
+	"#);
+    if !unsupported_js_features.contains(JsFeature::OBJECT_ACCESSORS) {
+        text.push_str(
+            r#"
+			export var __superWrapper = (cls, obj, key) => ({
+				get _() { return __superGet(cls, obj, key) },
+				set _(val) { __superSet(cls, obj, key, val) },
+			})
+		"#,
+        );
+    } else {
+        text.push_str(
+            r#"
+			export var __superWrapper = (cls, obj, key) => __defProp({}, '_', {
+				get: () => __superGet(cls, obj, key),
+				set: val => __superSet(cls, obj, key, val),
+			})
+		"#,
+        );
+    }
+    text.push_str(r#"
+		// For lowering tagged template literals
+		export var __template = (cooked, raw) => __freeze(__defProp(cooked, 'raw', { value: __freeze(raw || cooked.slice()) }))
+
+		// This helps for lowering async functions
+		export var __async = (__this, __arguments, generator) => {
+			return new Promise((resolve, reject) => {
+				var fulfilled = value => {
+					try {
+						step(generator.next(value))
+					} catch (e) {
+						reject(e)
+					}
+				}
+				var rejected = value => {
+					try {
+						step(generator.throw(value))
+					} catch (e) {
+						reject(e)
+					}
+				}
+				var step = x => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected)
+				step((generator = generator.apply(__this, __arguments)).next())
+			})
+		}
+
+		// These help for lowering async generator functions
+		export var __await = function (promise, isYieldStar) {
+			this[0] = promise
+			this[1] = isYieldStar
+		}
+		export var __asyncGenerator = (__this, __arguments, generator) => {
+			var resume = (k, v, yes, no) => {
+				try {
+					var x = generator[k](v), isAwait = (v = x.value) instanceof __await, done = x.done
+					Promise.resolve(isAwait ? v[0] : v)
+						.then(y => isAwait
+							? resume(k === 'return' ? k : 'next', v[1] ? { done: y.done, value: y.value } : y, yes, no)
+							: yes({ value: y, done }))
+						.catch(e => resume('throw', e, yes, no))
+				} catch (e) {
+					no(e)
+				}
+			}, method = (k, call, wait, clear) => it[k] = x => (
+				call = new Promise((yes, no, run) => (
+					run = () => resume(k, x, yes, no),
+					q ? q.then(run) : run())),
+				clear = () => q === wait && (q = 0),
+				q = wait = call.then(clear, clear),
+				call
+			), q, it = {}
+			return generator = generator.apply(__this, __arguments),
+				it[__knownSymbol('asyncIterator')] = () => it,
+				method('next'),
+				method('throw'),
+				method('return'),
+				it
+		}
+		export var __yieldStar = value => {
+			var obj = value[__knownSymbol('asyncIterator')], isAwait = false, method, it = {}
+			if (obj == null) {
+				obj = value[__knownSymbol('iterator')]()
+				method = k => it[k] = x => obj[k](x)
+			} else {
+				obj = obj.call(value)
+				method = k => it[k] = v => {
+					if (isAwait) {
+						isAwait = false
+						if (k === 'throw') throw v
+						return v
+					}
+					isAwait = true
+					return {
+						done: false,
+						value: new __await(new Promise(resolve => {
+							var x = obj[k](v)
+							if (!(x instanceof Object)) __typeError('Object expected')
+							resolve(x)
+						}), 1),
+					}
+				}
+			}
+			return it[__knownSymbol('iterator')] = () => it,
+				method('next'),
+				'throw' in obj ? method('throw') : it.throw = x => { throw x },
+				'return' in obj && method('return'),
+				it
+		}
+
+		// This helps for lowering for-await loops
+		export var __forAwait = (obj, it, method) =>
+			(it = obj[__knownSymbol('asyncIterator')])
+				? it.call(obj)
+				: (obj = obj[__knownSymbol('iterator')](),
+					it = {},
+					method = (key, fn) =>
+						(fn = obj[key]) && (it[key] = arg =>
+							new Promise((yes, no, done) => (
+								arg = fn.call(obj, arg),
+								done = arg.done,
+								Promise.resolve(arg.value)
+									.then(value => yes({ value, done }), no)
+							))),
+					method('next'),
+					method('return'),
+					it)
+
+		// This is for the "binary" loader (custom code is ~2x faster than "atob")
+		export var __toBinaryNode = Uint8Array.fromBase64 || (base64 => new Uint8Array(Buffer.from(base64, 'base64')))
+		export var __toBinary = Uint8Array.fromBase64 || /* @__PURE__ */ (() => {
+			var table = new Uint8Array(128)
+			for (var i = 0; i < 64; i++) table[i < 26 ? i + 65 : i < 52 ? i + 71 : i < 62 ? i - 4 : i * 4 - 205] = i
+			return base64 => {
+				var n = base64.length, bytes = new Uint8Array((n - (base64[n - 1] == '=') - (base64[n - 2] == '=')) * 3 / 4 | 0)
+				for (var i = 0, j = 0; i < n;) {
+					var c0 = table[base64.charCodeAt(i++)], c1 = table[base64.charCodeAt(i++)]
+					var c2 = table[base64.charCodeAt(i++)], c3 = table[base64.charCodeAt(i++)]
+					bytes[j++] = (c0 << 2) | (c1 >> 4)
+					bytes[j++] = (c1 << 4) | (c2 >> 2)
+					bytes[j++] = (c2 << 6) | c3
+				}
+				return bytes
+			}
+		})()
+
+		// These are for the "using" statement in TypeScript 5.2+
+		export var __using = (stack, value, async) => {
+			if (value != null) {
+				if (typeof value !== 'object' && typeof value !== 'function') __typeError('Object expected')
+				var dispose, inner
+				if (async) dispose = value[__knownSymbol('asyncDispose')]
+				if (dispose === void 0) {
+					dispose = value[__knownSymbol('dispose')]
+					if (async) inner = dispose
+				}
+				if (typeof dispose !== 'function') __typeError('Object not disposable')
+				if (inner) dispose = function() { try { inner.call(this) } catch (e) { return Promise.reject(e) } }
+				stack.push([async, dispose, value])
+			} else if (async) {
+				stack.push([async])
+			}
+			return value
+		}
+		export var __callDispose = (stack, error, hasError) => {
+			var E = typeof SuppressedError === 'function' ? SuppressedError :
+				function (e, s, m, _) { return _ = Error(m), _.name = 'SuppressedError', _.error = e, _.suppressed = s, _ }
+			var fail = e => error = hasError ? new E(e, error, 'An error was suppressed during disposal') : (hasError = true, e)
+			var next = (it) => {
+				while (it = stack.pop()) {
+					try {
+						var result = it[1] && it[1].call(it[2])
+						if (it[0]) return Promise.resolve(result).then(next, (e) => (fail(e), next()))
+					} catch (e) {
+						fail(e)
+					}
+				}
+				if (hasError) throw error
+			}
+			return next()
+		}
+	"#);
+
+    Source {
+        index: SOURCE_INDEX,
+        key_path: Path {
+            text: "<runtime>".into(),
+            ..Path::default()
+        },
+        pretty_paths: PrettyPaths {
+            abs: "<runtime>".into(),
+            rel: "<runtime>".into(),
+        },
+        identifier_name: "runtime".into(),
+        contents: Arc::from(text.into_bytes()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SOURCE_INDEX, source};
+    use crate::internal::compat::JsFeature;
+
+    #[test]
+    fn source_metadata_matches_upstream() {
+        let source = source(JsFeature::NONE);
+        assert_eq!(source.index, SOURCE_INDEX);
+        assert_eq!(source.key_path.text, "<runtime>");
+        assert_eq!(source.pretty_paths.abs, "<runtime>");
+        assert_eq!(source.pretty_paths.rel, "<runtime>");
+        assert_eq!(source.identifier_name, "runtime");
+    }
+
+    #[test]
+    fn feature_gates_select_legacy_syntax() {
+        let modern = source(JsFeature::NONE);
+        let legacy_for_of = source(JsFeature::FOR_OF);
+        let modern_text = String::from_utf8_lossy(&modern.contents);
+        let legacy_text = String::from_utf8_lossy(&legacy_for_of.contents);
+        assert!(modern_text.contains("for (var prop of __getOwnPropSymbols(b))"));
+        assert!(legacy_text.contains("for (var props = __getOwnPropSymbols(b), i = 0"));
+        assert_ne!(modern.contents, legacy_for_of.contents);
+    }
+
+    #[test]
+    fn feature_gates_cover_loop_and_object_syntax() {
+        let modern = source(JsFeature::NONE);
+        let legacy_let = source(JsFeature::CONST_AND_LET);
+        let legacy_object = source(JsFeature::OBJECT_ACCESSORS | JsFeature::OBJECT_EXTENSIONS);
+        let modern_text = String::from_utf8_lossy(&modern.contents);
+        let legacy_let_text = String::from_utf8_lossy(&legacy_let.contents);
+        let legacy_object_text = String::from_utf8_lossy(&legacy_object.contents);
+        assert!(modern_text.contains("for (let key of __getOwnPropNames(from))"));
+        assert!(legacy_let_text.contains("for (var keys = __getOwnPropNames(from), i = 0"));
+        assert!(modern_text.contains("get [name]()"));
+        assert!(legacy_object_text.contains("get: () => __privateGet(this, extra)"));
+        assert!(modern_text.contains("set _(value)"));
+        assert!(legacy_object_text.contains("set: value => __privateSet"));
+    }
+
+    #[test]
+    fn generated_runtime_contains_core_helpers() {
+        let source = source(JsFeature::NONE);
+        let text = String::from_utf8_lossy(&source.contents);
+        assert!(text.contains("export var __pow = Math.pow"));
+        assert!(text.contains("export var __commonJS"));
+        assert!(text.contains("export var __toESM"));
+        assert!(text.contains("export var __async"));
+        assert!(text.contains("export var __decoratorStart"));
+    }
+}

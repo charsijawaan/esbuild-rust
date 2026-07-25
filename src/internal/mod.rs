@@ -10,5 +10,6 @@ pub mod fs;
 pub mod helpers;
 pub mod js_ast;
 pub mod logger;
+pub mod runtime;
 pub mod sourcemap;
 pub mod xxhash;

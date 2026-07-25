@@ -25,7 +25,7 @@ Status values:
 | `internal/fs` | ported |
 | `internal/graph` | not started |
 | `internal/helpers` | ported |
-| `internal/js_ast` | in progress |
+| `internal/js_ast` | ported |
 | `internal/js_lexer` | not started |
 | `internal/js_parser` | not started |
 | `internal/js_printer` | not started |
@@ -33,6 +33,6 @@ Status values:
 | `internal/logger` | ported |
 | `internal/renamer` | not started |
 | `internal/resolver` | not started |
-| `internal/runtime` | not started |
+| `internal/runtime` | ported |
 | `internal/sourcemap` | ported |
 | `internal/xxhash` | ported |
