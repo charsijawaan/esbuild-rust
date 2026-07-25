@@ -8,6 +8,7 @@ pub mod css_ast;
 pub mod css_lexer;
 pub mod fs;
 pub mod helpers;
+pub mod js_ast;
 pub mod logger;
 pub mod sourcemap;
 pub mod xxhash;
