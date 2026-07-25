@@ -1,6 +1,8 @@
 //! Ports of esbuild's internal Go packages.
 
+pub mod api_helpers;
 pub mod ast;
+pub mod cli_helpers;
 pub mod compat;
 pub mod css_ast;
 pub mod css_lexer;

@@ -3,4 +3,5 @@
 //! The module layout mirrors esbuild's Go package layout. The implementation
 //! targets the exact revision recorded in `UPSTREAM.md`.
 
+pub mod api;
 pub mod internal;

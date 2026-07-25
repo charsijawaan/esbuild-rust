@@ -9,13 +9,13 @@ Status values:
 
 | Upstream package | Status |
 | --- | --- |
-| `api` | not started |
+| `api` | in progress |
 | `cmd/esbuild` | not started |
-| `internal/api_helpers` | not started |
+| `internal/api_helpers` | ported |
 | `internal/ast` | ported |
 | `internal/bundler` | not started |
 | `internal/cache` | not started |
-| `internal/cli_helpers` | not started |
+| `internal/cli_helpers` | ported |
 | `internal/compat` | ported |
 | `internal/config` | not started |
 | `internal/css_ast` | ported |
