@@ -13,6 +13,7 @@ mod parser_types;
 mod source_map;
 mod standalone_helpers;
 mod symbols;
+mod syntax_literals;
 
 pub use define::parse_define_expr;
 pub use global_name::parse_global_name;
