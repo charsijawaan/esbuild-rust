@@ -4,13 +4,17 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+mod filepath;
 mod mock;
+mod real;
 
 pub use mock::{MockFs, MockKind, mock_fs};
+pub use real::{RealFs, RealFsOptions, real_fs};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum EntryKind {
+    None = 0,
     Dir = 1,
     File = 2,
 }
