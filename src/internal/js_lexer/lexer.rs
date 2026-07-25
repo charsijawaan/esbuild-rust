@@ -85,6 +85,12 @@ pub enum KeyOrValue {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IdentifierKind {
+    Normal,
+    Private,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LexerPanic;
 
 #[allow(clippy::struct_excessive_bools)]
@@ -484,19 +490,28 @@ impl Lexer {
                         self.identifier = self.raw_identifier();
                     } else {
                         self.step();
-                        if !char::from_u32(self.code_point).is_some_and(js_ast::is_identifier_start)
-                        {
-                            self.syntax_error();
-                        }
-                        while char::from_u32(self.code_point)
-                            .is_some_and(js_ast::is_identifier_continue)
-                        {
-                            self.step();
-                        }
                         if self.code_point == u32::from(b'\\') {
-                            self.syntax_error();
+                            (self.identifier, _) =
+                                self.scan_identifier_with_escapes(IdentifierKind::Private);
+                        } else {
+                            if !char::from_u32(self.code_point)
+                                .is_some_and(js_ast::is_identifier_start)
+                            {
+                                self.syntax_error();
+                            }
+                            self.step();
+                            while char::from_u32(self.code_point)
+                                .is_some_and(js_ast::is_identifier_continue)
+                            {
+                                self.step();
+                            }
+                            if self.code_point == u32::from(b'\\') {
+                                (self.identifier, _) =
+                                    self.scan_identifier_with_escapes(IdentifierKind::Private);
+                            } else {
+                                self.identifier = self.raw_identifier();
+                            }
                         }
-                        self.identifier = self.raw_identifier();
                         self.token = Token::PrivateIdentifier;
                     }
                 }
@@ -674,7 +689,10 @@ impl Lexer {
                 }
                 '\'' | '"' | '`' => self.scan_string(character),
                 '.' | '0'..='9' => self.parse_numeric_literal_or_dot(),
-                '\\' => self.syntax_error(),
+                '\\' => {
+                    (self.identifier, self.token) =
+                        self.scan_identifier_with_escapes(IdentifierKind::Normal);
+                }
                 _ if js_ast::is_whitespace(character) => {
                     self.step();
                     continue;
@@ -867,13 +885,75 @@ impl Lexer {
             self.step();
         }
         if self.code_point == u32::from(b'\\') {
-            self.syntax_error();
+            (self.identifier, self.token) =
+                self.scan_identifier_with_escapes(IdentifierKind::Normal);
+            return;
         }
         self.identifier = self.raw_identifier();
         self.token = super::keyword_token(
             std::str::from_utf8(self.raw()).expect("ASCII keywords are valid UTF-8"),
         )
         .unwrap_or(Token::Identifier);
+    }
+
+    fn scan_identifier_with_escapes(&mut self, kind: IdentifierKind) -> (MaybeSubstring, Token) {
+        loop {
+            if self.code_point == u32::from(b'\\') {
+                self.step();
+                if self.code_point != u32::from(b'u') {
+                    self.syntax_error();
+                }
+                self.step();
+                if self.code_point == u32::from(b'{') {
+                    self.step();
+                    while self.code_point != u32::from(b'}') {
+                        if hex_value(self.code_point).is_none() {
+                            self.syntax_error();
+                        }
+                        self.step();
+                    }
+                    self.step();
+                } else {
+                    for _ in 0..4 {
+                        if hex_value(self.code_point).is_none() {
+                            self.syntax_error();
+                        }
+                        self.step();
+                    }
+                }
+                continue;
+            }
+            if !is_identifier_continue(self.code_point) {
+                break;
+            }
+            self.step();
+        }
+
+        let raw = self.raw().to_vec();
+        let decoded = match self.try_to_decode_escape_sequences(self.start, &raw, true) {
+            Ok(decoded) => decoded,
+            Err(end) => {
+                self.end = end;
+                self.syntax_error();
+            }
+        };
+        let text = crate::internal::helpers::utf16_to_string(&decoded);
+        let identifier = if kind == IdentifierKind::Private {
+            text.get(1..).unwrap_or_default()
+        } else {
+            &text
+        };
+        if !is_identifier_bytes(identifier) {
+            self.add_range_error(
+                self.range(),
+                format!("Invalid identifier: {:?}", String::from_utf8_lossy(&text)),
+            );
+        }
+        let token = std::str::from_utf8(&text)
+            .ok()
+            .and_then(super::keyword_token)
+            .map_or(Token::Identifier, |_| Token::EscapedKeyword);
+        (MaybeSubstring::from_allocated(text), token)
     }
 
     fn parse_numeric_literal_or_dot(&mut self) {
@@ -1373,6 +1453,22 @@ fn is_identifier_start(code_point: u32) -> bool {
     char::from_u32(code_point).is_some_and(js_ast::is_identifier_start)
 }
 
+fn is_identifier_bytes(text: &[u8]) -> bool {
+    let (first, first_width) = decode_wtf8_rune(text);
+    if first_width == 0 || !is_identifier_start(first) {
+        return false;
+    }
+    let mut index = first_width;
+    while index < text.len() {
+        let (code_point, width) = decode_wtf8_rune(&text[index..]);
+        if width == 0 || !is_identifier_continue(code_point) {
+            return false;
+        }
+        index += width;
+    }
+    true
+}
+
 fn parse_radix_f64(text: &[u8], radix: u8) -> f64 {
     let mut value = 0.0;
     for byte in text {
@@ -1684,6 +1780,25 @@ mod tests {
             lexer.string_literal(),
             "a\nbc😀".encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn scans_escaped_identifiers_and_keywords() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut lexer = Lexer::new(
+            log,
+            source(br"\u0061bc v\u0061r #pr\u0069vate"),
+            TsOptions::default(),
+        );
+        assert_eq!(lexer.token, Token::Identifier);
+        assert_eq!(lexer.identifier.string, b"abc");
+        assert!(!lexer.identifier.is_source_substring());
+        lexer.next();
+        assert_eq!(lexer.token, Token::EscapedKeyword);
+        assert_eq!(lexer.identifier.string, b"var");
+        lexer.next();
+        assert_eq!(lexer.token, Token::PrivateIdentifier);
+        assert_eq!(lexer.identifier.string, b"#private");
     }
 
     #[test]
