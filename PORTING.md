@@ -17,7 +17,7 @@ Status values:
 | `internal/cache` | not started |
 | `internal/cli_helpers` | ported |
 | `internal/compat` | ported |
-| `internal/config` | in progress |
+| `internal/config` | ported |
 | `internal/css_ast` | ported |
 | `internal/css_lexer` | ported |
 | `internal/css_parser` | not started |

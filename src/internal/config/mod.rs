@@ -5,10 +5,12 @@ mod known_globals;
 use crate::internal::ast::Index32;
 use crate::internal::js_ast::{Expr, ExprData};
 use known_globals::KNOWN_GLOBALS;
+use regex::Regex;
+use std::any::Any;
 use std::collections::HashMap;
 use std::ops::{BitOr, BitOrAssign};
 use std::sync::{
-    OnceLock,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -704,14 +706,249 @@ impl MetafileFormat {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct InjectedDefine {
+    pub data: Expr,
+    pub name: String,
+    pub source: crate::internal::logger::Source,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InjectableExport {
+    pub alias: String,
+    pub loc: crate::internal::logger::Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InjectedFile {
+    pub exports: Vec<InjectableExport>,
+    pub define_name: String,
+    pub source: crate::internal::logger::Source,
+    pub is_copy_loader: bool,
+}
+
+static FILTER_CACHE: OnceLock<Mutex<HashMap<String, Arc<Regex>>>> = OnceLock::new();
+
+/// # Errors
+///
+/// Returns an esbuild-compatible plugin error when the filter is empty or is
+/// not a valid regular expression.
+pub fn compile_filter_for_plugin(
+    plugin_name: &str,
+    kind: &str,
+    filter: &str,
+) -> Result<Arc<Regex>, String> {
+    if filter.is_empty() {
+        return Err(format!("[{plugin_name}] {kind:?} is missing a filter"));
+    }
+    let cache = FILTER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(regex) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(filter)
+        .cloned()
+    {
+        return Ok(regex);
+    }
+    let regex = Arc::new(Regex::new(filter).map_err(|_| {
+        format!("[{plugin_name}] {kind:?} filter is not a valid Go regular expression: {filter:?}")
+    })?);
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(filter.to_string(), regex.clone());
+    Ok(regex)
+}
+
+#[must_use]
+pub fn plugin_applies_to_path(
+    path: &crate::internal::logger::Path,
+    filter: &Regex,
+    namespace: &str,
+) -> bool {
+    (namespace.is_empty() || path.namespace == namespace) && filter.is_match(&path.text)
+}
+
+pub type PluginData = Arc<dyn Any + Send + Sync>;
+pub type OnStartCallback = Arc<dyn Fn() -> OnStartResult + Send + Sync>;
+pub type OnResolveCallback = Arc<dyn Fn(OnResolveArgs) -> OnResolveResult + Send + Sync>;
+pub type OnLoadCallback = Arc<dyn Fn(OnLoadArgs) -> OnLoadResult + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct Plugin {
+    pub name: String,
+    pub on_start: Vec<OnStart>,
+    pub on_resolve: Vec<OnResolve>,
+    pub on_load: Vec<OnLoad>,
+}
+
+#[derive(Clone, Default)]
+pub struct OnStart {
+    pub callback: Option<OnStartCallback>,
+    pub name: String,
+}
+
+#[derive(Clone, Default)]
+pub struct OnStartResult {
+    pub thrown_error: Option<String>,
+    pub messages: Vec<crate::internal::logger::Msg>,
+}
+
+#[derive(Clone, Default)]
+pub struct OnResolve {
+    pub filter: Option<Arc<Regex>>,
+    pub callback: Option<OnResolveCallback>,
+    pub name: String,
+    pub namespace: String,
+}
+
+#[derive(Clone, Default)]
+pub struct OnResolveArgs {
+    pub path: String,
+    pub resolve_dir: String,
+    pub plugin_data: Option<PluginData>,
+    pub importer: crate::internal::logger::Path,
+    pub kind: crate::internal::ast::ImportKind,
+    pub with: crate::internal::logger::ImportAttributes,
+}
+
+#[derive(Clone, Default)]
+pub struct OnResolveResult {
+    pub plugin_name: String,
+    pub messages: Vec<crate::internal::logger::Msg>,
+    pub thrown_error: Option<String>,
+    pub abs_watch_files: Vec<String>,
+    pub abs_watch_dirs: Vec<String>,
+    pub plugin_data: Option<PluginData>,
+    pub path: crate::internal::logger::Path,
+    pub external: bool,
+    pub is_side_effect_free: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct OnLoad {
+    pub filter: Option<Arc<Regex>>,
+    pub callback: Option<OnLoadCallback>,
+    pub name: String,
+    pub namespace: String,
+}
+
+#[derive(Clone, Default)]
+pub struct OnLoadArgs {
+    pub plugin_data: Option<PluginData>,
+    pub path: crate::internal::logger::Path,
+}
+
+#[derive(Clone, Default)]
+pub struct OnLoadResult {
+    pub plugin_name: String,
+    pub contents: Option<String>,
+    pub abs_resolve_dir: String,
+    pub plugin_data: Option<PluginData>,
+    pub messages: Vec<crate::internal::logger::Msg>,
+    pub thrown_error: Option<String>,
+    pub abs_watch_files: Vec<String>,
+    pub abs_watch_dirs: Vec<String>,
+    pub loader: Loader,
+}
+
+pub type MangleCache = HashMap<String, Arc<dyn Any + Send + Sync>>;
+pub type ExclusiveMangleCacheUpdate =
+    Arc<dyn Fn(&mut MangleCache, &mut HashMap<String, bool>) + Send + Sync>;
+
+#[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct Options {
+    pub module_type_data: crate::internal::js_ast::ModuleTypeData,
+    pub defines: Option<Arc<ProcessedDefines>>,
+    pub ts_always_strict: Option<Arc<TsAlwaysStrict>>,
+    pub mangle_props: Option<Arc<Regex>>,
+    pub reserve_props: Option<Arc<Regex>>,
+    pub cancel_flag: Option<Arc<CancelFlag>>,
+    pub exclusive_mangle_cache_update: Option<ExclusiveMangleCacheUpdate>,
+    pub original_target_environment: String,
+    pub drop_labels: Vec<String>,
+    pub extension_order: Vec<String>,
+    pub main_fields: Vec<String>,
+    pub conditions: Vec<String>,
+    pub abs_node_paths: Vec<String>,
+    pub external_settings: ExternalSettings,
+    pub external_packages: bool,
+    pub package_aliases: HashMap<String, String>,
+    pub abs_output_file: String,
+    pub abs_output_dir: String,
+    pub abs_output_base: String,
+    pub output_extension_js: String,
+    pub output_extension_css: String,
+    pub global_name: Vec<String>,
+    pub tsconfig_path: String,
+    pub tsconfig_raw: String,
+    pub extension_to_loader: HashMap<String, Loader>,
+    pub public_path: String,
+    pub inject_paths: Vec<String>,
+    pub injected_defines: Vec<InjectedDefine>,
+    pub injected_files: Vec<InjectedFile>,
+    pub js_banner: String,
+    pub js_footer: String,
+    pub css_banner: String,
+    pub css_footer: String,
+    pub entry_path_template: Vec<PathTemplate>,
+    pub chunk_path_template: Vec<PathTemplate>,
+    pub asset_path_template: Vec<PathTemplate>,
+    pub plugins: Vec<Plugin>,
+    pub source_root: String,
+    pub stdin: Option<StdinInfo>,
+    pub jsx: JsxOptions,
+    pub line_limit: usize,
+    pub css_prefix_data:
+        HashMap<crate::internal::css_ast::Declaration, crate::internal::compat::CssPrefix>,
+    pub unsupported_js_features: crate::internal::compat::JsFeature,
+    pub unsupported_css_features: crate::internal::compat::CssFeature,
+    pub unsupported_js_feature_overrides: crate::internal::compat::JsFeature,
+    pub unsupported_js_feature_overrides_mask: crate::internal::compat::JsFeature,
+    pub unsupported_css_feature_overrides: crate::internal::compat::CssFeature,
+    pub unsupported_css_feature_overrides_mask: crate::internal::compat::CssFeature,
+    pub ts: TsOptions,
+    pub mode: Mode,
+    pub preserve_symlinks: bool,
+    pub minify_whitespace: bool,
+    pub minify_identifiers: bool,
+    pub minify_syntax: bool,
+    pub profiler_names: bool,
+    pub code_splitting: bool,
+    pub watch_mode: bool,
+    pub allow_overwrite: bool,
+    pub legal_comments: LegalComments,
+    pub log_path_style: crate::internal::logger::PathStyle,
+    pub code_path_style: crate::internal::logger::PathStyle,
+    pub metafile_path_style: crate::internal::logger::PathStyle,
+    pub sourcemap_path_style: crate::internal::logger::PathStyle,
+    pub write_to_stdout: bool,
+    pub metafile_format: MetafileFormat,
+    pub omit_runtime_for_tests: bool,
+    pub omit_jsx_runtime_for_tests: bool,
+    pub ascii_only: bool,
+    pub keep_names: bool,
+    pub ignore_dce_annotations: bool,
+    pub tree_shaking: bool,
+    pub drop_debugger: bool,
+    pub mangle_quoted: bool,
+    pub platform: Platform,
+    pub output_format: Format,
+    pub needs_metafile: bool,
+    pub source_map: SourceMap,
+    pub exclude_sources_content: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         DefineData, DefineExpr, DefineFlags, Format, JsxOptions, Loader, MaybeBool, MetafileFormat,
         PathPlaceholder, PathPlaceholders, PathTemplate, TsConfig, TsConfigJsx,
-        TsImportsNotUsedAsValues, TsJsx, TsUnusedImportFlags, has_placeholder,
-        loader_from_file_extension, pretty_print_target_environment, process_defines,
-        should_call_runtime_require, substitute_template, template_to_string,
+        TsImportsNotUsedAsValues, TsJsx, TsUnusedImportFlags, compile_filter_for_plugin,
+        has_placeholder, loader_from_file_extension, plugin_applies_to_path,
+        pretty_print_target_environment, process_defines, should_call_runtime_require,
+        substitute_template, template_to_string,
     };
     use std::collections::HashMap;
 
@@ -875,5 +1112,21 @@ mod tests {
             MetafileFormat::Minified.maybe_remove_whitespace("{\n \"x\": 1\n}"),
             "{\"x\":1}"
         );
+    }
+
+    #[test]
+    fn plugin_filters_validate_cache_and_match_namespaces() {
+        assert!(compile_filter_for_plugin("demo", "on-load", "").is_err());
+        assert!(compile_filter_for_plugin("demo", "on-load", "(").is_err());
+        let first = compile_filter_for_plugin("demo", "on-load", r"\.js$").expect("valid filter");
+        let second = compile_filter_for_plugin("demo", "on-load", r"\.js$").expect("cached filter");
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        let path = crate::internal::logger::Path {
+            text: "entry.js".into(),
+            namespace: "file".into(),
+            ..crate::internal::logger::Path::default()
+        };
+        assert!(plugin_applies_to_path(&path, &first, "file"));
+        assert!(!plugin_applies_to_path(&path, &first, "virtual"));
     }
 }
