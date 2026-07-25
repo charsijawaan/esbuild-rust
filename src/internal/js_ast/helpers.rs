@@ -568,6 +568,25 @@ pub fn to_uint32(value: f64) -> u32 {
 }
 
 #[must_use]
+pub fn is_int32_or_uint32(data: Option<&ExprData>) -> bool {
+    match data {
+        Some(ExprData::Binary(value)) => match value.op {
+            OpCode::BinaryUnsignedShiftRight => true,
+            OpCode::BinaryLogicalOr | OpCode::BinaryLogicalAnd => {
+                is_int32_or_uint32(value.left.data.as_deref())
+                    && is_int32_or_uint32(value.right.data.as_deref())
+            }
+            _ => false,
+        },
+        Some(ExprData::If(value)) => {
+            is_int32_or_uint32(value.yes.data.as_deref())
+                && is_int32_or_uint32(value.no.data.as_deref())
+        }
+        _ => false,
+    }
+}
+
+#[must_use]
 pub fn to_number_without_side_effects(data: Option<&ExprData>) -> Option<f64> {
     match data? {
         ExprData::Annotation(value) => to_number_without_side_effects(value.value.data.as_deref()),
@@ -604,6 +623,38 @@ pub fn to_string_without_side_effects(data: Option<&ExprData>) -> Option<String>
     }
 }
 
+fn extract_numeric_value(data: Option<&ExprData>) -> Option<f64> {
+    match data? {
+        ExprData::Annotation(value) => extract_numeric_value(value.value.data.as_deref()),
+        ExprData::InlinedEnum(value) => extract_numeric_value(value.value.data.as_deref()),
+        ExprData::Number(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn extract_numeric_values(left: &Expr, right: &Expr) -> Option<(f64, f64)> {
+    Some((
+        extract_numeric_value(left.data.as_deref())?,
+        extract_numeric_value(right.data.as_deref())?,
+    ))
+}
+
+fn extract_string_value(data: Option<&ExprData>) -> Option<&[u16]> {
+    match data? {
+        ExprData::Annotation(value) => extract_string_value(value.value.data.as_deref()),
+        ExprData::InlinedEnum(value) => extract_string_value(value.value.data.as_deref()),
+        ExprData::String(value) => Some(&value.value),
+        _ => None,
+    }
+}
+
+fn extract_string_values<'a>(left: &'a Expr, right: &'a Expr) -> Option<(&'a [u16], &'a [u16])> {
+    Some((
+        extract_string_value(left.data.as_deref())?,
+        extract_string_value(right.data.as_deref())?,
+    ))
+}
+
 #[must_use]
 pub fn string_compare_ucs2(left: &[u16], right: &[u16]) -> i32 {
     for (&left, &right) in left.iter().zip(right) {
@@ -615,6 +666,375 @@ pub fn string_compare_ucs2(left: &[u16], right: &[u16]) -> i32 {
     i32::try_from(left.len())
         .unwrap_or(i32::MAX)
         .saturating_sub(i32::try_from(right.len()).unwrap_or(i32::MAX))
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn approximate_printed_int_char_count(value: f64) -> usize {
+    let mut count = 1 + value.abs().log10().floor().max(0.0) as usize;
+    if value.is_sign_negative() {
+        count += 1;
+    }
+    count
+}
+
+#[must_use]
+#[allow(clippy::float_cmp)]
+pub fn should_fold_binary_operator_when_minifying(binary: &BinaryExpr) -> bool {
+    match binary.op {
+        OpCode::BinaryLooseEqual
+        | OpCode::BinaryLooseNotEqual
+        | OpCode::BinaryStrictEqual
+        | OpCode::BinaryStrictNotEqual
+        | OpCode::BinaryShiftRight
+        | OpCode::BinaryBitwiseAnd
+        | OpCode::BinaryBitwiseOr
+        | OpCode::BinaryBitwiseXor
+        | OpCode::BinaryLessThan
+        | OpCode::BinaryGreaterThan
+        | OpCode::BinaryLessThanOrEqual
+        | OpCode::BinaryGreaterThanOrEqual => true,
+        OpCode::BinaryAdd => {
+            if let Some((left, right)) = extract_numeric_values(&binary.left, &binary.right)
+                && left == left.trunc()
+                && left.abs() <= 0xffff_ffff_u32.into()
+                && right == right.trunc()
+                && right.abs() <= 0xffff_ffff_u32.into()
+            {
+                return true;
+            }
+            extract_string_values(&binary.left, &binary.right).is_some()
+        }
+        OpCode::BinarySubtract => {
+            extract_numeric_values(&binary.left, &binary.right).is_some_and(|(left, right)| {
+                left == left.trunc()
+                    && left.abs() <= f64::from(0xffff_ffff_u32)
+                    && right == right.trunc()
+                    && right.abs() <= f64::from(0xffff_ffff_u32)
+            })
+        }
+        OpCode::BinaryMultiply => {
+            extract_numeric_values(&binary.left, &binary.right).is_some_and(|(left, right)| {
+                left == left.trunc()
+                    && left.abs() <= 255.0
+                    && right == right.trunc()
+                    && right.abs() <= 255.0
+            })
+        }
+        OpCode::BinaryDivide => extract_numeric_values(&binary.left, &binary.right)
+            .is_some_and(|(_, right)| right == 0.0),
+        OpCode::BinaryShiftLeft => {
+            extract_numeric_values(&binary.left, &binary.right).is_some_and(|(left, right)| {
+                let left_len = approximate_printed_int_char_count(left);
+                let right_len = approximate_printed_int_char_count(right);
+                let result = to_int32(left) << (to_uint32(right) & 31);
+                approximate_printed_int_char_count(f64::from(result)) <= left_len + 2 + right_len
+            })
+        }
+        OpCode::BinaryUnsignedShiftRight => extract_numeric_values(&binary.left, &binary.right)
+            .is_some_and(|(left, right)| {
+                let left_len = approximate_printed_int_char_count(left);
+                let right_len = approximate_printed_int_char_count(right);
+                let result = to_uint32(left) >> (to_uint32(right) & 31);
+                approximate_printed_int_char_count(f64::from(result)) <= left_len + 3 + right_len
+            }),
+        OpCode::BinaryLogicalAnd | OpCode::BinaryLogicalOr | OpCode::BinaryNullishCoalescing => {
+            is_primitive_literal(binary.left.data.as_deref())
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SideEffects {
+    #[default]
+    CouldHaveSideEffects,
+    NoSideEffects,
+}
+
+#[must_use]
+pub fn to_null_or_undefined_with_side_effects(
+    data: Option<&ExprData>,
+) -> Option<(bool, SideEffects)> {
+    match data? {
+        ExprData::Annotation(value) => {
+            let (is_nullish, mut side_effects) =
+                to_null_or_undefined_with_side_effects(value.value.data.as_deref())?;
+            if value
+                .flags
+                .contains(AnnotationFlags::CAN_BE_REMOVED_IF_UNUSED)
+            {
+                side_effects = SideEffects::NoSideEffects;
+            }
+            Some((is_nullish, side_effects))
+        }
+        ExprData::InlinedEnum(value) => {
+            to_null_or_undefined_with_side_effects(value.value.data.as_deref())
+        }
+        ExprData::Boolean(_)
+        | ExprData::Number(_)
+        | ExprData::String(_)
+        | ExprData::RegExp(_)
+        | ExprData::Function(_)
+        | ExprData::Arrow(_)
+        | ExprData::BigInt(_) => Some((false, SideEffects::NoSideEffects)),
+        ExprData::Object(_) | ExprData::Array(_) | ExprData::Class(_) => {
+            Some((false, SideEffects::CouldHaveSideEffects))
+        }
+        ExprData::Null | ExprData::Undefined => Some((true, SideEffects::NoSideEffects)),
+        ExprData::Unary(value) => match value.op {
+            OpCode::UnaryPositive
+            | OpCode::UnaryNegative
+            | OpCode::UnaryComplement
+            | OpCode::UnaryPreDecrement
+            | OpCode::UnaryPreIncrement
+            | OpCode::UnaryPostDecrement
+            | OpCode::UnaryPostIncrement
+            | OpCode::UnaryNot
+            | OpCode::UnaryDelete => Some((false, SideEffects::CouldHaveSideEffects)),
+            OpCode::UnaryTypeof => Some((
+                false,
+                if value.was_originally_typeof_identifier {
+                    SideEffects::NoSideEffects
+                } else {
+                    SideEffects::CouldHaveSideEffects
+                },
+            )),
+            OpCode::UnaryVoid => Some((true, SideEffects::CouldHaveSideEffects)),
+            _ => None,
+        },
+        ExprData::Binary(value) => match value.op {
+            OpCode::BinaryAdd
+            | OpCode::BinaryAddAssign
+            | OpCode::BinarySubtract
+            | OpCode::BinaryMultiply
+            | OpCode::BinaryDivide
+            | OpCode::BinaryRemainder
+            | OpCode::BinaryPower
+            | OpCode::BinarySubtractAssign
+            | OpCode::BinaryMultiplyAssign
+            | OpCode::BinaryDivideAssign
+            | OpCode::BinaryRemainderAssign
+            | OpCode::BinaryPowerAssign
+            | OpCode::BinaryShiftLeft
+            | OpCode::BinaryShiftRight
+            | OpCode::BinaryUnsignedShiftRight
+            | OpCode::BinaryShiftLeftAssign
+            | OpCode::BinaryShiftRightAssign
+            | OpCode::BinaryUnsignedShiftRightAssign
+            | OpCode::BinaryBitwiseOr
+            | OpCode::BinaryBitwiseAnd
+            | OpCode::BinaryBitwiseXor
+            | OpCode::BinaryBitwiseOrAssign
+            | OpCode::BinaryBitwiseAndAssign
+            | OpCode::BinaryBitwiseXorAssign
+            | OpCode::BinaryLessThan
+            | OpCode::BinaryLessThanOrEqual
+            | OpCode::BinaryGreaterThan
+            | OpCode::BinaryGreaterThanOrEqual
+            | OpCode::BinaryIn
+            | OpCode::BinaryInstanceof
+            | OpCode::BinaryLooseEqual
+            | OpCode::BinaryLooseNotEqual
+            | OpCode::BinaryStrictEqual
+            | OpCode::BinaryStrictNotEqual => Some((false, SideEffects::CouldHaveSideEffects)),
+            OpCode::BinaryComma => {
+                to_null_or_undefined_with_side_effects(value.right.data.as_deref())
+                    .map(|(is_nullish, _)| (is_nullish, SideEffects::CouldHaveSideEffects))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[must_use]
+#[allow(clippy::float_cmp)]
+pub fn to_boolean_with_side_effects(data: Option<&ExprData>) -> Option<(bool, SideEffects)> {
+    match data? {
+        ExprData::Annotation(value) => {
+            let (boolean, mut side_effects) =
+                to_boolean_with_side_effects(value.value.data.as_deref())?;
+            if value
+                .flags
+                .contains(AnnotationFlags::CAN_BE_REMOVED_IF_UNUSED)
+            {
+                side_effects = SideEffects::NoSideEffects;
+            }
+            Some((boolean, side_effects))
+        }
+        ExprData::InlinedEnum(value) => to_boolean_with_side_effects(value.value.data.as_deref()),
+        ExprData::Null | ExprData::Undefined => Some((false, SideEffects::NoSideEffects)),
+        ExprData::Boolean(value) => Some((*value, SideEffects::NoSideEffects)),
+        ExprData::Number(value) => {
+            Some((*value != 0.0 && !value.is_nan(), SideEffects::NoSideEffects))
+        }
+        ExprData::BigInt(value) => {
+            check_equality_big_int(value, "0").map(|equal| (!equal, SideEffects::NoSideEffects))
+        }
+        ExprData::String(value) => Some((!value.value.is_empty(), SideEffects::NoSideEffects)),
+        ExprData::Function(_) | ExprData::Arrow(_) | ExprData::RegExp(_) => {
+            Some((true, SideEffects::NoSideEffects))
+        }
+        ExprData::Object(_) | ExprData::Array(_) | ExprData::Class(_) => {
+            Some((true, SideEffects::CouldHaveSideEffects))
+        }
+        ExprData::Unary(value) => match value.op {
+            OpCode::UnaryVoid => Some((false, SideEffects::CouldHaveSideEffects)),
+            OpCode::UnaryTypeof => Some((
+                true,
+                if value.was_originally_typeof_identifier {
+                    SideEffects::NoSideEffects
+                } else {
+                    SideEffects::CouldHaveSideEffects
+                },
+            )),
+            OpCode::UnaryNot => to_boolean_with_side_effects(value.value.data.as_deref())
+                .map(|(boolean, side_effects)| (!boolean, side_effects)),
+            _ => None,
+        },
+        ExprData::Binary(value) => match value.op {
+            OpCode::BinaryLogicalOr => to_boolean_with_side_effects(value.right.data.as_deref())
+                .and_then(|(boolean, _)| {
+                    boolean.then_some((true, SideEffects::CouldHaveSideEffects))
+                }),
+            OpCode::BinaryLogicalAnd => to_boolean_with_side_effects(value.right.data.as_deref())
+                .and_then(|(boolean, _)| {
+                    (!boolean).then_some((false, SideEffects::CouldHaveSideEffects))
+                }),
+            OpCode::BinaryComma => to_boolean_with_side_effects(value.right.data.as_deref())
+                .map(|(boolean, _)| (boolean, SideEffects::CouldHaveSideEffects)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[must_use]
+#[allow(clippy::float_cmp, clippy::too_many_lines)]
+pub fn fold_binary_operator(loc: Loc, binary: &BinaryExpr) -> Option<Expr> {
+    let number = |value| Some(Expr::new(loc, ExprData::Number(value)));
+    let boolean = |value| Some(Expr::new(loc, ExprData::Boolean(value)));
+    match binary.op {
+        OpCode::BinaryAdd => {
+            if let Some((left, right)) = extract_numeric_values(&binary.left, &binary.right) {
+                return number(left + right);
+            }
+            if let Some((left, right)) = extract_string_values(&binary.left, &binary.right) {
+                let mut value = Vec::with_capacity(left.len() + right.len());
+                value.extend_from_slice(left);
+                value.extend_from_slice(right);
+                return Some(Expr::new(
+                    loc,
+                    ExprData::String(super::StringExpr {
+                        value,
+                        ..super::StringExpr::default()
+                    }),
+                ));
+            }
+            None
+        }
+        OpCode::BinarySubtract => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(left - right)),
+        OpCode::BinaryMultiply => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(left * right)),
+        OpCode::BinaryDivide => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(left / right)),
+        OpCode::BinaryRemainder => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(left % right)),
+        OpCode::BinaryPower => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(left.powf(right))),
+        OpCode::BinaryShiftLeft => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(f64::from(to_int32(left) << (to_uint32(right) & 31)))),
+        OpCode::BinaryShiftRight => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(f64::from(to_int32(left) >> (to_uint32(right) & 31)))),
+        OpCode::BinaryUnsignedShiftRight => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| {
+                number(f64::from(to_uint32(left) >> (to_uint32(right) & 31)))
+            }),
+        OpCode::BinaryBitwiseAnd => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(f64::from(to_int32(left) & to_int32(right)))),
+        OpCode::BinaryBitwiseOr => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(f64::from(to_int32(left) | to_int32(right)))),
+        OpCode::BinaryBitwiseXor => extract_numeric_values(&binary.left, &binary.right)
+            .and_then(|(left, right)| number(f64::from(to_int32(left) ^ to_int32(right)))),
+        OpCode::BinaryLessThan => {
+            if let Some((left, right)) = extract_numeric_values(&binary.left, &binary.right) {
+                return boolean(left < right);
+            }
+            extract_string_values(&binary.left, &binary.right)
+                .and_then(|(left, right)| boolean(string_compare_ucs2(left, right) < 0))
+        }
+        OpCode::BinaryGreaterThan => {
+            if let Some((left, right)) = extract_numeric_values(&binary.left, &binary.right) {
+                return boolean(left > right);
+            }
+            extract_string_values(&binary.left, &binary.right)
+                .and_then(|(left, right)| boolean(string_compare_ucs2(left, right) > 0))
+        }
+        OpCode::BinaryLessThanOrEqual => {
+            if let Some((left, right)) = extract_numeric_values(&binary.left, &binary.right) {
+                return boolean(left <= right);
+            }
+            extract_string_values(&binary.left, &binary.right)
+                .and_then(|(left, right)| boolean(string_compare_ucs2(left, right) <= 0))
+        }
+        OpCode::BinaryGreaterThanOrEqual => {
+            if let Some((left, right)) = extract_numeric_values(&binary.left, &binary.right) {
+                return boolean(left >= right);
+            }
+            extract_string_values(&binary.left, &binary.right)
+                .and_then(|(left, right)| boolean(string_compare_ucs2(left, right) >= 0))
+        }
+        OpCode::BinaryLooseEqual | OpCode::BinaryStrictEqual => {
+            if let Some((left, right)) = extract_numeric_values(&binary.left, &binary.right) {
+                return boolean(left == right);
+            }
+            extract_string_values(&binary.left, &binary.right)
+                .and_then(|(left, right)| boolean(string_compare_ucs2(left, right) == 0))
+        }
+        OpCode::BinaryLooseNotEqual | OpCode::BinaryStrictNotEqual => {
+            if let Some((left, right)) = extract_numeric_values(&binary.left, &binary.right) {
+                return boolean(left != right);
+            }
+            extract_string_values(&binary.left, &binary.right)
+                .and_then(|(left, right)| boolean(string_compare_ucs2(left, right) != 0))
+        }
+        OpCode::BinaryLogicalAnd => {
+            let (boolean, side_effects) =
+                to_boolean_with_side_effects(binary.left.data.as_deref())?;
+            if !boolean {
+                Some(binary.left.clone())
+            } else if side_effects == SideEffects::NoSideEffects {
+                Some(binary.right.clone())
+            } else {
+                None
+            }
+        }
+        OpCode::BinaryLogicalOr => {
+            let (boolean, side_effects) =
+                to_boolean_with_side_effects(binary.left.data.as_deref())?;
+            if boolean {
+                Some(binary.left.clone())
+            } else if side_effects == SideEffects::NoSideEffects {
+                Some(binary.right.clone())
+            } else {
+                None
+            }
+        }
+        OpCode::BinaryNullishCoalescing => {
+            let (is_nullish, side_effects) =
+                to_null_or_undefined_with_side_effects(binary.left.data.as_deref())?;
+            if !is_nullish {
+                Some(binary.left.clone())
+            } else if side_effects == SideEffects::NoSideEffects {
+                Some(binary.right.clone())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 #[must_use]
@@ -977,14 +1397,16 @@ fn format_i32_radix(value: i32, radix: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EqualityKind, PrimitiveType, assign, can_change_strict_to_loose, check_equality_big_int,
-        check_equality_if_no_side_effects, convert_binding_to_expr,
-        inline_spreads_of_array_literals, is_optional_chain, join_all_with_comma,
-        known_primitive_type, mangle_object_spread, maybe_simplify_equality_comparison,
-        maybe_simplify_not, not, string_compare_ucs2, string_to_equivalent_number_value, to_int32,
-        to_number_without_side_effects, to_string_without_side_effects, to_uint32,
-        try_to_insert_optional_chain, try_to_string_on_number_safely, typeof_without_side_effects,
-        values_look_the_same,
+        EqualityKind, PrimitiveType, SideEffects, assign, can_change_strict_to_loose,
+        check_equality_big_int, check_equality_if_no_side_effects, convert_binding_to_expr,
+        fold_binary_operator, inline_spreads_of_array_literals, is_optional_chain,
+        join_all_with_comma, known_primitive_type, mangle_object_spread,
+        maybe_simplify_equality_comparison, maybe_simplify_not, not,
+        should_fold_binary_operator_when_minifying, string_compare_ucs2,
+        string_to_equivalent_number_value, to_boolean_with_side_effects, to_int32,
+        to_null_or_undefined_with_side_effects, to_number_without_side_effects,
+        to_string_without_side_effects, to_uint32, try_to_insert_optional_chain,
+        try_to_string_on_number_safely, typeof_without_side_effects, values_look_the_same,
     };
     use crate::internal::ast::Ref;
     use crate::internal::compat::JsFeature;
@@ -1389,5 +1811,168 @@ mod tests {
             outer.target.data.as_deref(),
             Some(ExprData::Dot(inner)) if inner.optional_chain == OptionalChain::Start
         ));
+    }
+
+    #[test]
+    fn folds_numeric_string_and_shift_operators() {
+        let folded = fold_binary_operator(
+            Loc::default(),
+            &BinaryExpr {
+                left: number(1.0),
+                right: number(2.0),
+                op: OpCode::BinaryAdd,
+            },
+        )
+        .expect("addition should fold");
+        assert!(matches!(
+            folded.data.as_deref(),
+            Some(ExprData::Number(3.0))
+        ));
+
+        let string = |value: &str| {
+            Expr::new(
+                Loc::default(),
+                ExprData::String(StringExpr {
+                    value: value.encode_utf16().collect(),
+                    ..StringExpr::default()
+                }),
+            )
+        };
+        let folded = fold_binary_operator(
+            Loc::default(),
+            &BinaryExpr {
+                left: string("a"),
+                right: string("b"),
+                op: OpCode::BinaryAdd,
+            },
+        )
+        .expect("string addition should fold");
+        assert!(matches!(
+            folded.data.as_deref(),
+            Some(ExprData::String(value))
+                if value.value == "ab".encode_utf16().collect::<Vec<_>>()
+        ));
+
+        let folded = fold_binary_operator(
+            Loc::default(),
+            &BinaryExpr {
+                left: number(-1.0),
+                right: number(0.0),
+                op: OpCode::BinaryUnsignedShiftRight,
+            },
+        )
+        .expect("unsigned shift should fold");
+        assert!(matches!(
+            folded.data.as_deref(),
+            Some(ExprData::Number(value))
+                if value.to_bits() == f64::from(u32::MAX).to_bits()
+        ));
+    }
+
+    #[test]
+    fn selects_binary_folds_that_shrink_minified_output() {
+        assert!(should_fold_binary_operator_when_minifying(&BinaryExpr {
+            left: number(1.0),
+            right: number(2.0),
+            op: OpCode::BinaryAdd,
+        }));
+        assert!(!should_fold_binary_operator_when_minifying(&BinaryExpr {
+            left: number(1e20),
+            right: number(2.0),
+            op: OpCode::BinaryAdd,
+        }));
+        assert!(should_fold_binary_operator_when_minifying(&BinaryExpr {
+            left: number(1.0),
+            right: number(0.0),
+            op: OpCode::BinaryDivide,
+        }));
+    }
+
+    #[test]
+    fn tracks_truthiness_nullishness_and_side_effects() {
+        assert_eq!(
+            to_boolean_with_side_effects(number(0.0).data.as_deref()),
+            Some((false, SideEffects::NoSideEffects))
+        );
+        assert_eq!(
+            to_boolean_with_side_effects(
+                Expr::new(Loc::default(), ExprData::Array(ArrayExpr::default()))
+                    .data
+                    .as_deref()
+            ),
+            Some((true, SideEffects::CouldHaveSideEffects))
+        );
+        assert_eq!(
+            to_null_or_undefined_with_side_effects(
+                Expr::new(Loc::default(), ExprData::Null).data.as_deref()
+            ),
+            Some((true, SideEffects::NoSideEffects))
+        );
+        assert_eq!(
+            to_null_or_undefined_with_side_effects(
+                Expr::new(
+                    Loc::default(),
+                    ExprData::Unary(UnaryExpr {
+                        value: number(1.0),
+                        op: OpCode::UnaryVoid,
+                        ..UnaryExpr::default()
+                    })
+                )
+                .data
+                .as_deref()
+            ),
+            Some((true, SideEffects::CouldHaveSideEffects))
+        );
+    }
+
+    #[test]
+    fn folds_short_circuit_operators_without_dropping_effects() {
+        let right = number(2.0);
+        let folded = fold_binary_operator(
+            Loc::default(),
+            &BinaryExpr {
+                left: Expr::new(Loc::default(), ExprData::Boolean(false)),
+                right: right.clone(),
+                op: OpCode::BinaryLogicalAnd,
+            },
+        )
+        .expect("false && value should fold");
+        assert!(matches!(
+            folded.data.as_deref(),
+            Some(ExprData::Boolean(false))
+        ));
+
+        let folded = fold_binary_operator(
+            Loc::default(),
+            &BinaryExpr {
+                left: Expr::new(Loc::default(), ExprData::Null),
+                right: right.clone(),
+                op: OpCode::BinaryNullishCoalescing,
+            },
+        )
+        .expect("null ?? value should fold");
+        assert!(matches!(
+            folded.data.as_deref(),
+            Some(ExprData::Number(2.0))
+        ));
+
+        assert!(
+            fold_binary_operator(
+                Loc::default(),
+                &BinaryExpr {
+                    left: Expr::new(
+                        Loc::default(),
+                        ExprData::Unary(UnaryExpr {
+                            value: number(1.0),
+                            op: OpCode::UnaryVoid,
+                            ..UnaryExpr::default()
+                        })
+                    ),
+                    right,
+                    op: OpCode::BinaryNullishCoalescing,
+                },
+            )
+            .is_none()
+        );
     }
 }
