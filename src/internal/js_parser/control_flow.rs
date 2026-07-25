@@ -3,8 +3,8 @@
 use crate::internal::{
     helpers::{hash_combine, hash_combine_string},
     js_ast::{
-        EqualityKind, Expr, ExprData, LocalKind, Stmt, StmtData, SwitchStmt,
-        check_equality_big_int, check_equality_if_no_side_effects,
+        BinaryExpr, EqualityKind, Expr, ExprData, ForStmt, LocalKind, OpCode, Stmt, StmtData,
+        SwitchStmt, check_equality_big_int, check_equality_if_no_side_effects,
     },
 };
 
@@ -166,6 +166,95 @@ pub(crate) fn jump_stmts_look_the_same(left: &StmtData, right: &StmtData) -> boo
     }
 }
 
+pub(crate) fn drop_first_statement(mut body: Stmt, replacement: Stmt) -> Stmt {
+    if let Some(StmtData::Block(block)) = body.data.as_deref_mut()
+        && !block.statements.is_empty()
+    {
+        if replacement.data.is_some() {
+            block.statements[0] = replacement;
+        } else if block.statements.len() == 2 && !stmt_cares_about_scope(&block.statements[1]) {
+            return block.statements[1].clone();
+        } else {
+            block.statements.remove(0);
+        }
+        return body;
+    }
+    if replacement.data.is_some() {
+        return replacement;
+    }
+    Stmt::new(body.loc, StmtData::Empty)
+}
+
+pub(crate) fn mangle_for(for_stmt: &mut ForStmt) {
+    let mut first = &for_stmt.body;
+    if let Some(StmtData::Block(block)) = first.data.as_deref()
+        && let Some(statement) = block.statements.first()
+    {
+        first = statement;
+    }
+    let Some(StmtData::If(if_stmt)) = first.data.as_deref() else {
+        return;
+    };
+    let if_stmt = if_stmt.clone();
+
+    if matches!(
+        if_stmt.yes.data.as_deref(),
+        Some(StmtData::Break(break_stmt)) if break_stmt.label.is_none()
+    ) {
+        let inverted = match if_stmt.test.data.as_deref() {
+            Some(ExprData::Unary(unary)) if unary.op == OpCode::UnaryNot => unary.value.clone(),
+            _ => crate::internal::js_ast::not(if_stmt.test),
+        };
+        for_stmt.test_or_nil = join_loop_test(for_stmt.test_or_nil.clone(), inverted);
+        for_stmt.body = drop_first_statement(for_stmt.body.clone(), if_stmt.no_or_nil);
+        return;
+    }
+
+    if matches!(
+        if_stmt.no_or_nil.data.as_deref(),
+        Some(StmtData::Break(break_stmt)) if break_stmt.label.is_none()
+    ) {
+        for_stmt.test_or_nil = join_loop_test(for_stmt.test_or_nil.clone(), if_stmt.test);
+        for_stmt.body = drop_first_statement(for_stmt.body.clone(), if_stmt.yes);
+    }
+}
+
+fn join_loop_test(left: Expr, right: Expr) -> Expr {
+    if left.data.is_none() {
+        return right;
+    }
+    Expr::new(
+        left.loc,
+        ExprData::Binary(BinaryExpr {
+            left,
+            right,
+            op: OpCode::BinaryLogicalAnd,
+        }),
+    )
+}
+
+pub(crate) fn append_if_or_label_body_preserving_scope(
+    mut statements: Vec<Stmt>,
+    body: Stmt,
+) -> Vec<Stmt> {
+    if let Some(StmtData::Block(block)) = body.data.as_deref()
+        && !stmts_care_about_scope(&block.statements)
+    {
+        statements.extend(block.statements.clone());
+    } else if stmt_cares_about_scope(&body) {
+        statements.push(Stmt::new(
+            body.loc,
+            StmtData::Block(crate::internal::js_ast::BlockStmt {
+                statements: vec![body],
+                ..crate::internal::js_ast::BlockStmt::default()
+            }),
+        ));
+    } else {
+        statements.push(body);
+    }
+    statements
+}
+
 pub(crate) fn duplicate_case_hash(expr: &Expr) -> Option<u32> {
     match expr.data.as_deref()? {
         ExprData::InlinedEnum(value) => duplicate_case_hash(&value.value),
@@ -239,9 +328,9 @@ mod tests {
     use crate::internal::{
         ast::Ref,
         js_ast::{
-            BlockStmt, BreakStmt, ContinueStmt, DotExpr, Expr, ExprData, IdentifierExpr,
-            InlinedEnumExpr, LocalKind, LocalStmt, ReturnStmt, Stmt, StmtData, StringExpr,
-            SwitchCase, SwitchStmt,
+            BlockStmt, BreakStmt, ContinueStmt, DotExpr, Expr, ExprData, IdentifierExpr, IfStmt,
+            InlinedEnumExpr, LocalKind, LocalStmt, OpCode, ReturnStmt, Stmt, StmtData, StringExpr,
+            SwitchCase, SwitchStmt, UnaryExpr,
         },
         logger::Loc,
     };
@@ -249,6 +338,7 @@ mod tests {
     use super::{
         LivenessStatus, analyze_switch_cases_for_liveness, case_body_could_have_fall_through,
         duplicate_case_equals, duplicate_case_hash, is_jump_statement, jump_stmts_look_the_same,
+        mangle_for,
     };
 
     fn expr(data: ExprData) -> Expr {
@@ -378,5 +468,64 @@ mod tests {
         let empty = StmtData::Return(ReturnStmt::default());
         assert!(jump_stmts_look_the_same(&one, &another_one));
         assert!(!jump_stmts_look_the_same(&one, &empty));
+    }
+
+    #[test]
+    fn mangles_leading_break_condition_into_for_test() {
+        let mut for_stmt = crate::internal::js_ast::ForStmt {
+            test_or_nil: expr(ExprData::Identifier(IdentifierExpr {
+                reference: Ref {
+                    source_index: 1,
+                    inner_index: 1,
+                },
+                ..IdentifierExpr::default()
+            })),
+            body: stmt(StmtData::If(IfStmt {
+                test: expr(ExprData::Unary(UnaryExpr {
+                    value: expr(ExprData::Boolean(true)),
+                    op: OpCode::UnaryNot,
+                    ..UnaryExpr::default()
+                })),
+                yes: stmt(StmtData::Break(BreakStmt::default())),
+                ..IfStmt::default()
+            })),
+            ..crate::internal::js_ast::ForStmt::default()
+        };
+        mangle_for(&mut for_stmt);
+        let Some(ExprData::Binary(test)) = for_stmt.test_or_nil.data.as_deref() else {
+            panic!("expected combined loop test");
+        };
+        assert_eq!(test.op, OpCode::BinaryLogicalAnd);
+        assert!(matches!(
+            test.right.data.as_deref(),
+            Some(ExprData::Boolean(true))
+        ));
+        assert!(matches!(
+            for_stmt.body.data.as_deref(),
+            Some(StmtData::Empty)
+        ));
+    }
+
+    #[test]
+    fn mangles_else_break_into_loop_test_and_yes_body() {
+        let yes = stmt(StmtData::Debugger);
+        let mut for_stmt = crate::internal::js_ast::ForStmt {
+            body: stmt(StmtData::If(IfStmt {
+                test: expr(ExprData::Boolean(true)),
+                yes: yes.clone(),
+                no_or_nil: stmt(StmtData::Break(BreakStmt::default())),
+                ..IfStmt::default()
+            })),
+            ..crate::internal::js_ast::ForStmt::default()
+        };
+        mangle_for(&mut for_stmt);
+        assert!(matches!(
+            for_stmt.test_or_nil.data.as_deref(),
+            Some(ExprData::Boolean(true))
+        ));
+        assert!(matches!(
+            for_stmt.body.data.as_deref(),
+            Some(StmtData::Debugger)
+        ));
     }
 }
