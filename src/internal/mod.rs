@@ -3,4 +3,5 @@
 pub mod ast;
 pub mod helpers;
 pub mod logger;
+pub mod sourcemap;
 pub mod xxhash;
