@@ -6,9 +6,9 @@ use std::{
 
 use esbuild_rs::{
     api::{
-        BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
-        BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, Loader, Packages,
-        TransformOptions, build, transform,
+        AnalyzeMetafileOptions, BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments,
+        BuildOptions, BuildPlatform, BuildSourceMap, BuildSourcesContent, BuildStdin,
+        BuildTreeShaking, Loader, Packages, TransformOptions, analyze_metafile, build, transform,
     },
     internal::cli_helpers,
 };
@@ -16,11 +16,8 @@ use esbuild_rs::{
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     match run(&arguments) {
-        Ok(Output::Text(text)) => {
-            print!("{text}");
-        }
-        Ok(Output::Code(code)) => {
-            if let Err(error) = io::stdout().write_all(&code) {
+        Ok(output) => {
+            if let Err(error) = write_output(output) {
                 eprintln!("error: {error}");
                 std::process::exit(1);
             }
@@ -35,6 +32,26 @@ fn main() {
 enum Output {
     Text(String),
     Code(Vec<u8>),
+    WithStderr { output: Box<Output>, stderr: String },
+}
+
+fn write_output(output: Output) -> io::Result<()> {
+    match output {
+        Output::Text(text) => io::stdout().write_all(text.as_bytes()),
+        Output::Code(code) => io::stdout().write_all(&code),
+        Output::WithStderr { output, stderr } => {
+            io::stderr().write_all(stderr.as_bytes())?;
+            write_output(*output)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum AnalyzeMode {
+    #[default]
+    Disabled,
+    Enabled,
+    Verbose,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -69,6 +86,7 @@ fn run_with_stdin_and_node_paths(
     let mut tsconfig = String::new();
     let mut tsconfig_raw = String::new();
     let mut metafile_path = String::new();
+    let mut analyze = AnalyzeMode::Disabled;
     let mut format = BuildFormat::Default;
     let mut platform = BuildPlatform::Browser;
     let mut global_name = String::new();
@@ -119,6 +137,14 @@ fn run_with_stdin_and_node_paths(
         }
         if argument == "--bundle" {
             bundle = true;
+            continue;
+        }
+        if argument == "--analyze" {
+            analyze = AnalyzeMode::Enabled;
+            continue;
+        }
+        if argument == "--analyze=verbose" {
+            analyze = AnalyzeMode::Verbose;
             continue;
         }
         if argument == "--splitting" {
@@ -451,6 +477,7 @@ fn run_with_stdin_and_node_paths(
         || !outdir.is_empty()
         || !outfile.is_empty()
         || !metafile_path.is_empty()
+        || analyze != AnalyzeMode::Disabled
         || input_paths.len() > 1
         || input_paths.iter().any(|path| path.contains('='));
     if use_build_api {
@@ -515,7 +542,7 @@ fn run_with_stdin_and_node_paths(
             outbase,
             tsconfig,
             tsconfig_raw,
-            metafile: !metafile_path.is_empty(),
+            metafile: !metafile_path.is_empty() || analyze != AnalyzeMode::Disabled,
             format,
             platform,
             global_name,
@@ -588,11 +615,33 @@ fn run_with_stdin_and_node_paths(
                 }
             }
         }
+        let analysis = if analyze == AnalyzeMode::Disabled {
+            String::new()
+        } else {
+            format!(
+                "{}\n",
+                analyze_metafile(
+                    &result.metafile,
+                    AnalyzeMetafileOptions {
+                        verbose: analyze == AnalyzeMode::Verbose,
+                        ..AnalyzeMetafileOptions::default()
+                    }
+                )
+            )
+        };
         if outdir.is_empty() && outfile.is_empty() {
             let [output] = result.output_files.as_slice() else {
                 return Err("Must use \"--outdir\" when there are multiple output files".into());
             };
-            return Ok(Output::Code(output.contents.clone()));
+            let output = Output::Code(output.contents.clone());
+            return Ok(if analysis.is_empty() {
+                output
+            } else {
+                Output::WithStderr {
+                    output: Box::new(output),
+                    stderr: analysis,
+                }
+            });
         }
         for output in result.output_files {
             let path = std::path::Path::new(&output.path);
@@ -615,7 +664,15 @@ fn run_with_stdin_and_node_paths(
             fs::write(path, result.metafile)
                 .map_err(|error| format!("Could not write {metafile_path:?}: {error}"))?;
         }
-        return Ok(Output::Text(String::new()));
+        let output = Output::Text(String::new());
+        return Ok(if analysis.is_empty() {
+            output
+        } else {
+            Output::WithStderr {
+                output: Box::new(output),
+                stderr: analysis,
+            }
+        });
     }
 
     if !metafile_path.is_empty() {
@@ -723,6 +780,7 @@ fn help_text() -> String {
          Usage: esbuild [options] [input-file]\n\n\
          Options:\n\
          \x20\x20--bundle\n\
+         \x20\x20--analyze[=verbose]\n\
          \x20\x20--outdir=DIR\n\
          \x20\x20--outfile=FILE\n\
          \x20\x20--outbase=DIR\n\
@@ -1435,6 +1493,35 @@ mod tests {
             ])
             .is_err()
         );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn analyzes_bundles() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-analyze-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "console.log('analyze')").expect("write entry file");
+
+        for (flag, verbose) in [("--analyze", false), ("--analyze=verbose", true)] {
+            let Output::WithStderr { output, stderr } = run(&[
+                "--bundle".into(),
+                flag.into(),
+                entry.to_string_lossy().into_owned(),
+            ])
+            .expect("analysis succeeds") else {
+                panic!("expected analysis output");
+            };
+            assert!(matches!(*output, Output::Code(_)));
+            assert!(stderr.contains("100.0%"), "{stderr}");
+            assert_eq!(stderr.contains('─'), verbose, "{stderr}");
+            assert!(stderr.ends_with("\n\n"), "{stderr:?}");
+        }
+
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
