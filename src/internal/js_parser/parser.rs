@@ -2331,6 +2331,51 @@ mod tests {
     }
 
     #[test]
+    fn lowers_development_jsx_to_jsx_dev_calls() {
+        let mut options = Options::default();
+        options.jsx.parse = true;
+        options.jsx.automatic_runtime = true;
+        options.jsx.development = true;
+        let (ast, ok, log) = parse_source_with_options("<><One /><Two /></>;", options.clone());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 1);
+        assert_eq!(ast.import_records[0].path.text, "react/jsx-dev-runtime");
+        assert_eq!(
+            ast.named_imports
+                .values()
+                .map(|item| item.alias.as_str())
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from(["Fragment", "jsxDEV"])
+        );
+        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected expression statement");
+        };
+        let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
+            panic!("expected jsxDEV call");
+        };
+        assert_eq!(call.args.len(), 6);
+        assert!(matches!(
+            call.args[2].data.as_deref(),
+            Some(ExprData::Undefined)
+        ));
+        assert!(matches!(
+            call.args[3].data.as_deref(),
+            Some(ExprData::Boolean(true))
+        ));
+        assert!(matches!(
+            call.args[4].data.as_deref(),
+            Some(ExprData::Object(source)) if source.properties.len() == 3
+        ));
+        assert!(matches!(call.args[5].data.as_deref(), Some(ExprData::This)));
+
+        let (_, ok, log) =
+            parse_source_with_options("<div __source=\"plugin\" __self={self} />;", options);
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
+    }
+
+    #[test]
     fn for_loops_keep_lexical_bindings_in_a_loop_scope() {
         let (ast, ok, log) =
             parse_source("for (let item of items) { item; } item; for (let i = 0; i < 1; i++) {}");

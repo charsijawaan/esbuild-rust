@@ -1082,19 +1082,32 @@ fn visit_expr_with_target(
                     let mut key_or_nil = None;
                     let mut properties = Vec::with_capacity(element.properties.len() + 1);
                     for property in std::mem::take(&mut element.properties) {
-                        if property_name(&property).as_deref() == Some("key") {
-                            if property.flags.contains(PropertyFlags::WAS_SHORTHAND) {
+                        match property_name(&property).as_deref() {
+                            Some("key") => {
+                                if property.flags.contains(PropertyFlags::WAS_SHORTHAND) {
+                                    core.add_error_range(
+                                        crate::internal::logger::Range {
+                                            loc: property.loc,
+                                            len: 3,
+                                        },
+                                        "Please provide an explicit value for \"key\":",
+                                    );
+                                }
+                                key_or_nil = Some(property.value_or_nil);
+                            }
+                            Some("__source" | "__self") if core.options.jsx.development => {
                                 core.add_error_range(
                                     crate::internal::logger::Range {
                                         loc: property.loc,
-                                        len: 3,
+                                        len: 0,
                                     },
-                                    "Please provide an explicit value for \"key\":",
+                                    format!(
+                                        "Duplicate {:?} prop found:",
+                                        property_name(&property).unwrap_or_default()
+                                    ),
                                 );
                             }
-                            key_or_nil = Some(property.value_or_nil);
-                        } else {
-                            properties.push(property);
+                            _ => properties.push(property),
                         }
                     }
                     let mut is_static_children = children.len() > 1;
@@ -1140,7 +1153,66 @@ fn visit_expr_with_target(
                             }),
                         ),
                     ];
-                    if let Some(key) = key_or_nil {
+                    if core.options.jsx.development {
+                        args.push(
+                            key_or_nil
+                                .unwrap_or_else(|| Expr::new(expression.loc, ExprData::Undefined)),
+                        );
+                        args.push(Expr::new(
+                            expression.loc,
+                            ExprData::Boolean(is_static_children),
+                        ));
+                        let source_location =
+                            core.tracker
+                                .msg_location_or_none(crate::internal::logger::Range {
+                                    loc: expression.loc,
+                                    len: 0,
+                                });
+                        let (line, column) = source_location.map_or((1.0, 1.0), |location| {
+                            (
+                                f64::from(u32::try_from(location.line).unwrap_or(u32::MAX)),
+                                f64::from(
+                                    u32::try_from(location.column.saturating_add(1))
+                                        .unwrap_or(u32::MAX),
+                                ),
+                            )
+                        });
+                        let file_name = core
+                            .source
+                            .pretty_paths
+                            .select(core.options.code_path_style)
+                            .as_bytes()
+                            .to_vec();
+                        args.push(Expr::new(
+                            expression.loc,
+                            ExprData::Object(ObjectExpr {
+                                properties: vec![
+                                    jsx_metadata_property(
+                                        expression.loc,
+                                        b"fileName",
+                                        ExprData::String(crate::internal::js_ast::StringExpr {
+                                            value: crate::internal::helpers::string_to_utf16(
+                                                &file_name,
+                                            ),
+                                            ..crate::internal::js_ast::StringExpr::default()
+                                        }),
+                                    ),
+                                    jsx_metadata_property(
+                                        expression.loc,
+                                        b"lineNumber",
+                                        ExprData::Number(line),
+                                    ),
+                                    jsx_metadata_property(
+                                        expression.loc,
+                                        b"columnNumber",
+                                        ExprData::Number(column),
+                                    ),
+                                ],
+                                ..ObjectExpr::default()
+                            }),
+                        ));
+                        args.push(Expr::new(expression.loc, ExprData::This));
+                    } else if let Some(key) = key_or_nil {
                         args.push(key);
                     }
                     let import = if is_static_children {
@@ -1220,11 +1292,38 @@ fn property_name(property: &crate::internal::js_ast::Property) -> Option<String>
     Some(String::from_utf16_lossy(&string.value))
 }
 
+fn jsx_metadata_property(
+    loc: Loc,
+    name: &[u8],
+    value: ExprData,
+) -> crate::internal::js_ast::Property {
+    crate::internal::js_ast::Property {
+        key: Expr::new(
+            loc,
+            ExprData::String(crate::internal::js_ast::StringExpr {
+                value: crate::internal::helpers::string_to_utf16(name),
+                ..crate::internal::js_ast::StringExpr::default()
+            }),
+        ),
+        value_or_nil: Expr::new(loc, value),
+        loc,
+        ..crate::internal::js_ast::Property::default()
+    }
+}
+
 fn import_jsx_symbol(
     core: &mut ParserCore,
     loc: Loc,
-    import: super::parser_types::JsxImport,
+    mut import: super::parser_types::JsxImport,
 ) -> Expr {
+    if core.options.jsx.development
+        && matches!(
+            import,
+            super::parser_types::JsxImport::Jsx | super::parser_types::JsxImport::Jsxs
+        )
+    {
+        import = super::parser_types::JsxImport::Jsx;
+    }
     if let Some(reference) = core.jsx_imports.get(&import).copied() {
         core.record_usage(reference);
         return Expr::new(
@@ -1238,8 +1337,14 @@ fn import_jsx_symbol(
     }
 
     let (alias, suffix) = match import {
+        super::parser_types::JsxImport::Jsx if core.options.jsx.development => {
+            ("jsxDEV", "/jsx-dev-runtime")
+        }
         super::parser_types::JsxImport::Jsx => ("jsx", "/jsx-runtime"),
         super::parser_types::JsxImport::Jsxs => ("jsxs", "/jsx-runtime"),
+        super::parser_types::JsxImport::Fragment if core.options.jsx.development => {
+            ("Fragment", "/jsx-dev-runtime")
+        }
         super::parser_types::JsxImport::Fragment => ("Fragment", "/jsx-runtime"),
         super::parser_types::JsxImport::CreateElement => ("createElement", ""),
     };
