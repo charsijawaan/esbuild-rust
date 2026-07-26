@@ -210,6 +210,58 @@ pub(crate) fn parse_untagged_template_prefix(
     ))
 }
 
+pub(crate) fn parse_tagged_template_suffix(
+    tag: Expr,
+    lexer: &mut Lexer,
+    mut parse_value: impl FnMut(&mut Lexer) -> Expr,
+) -> Option<Expr> {
+    if !matches!(
+        lexer.token,
+        Token::NoSubstitutionTemplateLiteral | Token::TemplateHead
+    ) {
+        return None;
+    }
+    let loc = tag.loc;
+    let head_loc = lexer.loc();
+    let (_, head_raw) = lexer.cooked_and_raw_template_contents();
+    let head_raw = String::from_utf8(head_raw).expect("template source text must be valid UTF-8");
+    let mut parts = Vec::new();
+
+    if lexer.token == Token::NoSubstitutionTemplateLiteral {
+        lexer.next();
+    } else {
+        loop {
+            lexer.next();
+            let value = parse_value(lexer);
+            let tail_loc = lexer.loc();
+            lexer.rescan_close_brace_as_template_token();
+            let (_, tail_raw) = lexer.cooked_and_raw_template_contents();
+            parts.push(TemplatePart {
+                value,
+                tail_raw: String::from_utf8(tail_raw)
+                    .expect("template source text must be valid UTF-8"),
+                tail_loc,
+                ..TemplatePart::default()
+            });
+            if lexer.token == Token::TemplateTail {
+                lexer.next();
+                break;
+            }
+        }
+    }
+
+    Some(Expr::new(
+        loc,
+        ExprData::Template(TemplateExpr {
+            tag_or_nil: tag,
+            head_raw,
+            parts,
+            head_loc,
+            ..TemplateExpr::default()
+        }),
+    ))
+}
+
 pub(crate) fn parse_big_int_or_string_if_unsupported(core: &ParserCore, lexer: &Lexer) -> Expr {
     let loc = lexer.loc();
     let text = std::str::from_utf8(&lexer.identifier.string)
@@ -349,7 +401,8 @@ mod tests {
     use super::{
         parse_array_prefix, parse_big_int_or_string_if_unsupported, parse_numeric_literal,
         parse_object_prefix, parse_regular_expression_literal, parse_simple_prefix,
-        parse_string_literal, parse_unary_prefix, parse_untagged_template_prefix,
+        parse_string_literal, parse_tagged_template_suffix, parse_unary_prefix,
+        parse_untagged_template_prefix,
     };
     use crate::internal::{
         config::TsOptions,
@@ -609,6 +662,32 @@ mod tests {
             template.parts[1].tail_cooked,
             "c".encode_utf16().collect::<Vec<_>>()
         );
+        assert_eq!(lexer.token, Token::Plus);
+    }
+
+    #[test]
+    fn tagged_templates_preserve_raw_invalid_escapes() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&br"tag`\xZ${1}\r` + 2"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let tag = parse_simple_prefix(&mut core, &mut lexer).expect("expected tag");
+        let template = parse_tagged_template_suffix(tag, &mut lexer, |lexer| {
+            let loc = lexer.loc();
+            let value = lexer.number;
+            lexer.next();
+            Expr::new(loc, ExprData::Number(value))
+        })
+        .expect("expected tagged template");
+        let Some(ExprData::Template(template)) = template.data.as_deref() else {
+            panic!("expected template expression");
+        };
+        assert_eq!(template.head_raw, r"\xZ");
+        assert_eq!(template.parts[0].tail_raw, r"\r");
+        assert!(template.tag_or_nil.data.is_some());
         assert_eq!(lexer.token, Token::Plus);
     }
 }
