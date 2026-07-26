@@ -119,6 +119,10 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
             options.drop_debugger = true;
             continue;
         }
+        if argument == "--drop:console" {
+            options.drop_console = true;
+            continue;
+        }
         if let Some(value) = argument.strip_prefix("--drop-labels=") {
             if value.is_empty() || value.split(',').any(str::is_empty) {
                 return Err("Invalid empty label in \"--drop-labels\"".into());
@@ -506,6 +510,7 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
             minify_identifiers: options.minify_identifiers,
             minify_syntax: options.minify_syntax,
             ascii_only: options.ascii_only,
+            drop_console: options.drop_console,
             drop_debugger: options.drop_debugger,
             drop_labels: options.drop_labels,
             ignore_annotations: options.ignore_annotations,
@@ -700,6 +705,7 @@ fn help_text() -> String {
          \x20\x20--resolve-extensions=EXTENSIONS\n\
          \x20\x20--conditions=CONDITIONS\n\
          \x20\x20--drop:debugger\n\
+         \x20\x20--drop:console\n\
          \x20\x20--drop-labels=LABELS\n\
          \x20\x20--ignore-annotations\n\
          \x20\x20--minify\n\
@@ -933,6 +939,21 @@ mod tests {
         assert!(output.contains("PROD:"));
         assert!(output.contains("console.log(\"production\")"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn drops_console_calls_for_standard_input() {
+        let Output::Code(output) = run_with_stdin(
+            &["--drop:console".into()],
+            Some(b"console.log(sideEffect()); keep()"),
+        )
+        .expect("transform succeeds") else {
+            panic!("expected transformed code");
+        };
+        assert_eq!(
+            String::from_utf8(output).expect("transform output is UTF-8"),
+            "keep();\n"
+        );
     }
 
     #[test]

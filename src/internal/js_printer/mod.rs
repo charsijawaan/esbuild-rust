@@ -1036,7 +1036,11 @@ impl Printer<'_> {
     }
 
     fn print_body(&mut self, body: &Stmt) {
-        if let Some(StmtData::Block(block)) = body.data.as_deref() {
+        if body.data.is_none() {
+            self.print_optional_space();
+            self.output.push(b';');
+            self.print_newline();
+        } else if let Some(StmtData::Block(block)) = body.data.as_deref() {
             self.print_optional_space();
             self.print_block(block, true);
         } else {

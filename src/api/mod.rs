@@ -174,6 +174,7 @@ pub struct TransformOptions {
     pub minify_identifiers: bool,
     pub minify_syntax: bool,
     pub ascii_only: bool,
+    pub drop_console: bool,
     pub drop_debugger: bool,
     pub drop_labels: Vec<String>,
     pub ignore_annotations: bool,
@@ -304,6 +305,7 @@ pub struct BuildOptions {
     pub minify_identifiers: bool,
     pub minify_syntax: bool,
     pub ascii_only: bool,
+    pub drop_console: bool,
     pub drop_debugger: bool,
     pub drop_labels: Vec<String>,
     pub ignore_annotations: bool,
@@ -943,6 +945,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         minify_identifiers: options.minify_identifiers,
         minify_syntax: options.minify_syntax,
         ascii_only: options.ascii_only,
+        drop_console: options.drop_console,
         drop_debugger: options.drop_debugger,
         drop_labels: options.drop_labels,
         ignore_dce_annotations: options.ignore_annotations,
@@ -1265,6 +1268,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     parser_options.minify_identifiers = options.minify_identifiers;
     parser_options.minify_whitespace = options.minify_whitespace;
     parser_options.ascii_only = options.ascii_only;
+    parser_options.drop_console = options.drop_console;
     parser_options.drop_debugger = options.drop_debugger;
     parser_options.drop_labels.clone_from(&options.drop_labels);
     parser_options.ignore_dce_annotations = options.ignore_annotations;
@@ -2775,6 +2779,72 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(!output.contains("debugger"));
         assert!(output.contains("console.log(\"live\")"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn drops_console_calls_in_transforms_and_builds() {
+        let dropped = code(transform(
+            "
+                console.log('foo')
+                console.log(foo())
+                console.log.call(console, foo())
+                console.log.apply(console, foo())
+                x = console.log(bar())
+                console['log']('foo')
+            ",
+            TransformOptions {
+                drop_console: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(dropped, "x = void 0;\n");
+
+        let preserved = code(transform(
+            "
+                console('keep')
+                console.abc.xyz('keep')
+                console[abc][xyz]('keep')
+                const bound = console.log.bind(console)
+                function shadow(console) { console.log('keep') }
+                if (ok) console.log('drop')
+            ",
+            TransformOptions {
+                drop_console: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(preserved.contains("console(\"keep\")"));
+        assert!(preserved.contains("}).xyz(\"keep\")"));
+        assert!(preserved.contains("console[abc][xyz](\"keep\")"));
+        assert!(preserved.contains("}).bind(console)"));
+        assert!(preserved.contains("console.log(\"keep\")"));
+        assert!(preserved.contains("if (ok) ;"));
+        assert!(!preserved.contains("\"drop\""));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-drop-console-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "console.log(sideEffect()); keep()",
+        )
+        .expect("write entry file");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            drop_console: true,
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(!output.contains("console"));
+        assert!(!output.contains("sideEffect"));
+        assert!(output.contains("keep();"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

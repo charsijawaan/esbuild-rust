@@ -932,6 +932,7 @@ pub struct Options {
     pub keep_names: bool,
     pub ignore_dce_annotations: bool,
     pub tree_shaking: bool,
+    pub drop_console: bool,
     pub drop_debugger: bool,
     pub mangle_quoted: bool,
     pub platform: Platform,

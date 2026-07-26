@@ -44,6 +44,7 @@ pub struct Options {
     pub omit_jsx_runtime_for_tests: bool,
     pub ignore_dce_annotations: bool,
     pub tree_shaking: bool,
+    pub drop_console: bool,
     pub drop_debugger: bool,
     pub mangle_quoted: bool,
     pub decode_hydrate_runtime_state_yarn_pnp: bool,
@@ -85,6 +86,7 @@ pub fn options_from_config(options: &config::Options) -> Options {
         omit_jsx_runtime_for_tests: options.omit_jsx_runtime_for_tests,
         ignore_dce_annotations: options.ignore_dce_annotations,
         tree_shaking: options.tree_shaking,
+        drop_console: options.drop_console,
         drop_debugger: options.drop_debugger,
         mangle_quoted: options.mangle_quoted,
         log_path_style: options.log_path_style,
@@ -150,6 +152,7 @@ impl Options {
             && self.omit_jsx_runtime_for_tests == other.omit_jsx_runtime_for_tests
             && self.ignore_dce_annotations == other.ignore_dce_annotations
             && self.tree_shaking == other.tree_shaking
+            && self.drop_console == other.drop_console
             && self.drop_debugger == other.drop_debugger
             && self.mangle_quoted == other.mangle_quoted
             && self.decode_hydrate_runtime_state_yarn_pnp

@@ -500,6 +500,15 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             _ => {}
         }
+        if core.options.drop_console
+            && matches!(
+                statement.data.as_deref(),
+                Some(StmtData::Expr(expression))
+                    if matches!(expression.value.data.as_deref(), Some(ExprData::Undefined))
+            )
+        {
+            statement.data = None;
+        }
     }
 }
 
@@ -1265,6 +1274,19 @@ fn visit_expr_with_target(
             };
             for argument in &mut call.args {
                 visit_expr(core, argument, resolve_identifiers);
+            }
+            if core.options.drop_console {
+                let mut parts = Vec::new();
+                if append_console_method_chain(core, &call.target, &mut parts) {
+                    if parts.len() == 1
+                        || (parts.len() == 2
+                            && matches!(parts.last().map(String::as_str), Some("call" | "apply")))
+                    {
+                        *data = ExprData::Undefined;
+                        return;
+                    }
+                    replace_console_method_with_noop(core, &mut call.target);
+                }
             }
             if target_was_identifier
                 && call.optional_chain == crate::internal::js_ast::OptionalChain::None
@@ -2234,4 +2256,55 @@ fn is_unbound_identifier_named(core: &ParserCore, expression: &Expr, expected: &
             symbol.original_name == expected
                 && symbol.kind == crate::internal::ast::SymbolKind::Unbound
         })
+}
+
+fn append_console_method_chain(
+    core: &ParserCore,
+    expression: &Expr,
+    parts: &mut Vec<String>,
+) -> bool {
+    match expression.data.as_deref() {
+        Some(ExprData::Dot(dot)) => {
+            if !append_console_method_chain(core, &dot.target, parts) {
+                return false;
+            }
+            parts.push(dot.name.clone());
+            true
+        }
+        Some(ExprData::Index(index)) => {
+            let Some(ExprData::String(name)) = index.index.data.as_deref() else {
+                return false;
+            };
+            if !append_console_method_chain(core, &index.target, parts) {
+                return false;
+            }
+            parts.push(String::from_utf8_lossy(&utf16_to_string(&name.value)).into_owned());
+            true
+        }
+        _ => is_unbound_identifier_named(core, expression, "console"),
+    }
+}
+
+fn replace_console_method_with_noop(core: &ParserCore, expression: &mut Expr) -> bool {
+    let target = match expression.data.as_deref_mut() {
+        Some(ExprData::Dot(dot)) => &mut dot.target,
+        Some(ExprData::Index(index)) => &mut index.target,
+        _ => return false,
+    };
+    if is_unbound_identifier_named(core, target, "console") {
+        let loc = expression.loc;
+        *expression = Expr::new(
+            loc,
+            ExprData::Arrow(crate::internal::js_ast::ArrowExpr {
+                body: crate::internal::js_ast::FunctionBody {
+                    loc,
+                    ..crate::internal::js_ast::FunctionBody::default()
+                },
+                ..crate::internal::js_ast::ArrowExpr::default()
+            }),
+        );
+        true
+    } else {
+        replace_console_method_with_noop(core, target)
+    }
 }
