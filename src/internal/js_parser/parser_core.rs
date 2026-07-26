@@ -14,9 +14,9 @@ use crate::internal::{
     config::{Mode, pretty_print_target_environment},
     helpers::contains_non_bmp_code_point,
     js_ast::{
-        Binding, CallExpr, DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, NameOfSymbolExpr,
-        OptionalChain, Scope, ScopeKind, ScopeMember, ScopeRef, StrictModeKind, SymbolUse,
-        for_each_identifier_binding,
+        Binding, CallExpr, DeclaredSymbol, DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr,
+        NameOfSymbolExpr, OptionalChain, Scope, ScopeKind, ScopeMember, ScopeRef, StrictModeKind,
+        SymbolUse, for_each_identifier_binding,
     },
     js_lexer::{MaybeSubstring, range_of_identifier},
     logger::{LineColumnTracker, Loc, Log, Path, Range, Source},
@@ -46,6 +46,7 @@ pub(crate) struct ParserCore {
     pub(crate) symbols: Vec<Symbol>,
     pub(crate) import_records: Vec<ImportRecord>,
     pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
+    pub(crate) declared_symbols: Vec<DeclaredSymbol>,
     pub(crate) runtime_imports: HashMap<String, LocRef>,
     pub(crate) allocated_names: Vec<Vec<u8>>,
     pub(crate) mangled_props: HashMap<String, Ref>,
@@ -85,6 +86,7 @@ impl ParserCore {
             symbols: Vec::new(),
             import_records: Vec::new(),
             symbol_uses: HashMap::new(),
+            declared_symbols: Vec::new(),
             runtime_imports: HashMap::new(),
             allocated_names: Vec::new(),
             mangled_props: HashMap::new(),
@@ -259,6 +261,59 @@ impl ParserCore {
 
     pub(crate) fn remaining_scope_count(&self) -> usize {
         self.scopes_in_order.len()
+    }
+
+    pub(crate) fn record_declared_symbol(&mut self, reference: Ref) {
+        let mut is_top_level = self
+            .current_scope
+            .as_ref()
+            .zip(self.module_scope.as_ref())
+            .is_some_and(|(current, module)| Arc::ptr_eq(current, module));
+
+        if !is_top_level {
+            let symbol_index =
+                usize::try_from(reference.inner_index).expect("symbol index fits usize");
+            let symbol = &self.symbols[symbol_index];
+            if symbol.kind.is_hoisted() {
+                let name = symbol.original_name.clone();
+                let module_reference = self.module_scope.as_ref().and_then(|scope| {
+                    scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .members
+                        .get(&name)
+                        .map(|member| member.reference)
+                });
+                if let Some(module_reference) = module_reference {
+                    is_top_level = self.follow_symbol_link(reference)
+                        == self.follow_symbol_link(module_reference);
+                }
+            }
+        }
+
+        if let Some(existing) = self
+            .declared_symbols
+            .iter_mut()
+            .find(|declared| declared.reference == reference)
+        {
+            existing.is_top_level |= is_top_level;
+        } else {
+            self.declared_symbols.push(DeclaredSymbol {
+                reference,
+                is_top_level,
+            });
+        }
+    }
+
+    fn follow_symbol_link(&self, mut reference: Ref) -> Ref {
+        loop {
+            let index = usize::try_from(reference.inner_index).expect("symbol index fits usize");
+            let link = self.symbols[index].link;
+            if link == INVALID_REF {
+                return reference;
+            }
+            reference = link;
+        }
     }
 
     pub(crate) fn is_strict_mode(&self) -> bool {

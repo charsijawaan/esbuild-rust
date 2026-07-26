@@ -2,7 +2,7 @@
 
 use crate::internal::js_ast::{
     Binding, BindingData, BlockStmt, Class, Expr, ExprData, Function, PropertyFlags, ScopeKind,
-    Stmt, StmtData,
+    Stmt, StmtData, for_each_identifier_binding,
 };
 
 use super::parser_core::ParserCore;
@@ -23,6 +23,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             Some(StmtData::Local(local)) => {
                 for declaration in &mut local.declarations {
+                    record_binding(core, &mut declaration.binding);
                     visit_binding_initializers(core, &mut declaration.binding, resolve_identifiers);
                     visit_expr(core, &mut declaration.value_or_nil, resolve_identifiers);
                 }
@@ -176,6 +177,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 );
                 if let Some(catch) = &mut try_statement.catch {
                     core.push_scope_for_visit_pass(ScopeKind::CatchBinding, catch.loc);
+                    record_binding(core, &mut catch.binding_or_nil);
                     visit_binding_initializers(
                         core,
                         &mut catch.binding_or_nil,
@@ -256,8 +258,14 @@ fn visit_block(
 fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identifiers: bool) {
     let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
     let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
+    if let Some(name) = function.name
+        && !ParserCore::is_stored_name_ref(name.reference)
+    {
+        core.record_declared_symbol(name.reference);
+    }
     core.push_scope_for_visit_pass(ScopeKind::FunctionArgs, function.open_paren_loc);
     for argument in &mut function.args {
+        record_binding(core, &mut argument.binding);
         visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
         visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
         for decorator in &mut argument.decorators {
@@ -277,6 +285,11 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
 }
 
 fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bool) {
+    if let Some(name) = class.name
+        && !ParserCore::is_stored_name_ref(name.reference)
+    {
+        core.record_declared_symbol(name.reference);
+    }
     for decorator in &mut class.decorators {
         visit_expr(core, &mut decorator.value, resolve_identifiers);
     }
@@ -291,6 +304,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
         };
         let inner_reference =
             core.new_symbol(crate::internal::ast::SymbolKind::Const, format!("_{text}"));
+        core.record_declared_symbol(inner_reference);
         core.current_scope
             .as_ref()
             .expect("class name scope")
@@ -368,6 +382,14 @@ fn visit_binding_initializers(
         }
         Some(BindingData::Missing | BindingData::Identifier(_)) | None => {}
     }
+}
+
+fn record_binding(core: &mut ParserCore, binding: &mut Binding) {
+    for_each_identifier_binding(binding, &mut |_loc, identifier| {
+        if !ParserCore::is_stored_name_ref(identifier.reference) {
+            core.record_declared_symbol(identifier.reference);
+        }
+    });
 }
 
 #[allow(clippy::too_many_lines)]
@@ -523,11 +545,12 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
         ExprData::Arrow(arrow) => {
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
-            for argument in &mut arrow.args {
-                visit_binding_initializers(core, &mut argument.binding, false);
-                visit_expr(core, &mut argument.default_or_nil, false);
-            }
             core.push_next_scope_for_visit_pass(ScopeKind::FunctionArgs);
+            for argument in &mut arrow.args {
+                record_binding(core, &mut argument.binding);
+                visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
+                visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
+            }
             core.push_scope_for_visit_pass(ScopeKind::FunctionBody, arrow.body.loc);
             visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
             core.pop_scope();

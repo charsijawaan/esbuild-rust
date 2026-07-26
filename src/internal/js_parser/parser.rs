@@ -90,7 +90,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                     Some(StmtData::Class(class)) if class.is_export
                 )
             });
-        let declared_symbols = declare_top_level_symbols(&mut core, &mut statements);
+        core.declared_symbols = declare_top_level_symbols(&mut core, &mut statements);
         core.hoist_symbols();
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
@@ -126,7 +126,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 statements,
                 scopes,
                 import_record_indices,
-                declared_symbols,
+                declared_symbols: std::mem::take(&mut core.declared_symbols),
                 symbol_uses: std::mem::take(&mut core.symbol_uses),
                 ..Part::default()
             });
@@ -739,7 +739,15 @@ mod tests {
         );
         assert!(ok);
         assert!(log.done().is_empty());
-        assert_eq!(ast.parts[1].declared_symbols.len(), 4);
+        assert_eq!(ast.parts[1].declared_symbols.len(), 5);
+        assert_eq!(
+            ast.parts[1]
+                .declared_symbols
+                .iter()
+                .filter(|symbol| symbol.is_top_level)
+                .count(),
+            4
+        );
         let Some(StmtData::Local(exports)) = ast.parts[1].statements[0].data.as_deref() else {
             panic!("expected exports declaration");
         };
@@ -1370,6 +1378,37 @@ mod tests {
             outer_use.value.data.as_deref(),
             Some(ExprData::Identifier(identifier)) if identifier.reference != item_ref
         ));
+    }
+
+    #[test]
+    fn records_nested_declared_symbols_for_linking() {
+        let (ast, ok, log) = parse_source(
+            "function outer(arg) {\
+               let local;\
+               try {} catch (error) { const caught = error; }\
+             }\
+             for (let item of items) {}\
+             if (condition) { var hoisted; }",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+
+        let declarations = ast.parts[1]
+            .declared_symbols
+            .iter()
+            .map(|declared| {
+                let name = ast.symbols
+                    [usize::try_from(declared.reference.inner_index).expect("symbol index")]
+                .original_name
+                .as_str();
+                (name, declared.is_top_level)
+            })
+            .collect::<HashMap<_, _>>();
+        assert!(declarations["outer"]);
+        assert!(declarations["hoisted"]);
+        for name in ["arg", "local", "error", "caught", "item"] {
+            assert!(!declarations[name], "{name}");
+        }
     }
 
     #[test]
