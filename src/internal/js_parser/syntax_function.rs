@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
-    ast::{INVALID_REF, LocRef},
+    ast::{LocRef, SymbolKind},
     js_ast::{
         Arg, Binding, BindingData, Expr, ExprData, Function, FunctionExpr, IdentifierBinding,
         Precedence,
@@ -136,6 +136,7 @@ pub(crate) fn parse_function_tail(
         crate::internal::js_ast::ScopeKind::FunctionArgs,
         open_paren_loc,
     );
+    let arguments_ref = core.declare_symbol(SymbolKind::Arguments, open_paren_loc, "arguments");
     lexer.expect(Token::OpenParen);
 
     let old_context = core.fn_or_arrow_data_parse;
@@ -163,7 +164,8 @@ pub(crate) fn parse_function_tail(
             has_rest_arg = true;
         }
 
-        let binding = parse_binding(core, lexer);
+        let mut binding = parse_binding(core, lexer);
+        core.declare_binding(SymbolKind::Hoisted, &mut binding);
 
         let default_or_nil = if !has_rest_arg && lexer.token == Token::Equals {
             lexer.next();
@@ -203,7 +205,7 @@ pub(crate) fn parse_function_tail(
             block,
             loc: body_loc,
         },
-        arguments_ref: INVALID_REF,
+        arguments_ref,
         open_paren_loc,
         is_async,
         is_generator,

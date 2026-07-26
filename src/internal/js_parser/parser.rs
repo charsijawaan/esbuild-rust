@@ -184,11 +184,13 @@ fn declare_top_level_symbols(
                     for_each_identifier_binding(
                         &mut declaration.binding,
                         &mut |loc, identifier| {
-                            let name = String::from_utf8_lossy(
-                                core.load_name_from_ref(identifier.reference),
-                            )
-                            .into_owned();
-                            identifier.reference = core.declare_symbol(kind, loc, &name);
+                            if ParserCore::is_stored_name_ref(identifier.reference) {
+                                let name = String::from_utf8_lossy(
+                                    core.load_name_from_ref(identifier.reference),
+                                )
+                                .into_owned();
+                                identifier.reference = core.declare_symbol(kind, loc, &name);
+                            }
                             record_top_level_symbol(&mut declared, identifier.reference);
                         },
                     );
@@ -258,8 +260,10 @@ fn bind_loc_ref(
     kind: SymbolKind,
     declared: &mut Vec<DeclaredSymbol>,
 ) {
-    let text = String::from_utf8_lossy(core.load_name_from_ref(name.reference)).into_owned();
-    name.reference = core.declare_symbol(kind, name.loc, &text);
+    if ParserCore::is_stored_name_ref(name.reference) {
+        let text = String::from_utf8_lossy(core.load_name_from_ref(name.reference)).into_owned();
+        name.reference = core.declare_symbol(kind, name.loc, &text);
+    }
     record_top_level_symbol(declared, name.reference);
 }
 
@@ -563,5 +567,27 @@ mod tests {
                 &ast.parts[1].scopes[expected_parent]
             ));
         }
+
+        let Some(StmtData::Function(outer)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected outer function");
+        };
+        let Some(crate::internal::js_ast::BindingData::Identifier(argument)) =
+            outer.function.args[0].binding.data.as_deref()
+        else {
+            panic!("expected identifier argument");
+        };
+        let args_scope = ast.parts[1].scopes[1].lock().expect("args scope lock");
+        assert_eq!(args_scope.members["a"].reference, argument.reference);
+        assert_eq!(
+            args_scope.members["arguments"].reference,
+            outer.function.arguments_ref
+        );
+        drop(args_scope);
+        let body_scope = ast.parts[1].scopes[2].lock().expect("body scope lock");
+        assert_eq!(body_scope.members["a"].reference, argument.reference);
+        assert_eq!(
+            body_scope.members["arguments"].reference,
+            outer.function.arguments_ref
+        );
     }
 }

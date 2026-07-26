@@ -13,8 +13,9 @@ use crate::internal::{
     config::{Mode, pretty_print_target_environment},
     helpers::contains_non_bmp_code_point,
     js_ast::{
-        CallExpr, DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, NameOfSymbolExpr,
+        Binding, CallExpr, DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, NameOfSymbolExpr,
         OptionalChain, Scope, ScopeKind, ScopeMember, ScopeRef, StrictModeKind, SymbolUse,
+        for_each_identifier_binding,
     },
     js_lexer::{MaybeSubstring, range_of_identifier},
     logger::{LineColumnTracker, Loc, Log, Range, Source},
@@ -830,6 +831,18 @@ impl ParserCore {
                 inner_index,
             }
         }
+    }
+
+    pub(crate) fn is_stored_name_ref(reference: Ref) -> bool {
+        reference.source_index & 0x8000_0000 != 0
+    }
+
+    pub(crate) fn declare_binding(&mut self, kind: SymbolKind, binding: &mut Binding) {
+        for_each_identifier_binding(binding, &mut |loc, identifier| {
+            let name =
+                String::from_utf8_lossy(self.load_name_from_ref(identifier.reference)).into_owned();
+            identifier.reference = self.declare_symbol(kind, loc, &name);
+        });
     }
 
     pub(crate) fn load_name_from_ref(&self, reference: Ref) -> &[u8] {
