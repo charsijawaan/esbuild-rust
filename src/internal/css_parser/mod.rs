@@ -1,12 +1,16 @@
 //! Port of upstream `internal/css_parser`.
 
+use std::collections::HashMap;
+
 use crate::internal::{
     ast::{ImportKind, ImportRecord, LocRef, Ref, Symbol, SymbolKind},
     css_ast::{
         Ast, AtCharsetRule, AtImportRule, AtKeyframesRule, AtLayerRule, AtMediaRule,
-        BadDeclarationRule, DeclarationRule, ImportConditions, KeyframeBlock, KnownAtRule,
-        MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, QualifiedRule, Rule, RuleData,
-        Token, UnknownAtRule, WhitespaceFlags,
+        BadDeclarationRule, ClassSelector, Combinator, ComplexSelector, CompoundSelector,
+        DeclarationRule, HashSelector, ImportConditions, KeyframeBlock, KnownAtRule,
+        MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, NameToken, NamespacedName,
+        PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule, SubclassData,
+        SubclassSelector, Token, UnknownAtRule, WhitespaceFlags,
     },
     css_lexer::{self, TokenKind},
     logger::{Loc, Log, Path, Range, Source},
@@ -35,6 +39,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
         index: 0,
         import_records: Vec::new(),
         symbols: Vec::new(),
+        css_symbols: HashMap::new(),
     };
     let rules = parser.parse_rule_list(false);
     Ast {
@@ -54,6 +59,7 @@ struct Parser {
     index: usize,
     import_records: Vec<ImportRecord>,
     symbols: Vec<Symbol>,
+    css_symbols: HashMap<String, Ref>,
 }
 
 impl Parser {
@@ -231,11 +237,15 @@ impl Parser {
     }
 
     fn new_css_symbol(&mut self, name: &str) -> Ref {
+        if let Some(reference) = self.css_symbols.get(name).copied() {
+            return reference;
+        }
         let reference = Ref {
             source_index: self.source.index,
             inner_index: u32::try_from(self.symbols.len()).expect("CSS symbol count fits in u32"),
         };
         self.symbols.push(Symbol::new(SymbolKind::GlobalCss, name));
+        self.css_symbols.insert(name.into(), reference);
         reference
     }
 
@@ -291,7 +301,7 @@ impl Parser {
         let loc = self.current().range.loc;
         let prelude_start = self.index;
         let end = self.scan_to_rule_delimiter();
-        let prelude = self.convert_tokens(prelude_start, end);
+        let prelude = self.convert_tokens_preserving_whitespace(prelude_start, end);
         self.index = end;
         if self.current_kind() != TokenKind::OpenBrace {
             if self.current_kind() == TokenKind::Semicolon {
@@ -304,13 +314,160 @@ impl Parser {
         }
         self.index += 1;
         let rules = self.parse_rule_list(true);
-        Rule {
-            loc,
-            data: RuleData::Qualified(QualifiedRule {
-                prelude,
-                rules,
-                ..QualifiedRule::default()
-            }),
+        if let Some(selectors) = self.parse_complex_selectors(&prelude) {
+            Rule {
+                loc,
+                data: RuleData::Selector(SelectorRule {
+                    selectors,
+                    rules,
+                    ..SelectorRule::default()
+                }),
+            }
+        } else {
+            Rule {
+                loc,
+                data: RuleData::Qualified(QualifiedRule {
+                    prelude,
+                    rules,
+                    ..QualifiedRule::default()
+                }),
+            }
+        }
+    }
+
+    fn parse_complex_selectors(&mut self, tokens: &[Token]) -> Option<Vec<ComplexSelector>> {
+        let mut selectors = Vec::new();
+        let mut start = 0;
+        for index in 0..=tokens.len() {
+            if index == tokens.len() || tokens[index].kind == TokenKind::Comma {
+                if start == index {
+                    return None;
+                }
+                selectors.push(self.parse_complex_selector(&tokens[start..index])?);
+                start = index + 1;
+            }
+        }
+        Some(selectors)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn parse_complex_selector(&mut self, tokens: &[Token]) -> Option<ComplexSelector> {
+        let mut selectors = Vec::new();
+        let mut compound = CompoundSelector::default();
+        let mut pending_combinator = Combinator::default();
+        let mut index = 0;
+        while index < tokens.len() {
+            let token = &tokens[index];
+            if matches!(
+                token.kind,
+                TokenKind::DelimGreaterThan | TokenKind::DelimPlus | TokenKind::DelimTilde
+            ) {
+                push_compound(&mut selectors, &mut compound);
+                pending_combinator = Combinator {
+                    loc: token.loc,
+                    byte: token.text.as_bytes().first().copied().unwrap_or_default(),
+                };
+                index += 1;
+                continue;
+            }
+            if token.whitespace.contains(WhitespaceFlags::BEFORE) && !compound_is_empty(&compound) {
+                push_compound(&mut selectors, &mut compound);
+            }
+            if compound_is_empty(&compound) {
+                compound.combinator = pending_combinator;
+                pending_combinator = Combinator::default();
+            }
+            match token.kind {
+                TokenKind::Ident | TokenKind::DelimAsterisk
+                    if compound.type_selector.is_none()
+                        && compound.subclass_selectors.is_empty()
+                        && compound.nesting_selector_locs.is_empty() =>
+                {
+                    compound.type_selector = Some(NamespacedName {
+                        name: NameToken {
+                            text: token.text.clone(),
+                            range: Range {
+                                loc: token.loc,
+                                len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                            },
+                            kind: token.kind,
+                        },
+                        ..NamespacedName::default()
+                    });
+                }
+                TokenKind::DelimAmpersand => compound.nesting_selector_locs.push(token.loc),
+                TokenKind::DelimDot => {
+                    let name = tokens.get(index + 1)?;
+                    if name.kind != TokenKind::Ident {
+                        return None;
+                    }
+                    let reference = self.new_css_symbol(&name.text);
+                    compound.subclass_selectors.push(SubclassSelector {
+                        data: SubclassData::Class(ClassSelector {
+                            name: LocRef {
+                                loc: name.loc,
+                                reference,
+                            },
+                        }),
+                        range: Range {
+                            loc: token.loc,
+                            len: i32::try_from(name.text.len() + 1).unwrap_or(i32::MAX),
+                        },
+                    });
+                    index += 1;
+                }
+                TokenKind::Hash => {
+                    let reference = self.new_css_symbol(&token.text);
+                    compound.subclass_selectors.push(SubclassSelector {
+                        data: SubclassData::Hash(HashSelector {
+                            name: LocRef {
+                                loc: token.loc,
+                                reference,
+                            },
+                        }),
+                        range: Range {
+                            loc: token.loc,
+                            len: i32::try_from(token.text.len() + 1).unwrap_or(i32::MAX),
+                        },
+                    });
+                }
+                TokenKind::Colon => {
+                    let mut is_element = false;
+                    let mut name_index = index + 1;
+                    if tokens
+                        .get(name_index)
+                        .is_some_and(|token| token.kind == TokenKind::Colon)
+                    {
+                        is_element = true;
+                        name_index += 1;
+                    }
+                    let name = tokens.get(name_index)?;
+                    if !matches!(name.kind, TokenKind::Ident | TokenKind::Function) {
+                        return None;
+                    }
+                    compound.subclass_selectors.push(SubclassSelector {
+                        data: SubclassData::PseudoClass(PseudoClassSelector {
+                            name: name.text.clone(),
+                            args: name.children.clone().unwrap_or_default(),
+                            is_element,
+                        }),
+                        range: Range {
+                            loc: token.loc,
+                            len: i32::try_from(name.text.len() + usize::from(is_element) + 1)
+                                .unwrap_or(i32::MAX),
+                        },
+                    });
+                    index = name_index;
+                }
+                _ => return None,
+            }
+            index += 1;
+        }
+        push_compound(&mut selectors, &mut compound);
+        if selectors.is_empty() {
+            None
+        } else {
+            Some(ComplexSelector { selectors })
         }
     }
 
@@ -440,6 +597,14 @@ impl Parser {
         result
     }
 
+    fn convert_tokens_preserving_whitespace(&mut self, start: usize, end: usize) -> Vec<Token> {
+        let minify_whitespace = self.minify_whitespace;
+        self.minify_whitespace = false;
+        let result = self.convert_tokens(start, end);
+        self.minify_whitespace = minify_whitespace;
+        result
+    }
+
     fn convert_token(&mut self, token: css_lexer::Token) -> Token {
         let text = self.decoded(token);
         let (kind, payload_index) = if token.kind == TokenKind::Url {
@@ -523,6 +688,18 @@ fn update_stack(stack: &mut Vec<TokenKind>, kind: TokenKind) {
         stack.push(close);
     } else if stack.last() == Some(&kind) {
         stack.pop();
+    }
+}
+
+fn compound_is_empty(compound: &CompoundSelector) -> bool {
+    compound.type_selector.is_none()
+        && compound.subclass_selectors.is_empty()
+        && compound.nesting_selector_locs.is_empty()
+}
+
+fn push_compound(selectors: &mut Vec<CompoundSelector>, compound: &mut CompoundSelector) {
+    if !compound_is_empty(compound) {
+        selectors.push(std::mem::take(compound));
     }
 }
 
@@ -810,6 +987,27 @@ mod tests {
                 true
             ),
             "@keyframes fade{from{opacity:0}to{opacity:1}}"
+        );
+    }
+
+    #[test]
+    fn parses_semantic_selectors_and_reuses_css_symbols() {
+        let contents = "a + b c > d ~ e, .item#root:hover { color: red }\
+                        section { & .item { color: blue } }";
+        assert_eq!(
+            parse_and_print(contents, true),
+            "a+b c>d~e,.item#root:hover{color:red}section{& .item{color:blue}}"
+        );
+
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let tree = parse(log.clone(), source(contents), Options::default());
+        assert!(log.done().is_empty());
+        assert_eq!(
+            tree.symbols
+                .iter()
+                .filter(|symbol| symbol.original_name == "item")
+                .count(),
+            1
         );
     }
 }
