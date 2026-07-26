@@ -1020,33 +1020,139 @@ fn visit_expr_with_target(
             for child in &mut element.nullable_children {
                 visit_expr(core, child, resolve_identifiers);
             }
-            if !core.options.jsx.preserve && !core.options.jsx.automatic_runtime {
+            if !core.options.jsx.preserve {
                 let mut children = std::mem::take(&mut element.nullable_children);
                 children.retain(|child| child.data.is_some());
                 if element.tag_or_nil.data.is_none() {
-                    element.tag_or_nil =
-                        instantiate_jsx_define(core, expression.loc, true, resolve_identifiers);
+                    element.tag_or_nil = if core.options.jsx.automatic_runtime {
+                        import_jsx_symbol(
+                            core,
+                            expression.loc,
+                            super::parser_types::JsxImport::Fragment,
+                        )
+                    } else {
+                        instantiate_jsx_define(core, expression.loc, true, resolve_identifiers)
+                    };
                 }
-                let mut args = vec![element.tag_or_nil.clone()];
-                if element.properties.is_empty() {
-                    args.push(Expr::new(element.tag_or_nil.loc, ExprData::Null));
-                } else {
-                    args.push(Expr::new(
-                        element.tag_or_nil.loc,
-                        ExprData::Object(ObjectExpr {
-                            properties: std::mem::take(&mut element.properties),
-                            is_single_line: element.is_tag_single_line,
-                            ..ObjectExpr::default()
-                        }),
-                    ));
+
+                let mut should_use_create_element = !core.options.jsx.automatic_runtime;
+                if !should_use_create_element {
+                    let mut saw_spread = false;
+                    for property in &element.properties {
+                        if property.kind == PropertyKind::Spread {
+                            saw_spread = true;
+                        } else if saw_spread && property_name(property).as_deref() == Some("key") {
+                            should_use_create_element = true;
+                            break;
+                        }
+                    }
                 }
-                args.extend(children);
-                let target =
-                    instantiate_jsx_define(core, expression.loc, false, resolve_identifiers);
-                let kind = if matches!(target.data.as_deref(), Some(ExprData::Dot(_))) {
-                    CallKind::TargetWasOriginallyPropertyAccess
+
+                let (target, args, kind) = if should_use_create_element {
+                    let mut args = vec![element.tag_or_nil.clone()];
+                    if element.properties.is_empty() {
+                        args.push(Expr::new(element.tag_or_nil.loc, ExprData::Null));
+                    } else {
+                        args.push(Expr::new(
+                            element.tag_or_nil.loc,
+                            ExprData::Object(ObjectExpr {
+                                properties: std::mem::take(&mut element.properties),
+                                is_single_line: element.is_tag_single_line,
+                                ..ObjectExpr::default()
+                            }),
+                        ));
+                    }
+                    args.extend(children);
+                    let target = if core.options.jsx.automatic_runtime {
+                        import_jsx_symbol(
+                            core,
+                            expression.loc,
+                            super::parser_types::JsxImport::CreateElement,
+                        )
+                    } else {
+                        instantiate_jsx_define(core, expression.loc, false, resolve_identifiers)
+                    };
+                    let kind = if matches!(target.data.as_deref(), Some(ExprData::Dot(_))) {
+                        CallKind::TargetWasOriginallyPropertyAccess
+                    } else {
+                        CallKind::Normal
+                    };
+                    (target, args, kind)
                 } else {
-                    CallKind::Normal
+                    let mut key_or_nil = None;
+                    let mut properties = Vec::with_capacity(element.properties.len() + 1);
+                    for property in std::mem::take(&mut element.properties) {
+                        if property_name(&property).as_deref() == Some("key") {
+                            if property.flags.contains(PropertyFlags::WAS_SHORTHAND) {
+                                core.add_error_range(
+                                    crate::internal::logger::Range {
+                                        loc: property.loc,
+                                        len: 3,
+                                    },
+                                    "Please provide an explicit value for \"key\":",
+                                );
+                            }
+                            key_or_nil = Some(property.value_or_nil);
+                        } else {
+                            properties.push(property);
+                        }
+                    }
+                    let mut is_static_children = children.len() > 1;
+                    if !children.is_empty() {
+                        let child_loc = children[0].loc;
+                        let child = if children.len() == 1
+                            && !matches!(children[0].data.as_deref(), Some(ExprData::Spread(_)))
+                        {
+                            children.pop().expect("one child")
+                        } else {
+                            if children.len() == 1 {
+                                is_static_children = true;
+                            }
+                            Expr::new(
+                                child_loc,
+                                ExprData::Array(crate::internal::js_ast::ArrayExpr {
+                                    items: children,
+                                    ..crate::internal::js_ast::ArrayExpr::default()
+                                }),
+                            )
+                        };
+                        properties.push(crate::internal::js_ast::Property {
+                            key: Expr::new(
+                                child_loc,
+                                ExprData::String(crate::internal::js_ast::StringExpr {
+                                    value: crate::internal::helpers::string_to_utf16(b"children"),
+                                    ..crate::internal::js_ast::StringExpr::default()
+                                }),
+                            ),
+                            value_or_nil: child,
+                            loc: child_loc,
+                            ..crate::internal::js_ast::Property::default()
+                        });
+                    }
+                    let mut args = vec![
+                        element.tag_or_nil.clone(),
+                        Expr::new(
+                            element.tag_or_nil.loc,
+                            ExprData::Object(ObjectExpr {
+                                properties,
+                                is_single_line: element.is_tag_single_line,
+                                ..ObjectExpr::default()
+                            }),
+                        ),
+                    ];
+                    if let Some(key) = key_or_nil {
+                        args.push(key);
+                    }
+                    let import = if is_static_children {
+                        super::parser_types::JsxImport::Jsxs
+                    } else {
+                        super::parser_types::JsxImport::Jsx
+                    };
+                    (
+                        import_jsx_symbol(core, expression.loc, import),
+                        args,
+                        CallKind::Normal,
+                    )
                 };
                 *data = ExprData::Call(CallExpr {
                     target,
@@ -1105,6 +1211,84 @@ fn visit_expr_with_target(
             }
         }
     }
+}
+
+fn property_name(property: &crate::internal::js_ast::Property) -> Option<String> {
+    let ExprData::String(string) = property.key.data.as_deref()? else {
+        return None;
+    };
+    Some(String::from_utf16_lossy(&string.value))
+}
+
+fn import_jsx_symbol(
+    core: &mut ParserCore,
+    loc: Loc,
+    import: super::parser_types::JsxImport,
+) -> Expr {
+    if let Some(reference) = core.jsx_imports.get(&import).copied() {
+        core.record_usage(reference);
+        return Expr::new(
+            loc,
+            ExprData::ImportIdentifier(crate::internal::js_ast::ImportIdentifierExpr {
+                reference,
+                was_originally_identifier: true,
+                ..crate::internal::js_ast::ImportIdentifierExpr::default()
+            }),
+        );
+    }
+
+    let (alias, suffix) = match import {
+        super::parser_types::JsxImport::Jsx => ("jsx", "/jsx-runtime"),
+        super::parser_types::JsxImport::Jsxs => ("jsxs", "/jsx-runtime"),
+        super::parser_types::JsxImport::Fragment => ("Fragment", "/jsx-runtime"),
+        super::parser_types::JsxImport::CreateElement => ("createElement", ""),
+    };
+    let path = format!(
+        "{}{suffix}",
+        core.options.jsx.import_source.trim_end_matches('/')
+    );
+    let (import_record_index, namespace_ref) =
+        if let Some(pair) = core.jsx_import_records.get(&path).copied() {
+            pair
+        } else {
+            let import_record_index = core.add_import_record(
+                crate::internal::ast::ImportKind::Stmt,
+                crate::internal::ast::ImportPhase::Evaluation,
+                crate::internal::logger::Range { loc, len: 0 },
+                path.clone(),
+                crate::internal::ast::ImportRecordFlags::default(),
+            );
+            let namespace_ref = core.new_symbol(
+                crate::internal::ast::SymbolKind::Other,
+                format!("import_{alias}"),
+            );
+            core.record_declared_symbol(namespace_ref);
+            core.jsx_import_records
+                .insert(path, (import_record_index, namespace_ref));
+            (import_record_index, namespace_ref)
+        };
+    let reference = core.new_symbol(crate::internal::ast::SymbolKind::Import, alias);
+    core.record_declared_symbol(reference);
+    core.generated_named_imports.insert(
+        reference,
+        crate::internal::js_ast::NamedImport {
+            alias: alias.into(),
+            alias_loc: loc,
+            namespace_ref,
+            import_record_index,
+            ..crate::internal::js_ast::NamedImport::default()
+        },
+    );
+    core.jsx_imports.insert(import, reference);
+    core.record_usage(reference);
+    Expr::new(
+        loc,
+        ExprData::ImportIdentifier(crate::internal::js_ast::ImportIdentifierExpr {
+            reference,
+            was_originally_identifier: true,
+            ..crate::internal::js_ast::ImportIdentifierExpr::default()
+        }),
+    )
 }
 
 fn instantiate_jsx_define(

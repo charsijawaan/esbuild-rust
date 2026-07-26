@@ -27,6 +27,7 @@ pub(crate) fn parse_jsx_element_prefix(core: &mut ParserCore, lexer: &mut Lexer)
         core.options.jsx.parse = true;
     }
     let loc = lexer.loc();
+    core.has_jsx_element = true;
     lexer.next_inside_jsx_element();
     let element = parse_jsx_element(core, lexer, loc);
     lexer.next();

@@ -52,7 +52,7 @@ pub(crate) enum FnKind {
     Expression,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 #[repr(u8)]
 pub(crate) enum JsxImport {
     #[default]

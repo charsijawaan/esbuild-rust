@@ -15,8 +15,8 @@ use crate::internal::{
     helpers::contains_non_bmp_code_point,
     js_ast::{
         Binding, CallExpr, DeclaredSymbol, DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr,
-        NameOfSymbolExpr, OptionalChain, Scope, ScopeKind, ScopeMember, ScopeRef, StrictModeKind,
-        SymbolUse, for_each_identifier_binding,
+        NameOfSymbolExpr, NamedImport, OptionalChain, Scope, ScopeKind, ScopeMember, ScopeRef,
+        StrictModeKind, SymbolUse, for_each_identifier_binding,
     },
     js_lexer::{MaybeSubstring, range_of_identifier},
     logger::{LineColumnTracker, Loc, Log, MsgId, MsgKind, Path, Range, Source},
@@ -49,6 +49,9 @@ pub(crate) struct ParserCore {
     pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
     pub(crate) declared_symbols: Vec<DeclaredSymbol>,
     pub(crate) runtime_imports: HashMap<String, LocRef>,
+    pub(crate) jsx_imports: HashMap<super::parser_types::JsxImport, Ref>,
+    pub(crate) jsx_import_records: HashMap<String, (u32, Ref)>,
+    pub(crate) generated_named_imports: HashMap<Ref, NamedImport>,
     pub(crate) allocated_names: Vec<Vec<u8>>,
     pub(crate) mangled_props: HashMap<String, Ref>,
     pub(crate) reserved_props: HashMap<String, bool>,
@@ -71,6 +74,7 @@ pub(crate) struct ParserCore {
     pub(crate) visit_switch_depth: usize,
     pub(crate) visit_new_target_allowed: bool,
     pub(crate) has_top_level_return: bool,
+    pub(crate) has_jsx_element: bool,
 }
 
 impl ParserCore {
@@ -90,6 +94,9 @@ impl ParserCore {
             symbol_uses: HashMap::new(),
             declared_symbols: Vec::new(),
             runtime_imports: HashMap::new(),
+            jsx_imports: HashMap::new(),
+            jsx_import_records: HashMap::new(),
+            generated_named_imports: HashMap::new(),
             allocated_names: Vec::new(),
             mangled_props: HashMap::new(),
             reserved_props: HashMap::new(),
@@ -112,6 +119,7 @@ impl ParserCore {
             visit_switch_depth: 0,
             visit_new_target_allowed: false,
             has_top_level_return: false,
+            has_jsx_element: false,
         }
     }
 

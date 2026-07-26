@@ -82,6 +82,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))));
         let has_esm_exports = core.esm_import_meta.len > 0
             || core.top_level_await_keyword.len > 0
+            || (core.options.jsx.automatic_runtime && core.has_jsx_element)
             || statements.iter().any(|statement| {
                 matches!(
                     statement.data.as_deref(),
@@ -450,6 +451,9 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
             _ => {}
         }
     }
+    metadata
+        .named_imports
+        .extend(std::mem::take(&mut core.generated_named_imports));
     metadata
 }
 
@@ -2260,6 +2264,70 @@ mod tests {
                 .expect("lowered JSX reference symbol");
             assert_eq!(usage.count_estimate, count, "{name}");
         }
+    }
+
+    #[test]
+    fn lowers_automatic_jsx_to_runtime_imports() {
+        let mut options = Options::default();
+        options.jsx.parse = true;
+        options.jsx.automatic_runtime = true;
+        let (ast, ok, log) =
+            parse_source_with_options("<><div key={id} />{left}{right}</>;", options.clone());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+        assert_eq!(ast.import_records.len(), 1);
+        assert_eq!(ast.import_records[0].path.text, "react/jsx-runtime");
+        assert_eq!(ast.named_imports.len(), 3);
+        assert_eq!(
+            ast.named_imports
+                .values()
+                .map(|item| item.alias.as_str())
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from(["Fragment", "jsx", "jsxs"])
+        );
+        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected expression statement");
+        };
+        let Some(ExprData::Call(root)) = statement.value.data.as_deref() else {
+            panic!("expected automatic JSX call");
+        };
+        let Some(ExprData::ImportIdentifier(target)) = root.target.data.as_deref() else {
+            panic!("expected runtime import target");
+        };
+        assert_eq!(ast.named_imports[&target.reference].alias, "jsxs");
+        assert_eq!(root.args.len(), 2);
+        let Some(ExprData::Object(props)) = root.args[1].data.as_deref() else {
+            panic!("expected props object");
+        };
+        let Some(ExprData::Array(children)) = props.properties[0].value_or_nil.data.as_deref()
+        else {
+            panic!("expected static children array");
+        };
+        let Some(ExprData::Call(child)) = children.items[0].data.as_deref() else {
+            panic!("expected nested JSX call");
+        };
+        assert_eq!(child.args.len(), 3);
+        let Some(ExprData::ImportIdentifier(target)) = child.target.data.as_deref() else {
+            panic!("expected nested runtime import target");
+        };
+        assert_eq!(ast.named_imports[&target.reference].alias, "jsx");
+
+        let (ast, ok, log) = parse_source_with_options("<div {...props} key={id} />;", options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 1);
+        assert_eq!(ast.import_records[0].path.text, "react");
+        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected expression statement");
+        };
+        let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
+            panic!("expected createElement fallback");
+        };
+        let Some(ExprData::ImportIdentifier(target)) = call.target.data.as_deref() else {
+            panic!("expected createElement import target");
+        };
+        assert_eq!(ast.named_imports[&target.reference].alias, "createElement");
     }
 
     #[test]
