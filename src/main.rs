@@ -605,6 +605,13 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
     options.jsx_side_effects = jsx_side_effects;
     options.pure = pure;
     options.keep_names = keep_names;
+    options.legal_comments = legal_comments;
+    if matches!(
+        options.legal_comments,
+        BuildLegalComments::Linked | BuildLegalComments::External
+    ) {
+        return Err("Cannot transform with linked or external legal comments".into());
+    }
     let input = if let Some(path) = input_paths.pop() {
         if options.sourcefile.is_empty() {
             options.sourcefile.clone_from(&path);
@@ -954,6 +961,34 @@ mod tests {
             String::from_utf8(output).expect("transform output is UTF-8"),
             "keep();\n"
         );
+    }
+
+    #[test]
+    fn configures_legal_comments_for_transforms() {
+        let Output::Code(output) = run_with_stdin(
+            &["--legal-comments=eof".into()],
+            Some(b"//! license\nkeep()"),
+        )
+        .expect("EOF legal comments succeed") else {
+            panic!("expected transformed code");
+        };
+        assert_eq!(
+            String::from_utf8(output).expect("transform output is UTF-8"),
+            "keep();\n//! license\n"
+        );
+
+        for mode in ["linked", "external"] {
+            let Err(error) = run_with_stdin(
+                &[format!("--legal-comments={mode}")],
+                Some(b"//! license\nkeep()"),
+            ) else {
+                panic!("separate legal comment output is unavailable for CLI transforms");
+            };
+            assert_eq!(
+                error,
+                "Cannot transform with linked or external legal comments"
+            );
+        }
     }
 
     #[test]

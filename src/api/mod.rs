@@ -13,7 +13,10 @@ use crate::internal::{
     config::{self, Mode},
     css_parser, css_printer,
     fs::{Fs, RealFsOptions, real_fs},
-    helpers::{encode_string_as_shortest_data_url, mime_type_by_extension, string_to_utf16},
+    helpers::{
+        encode_string_as_shortest_data_url, escape_closing_tag, mime_type_by_extension,
+        string_to_utf16,
+    },
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
     logger::{DeferLogKind, Log, Msg, MsgKind, PrettyPaths, Source},
@@ -178,6 +181,7 @@ pub struct TransformOptions {
     pub drop_debugger: bool,
     pub drop_labels: Vec<String>,
     pub ignore_annotations: bool,
+    pub legal_comments: BuildLegalComments,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,6 +246,16 @@ pub enum BuildLegalComments {
     EndOfFile,
     Linked,
     External,
+}
+
+const fn internal_legal_comments(value: BuildLegalComments) -> config::LegalComments {
+    match value {
+        BuildLegalComments::Inline => config::LegalComments::Inline,
+        BuildLegalComments::None => config::LegalComments::None,
+        BuildLegalComments::EndOfFile => config::LegalComments::EndOfFile,
+        BuildLegalComments::Linked => config::LegalComments::LinkedWithComment,
+        BuildLegalComments::External => config::LegalComments::ExternalWithoutComment,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -919,13 +933,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         },
         source_root: options.source_root,
         exclude_sources_content: options.sources_content == BuildSourcesContent::Exclude,
-        legal_comments: match options.legal_comments {
-            BuildLegalComments::Inline => config::LegalComments::Inline,
-            BuildLegalComments::None => config::LegalComments::None,
-            BuildLegalComments::EndOfFile => config::LegalComments::EndOfFile,
-            BuildLegalComments::Linked => config::LegalComments::LinkedWithComment,
-            BuildLegalComments::External => config::LegalComments::ExternalWithoutComment,
-        },
+        legal_comments: internal_legal_comments(options.legal_comments),
         line_limit: options.line_limit,
         code_splitting: options.splitting,
         preserve_symlinks: options.preserve_symlinks,
@@ -1047,6 +1055,15 @@ pub fn build(options: BuildOptions) -> BuildResult {
 pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> TransformResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
     let mut options = options;
+    if options.legal_comments == BuildLegalComments::Linked {
+        return TransformResult {
+            errors: vec![Message {
+                text: "Cannot transform with linked legal comments".into(),
+                kind: MessageKind::Error,
+            }],
+            ..TransformResult::default()
+        };
+    }
     let sourcefile = if options.sourcefile.is_empty() {
         "<stdin>".to_string()
     } else {
@@ -1074,17 +1091,17 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         ..Source::default()
     };
 
-    let mut code = match options.loader {
+    let (mut code, extracted_legal_comments) = match options.loader {
         Loader::Css | Loader::GlobalCss | Loader::LocalCss => transform_css(&log, source, &options),
         Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None => {
             transform_javascript(&log, source, &options)
         }
-        Loader::Json => transform_json(&log, source, &options),
-        Loader::Text => transform_text(&source, &options),
-        Loader::Base64 => transform_base64(&source, &options),
-        Loader::Binary => transform_binary(&source, &options),
-        Loader::DataUrl => transform_data_url(&source, &options),
-        Loader::Empty => Vec::new(),
+        Loader::Json => (transform_json(&log, source, &options), Vec::new()),
+        Loader::Text => (transform_text(&source, &options), Vec::new()),
+        Loader::Base64 => (transform_base64(&source, &options), Vec::new()),
+        Loader::Binary => (transform_binary(&source, &options), Vec::new()),
+        Loader::DataUrl => (transform_data_url(&source, &options), Vec::new()),
+        Loader::Empty => (Vec::new(), Vec::new()),
         loader => {
             let message = format!("Transform loader {loader:?} is not implemented yet");
             return TransformResult {
@@ -1099,8 +1116,24 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
 
     let messages = log.done();
     let (errors, warnings) = public_messages(messages);
+    let mut legal_comments = Vec::new();
     if errors.is_empty() {
-        code = add_banner_and_footer(code, &options.banner, &options.footer);
+        code = add_banner_and_footer(code, &options.banner, "");
+        let slash_tag = if matches!(
+            options.loader,
+            Loader::Css | Loader::GlobalCss | Loader::LocalCss
+        ) {
+            "/style"
+        } else {
+            "/script"
+        };
+        let rendered = render_legal_comments(&extracted_legal_comments, slash_tag);
+        match options.legal_comments {
+            BuildLegalComments::EndOfFile => code.extend(rendered),
+            BuildLegalComments::External => legal_comments = rendered,
+            _ => {}
+        }
+        code = add_banner_and_footer(code, "", &options.footer);
     } else {
         code.clear();
     }
@@ -1108,8 +1141,20 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         errors,
         warnings,
         code,
+        legal_comments,
         ..TransformResult::default()
     }
+}
+
+fn render_legal_comments(comments: &[String], slash_tag: &str) -> Vec<u8> {
+    let mut result = Vec::new();
+    for comment in comments {
+        result.extend_from_slice(escape_closing_tag(comment, slash_tag).as_bytes());
+        if !comment.ends_with('\n') {
+            result.push(b'\n');
+        }
+    }
+    result
 }
 
 fn default_loader_for_sourcefile(sourcefile: &str) -> Option<Loader> {
@@ -1199,6 +1244,7 @@ fn js_printer_options(options: &TransformOptions) -> js_printer::Options {
         minify_syntax: options.minify_syntax,
         minify_whitespace: options.minify_whitespace,
         ascii_only: options.ascii_only,
+        legal_comments: internal_legal_comments(options.legal_comments),
         ..js_printer::Options::default()
     }
 }
@@ -1241,7 +1287,11 @@ fn detect_content_type(contents: &[u8]) -> &'static str {
     }
 }
 
-fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -> Vec<u8> {
+fn transform_javascript(
+    log: &Log,
+    source: Source,
+    options: &TransformOptions,
+) -> (Vec<u8>, Vec<String>) {
     let mut parser_options = js_parser::Options::default();
     parser_options.ts.parse = matches!(options.loader, Loader::Ts | Loader::Tsx);
     parser_options.jsx.parse = matches!(options.loader, Loader::Jsx | Loader::Tsx);
@@ -1276,17 +1326,18 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     parser_options.omit_runtime_for_tests = true;
     let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
     if !ok {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&ast.symbols);
     let (renamer, helper_name) = transform_keep_name_renamer(&ast, symbols, options.keep_names);
-    let mut code = js_printer::print(&ast, &renamer, js_printer_options(options)).js;
+    let printed = js_printer::print(&ast, &renamer, js_printer_options(options));
+    let mut code = printed.js;
     prepend_keep_name_helper(&mut code, &helper_name, options.minify_whitespace);
-    code
+    (code, printed.extracted_legal_comments)
 }
 
-fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u8> {
+fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> (Vec<u8>, Vec<String>) {
     let identifier_name = source.identifier_name.clone();
     let tree = css_parser::parse(
         log.clone(),
@@ -1314,7 +1365,7 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u
     } else {
         HashMap::new()
     };
-    let mut css = css_printer::print(
+    let printed = css_printer::print(
         &tree,
         &symbols,
         css_printer::Options {
@@ -1322,14 +1373,15 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u
             line_limit: options.line_limit,
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
+            legal_comments: internal_legal_comments(options.legal_comments),
             ..css_printer::Options::default()
         },
-    )
-    .css;
+    );
+    let mut css = printed.css;
     if !css.is_empty() && css.last() != Some(&b'\n') {
         css.push(b'\n');
     }
-    css
+    (css, printed.extracted_legal_comments)
 }
 
 fn local_css_names(
@@ -3835,5 +3887,79 @@ mod tests {
             )),
             "/* before */\nlet x = 1;\n/* after */\n"
         );
+    }
+
+    #[test]
+    fn configures_transform_legal_comments_for_javascript_and_css() {
+        for (loader, input, output_without_comment, inline_output, legal_comment) in [
+            (Loader::Js, "//!x\ny()", "y();\n", "//!x\ny();\n", "//!x\n"),
+            (
+                Loader::Css,
+                "/*!x*/\ny{}",
+                "y {\n}\n",
+                "/*!x*/\ny {\n}\n",
+                "/*!x*/\n",
+            ),
+        ] {
+            let transformed = |legal_comments| {
+                transform(
+                    input,
+                    TransformOptions {
+                        loader,
+                        legal_comments,
+                        ..TransformOptions::default()
+                    },
+                )
+            };
+
+            assert_eq!(
+                code(transformed(BuildLegalComments::None)),
+                output_without_comment
+            );
+            assert_eq!(code(transformed(BuildLegalComments::Inline)), inline_output);
+
+            let eof = transformed(BuildLegalComments::EndOfFile);
+            assert!(eof.errors.is_empty(), "{:?}", eof.errors);
+            assert_eq!(
+                String::from_utf8(eof.code).expect("transform output is UTF-8"),
+                format!("{output_without_comment}{legal_comment}")
+            );
+            assert!(eof.legal_comments.is_empty());
+
+            let external = transformed(BuildLegalComments::External);
+            assert!(external.errors.is_empty(), "{:?}", external.errors);
+            assert_eq!(
+                String::from_utf8(external.code).expect("transform output is UTF-8"),
+                output_without_comment
+            );
+            assert_eq!(
+                String::from_utf8(external.legal_comments)
+                    .expect("external legal comments are UTF-8"),
+                legal_comment
+            );
+        }
+
+        let linked = transform(
+            "",
+            TransformOptions {
+                legal_comments: BuildLegalComments::Linked,
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(
+            linked.errors.first().map(|message| message.text.as_str()),
+            Some("Cannot transform with linked legal comments")
+        );
+        assert!(linked.code.is_empty());
+
+        let escaped = transform(
+            "/*! </script> */\nkeep()",
+            TransformOptions {
+                legal_comments: BuildLegalComments::EndOfFile,
+                footer: "footer()".into(),
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(code(escaped), "keep();\n/*! <\\/script> */\nfooter()\n");
     }
 }
