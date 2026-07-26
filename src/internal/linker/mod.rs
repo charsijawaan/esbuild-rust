@@ -2044,6 +2044,44 @@ pub fn bind_imports_to_parts_for_file(
     }
 }
 
+/// Pre-generate local symbols used to re-export `CommonJS` values from an ESM
+/// entry point.
+///
+/// # Panics
+///
+/// Panics when the source lacks the parser module scope required for generated
+/// symbols.
+pub fn generate_common_js_export_copies(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    options: &Options,
+) {
+    if !graph.files[source_index as usize].is_entry_point()
+        || options.output_format != Format::EsModule
+    {
+        return;
+    }
+    let aliases = {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            panic!("entry point must be JavaScript");
+        };
+        repr.meta.sorted_and_filtered_export_aliases.clone()
+    };
+    let copies = aliases
+        .into_iter()
+        .map(|alias| {
+            graph.generate_new_symbol(source_index, SymbolKind::Other, format!("export_{alias}"))
+        })
+        .collect();
+    let Some(InputFileRepr::Js(repr)) = graph.files[source_index as usize].input_file.repr.as_mut()
+    else {
+        unreachable!("entry point was checked above");
+    };
+    repr.meta.cjs_export_copies = copies;
+}
+
 /// Create the synthetic part that keeps an entry point's public surface live.
 ///
 /// # Panics
@@ -2498,6 +2536,7 @@ pub fn scan_imports_and_exports<S: BuildHasher>(
         ) {
             continue;
         }
+        generate_common_js_export_copies(graph, source_index, options);
         bind_imports_to_parts_for_file(graph, source_index, runtime_refs.export_ref);
         if graph.files[source_index as usize].is_entry_point() {
             create_entry_point_part(graph, source_index, runtime_refs.to_common_js_ref);
@@ -7992,18 +8031,19 @@ mod tests {
         encode_import_constraints_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
         finalize_javascript_chunk_outputs, finalize_part_dependencies_for_file,
         find_imported_css_files_in_js_order, find_imported_files_in_css_order,
-        generate_code_for_lazy_exports, generate_cross_chunk_stmts, generate_css_chunk,
-        generate_css_module_exports, generate_entry_point_tail, generate_global_name_prefix,
-        generate_isolated_hash, generate_source_map_for_chunk,
-        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
-        lower_esm_lazy_export, mangle_local_css, mark_file_live_for_tree_shaking,
-        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
-        populate_css_stub_lazy_export, prepare_css_asts, print_cross_chunk_bindings,
-        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
-        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
+        generate_code_for_lazy_exports, generate_common_js_export_copies,
+        generate_cross_chunk_stmts, generate_css_chunk, generate_css_module_exports,
+        generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
+        generate_source_map_for_chunk, has_dynamic_exports_due_to_export_star,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, lower_common_js_lazy_export, lower_esm_lazy_export,
+        mangle_local_css, mark_file_live_for_tree_shaking, match_import_with_export,
+        merge_adjacent_local_stmts, path_between_chunks, populate_css_stub_lazy_export,
+        prepare_css_asts, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
+        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
+        wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -10983,6 +11023,61 @@ mod tests {
             repr.ast.parts[2].statements[0].data.as_deref(),
             Some(js_ast::StmtData::ExportDefault(_))
         ));
+    }
+
+    #[test]
+    fn pre_generates_common_js_export_copies_for_esm_entries() {
+        let source = Source {
+            index: 1,
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let ast = js_parser::lazy_export_ast(
+            Log::new_defer(DeferLogKind::All, HashMap::new()),
+            &source,
+            js_parser::options_from_config(&Options::default()),
+            js_ast::Expr::new(Loc::default(), js_ast::ExprData::Null),
+            None,
+        );
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            InputFile {
+                repr: Some(InputFileRepr::Js(Box::new(JsRepr {
+                    ast,
+                    ..JsRepr::default()
+                }))),
+                source,
+                loader: Loader::Json,
+                ..InputFile::default()
+            },
+        ];
+        let mut graph = clone_linker_graph(
+            &input_files,
+            &[0, 1],
+            &[EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            }],
+            false,
+        );
+        let Some(InputFileRepr::Js(repr)) = graph.files[1].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta.sorted_and_filtered_export_aliases = vec!["default".into(), "foo".into()];
+
+        generate_common_js_export_copies(
+            &mut graph,
+            1,
+            &Options {
+                output_format: Format::EsModule,
+                ..Options::default()
+            },
+        );
+
+        let copies = &js_repr(&graph, 1).meta.cjs_export_copies;
+        assert_eq!(copies.len(), 2);
+        assert_eq!(graph.symbols.get(copies[0]).original_name, "export_default");
+        assert_eq!(graph.symbols.get(copies[1]).original_name, "export_foo");
     }
 
     #[test]
