@@ -64,6 +64,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut aliases = HashMap::new();
     let mut packages = Packages::Bundle;
     let mut build_loaders = HashMap::new();
+    let mut out_extensions = HashMap::new();
     let mut defines = HashMap::new();
     let mut main_fields = Vec::new();
     let mut resolve_extensions = Vec::new();
@@ -274,6 +275,13 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             build_loaders.insert(extension.into(), loader);
             continue;
         }
+        if let Some(value) = argument.strip_prefix("--out-extension:") {
+            let Some((kind, extension)) = value.split_once('=') else {
+                return Err(format!("Missing \"=\" in {argument:?}"));
+            };
+            out_extensions.insert(kind.into(), extension.into());
+            continue;
+        }
         if let Some(value) = argument.strip_prefix("--define:") {
             let Some((key, value)) = value.split_once('=') else {
                 return Err(format!("Missing \"=\" in {argument:?}"));
@@ -361,6 +369,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             alias: aliases,
             packages,
             loader: build_loaders,
+            out_extension: out_extensions,
             define: defines,
             main_fields,
             resolve_extensions,
@@ -488,6 +497,7 @@ fn help_text() -> String {
          \x20\x20--packages=bundle|external\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
          \x20\x20--loader:.EXT=LOADER\n\
+         \x20\x20--out-extension:.js=.mjs\n\
          \x20\x20--define:KEY=VALUE\n\
          \x20\x20--main-fields=FIELDS\n\
          \x20\x20--resolve-extensions=EXTENSIONS\n\
@@ -545,6 +555,7 @@ mod tests {
         assert!(run(&["--tree-shaking=wat".into()]).is_err());
         assert!(run(&["--jsx=wat".into()]).is_err());
         assert!(run(&["--alias:missing-value".into()]).is_err());
+        assert!(run(&["--out-extension:.js".into()]).is_err());
     }
 
     #[test]

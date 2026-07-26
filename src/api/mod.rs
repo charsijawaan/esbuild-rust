@@ -178,6 +178,7 @@ pub struct BuildOptions {
     pub alias: HashMap<String, String>,
     pub packages: Packages,
     pub loader: HashMap<String, Loader>,
+    pub out_extension: HashMap<String, String>,
     pub define: HashMap<String, String>,
     pub main_fields: Vec<String>,
     pub resolve_extensions: Vec<String>,
@@ -317,6 +318,40 @@ fn validate_build_loaders(
     }
     if errors.is_empty() {
         Ok(result)
+    } else {
+        Err(errors)
+    }
+}
+
+fn validate_output_extensions(
+    extensions: &HashMap<String, String>,
+) -> Result<(String, String), Vec<Message>> {
+    let mut javascript = String::new();
+    let mut css = String::new();
+    let mut errors = Vec::new();
+    for (kind, extension) in extensions {
+        let target = match kind.as_str() {
+            ".js" => &mut javascript,
+            ".css" => &mut css,
+            _ => {
+                errors.push(Message {
+                    text: format!("Invalid output extension key: {kind:?}"),
+                    kind: MessageKind::Error,
+                });
+                continue;
+            }
+        };
+        if extension.len() < 2 || !extension.starts_with('.') || extension.ends_with('.') {
+            errors.push(Message {
+                text: format!("Invalid output extension: {extension:?}"),
+                kind: MessageKind::Error,
+            });
+        } else {
+            target.clone_from(extension);
+        }
+    }
+    if errors.is_empty() {
+        Ok((javascript, css))
     } else {
         Err(errors)
     }
@@ -546,6 +581,16 @@ pub fn build(options: BuildOptions) -> BuildResult {
             };
         }
     };
+    let (output_extension_js, output_extension_css) =
+        match validate_output_extensions(&options.out_extension) {
+            Ok(extensions) => extensions,
+            Err(errors) => {
+                return BuildResult {
+                    errors,
+                    ..BuildResult::default()
+                };
+            }
+        };
     if let Err(errors) = validate_resolve_extensions(&options.resolve_extensions) {
         return BuildResult {
             errors,
@@ -663,6 +708,8 @@ pub fn build(options: BuildOptions) -> BuildResult {
         external_packages: options.packages == Packages::External,
         package_aliases: options.alias,
         extension_to_loader,
+        output_extension_js,
+        output_extension_css,
         extension_order: options.resolve_extensions,
         main_fields: options.main_fields,
         conditions: options.conditions,
@@ -2032,6 +2079,46 @@ mod tests {
         assert!(output.contains("\"aliased package\""), "{output}");
         assert!(!output.contains("original/feature"));
 
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn applies_build_output_extensions() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-out-extension-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(directory.join("entry.js"), "console.log('js')")
+            .expect("write JavaScript entry");
+        std::fs::write(directory.join("style.css"), ".style { color: red }")
+            .expect("write CSS entry");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into(), "style.css".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            out_extension: HashMap::from([
+                (".js".into(), ".mjs".into()),
+                (".css".into(), ".xcss".into()),
+            ]),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let paths = result
+            .output_files
+            .iter()
+            .map(|output| output.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(paths.iter().any(|path| path.ends_with("/entry.mjs")));
+        assert!(paths.iter().any(|path| path.ends_with("/style.xcss")));
+
+        let invalid = build(BuildOptions {
+            out_extension: HashMap::from([(".wat".into(), "invalid".into())]),
+            ..BuildOptions::default()
+        });
+        assert!(!invalid.errors.is_empty());
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
