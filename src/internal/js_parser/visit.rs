@@ -8,9 +8,9 @@ use crate::internal::{
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
-        DotExpr, Expr, ExprData, ExprStmt, Function, IdentifierExpr, ObjectExpr, OpCode, Property,
-        PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData, StrictModeKind, StringExpr,
-        for_each_identifier_binding,
+        DotExpr, Expr, ExprData, ExprStmt, Function, FunctionExpr, IdentifierExpr, ObjectExpr,
+        OpCode, Property, PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData, StrictModeKind,
+        StringExpr, for_each_identifier_binding, is_identifier_es5_and_es_next,
     },
 };
 
@@ -813,10 +813,235 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
             core.visit_new_target_allowed = old_new_target_allowed;
         }
     }
+    lower_type_script_class_field_assignments(class);
     core.pop_scope();
     core.pop_scope();
     if let (Some(inner), Some(outer)) = (inner_class_name, outer_class_name) {
         core.merge_symbols(inner, outer);
+    }
+}
+
+fn lower_type_script_class_field_assignments(class: &mut Class) {
+    if class.use_define_for_class_fields {
+        return;
+    }
+    let has_constructor = class_constructor_index(class).is_some();
+    let is_derived = class.extends_or_nil.data.is_some();
+    if is_derived && !has_constructor {
+        return;
+    }
+
+    let mut assignments = Vec::new();
+    class.properties.retain_mut(|property| {
+        let Some(assignment) = take_class_field_assignment(property) else {
+            return true;
+        };
+        assignments.push(assignment);
+        false
+    });
+    if assignments.is_empty() {
+        return;
+    }
+
+    if let Some(constructor_index) = class_constructor_index(class) {
+        let constructor = &mut class.properties[constructor_index];
+        let Some(ExprData::Function(function)) = constructor.value_or_nil.data.as_deref_mut()
+        else {
+            return;
+        };
+        if is_derived {
+            insert_parameter_fields_after_super(
+                &mut function.function.body.block.statements,
+                &assignments,
+            );
+        } else {
+            function
+                .function
+                .body
+                .block
+                .statements
+                .splice(0..0, assignments);
+        }
+    } else {
+        let loc = class.body_loc;
+        let mut function = Function::default();
+        function.body.loc = loc;
+        function.body.block.statements = assignments;
+        class.properties.push(Property {
+            key: Expr::new(
+                loc,
+                ExprData::String(StringExpr {
+                    value: string_to_utf16(b"constructor"),
+                    ..StringExpr::default()
+                }),
+            ),
+            value_or_nil: Expr::new(
+                loc,
+                ExprData::Function(FunctionExpr {
+                    function,
+                    ..FunctionExpr::default()
+                }),
+            ),
+            loc,
+            kind: PropertyKind::Method,
+            ..Property::default()
+        });
+    }
+}
+
+fn class_constructor_index(class: &Class) -> Option<usize> {
+    class.properties.iter().position(|property| {
+        property.kind == PropertyKind::Method
+            && matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::String(name))
+                    if utf16_to_string(&name.value) == b"constructor"
+            )
+    })
+}
+
+fn take_class_field_assignment(property: &mut Property) -> Option<Stmt> {
+    if property.kind != PropertyKind::Field
+        || property.flags.contains(PropertyFlags::IS_STATIC)
+        || property.flags.contains(PropertyFlags::IS_COMPUTED)
+        || !property.decorators.is_empty()
+    {
+        return None;
+    }
+    let ExprData::String(key) = property.key.data.as_deref()? else {
+        return None;
+    };
+    let name = String::from_utf16_lossy(&key.value);
+    if !is_identifier_es5_and_es_next(&name) {
+        return None;
+    }
+    let initializer = if property.initializer_or_nil.data.is_some() {
+        &property.initializer_or_nil
+    } else {
+        &property.value_or_nil
+    };
+    if !class_field_initializer_is_safe_to_move(initializer) {
+        return None;
+    }
+    let initializer = if property.initializer_or_nil.data.is_some() {
+        std::mem::take(&mut property.initializer_or_nil)
+    } else {
+        std::mem::take(&mut property.value_or_nil)
+    };
+    let loc = property.loc;
+    Some(Stmt::new(
+        loc,
+        StmtData::Expr(ExprStmt {
+            value: Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: Expr::new(
+                        loc,
+                        ExprData::Dot(DotExpr {
+                            target: Expr::new(loc, ExprData::This),
+                            name,
+                            name_loc: property.key.loc,
+                            ..DotExpr::default()
+                        }),
+                    ),
+                    right: initializer,
+                    op: OpCode::BinaryAssign,
+                }),
+            ),
+            ..ExprStmt::default()
+        }),
+    ))
+}
+
+fn class_field_initializer_is_safe_to_move(expression: &Expr) -> bool {
+    match expression.data.as_deref() {
+        Some(
+            ExprData::Boolean(_)
+            | ExprData::Null
+            | ExprData::Undefined
+            | ExprData::This
+            | ExprData::NewTarget(_)
+            | ExprData::ImportMeta(_)
+            | ExprData::JsxText(_)
+            | ExprData::Missing
+            | ExprData::Number(_)
+            | ExprData::BigInt(_)
+            | ExprData::String(_)
+            | ExprData::RegExp(_)
+            | ExprData::RequireString(_)
+            | ExprData::RequireResolveString(_)
+            | ExprData::ImportString(_),
+        ) => true,
+        Some(ExprData::Array(value)) => value
+            .items
+            .iter()
+            .all(class_field_initializer_is_safe_to_move),
+        Some(ExprData::Unary(value)) => class_field_initializer_is_safe_to_move(&value.value),
+        Some(ExprData::Binary(value)) => {
+            class_field_initializer_is_safe_to_move(&value.left)
+                && class_field_initializer_is_safe_to_move(&value.right)
+        }
+        Some(ExprData::New(value)) => {
+            class_field_initializer_is_safe_to_move(&value.target)
+                && value
+                    .args
+                    .iter()
+                    .all(class_field_initializer_is_safe_to_move)
+        }
+        Some(ExprData::Call(value)) => {
+            class_field_initializer_is_safe_to_move(&value.target)
+                && value
+                    .args
+                    .iter()
+                    .all(class_field_initializer_is_safe_to_move)
+        }
+        Some(ExprData::Dot(value)) => class_field_initializer_is_safe_to_move(&value.target),
+        Some(ExprData::Index(value)) => {
+            class_field_initializer_is_safe_to_move(&value.target)
+                && class_field_initializer_is_safe_to_move(&value.index)
+        }
+        Some(ExprData::Object(value)) => value.properties.iter().all(|property| {
+            (!property.flags.contains(PropertyFlags::IS_COMPUTED)
+                || class_field_initializer_is_safe_to_move(&property.key))
+                && class_field_initializer_is_safe_to_move(&property.value_or_nil)
+                && class_field_initializer_is_safe_to_move(&property.initializer_or_nil)
+                && property.decorators.is_empty()
+        }),
+        Some(ExprData::Spread(value)) => class_field_initializer_is_safe_to_move(&value.value),
+        Some(ExprData::Template(value)) => {
+            class_field_initializer_is_safe_to_move(&value.tag_or_nil)
+                && value
+                    .parts
+                    .iter()
+                    .all(|part| class_field_initializer_is_safe_to_move(&part.value))
+        }
+        Some(ExprData::InlinedEnum(value)) => class_field_initializer_is_safe_to_move(&value.value),
+        Some(ExprData::Annotation(value)) => class_field_initializer_is_safe_to_move(&value.value),
+        Some(ExprData::Await(value)) => class_field_initializer_is_safe_to_move(&value.value),
+        Some(ExprData::Yield(value)) => {
+            class_field_initializer_is_safe_to_move(&value.value_or_nil)
+        }
+        Some(ExprData::If(value)) => {
+            class_field_initializer_is_safe_to_move(&value.test)
+                && class_field_initializer_is_safe_to_move(&value.yes)
+                && class_field_initializer_is_safe_to_move(&value.no)
+        }
+        Some(ExprData::ImportCall(value)) => {
+            class_field_initializer_is_safe_to_move(&value.expr)
+                && class_field_initializer_is_safe_to_move(&value.options_or_nil)
+        }
+        Some(
+            ExprData::Super
+            | ExprData::Arrow(_)
+            | ExprData::Function(_)
+            | ExprData::Class(_)
+            | ExprData::Identifier(_)
+            | ExprData::ImportIdentifier(_)
+            | ExprData::PrivateIdentifier(_)
+            | ExprData::NameOfSymbol(_)
+            | ExprData::JsxElement(_),
+        )
+        | None => false,
     }
 }
 

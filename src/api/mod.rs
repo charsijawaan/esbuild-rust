@@ -4166,8 +4166,46 @@ mod tests {
             "{assignment_fields}"
         );
         assert!(
-            assignment_fields.contains("initialized = 1;"),
+            assignment_fields.contains("this.initialized = 1;"),
             "{assignment_fields}"
+        );
+        assert!(
+            !assignment_fields.contains("\n  initialized = 1;"),
+            "{assignment_fields}"
+        );
+
+        let ordered = code(transform(
+            "class Foo { initialized = 1; constructor(public id: string) { body() } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            ordered
+                .find("this.initialized = 1")
+                .expect("field assignment")
+                < ordered.find("this.id = id").expect("parameter property"),
+            "{ordered}"
+        );
+
+        let derived = code(transform(
+            "class Foo extends Base { initialized = this.init(); constructor() { before(); super(); after() } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        let super_index = derived.find("super();").expect("super call");
+        let field_index = derived
+            .find("this.initialized = this.init();")
+            .expect("field assignment");
+        let after_index = derived.find("after();").expect("following statement");
+        assert!(
+            super_index < field_index && field_index < after_index,
+            "{derived}"
         );
 
         let define_fields = code(transform(
