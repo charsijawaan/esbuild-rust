@@ -160,6 +160,7 @@ pub enum BuildJsx {
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildOptions {
     pub entry_points: Vec<String>,
+    pub entry_points_advanced: Vec<BuildEntryPoint>,
     pub outdir: String,
     pub outfile: String,
     pub outbase: String,
@@ -206,6 +207,12 @@ pub struct BuildOptions {
     pub main_fields: Vec<String>,
     pub resolve_extensions: Vec<String>,
     pub conditions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BuildEntryPoint {
+    pub input_path: String,
+    pub output_path: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -617,10 +624,21 @@ pub fn build(options: BuildOptions) -> BuildResult {
             };
         }
     };
+    let all_entry_point_paths = options
+        .entry_points
+        .iter()
+        .chain(
+            options
+                .entry_points_advanced
+                .iter()
+                .map(|entry| &entry.input_path),
+        )
+        .cloned()
+        .collect::<Vec<_>>();
     let abs_output_base = if options.outbase.is_empty() {
         default_abs_output_base(
             file_system.as_ref(),
-            &options.entry_points,
+            &all_entry_point_paths,
             options.preserve_symlinks,
         )
     } else if file_system.is_abs(&options.outbase) {
@@ -795,7 +813,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         needs_metafile: options.metafile,
         ..config::Options::default()
     };
-    let entry_points: Vec<_> = options
+    let mut entry_points: Vec<_> = options
         .entry_points
         .into_iter()
         .map(|input_path| bundler::EntryPoint {
@@ -804,6 +822,13 @@ pub fn build(options: BuildOptions) -> BuildResult {
             ..bundler::EntryPoint::default()
         })
         .collect();
+    entry_points.extend(options.entry_points_advanced.into_iter().map(|entry| {
+        bundler::EntryPoint {
+            input_path: entry.input_path,
+            output_path: entry.output_path,
+            input_path_in_file_namespace: true,
+        }
+    }));
     let compiled = bundler::bundle_javascript(
         &log,
         file_system.as_ref(),
@@ -1244,9 +1269,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
-        BuildSourcesContent, BuildTreeShaking, Loader, Packages, TransformOptions, build,
-        transform,
+        BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
+        BuildSourceMap, BuildSourcesContent, BuildTreeShaking, Loader, Packages, TransformOptions,
+        build, transform,
     };
 
     fn code(result: super::TransformResult) -> String {
@@ -1410,6 +1435,40 @@ mod tests {
             paths
                 .iter()
                 .any(|path| path.ends_with("/out/admin/panel.js"))
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn supports_advanced_entry_point_output_paths() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-advanced-entry-{unique}"));
+        std::fs::create_dir_all(directory.join("src")).expect("create source directory");
+        std::fs::write(
+            directory.join("src/app.js"),
+            "console.log('advanced entry')",
+        )
+        .expect("write entry");
+
+        let result = build(BuildOptions {
+            entry_points_advanced: vec![BuildEntryPoint {
+                input_path: "src/app.js".into(),
+                output_path: "custom/nested/application".into(),
+            }],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 1);
+        assert!(
+            result.output_files[0]
+                .path
+                .ends_with("/out/custom/nested/application.js")
         );
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }

@@ -6,9 +6,9 @@ use std::{
 
 use esbuild_rs::{
     api::{
-        BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
-        BuildSourcesContent, BuildTreeShaking, Loader, Packages, TransformOptions, build,
-        transform,
+        BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
+        BuildSourceMap, BuildSourcesContent, BuildTreeShaking, Loader, Packages, TransformOptions,
+        build, transform,
     },
     internal::cli_helpers,
 };
@@ -399,8 +399,24 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         if !metafile_path.is_empty() && outdir.is_empty() && outfile.is_empty() {
             return Err("Cannot use \"--metafile\" without an output path".into());
         }
+        let mut entry_points = Vec::new();
+        let mut entry_points_advanced = Vec::new();
+        for input_path in input_paths {
+            if let Some((output_path, input_path)) = input_path.split_once('=') {
+                if output_path.is_empty() || input_path.is_empty() {
+                    return Err("Invalid advanced entry point".into());
+                }
+                entry_points_advanced.push(BuildEntryPoint {
+                    input_path: input_path.into(),
+                    output_path: output_path.into(),
+                });
+            } else {
+                entry_points.push(input_path);
+            }
+        }
         let result = build(BuildOptions {
-            entry_points: input_paths,
+            entry_points,
+            entry_points_advanced,
             outdir: outdir.clone(),
             outfile: outfile.clone(),
             outbase,
@@ -684,6 +700,38 @@ mod tests {
         let output = String::from_utf8(output).expect("bundle output is UTF-8");
         assert!(output.contains("console.log(\"cli bundle\");"));
         assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn supports_advanced_entry_point_output_paths() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("esbuild-rs-cli-advanced-entry-{unique}"));
+        let output_directory = directory.join("out");
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "console.log('advanced entry')").expect("write entry file");
+
+        let Output::Text(output) = run(&[
+            "--bundle".into(),
+            format!("--outdir={}", output_directory.display()),
+            format!("custom/application={}", entry.display()),
+        ])
+        .expect("bundle succeeds") else {
+            panic!("expected file output");
+        };
+        assert!(output.is_empty());
+        let generated = output_directory.join("custom/application.js");
+        assert!(generated.is_file());
+        assert!(
+            std::fs::read_to_string(generated)
+                .expect("read generated entry")
+                .contains("console.log(\"advanced entry\")")
+        );
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
