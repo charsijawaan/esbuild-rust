@@ -829,18 +829,19 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
     }
     let is_derived = class.extends_or_nil.data.is_some();
     let has_constructor = class_constructor_index(class).is_some();
+    let allow_any_initializer = !has_constructor || class_constructor_is_binding_free(class);
     let lower_private_fields = class.properties.iter().any(|property| {
         !matches!(
             property.key.data.as_deref(),
             Some(ExprData::PrivateIdentifier(_))
-        ) && class_field_can_be_moved(property, !has_constructor)
+        ) && class_field_can_be_moved(property, allow_any_initializer)
     });
 
     let mut assignments = Vec::new();
     let mut private_declarations = Vec::new();
     class.properties.retain_mut(|property| {
         let Some((assignment, keep_private_declaration)) =
-            take_class_field_assignment(property, lower_private_fields, !has_constructor)
+            take_class_field_assignment(property, lower_private_fields, allow_any_initializer)
         else {
             return true;
         };
@@ -951,6 +952,55 @@ fn class_constructor_index(class: &Class) -> Option<usize> {
                     if utf16_to_string(&name.value) == b"constructor"
             )
     })
+}
+
+fn class_constructor_is_binding_free(class: &Class) -> bool {
+    let Some(index) = class_constructor_index(class) else {
+        return true;
+    };
+    let Some(ExprData::Function(function)) = class.properties[index].value_or_nil.data.as_deref()
+    else {
+        return false;
+    };
+    function.function.args.is_empty()
+        && !function
+            .function
+            .body
+            .block
+            .statements
+            .iter()
+            .any(statement_contains_binding)
+}
+
+fn statement_contains_binding(statement: &Stmt) -> bool {
+    match statement.data.as_deref() {
+        Some(
+            StmtData::Local(_) | StmtData::Function(_) | StmtData::Class(_) | StmtData::Try(_),
+        ) => true,
+        Some(StmtData::Block(value)) => value.statements.iter().any(statement_contains_binding),
+        Some(StmtData::If(value)) => {
+            statement_contains_binding(&value.yes) || statement_contains_binding(&value.no_or_nil)
+        }
+        Some(StmtData::For(value)) => {
+            statement_contains_binding(&value.init_or_nil)
+                || statement_contains_binding(&value.body)
+        }
+        Some(StmtData::ForIn(value)) => {
+            statement_contains_binding(&value.init) || statement_contains_binding(&value.body)
+        }
+        Some(StmtData::ForOf(value)) => {
+            statement_contains_binding(&value.init) || statement_contains_binding(&value.body)
+        }
+        Some(StmtData::DoWhile(value)) => statement_contains_binding(&value.body),
+        Some(StmtData::While(value)) => statement_contains_binding(&value.body),
+        Some(StmtData::With(value)) => statement_contains_binding(&value.body),
+        Some(StmtData::Label(value)) => statement_contains_binding(&value.statement),
+        Some(StmtData::Switch(value)) => value
+            .cases
+            .iter()
+            .any(|case| case.body.iter().any(statement_contains_binding)),
+        _ => false,
+    }
 }
 
 fn class_field_can_be_moved(property: &Property, allow_any_initializer: bool) -> bool {

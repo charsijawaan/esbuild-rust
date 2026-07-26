@@ -4219,6 +4219,23 @@ mod tests {
             "{generated}"
         );
 
+        let capture_sensitive = code(transform(
+            "const outer = 1; class Foo { initialized = outer; constructor() { let outer = 2 } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            capture_sensitive.contains("initialized = outer;"),
+            "{capture_sensitive}"
+        );
+        assert!(
+            !capture_sensitive.contains("this.initialized = outer;"),
+            "{capture_sensitive}"
+        );
+
         let define_fields = code(transform(
             "class Foo { foo }",
             TransformOptions {
@@ -4233,7 +4250,7 @@ mod tests {
     #[test]
     fn lowers_derived_type_script_class_fields() {
         let derived = code(transform(
-            "class Foo extends Base { initialized = this.init(); constructor() { before(); super(); after() } }",
+            "class Foo extends Base { initialized = createValue(); constructor() { before(); super(); after() } }",
             TransformOptions {
                 loader: Loader::Ts,
                 tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
@@ -4242,7 +4259,7 @@ mod tests {
         ));
         let super_index = derived.find("super();").expect("super call");
         let field_index = derived
-            .find("this.initialized = this.init();")
+            .find("this.initialized = createValue();")
             .expect("field assignment");
         let after_index = derived.find("after();").expect("following statement");
         assert!(
