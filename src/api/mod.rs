@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::internal::{
-    ast::{DEFAULT_NAME_MINIFIER_CSS, Ref, SymbolKind, SymbolMap},
+    ast::{DEFAULT_NAME_MINIFIER_CSS, DEFAULT_NAME_MINIFIER_JS, Ref, SymbolKind, SymbolMap},
     bundler,
     cache::CacheSet,
     config::{self, Mode},
@@ -37,6 +37,7 @@ use base64::{
 };
 
 struct TransformRenamer {
+    base: Box<dyn Renamer>,
     symbols: SymbolMap,
     overrides: HashMap<Ref, String>,
 }
@@ -47,7 +48,7 @@ impl Renamer for TransformRenamer {
         self.overrides
             .get(&reference)
             .cloned()
-            .unwrap_or_else(|| self.symbols.get(reference).original_name.clone())
+            .unwrap_or_else(|| self.base.name_for_symbol(reference))
     }
 
     fn namespace_alias_for_symbol(
@@ -63,6 +64,7 @@ fn transform_keep_name_renamer(
     ast: &crate::internal::js_ast::Ast,
     symbols: SymbolMap,
     keep_names: bool,
+    minify_identifiers: bool,
 ) -> (TransformRenamer, String) {
     let mut overrides = HashMap::new();
     let mut helper_name = String::new();
@@ -116,7 +118,41 @@ fn transform_keep_name_renamer(
             );
         }
     }
-    (TransformRenamer { symbols, overrides }, helper_name)
+    let base: Box<dyn Renamer> = if minify_identifiers {
+        let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
+        let reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, &symbols);
+        let mut renamer = crate::internal::renamer::MinifyRenamer::new(
+            symbols.clone(),
+            ast.nested_scope_slot_counts,
+            reserved_names,
+        );
+        let mut top_level_symbols = Vec::new();
+        for part in &ast.parts {
+            renamer.accumulate_symbol_use_counts(&mut top_level_symbols, &part.symbol_uses, &[0]);
+            for declared in &part.declared_symbols {
+                renamer.accumulate_symbol_count(
+                    &mut top_level_symbols,
+                    declared.reference,
+                    1,
+                    &[0],
+                );
+            }
+        }
+        let minifier =
+            DEFAULT_NAME_MINIFIER_JS.shuffle_by_char_freq(ast.char_freq.unwrap_or_default());
+        renamer.assign_names_by_frequency(&minifier);
+        Box::new(renamer)
+    } else {
+        Box::new(new_no_op_renamer(symbols.clone()))
+    };
+    (
+        TransformRenamer {
+            base,
+            symbols,
+            overrides,
+        },
+        helper_name,
+    )
 }
 
 fn prepend_keep_name_helper(code: &mut Vec<u8>, helper_name: &str, minify_whitespace: bool) {
@@ -2177,7 +2213,12 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     }
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&ast.symbols);
-    let (renamer, helper_name) = transform_keep_name_renamer(&ast, symbols, options.keep_names);
+    let (renamer, helper_name) = transform_keep_name_renamer(
+        &ast,
+        symbols,
+        options.keep_names,
+        options.minify_identifiers,
+    );
     let printed = if let Some(line_offset_tables) = line_offset_tables {
         js_printer::print_with_source_map(
             &ast,
@@ -3679,6 +3720,30 @@ mod tests {
                 TransformOptions::default()
             )),
             "if (true) {\n  console.log(\"yes\");\n}\n"
+        );
+    }
+
+    #[test]
+    fn minifies_transform_identifiers_by_frequency() {
+        assert_eq!(
+            code(transform(
+                "function longName(longArgument) { let localValue = longArgument; return localValue }",
+                TransformOptions {
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function longName(l) {\n  let e = l;\n  return e;\n}\n"
+        );
+        assert_eq!(
+            code(transform(
+                "function longName(longArgument) { return externalValue + longArgument }",
+                TransformOptions {
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function longName(e) {\n  return externalValue + e;\n}\n"
         );
     }
 

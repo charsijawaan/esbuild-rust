@@ -4,13 +4,16 @@ use std::{
 };
 
 use crate::internal::{
-    ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, LocRef, Ref, SymbolKind},
+    ast::{
+        CharFreq, INVALID_REF, ImportKind, ImportRecord, ImportRecordFlags, Index32, LocRef, Ref,
+        SlotNamespace, Symbol, SymbolKind,
+    },
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         Ast, Binding, BindingData, CallExpr, CallKind, ClauseItem, Decl, DeclaredSymbol, DotExpr,
         ExportsKind, Expr, ExprData, ExprStmt, IdentifierBinding, IdentifierExpr, ImportStmt,
         LazyExportStmt, LocalKind, LocalStmt, NamedExport, NamedImport, Part, Scope, ScopeKind,
-        Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr,
+        ScopeRef, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr,
         for_each_identifier_binding, make_helper_context,
     },
     js_lexer::{Lexer, LexerPanic, Token},
@@ -28,6 +31,67 @@ use super::{
 };
 
 const MODULE_SCOPE_LOC: Loc = Loc { start: -1 };
+
+fn compute_character_frequency(core: &ParserCore, lexer: &Lexer) -> Option<CharFreq> {
+    if !core.options.minify_identifiers || core.source.key_path.text == "<runtime>" {
+        return None;
+    }
+    let mut frequency = CharFreq::default();
+    frequency.scan(&core.source.contents, 1);
+    for comment in &lexer.all_comments {
+        frequency.scan(core.source.text_for_range(*comment), -1);
+    }
+    for record in &core.import_records {
+        if !record.source_index.is_valid() {
+            frequency.scan(record.path.text.as_bytes(), -1);
+        }
+    }
+    if let Some(scope) = &core.module_scope {
+        subtract_symbol_names_from_frequency(scope, &core.symbols, &mut frequency);
+    }
+    for reference in core.mangled_props.values() {
+        let symbol =
+            &core.symbols[usize::try_from(reference.inner_index).expect("symbol index fits usize")];
+        frequency.scan(
+            symbol.original_name.as_bytes(),
+            -i32::try_from(symbol.use_count_estimate).unwrap_or(i32::MAX),
+        );
+    }
+    Some(frequency)
+}
+
+fn subtract_symbol_names_from_frequency(
+    scope: &ScopeRef,
+    symbols: &[Symbol],
+    frequency: &mut CharFreq,
+) {
+    let scope = scope
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for member in scope.members.values() {
+        let symbol = &symbols
+            [usize::try_from(member.reference.inner_index).expect("symbol index fits usize")];
+        if symbol.slot_namespace() != SlotNamespace::MustNotBeRenamed {
+            frequency.scan(
+                symbol.original_name.as_bytes(),
+                -i32::try_from(symbol.use_count_estimate).unwrap_or(i32::MAX),
+            );
+        }
+    }
+    if scope.label.reference != INVALID_REF {
+        let symbol = &symbols
+            [usize::try_from(scope.label.reference.inner_index).expect("symbol index fits usize")];
+        if symbol.slot_namespace() != SlotNamespace::MustNotBeRenamed {
+            let count = i32::try_from(symbol.use_count_estimate)
+                .unwrap_or(i32::MAX)
+                .saturating_add(1);
+            frequency.scan(symbol.original_name.as_bytes(), -count);
+        }
+    }
+    for child in &scope.children {
+        subtract_symbol_names_from_frequency(child, symbols, frequency);
+    }
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HelperCall {
@@ -422,10 +486,12 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 }
             }
         }
+        let char_freq = compute_character_frequency(&core, &lexer);
 
         result = Ast {
             module_type_data: core.options.module_type_data,
             parts,
+            char_freq,
             symbols: core.symbols,
             module_scope: Some(module_scope),
             hashbang,
