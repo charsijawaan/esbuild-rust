@@ -101,6 +101,14 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             0,
             "visit pass must consume every parse-pass scope"
         );
+        let uses_exports_ref = core
+            .symbol_uses
+            .get(&core.exports_ref)
+            .is_some_and(|usage| usage.count_estimate > 0);
+        let uses_module_ref = core
+            .symbol_uses
+            .get(&core.module_ref)
+            .is_some_and(|usage| usage.count_estimate > 0);
         let module_metadata = scan_module_metadata(&mut core, &mut statements);
         let module_scope = core
             .module_scope
@@ -140,6 +148,8 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             ExportsKind::Esm
         } else if core.options.module_type_data.module_type.is_common_js()
             || core.has_top_level_return
+            || uses_exports_ref
+            || uses_module_ref
         {
             ExportsKind::CommonJs
         } else {
@@ -172,6 +182,8 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 .unwrap_or(i32::MAX)
                 .saturating_add(1),
             exports_kind,
+            uses_exports_ref,
+            uses_module_ref,
             ..Ast::default()
         };
     }));
@@ -1174,6 +1186,60 @@ mod tests {
                 .expect("entry scope")
                 .contains_direct_eval
         );
+    }
+
+    #[test]
+    fn commonjs_wrapper_usage_classifies_the_module() {
+        let parse_with_mode = |text: &'static [u8], mode| {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let source = Source {
+                contents: Arc::from(text),
+                identifier_name: "entry".to_owned(),
+                ..Source::default()
+            };
+            let (ast, ok) = parse(
+                log.clone(),
+                source,
+                Options {
+                    mode,
+                    ..Options::default()
+                },
+            );
+            (ast, ok, log)
+        };
+
+        let (ast, ok, log) = parse_with_mode(
+            b"exports.value = 1; module.exports = 2;",
+            crate::internal::config::Mode::Bundle,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(
+            ast.exports_kind,
+            crate::internal::js_ast::ExportsKind::CommonJs
+        );
+        assert!(ast.uses_exports_ref);
+        assert!(ast.uses_module_ref);
+
+        let (ast, ok, log) = parse_with_mode(
+            b"let exports = {}; let module = {}; exports.value = module;",
+            crate::internal::config::Mode::ConvertFormat,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::None);
+        assert!(!ast.uses_exports_ref);
+        assert!(!ast.uses_module_ref);
+
+        let (ast, ok, log) = parse_with_mode(b"eval(code);", crate::internal::config::Mode::Bundle);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(
+            ast.exports_kind,
+            crate::internal::js_ast::ExportsKind::CommonJs
+        );
+        assert!(ast.uses_exports_ref);
+        assert!(ast.uses_module_ref);
     }
 
     #[test]
