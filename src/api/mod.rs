@@ -6248,6 +6248,32 @@ mod tests {
     }
 
     #[test]
+    fn merges_adjacent_and_conditional_throws_like_esbuild() {
+        assert_eq!(
+            code(transform(
+                "function complex(){a=b;if(a)throw a;if(b)c=b;throw c}\
+                 function conditional(){if(!a)throw b;throw c}\
+                 function branches(){if(!!a)throw b();else throw c()}",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "function complex() {\n",
+                "  throw a = b, a || (b && (c = b), c);\n",
+                "}\n",
+                "function conditional() {\n",
+                "  throw a ? c : b;\n",
+                "}\n",
+                "function branches() {\n",
+                "  throw a ? b() : c();\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

@@ -16,7 +16,7 @@ use crate::internal::{
         FunctionExpr, IdentifierBinding, IdentifierExpr, IfExpr, IfStmt, LocalKind, LocalStmt,
         ObjectExpr, OpCode, OptionalChain, Property, PropertyFlags, PropertyKind, ReturnStmt,
         ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr,
-        UnaryExpr, for_each_identifier_binding, inline_primitives_into_template,
+        ThrowStmt, UnaryExpr, for_each_identifier_binding, inline_primitives_into_template,
         inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
         is_primitive_literal, join_with_comma, make_helper_context,
     },
@@ -682,6 +682,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             inline_single_use_declarations(core, statements);
         }
         absorb_expressions_into_for_initializers(statements);
+        merge_adjacent_throws(core, statements);
     }
 }
 
@@ -1504,11 +1505,7 @@ fn collapse_if_with_return_branches(core: &ParserCore, statement: &mut Stmt) -> 
     true
 }
 
-fn merge_adjacent_returns(core: &ParserCore, statements: &mut [Stmt]) {
-    for statement in statements.iter_mut() {
-        collapse_if_with_return_branches(core, statement);
-    }
-
+fn remove_dead_statements_after_jumps(statements: &mut [Stmt]) {
     let mut is_dead = false;
     for statement in statements.iter_mut() {
         if is_dead && !super::dead_control_flow::should_keep_stmt_in_dead_control_flow(statement) {
@@ -1527,6 +1524,13 @@ fn merge_adjacent_returns(core: &ParserCore, statements: &mut [Stmt]) {
             is_dead = true;
         }
     }
+}
+
+fn merge_adjacent_returns(core: &ParserCore, statements: &mut [Stmt]) {
+    for statement in statements.iter_mut() {
+        collapse_if_with_return_branches(core, statement);
+    }
+    remove_dead_statements_after_jumps(statements);
 
     loop {
         let mut non_empty = statements
@@ -1581,6 +1585,98 @@ fn merge_adjacent_returns(core: &ParserCore, statements: &mut [Stmt]) {
             break;
         };
         statements[previous_index].data = Some(Box::new(StmtData::Return(replacement)));
+        statements[last_index].data = None;
+    }
+}
+
+fn throw_value(statement: &Stmt) -> Option<Expr> {
+    let StmtData::Throw(statement) = statement.data.as_deref()? else {
+        return None;
+    };
+    Some(statement.value.clone())
+}
+
+fn collapse_if_with_throw_branches(core: &ParserCore, statement: &mut Stmt) -> bool {
+    let Some(StmtData::If(if_statement)) = statement.data.as_deref() else {
+        return false;
+    };
+    if if_statement.no_or_nil.data.is_none() {
+        return false;
+    }
+    let Some(yes) = throw_value(&if_statement.yes) else {
+        return false;
+    };
+    let Some(no) = throw_value(&if_statement.no_or_nil) else {
+        return false;
+    };
+    let helpers = make_helper_context(|reference| {
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+            == SymbolKind::Unbound
+    });
+    let test = helpers.simplify_boolean_expr(&if_statement.test);
+    let value = helpers.mangle_if_expr(
+        test.loc,
+        &IfExpr { test, yes, no },
+        core.options.unsupported_js_features,
+    );
+    statement.data = Some(Box::new(StmtData::Throw(ThrowStmt { value })));
+    true
+}
+
+fn merge_adjacent_throws(core: &ParserCore, statements: &mut [Stmt]) {
+    for statement in statements.iter_mut() {
+        collapse_if_with_throw_branches(core, statement);
+    }
+    remove_dead_statements_after_jumps(statements);
+
+    loop {
+        let mut non_empty = statements
+            .iter()
+            .enumerate()
+            .filter(|(_, statement)| statement.data.is_some())
+            .map(|(index, _)| index)
+            .rev();
+        let Some(last_index) = non_empty.next() else {
+            break;
+        };
+        let Some(previous_index) = non_empty.next() else {
+            break;
+        };
+        let Some(StmtData::Throw(last_throw)) = statements[last_index].data.as_deref().cloned()
+        else {
+            break;
+        };
+
+        let replacement = match statements[previous_index].data.as_deref() {
+            Some(StmtData::Expr(previous)) => Some(ThrowStmt {
+                value: join_with_comma(previous.value.clone(), last_throw.value),
+            }),
+            Some(StmtData::If(previous)) if previous.no_or_nil.data.is_none() => {
+                let Some(yes) = throw_value(&previous.yes) else {
+                    break;
+                };
+                let helpers = make_helper_context(|reference| {
+                    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                        == SymbolKind::Unbound
+                });
+                let test = helpers.simplify_boolean_expr(&previous.test);
+                let value = helpers.mangle_if_expr(
+                    test.loc,
+                    &IfExpr {
+                        test,
+                        yes,
+                        no: last_throw.value,
+                    },
+                    core.options.unsupported_js_features,
+                );
+                Some(ThrowStmt { value })
+            }
+            _ => None,
+        };
+        let Some(replacement) = replacement else {
+            break;
+        };
+        statements[previous_index].data = Some(Box::new(StmtData::Throw(replacement)));
         statements[last_index].data = None;
     }
 }
