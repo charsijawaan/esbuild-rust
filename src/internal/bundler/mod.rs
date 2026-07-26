@@ -2209,13 +2209,64 @@ mod tests {
         );
 
         assert!(log.done().is_empty());
-        assert!(compiled.scan_result.import_issues.is_empty());
+        assert!(
+            compiled.scan_result.import_issues.is_empty(),
+            "{:?}",
+            compiled.scan_result.import_issues
+        );
         assert_eq!(compiled.output_files.len(), 1);
         assert_eq!(compiled.output_files[0].abs_path, "/out/entry.js");
         let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
         assert!(output.contains("console.log(\"bundled\");"));
         assert!(output.starts_with("(() => {\n"));
         assert!(output.ends_with("})();\n"));
+    }
+
+    #[test]
+    fn bundles_named_imports_across_javascript_modules() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import { value } from './dep.js'; console.log(value)".into(),
+                ),
+                ("/project/dep.js".into(), "export const value = 123".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert!(
+            compiled.scan_result.import_issues.is_empty(),
+            "{:?}",
+            compiled.scan_result.import_issues
+        );
+        assert_eq!(compiled.output_files.len(), 1);
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains("const value = 123;"));
+        assert!(output.contains("console.log(value);"));
+        assert!(!output.contains("import "));
+        assert!(!output.contains("export "));
     }
 
     #[test]

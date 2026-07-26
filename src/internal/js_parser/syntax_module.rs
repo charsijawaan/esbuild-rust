@@ -223,6 +223,9 @@ fn parse_type_script_import_equals(
 #[allow(clippy::too_many_lines)]
 pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
+    if core.is_current_scope_module_scope() && core.esm_export_keyword.len == 0 {
+        core.esm_export_keyword = crate::internal::logger::Range { loc, len: 6 };
+    }
     lexer.expect(Token::Export);
     let is_namespace_scope = core.current_scope.as_ref().is_some_and(|scope| {
         scope

@@ -390,6 +390,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             named_exports: module_metadata.named_exports,
             export_star_import_records: module_metadata.export_star_import_records,
             source_map_comment: lexer.source_mapping_url.clone(),
+            export_keyword: core.esm_export_keyword,
             top_level_await_keyword: core.top_level_await_keyword,
             live_top_level_await_keyword: core.top_level_await_keyword,
             exports_ref: core.exports_ref,
@@ -1805,6 +1806,7 @@ mod tests {
         );
         assert!(ok);
         assert!(log.done().is_empty());
+        assert_eq!(ast.export_keyword.len, 6);
         assert_eq!(ast.named_imports.len(), 5);
         assert_eq!(
             ast.named_exports
