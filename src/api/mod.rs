@@ -6020,6 +6020,50 @@ mod tests {
     }
 
     #[test]
+    fn inlines_single_use_locals_with_ordering_guards() {
+        assert_eq!(
+            code(transform(
+                "function chain(){let x=fn();let y=x[prop];let z=y.val;throw z}\
+                 function keepThis(arg0){let x=arg0.foo;(0,x)()}\
+                 function optional(arg0,arg1){let x=fn();return arg1?.[x]}\
+                 function conditional(arg0,arg1){let x=arg0;return (arg1?1:2)?x:3}\
+                 function indirect(){let x=eval;x(\"code\")}\
+                 function spread(arg0){let x=1;return {...arg0,c:x}}\
+                 function dead(){let x=1;if(false)x++;return x}",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "function chain() {\n",
+                "  throw fn()[prop].val;\n",
+                "}\n",
+                "function keepThis(arg0) {\n",
+                "  let x = arg0.foo;\n",
+                "  x();\n",
+                "}\n",
+                "function optional(arg0, arg1) {\n",
+                "  let x = fn();\n",
+                "  return arg1?.[x];\n",
+                "}\n",
+                "function conditional(arg0, arg1) {\n",
+                "  return arg0;\n",
+                "}\n",
+                "function indirect() {\n",
+                "  (0, eval)(\"code\");\n",
+                "}\n",
+                "function spread(arg0) {\n",
+                "  return { ...arg0, c: 1 };\n",
+                "}\n",
+                "function dead() {\n",
+                "  return 1;\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

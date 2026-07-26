@@ -5,16 +5,19 @@ use std::collections::{HashMap, HashSet};
 use crate::internal::logger::{Loc, Range};
 use crate::internal::{
     ast::{
-        AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportRecordFlags, SymbolKind,
+        AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportRecordFlags, Ref,
+        SymbolFlags, SymbolKind,
     },
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         Arg, AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
         ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody,
-        FunctionExpr, IdentifierExpr, IfExpr, ObjectExpr, OpCode, Property, PropertyFlags,
-        PropertyKind, ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind,
-        StringExpr, UnaryExpr, for_each_identifier_binding, inline_spreads_of_array_literals,
-        is_identifier, is_identifier_es5_and_es_next, join_with_comma, make_helper_context,
+        FunctionExpr, IdentifierExpr, IfExpr, LocalKind, ObjectExpr, OpCode, OptionalChain,
+        Property, PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData,
+        StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, UnaryExpr,
+        for_each_identifier_binding, inline_primitives_into_template,
+        inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
+        is_primitive_literal, join_with_comma, make_helper_context,
     },
 };
 
@@ -290,14 +293,30 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             },
             Some(StmtData::If(if_statement)) => {
                 visit_expr(core, &mut if_statement.test, resolve_identifiers);
+                let old_control_flow_dead = core.is_control_flow_dead;
+                let constant = if core.options.minify_syntax {
+                    match crate::internal::js_ast::to_boolean_with_side_effects(
+                        if_statement.test.data.as_deref(),
+                    ) {
+                        Some((value, crate::internal::js_ast::SideEffects::NoSideEffects)) => {
+                            Some(value)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 validate_single_statement(core, &if_statement.yes, SingleStatementContext::If);
+                core.is_control_flow_dead = old_control_flow_dead || constant == Some(false);
                 visit_statement(core, &mut if_statement.yes, resolve_identifiers);
                 validate_single_statement(
                     core,
                     &if_statement.no_or_nil,
                     SingleStatementContext::If,
                 );
+                core.is_control_flow_dead = old_control_flow_dead || constant == Some(true);
                 visit_statement(core, &mut if_statement.no_or_nil, resolve_identifiers);
+                core.is_control_flow_dead = old_control_flow_dead;
             }
             Some(StmtData::DoWhile(loop_statement)) => {
                 validate_single_statement(
@@ -599,10 +618,541 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             core.is_control_flow_dead = true;
         }
     }
+    core.is_control_flow_dead = old_control_flow_dead;
     if core.options.minify_syntax {
+        if !old_control_flow_dead {
+            inline_single_use_declarations(core, statements);
+        }
         absorb_expressions_into_for_initializers(statements);
     }
-    core.is_control_flow_dead = old_control_flow_dead;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubstituteStatus {
+    Continue,
+    Success,
+    Failure,
+}
+
+fn expression_can_be_removed_if_unused(core: &ParserCore, expression: &Expr) -> bool {
+    make_helper_context(|reference| {
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+            == SymbolKind::Unbound
+    })
+    .expr_can_be_removed_if_unused(expression)
+}
+
+fn substitute_single_use_symbol_in_statement(
+    core: &mut ParserCore,
+    statement: &mut Stmt,
+    reference: Ref,
+    replacement: &Expr,
+) -> bool {
+    let expression = match statement.data.as_deref_mut() {
+        Some(StmtData::Expr(statement)) => Some(&mut statement.value),
+        Some(StmtData::Throw(statement)) => Some(&mut statement.value),
+        Some(StmtData::Return(statement)) => Some(&mut statement.value_or_nil),
+        Some(StmtData::If(statement)) => Some(&mut statement.test),
+        Some(StmtData::Switch(statement)) => Some(&mut statement.test),
+        Some(StmtData::Local(statement)) => statement
+            .declarations
+            .first_mut()
+            .filter(|declaration| {
+                declaration.value_or_nil.data.is_some()
+                    && matches!(
+                        declaration.binding.data.as_deref(),
+                        Some(BindingData::Identifier(_))
+                    )
+            })
+            .map(|declaration| &mut declaration.value_or_nil),
+        _ => None,
+    };
+    let Some(expression) = expression else {
+        return false;
+    };
+    let replacement_can_be_removed = expression_can_be_removed_if_unused(core, replacement);
+    substitute_single_use_symbol_in_expression(
+        core,
+        expression,
+        reference,
+        replacement,
+        replacement_can_be_removed,
+    ) == SubstituteStatus::Success
+}
+
+#[allow(clippy::too_many_lines)]
+fn substitute_single_use_symbol_in_expression(
+    core: &mut ParserCore,
+    expression: &mut Expr,
+    reference: Ref,
+    replacement: &Expr,
+    replacement_can_be_removed: bool,
+) -> SubstituteStatus {
+    let expression_loc = expression.loc;
+    match expression.data.as_deref_mut() {
+        Some(ExprData::Identifier(identifier)) if identifier.reference == reference => {
+            core.ignore_usage(reference);
+            *expression = replacement.clone();
+            return SubstituteStatus::Success;
+        }
+        Some(ExprData::Spread(spread)) => {
+            let status = substitute_single_use_symbol_in_expression(
+                core,
+                &mut spread.value,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+            if status != SubstituteStatus::Continue {
+                return status;
+            }
+        }
+        Some(ExprData::Await(await_expression)) => {
+            let status = substitute_single_use_symbol_in_expression(
+                core,
+                &mut await_expression.value,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+            if status != SubstituteStatus::Continue {
+                return status;
+            }
+        }
+        Some(ExprData::Yield(yield_expression)) if yield_expression.value_or_nil.data.is_some() => {
+            let status = substitute_single_use_symbol_in_expression(
+                core,
+                &mut yield_expression.value_or_nil,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+            if status != SubstituteStatus::Continue {
+                return status;
+            }
+        }
+        Some(ExprData::ImportCall(import_call)) => {
+            let status = substitute_single_use_symbol_in_expression(
+                core,
+                &mut import_call.expr,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+            if status != SubstituteStatus::Continue {
+                return status;
+            }
+            if replacement_can_be_removed
+                && expression_can_be_removed_if_unused(core, &import_call.expr)
+            {
+                return SubstituteStatus::Continue;
+            }
+        }
+        Some(ExprData::Unary(unary))
+            if unary.op.unary_assign_target() == AssignTarget::None
+                && unary.op != OpCode::UnaryDelete =>
+        {
+            let status = substitute_single_use_symbol_in_expression(
+                core,
+                &mut unary.value,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+            if status != SubstituteStatus::Continue {
+                return status;
+            }
+        }
+        Some(ExprData::Dot(dot)) => {
+            let status = substitute_single_use_symbol_in_expression(
+                core,
+                &mut dot.target,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+            if status != SubstituteStatus::Continue {
+                return status;
+            }
+        }
+        Some(ExprData::Binary(binary)) => {
+            let assign_target = binary.op.binary_assign_target();
+            if assign_target == AssignTarget::None {
+                let status = substitute_single_use_symbol_in_expression(
+                    core,
+                    &mut binary.left,
+                    reference,
+                    replacement,
+                    replacement_can_be_removed,
+                );
+                if status != SubstituteStatus::Continue {
+                    return status;
+                }
+            } else if !expression_can_be_removed_if_unused(core, &binary.left)
+                || (assign_target == AssignTarget::Update && !replacement_can_be_removed)
+            {
+                return SubstituteStatus::Failure;
+            }
+            let status = substitute_single_use_symbol_in_expression(
+                core,
+                &mut binary.right,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+            if status != SubstituteStatus::Continue {
+                return status;
+            }
+        }
+        Some(ExprData::If(conditional)) => {
+            let status = substitute_single_use_symbol_in_expression(
+                core,
+                &mut conditional.test,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+            if status != SubstituteStatus::Continue {
+                return status;
+            }
+            if replacement_can_be_removed {
+                let yes_status = substitute_single_use_symbol_in_expression(
+                    core,
+                    &mut conditional.yes,
+                    reference,
+                    replacement,
+                    replacement_can_be_removed,
+                );
+                if yes_status == SubstituteStatus::Success {
+                    return yes_status;
+                }
+                let no_status = substitute_single_use_symbol_in_expression(
+                    core,
+                    &mut conditional.no,
+                    reference,
+                    replacement,
+                    replacement_can_be_removed,
+                );
+                if no_status == SubstituteStatus::Success {
+                    return no_status;
+                }
+                if yes_status != SubstituteStatus::Continue
+                    || no_status != SubstituteStatus::Continue
+                {
+                    return SubstituteStatus::Failure;
+                }
+            }
+        }
+        Some(ExprData::Index(index)) => {
+            let status = substitute_single_use_symbol_in_expression(
+                core,
+                &mut index.target,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+            if status != SubstituteStatus::Continue {
+                return status;
+            }
+            if replacement_can_be_removed || index.optional_chain == OptionalChain::None {
+                let status = substitute_single_use_symbol_in_expression(
+                    core,
+                    &mut index.index,
+                    reference,
+                    replacement,
+                    replacement_can_be_removed,
+                );
+                if status != SubstituteStatus::Continue {
+                    return status;
+                }
+            }
+        }
+        Some(ExprData::Call(call)) => {
+            let replacement_is_property_access = matches!(
+                replacement.data.as_deref(),
+                Some(ExprData::Dot(_) | ExprData::Index(_))
+            );
+            let target_is_direct_reference = matches!(
+                call.target.data.as_deref(),
+                Some(ExprData::Identifier(identifier)) if identifier.reference == reference
+            );
+            let target_is_indirect_reference = matches!(
+                call.target.data.as_deref(),
+                Some(ExprData::Binary(binary))
+                    if binary.op == OpCode::BinaryComma
+                        && matches!(
+                            binary.right.data.as_deref(),
+                            Some(ExprData::Identifier(identifier))
+                                if identifier.reference == reference
+                        )
+            );
+            let target_is_reference = target_is_direct_reference || target_is_indirect_reference;
+            if !(replacement_is_property_access && target_is_reference) {
+                let status = substitute_single_use_symbol_in_expression(
+                    core,
+                    &mut call.target,
+                    reference,
+                    replacement,
+                    replacement_can_be_removed,
+                );
+                if status != SubstituteStatus::Continue {
+                    if status == SubstituteStatus::Success {
+                        if target_is_indirect_reference
+                            && let Some(ExprData::Binary(binary)) = call.target.data.as_deref_mut()
+                            && binary.op == OpCode::BinaryComma
+                        {
+                            let right_is_unbound_eval = matches!(
+                                binary.right.data.as_deref(),
+                                Some(ExprData::Identifier(identifier))
+                                    if {
+                                        let symbol = &core.symbols[usize::try_from(
+                                            identifier.reference.inner_index,
+                                        )
+                                        .expect("symbol index")];
+                                        symbol.kind == SymbolKind::Unbound
+                                            && symbol.original_name == "eval"
+                                    }
+                            );
+                            if !right_is_unbound_eval {
+                                call.target = std::mem::take(&mut binary.right);
+                            }
+                        }
+                        if let Some(inlined) = maybe_inline_iife(core, expression_loc, call) {
+                            expression.data = Some(Box::new(inlined));
+                        } else if let Some(ExprData::Identifier(identifier)) =
+                            call.target.data.as_deref()
+                        {
+                            let symbol =
+                                &core.symbols[usize::try_from(identifier.reference.inner_index)
+                                    .expect("symbol index")];
+                            if symbol.kind == SymbolKind::Unbound
+                                && symbol.original_name == "eval"
+                                && call.kind != CallKind::DirectEval
+                            {
+                                let target = std::mem::take(&mut call.target);
+                                call.target = Expr::new(
+                                    target.loc,
+                                    ExprData::Binary(BinaryExpr {
+                                        left: Expr::new(target.loc, ExprData::Number(0.0)),
+                                        right: target,
+                                        op: OpCode::BinaryComma,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                    return status;
+                }
+                if replacement_can_be_removed || call.optional_chain == OptionalChain::None {
+                    for argument in &mut call.args {
+                        let status = substitute_single_use_symbol_in_expression(
+                            core,
+                            argument,
+                            reference,
+                            replacement,
+                            replacement_can_be_removed,
+                        );
+                        if status != SubstituteStatus::Continue {
+                            return status;
+                        }
+                    }
+                }
+            }
+        }
+        Some(ExprData::Array(array)) => {
+            for item in &mut array.items {
+                let status = substitute_single_use_symbol_in_expression(
+                    core,
+                    item,
+                    reference,
+                    replacement,
+                    replacement_can_be_removed,
+                );
+                if status != SubstituteStatus::Continue {
+                    return status;
+                }
+            }
+        }
+        Some(ExprData::Object(object)) => {
+            for property in &mut object.properties {
+                if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+                    let status = substitute_single_use_symbol_in_expression(
+                        core,
+                        &mut property.key,
+                        reference,
+                        replacement,
+                        replacement_can_be_removed,
+                    );
+                    if status != SubstituteStatus::Continue {
+                        return status;
+                    }
+                    return SubstituteStatus::Failure;
+                }
+                if property.value_or_nil.data.is_some() {
+                    let status = substitute_single_use_symbol_in_expression(
+                        core,
+                        &mut property.value_or_nil,
+                        reference,
+                        replacement,
+                        replacement_can_be_removed,
+                    );
+                    if status != SubstituteStatus::Continue {
+                        return status;
+                    }
+                }
+            }
+        }
+        Some(ExprData::Template(template)) => {
+            if template.tag_or_nil.data.is_some() {
+                let status = substitute_single_use_symbol_in_expression(
+                    core,
+                    &mut template.tag_or_nil,
+                    reference,
+                    replacement,
+                    replacement_can_be_removed,
+                );
+                if status != SubstituteStatus::Continue {
+                    return status;
+                }
+            }
+            for part in &mut template.parts {
+                let status = substitute_single_use_symbol_in_expression(
+                    core,
+                    &mut part.value,
+                    reference,
+                    replacement,
+                    replacement_can_be_removed,
+                );
+                if status != SubstituteStatus::Continue {
+                    if status == SubstituteStatus::Success
+                        && is_primitive_literal(part.value.data.as_deref())
+                    {
+                        *expression = inline_primitives_into_template(expression_loc, template);
+                    }
+                    return status;
+                }
+            }
+        }
+        Some(ExprData::InlinedEnum(inlined)) => {
+            return substitute_single_use_symbol_in_expression(
+                core,
+                &mut inlined.value,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+        }
+        Some(ExprData::Annotation(annotation)) => {
+            return substitute_single_use_symbol_in_expression(
+                core,
+                &mut annotation.value,
+                reference,
+                replacement,
+                replacement_can_be_removed,
+            );
+        }
+        _ => {}
+    }
+    if replacement_can_be_removed && expression_can_be_removed_if_unused(core, expression) {
+        return SubstituteStatus::Continue;
+    }
+    if is_primitive_literal(expression.data.as_deref())
+        || is_primitive_literal(replacement.data.as_deref())
+    {
+        return SubstituteStatus::Continue;
+    }
+    SubstituteStatus::Failure
+}
+
+fn inline_single_use_declarations(core: &mut ParserCore, statements: &mut [Stmt]) {
+    let is_nested_scope = !core.is_current_scope_module_scope();
+    let contains_direct_eval = core.current_scope.as_ref().is_some_and(|scope| {
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_direct_eval
+    });
+    if !is_nested_scope || contains_direct_eval {
+        return;
+    }
+    for statement in statements.iter_mut() {
+        let Some(StmtData::Local(local)) = statement.data.as_deref_mut() else {
+            continue;
+        };
+        if local.is_export {
+            continue;
+        }
+        local.declarations.retain(|declaration| {
+            let Some(BindingData::Identifier(identifier)) = declaration.binding.data.as_deref()
+            else {
+                return true;
+            };
+            !core.const_values.contains_key(&identifier.reference)
+                || core.symbols
+                    [usize::try_from(identifier.reference.inner_index).expect("symbol index")]
+                .use_count_estimate
+                    != 0
+        });
+        if local.declarations.is_empty() {
+            statement.data = None;
+        }
+    }
+    for statement_index in 0..statements.len() {
+        while let Some(previous_index) = (0..statement_index)
+            .rev()
+            .find(|&index| statements[index].data.is_some())
+        {
+            let candidate = match statements[previous_index].data.as_deref() {
+                Some(StmtData::Local(local))
+                    if !local.is_export
+                        && matches!(local.kind, LocalKind::Let | LocalKind::Const) =>
+                {
+                    local.declarations.last().and_then(|declaration| {
+                        let BindingData::Identifier(identifier) =
+                            declaration.binding.data.as_deref()?
+                        else {
+                            return None;
+                        };
+                        let symbol =
+                            &core.symbols[usize::try_from(identifier.reference.inner_index)
+                                .expect("symbol index")];
+                        if symbol.use_count_estimate != 1
+                            || symbol.flags.contains(SymbolFlags::DID_KEEP_NAME)
+                            || symbol.flags.contains(SymbolFlags::WAS_EXPORTED)
+                        {
+                            return None;
+                        }
+                        let replacement = if declaration.value_or_nil.data.is_some() {
+                            declaration.value_or_nil.clone()
+                        } else {
+                            Expr::new(declaration.binding.loc, ExprData::Undefined)
+                        };
+                        Some((identifier.reference, replacement))
+                    })
+                }
+                _ => None,
+            };
+            let Some((reference, replacement)) = candidate else {
+                break;
+            };
+            if !substitute_single_use_symbol_in_statement(
+                core,
+                &mut statements[statement_index],
+                reference,
+                &replacement,
+            ) {
+                break;
+            }
+            let Some(StmtData::Local(local)) = statements[previous_index].data.as_deref_mut()
+            else {
+                unreachable!("single-use candidate must still be a local declaration");
+            };
+            local.declarations.pop();
+            if local.declarations.is_empty() {
+                statements[previous_index].data = None;
+            }
+        }
+    }
 }
 
 fn collapse_expression_statements_into_return(statements: &mut Vec<Stmt>) -> bool {
@@ -3244,6 +3794,38 @@ fn visit_expr_with_target(
             let target_was_identifier =
                 matches!(call.target.data.as_deref(), Some(ExprData::Identifier(_)));
             visit_expr(core, &mut call.target, resolve_identifiers);
+            if core.options.minify_syntax {
+                let collapse_indirect_identifier = match call.target.data.as_deref() {
+                    Some(ExprData::Binary(binary))
+                        if binary.op == OpCode::BinaryComma
+                            && matches!(
+                                binary.left.data.as_deref(),
+                                Some(ExprData::Number(number)) if *number == 0.0
+                            ) =>
+                    {
+                        match binary.right.data.as_deref() {
+                            Some(ExprData::Identifier(identifier)) => {
+                                let symbol = &core.symbols[usize::try_from(
+                                    identifier.reference.inner_index,
+                                )
+                                .expect("symbol index")];
+                                if symbol.kind != SymbolKind::Unbound
+                                    || symbol.original_name != "eval"
+                                {
+                                    Some(binary.right.clone())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(target) = collapse_indirect_identifier {
+                    call.target = target;
+                }
+            }
             if let Some(ExprData::Function(function)) = call.target.data.as_deref_mut() {
                 function.is_parenthesized = true;
             }
@@ -3636,8 +4218,76 @@ fn visit_expr_with_target(
         }
         ExprData::If(if_expression) => {
             visit_expr(core, &mut if_expression.test, resolve_identifiers);
-            visit_expr(core, &mut if_expression.yes, resolve_identifiers);
-            visit_expr(core, &mut if_expression.no, resolve_identifiers);
+            if core.options.minify_syntax {
+                let helpers = make_helper_context(|reference| {
+                    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                        == SymbolKind::Unbound
+                });
+                if_expression.test = helpers.simplify_boolean_expr(&if_expression.test);
+            }
+            if let Some((boolean, side_effects)) =
+                crate::internal::js_ast::to_boolean_with_side_effects(
+                    if_expression.test.data.as_deref(),
+                )
+            {
+                let old_control_flow_dead = core.is_control_flow_dead;
+                let live = if boolean {
+                    visit_expr(core, &mut if_expression.yes, resolve_identifiers);
+                    core.is_control_flow_dead = true;
+                    visit_expr(core, &mut if_expression.no, resolve_identifiers);
+                    if_expression.yes.clone()
+                } else {
+                    core.is_control_flow_dead = true;
+                    visit_expr(core, &mut if_expression.yes, resolve_identifiers);
+                    core.is_control_flow_dead = old_control_flow_dead;
+                    visit_expr(core, &mut if_expression.no, resolve_identifiers);
+                    if_expression.no.clone()
+                };
+                core.is_control_flow_dead = old_control_flow_dead;
+                if core.options.minify_syntax {
+                    let replacement = if side_effects
+                        == crate::internal::js_ast::SideEffects::CouldHaveSideEffects
+                    {
+                        let helpers = make_helper_context(|reference| {
+                            core.symbols
+                                [usize::try_from(reference.inner_index).expect("symbol index")]
+                            .kind
+                                == SymbolKind::Unbound
+                        });
+                        join_with_comma(
+                            helpers.simplify_unused_expr(
+                                &if_expression.test,
+                                core.options.unsupported_js_features,
+                            ),
+                            live,
+                        )
+                    } else {
+                        live
+                    };
+                    if let Some(replacement) = replacement.data {
+                        *data = *replacement;
+                    }
+                    return;
+                }
+            } else {
+                visit_expr(core, &mut if_expression.yes, resolve_identifiers);
+                visit_expr(core, &mut if_expression.no, resolve_identifiers);
+            }
+            if core.options.minify_syntax {
+                let helpers = make_helper_context(|reference| {
+                    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                        == SymbolKind::Unbound
+                });
+                let replacement = helpers.mangle_if_expr(
+                    expression.loc,
+                    if_expression,
+                    core.options.unsupported_js_features,
+                );
+                if let Some(replacement) = replacement.data {
+                    *data = *replacement;
+                }
+                return;
+            }
         }
         ExprData::ImportCall(import) => {
             visit_expr(core, &mut import.expr, resolve_identifiers);

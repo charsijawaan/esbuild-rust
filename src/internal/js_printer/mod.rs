@@ -2091,7 +2091,10 @@ impl Printer<'_> {
                     self.output.extend_from_slice(b"yield*");
                     self.print_optional_space();
                 } else {
-                    self.output.extend_from_slice(b"yield ");
+                    self.output.extend_from_slice(b"yield");
+                    if yield_expression.value_or_nil.data.is_some() {
+                        self.output.push(b' ');
+                    }
                 }
                 self.print_expr_at(&yield_expression.value_or_nil, Precedence::Yield);
             }
