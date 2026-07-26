@@ -4148,7 +4148,7 @@ mod tests {
     #[test]
     fn applies_raw_tsconfig_class_field_semantics() {
         let assignment_fields = code(transform(
-            "class Foo { foo; static bar; #private; [sideEffect()]; initialized = 1; ['quoted-key'] = 2; [3] = 4 }",
+            "class Foo { foo; static bar; static ready = createReady(); #private; [sideEffect()]; initialized = 1; ['quoted-key'] = 2; [3] = 4 }",
             TransformOptions {
                 loader: Loader::Ts,
                 tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
@@ -4179,6 +4179,10 @@ mod tests {
         );
         assert!(
             assignment_fields.contains("this[3] = 4;"),
+            "{assignment_fields}"
+        );
+        assert!(
+            assignment_fields.contains("static {\n    this.ready = createReady();\n  }"),
             "{assignment_fields}"
         );
 

@@ -8,9 +8,10 @@ use crate::internal::{
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
-        DotExpr, Expr, ExprData, ExprStmt, Function, FunctionExpr, IdentifierExpr, ObjectExpr,
-        OpCode, Property, PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData, StrictModeKind,
-        StringExpr, for_each_identifier_binding, is_identifier_es5_and_es_next,
+        ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, Function, FunctionExpr,
+        IdentifierExpr, ObjectExpr, OpCode, Property, PropertyFlags, PropertyKind, ScopeKind, Stmt,
+        StmtData, StrictModeKind, StringExpr, for_each_identifier_binding,
+        is_identifier_es5_and_es_next,
     },
 };
 
@@ -813,6 +814,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
             core.visit_new_target_allowed = old_new_target_allowed;
         }
     }
+    lower_type_script_static_field_assignments(class);
     lower_type_script_class_field_assignments(class);
     core.pop_scope();
     core.pop_scope();
@@ -907,7 +909,25 @@ fn take_class_field_assignment(property: &mut Property) -> Option<Stmt> {
     {
         return None;
     }
-    let target = match property.key.data.as_deref()? {
+    let target = class_field_assignment_target(property)?;
+    let initializer = if property.initializer_or_nil.data.is_some() {
+        &property.initializer_or_nil
+    } else {
+        &property.value_or_nil
+    };
+    if !class_field_initializer_is_safe_to_move(initializer) {
+        return None;
+    }
+    let initializer = if property.initializer_or_nil.data.is_some() {
+        std::mem::take(&mut property.initializer_or_nil)
+    } else {
+        std::mem::take(&mut property.value_or_nil)
+    };
+    Some(class_field_assignment(property.loc, target, initializer))
+}
+
+fn class_field_assignment_target(property: &Property) -> Option<Expr> {
+    match property.key.data.as_deref()? {
         ExprData::String(key)
             if !property.flags.contains(PropertyFlags::IS_COMPUTED)
                 && is_identifier_es5_and_es_next(&String::from_utf16_lossy(&key.value)) =>
@@ -931,22 +951,12 @@ fn take_class_field_assignment(property: &mut Property) -> Option<Stmt> {
             }),
         ),
         _ => return None,
-    };
-    let initializer = if property.initializer_or_nil.data.is_some() {
-        &property.initializer_or_nil
-    } else {
-        &property.value_or_nil
-    };
-    if !class_field_initializer_is_safe_to_move(initializer) {
-        return None;
     }
-    let initializer = if property.initializer_or_nil.data.is_some() {
-        std::mem::take(&mut property.initializer_or_nil)
-    } else {
-        std::mem::take(&mut property.value_or_nil)
-    };
-    let loc = property.loc;
-    Some(Stmt::new(
+    .into()
+}
+
+fn class_field_assignment(loc: Loc, target: Expr, initializer: Expr) -> Stmt {
+    Stmt::new(
         loc,
         StmtData::Expr(ExprStmt {
             value: Expr::new(
@@ -959,7 +969,44 @@ fn take_class_field_assignment(property: &mut Property) -> Option<Stmt> {
             ),
             ..ExprStmt::default()
         }),
-    ))
+    )
+}
+
+fn lower_type_script_static_field_assignments(class: &mut Class) {
+    if class.use_define_for_class_fields {
+        return;
+    }
+    for property in &mut class.properties {
+        if property.kind != PropertyKind::Field
+            || !property.flags.contains(PropertyFlags::IS_STATIC)
+            || !property.decorators.is_empty()
+        {
+            continue;
+        }
+        let Some(target) = class_field_assignment_target(property) else {
+            continue;
+        };
+        let initializer = if property.initializer_or_nil.data.is_some() {
+            std::mem::take(&mut property.initializer_or_nil)
+        } else if property.value_or_nil.data.is_some() {
+            std::mem::take(&mut property.value_or_nil)
+        } else {
+            continue;
+        };
+        let loc = property.loc;
+        *property = Property {
+            class_static_block: Some(Box::new(ClassStaticBlock {
+                block: BlockStmt {
+                    statements: vec![class_field_assignment(loc, target, initializer)],
+                    ..BlockStmt::default()
+                },
+                loc,
+            })),
+            loc,
+            kind: PropertyKind::ClassStaticBlock,
+            ..Property::default()
+        };
+    }
 }
 
 fn class_field_initializer_is_safe_to_move(expression: &Expr) -> bool {
