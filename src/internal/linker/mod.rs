@@ -14,7 +14,7 @@ use crate::internal::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
     },
     fs::Fs,
-    graph::{ExportData, ImportData, InputFileRepr, LinkerGraph, WrapKind},
+    graph::{ExportData, ImportData, InputFileRepr, LinkerGraph, SideEffectsKind, WrapKind},
     helpers::Joiner,
     js_ast::ExportsKind,
     logger::{Log, Range},
@@ -1593,6 +1593,296 @@ pub fn create_wrapper_for_file(
     );
 }
 
+enum TreeShakingReprSnapshot {
+    Js {
+        css_source_index: Index32,
+        import_records: Vec<crate::internal::ast::ImportRecord>,
+        parts: Vec<crate::internal::js_ast::Part>,
+    },
+    Css(Vec<crate::internal::ast::ImportRecord>),
+    Copy,
+}
+
+enum CodeSplittingReprSnapshot {
+    Js {
+        css_source_index: Index32,
+        import_records: Vec<crate::internal::ast::ImportRecord>,
+        dependencies: Vec<crate::internal::js_ast::Dependency>,
+    },
+    Css(Vec<crate::internal::ast::ImportRecord>),
+    Copy,
+}
+
+#[must_use]
+pub fn is_external_dynamic_import(
+    graph: &LinkerGraph,
+    options: &Options,
+    record: &crate::internal::ast::ImportRecord,
+    source_index: u32,
+) -> bool {
+    options.code_splitting
+        && record.kind == ImportKind::Dynamic
+        && graph.files[record.source_index.get_index() as usize].is_entry_point()
+        && record.source_index.get_index() != source_index
+}
+
+/// Mark one JavaScript part and its dependency closure as live.
+///
+/// # Panics
+///
+/// Panics when the part dependency graph violates linker graph invariants.
+pub fn mark_part_live_for_tree_shaking(
+    graph: &mut LinkerGraph,
+    options: &Options,
+    source_index: u32,
+    part_index: u32,
+) {
+    let dependencies = {
+        let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+            .input_file
+            .repr
+            .as_mut()
+            .expect("live part source must have a representation")
+        else {
+            panic!("live part source must be JavaScript");
+        };
+        let part = &mut repr.ast.parts[part_index as usize];
+        if part.is_live {
+            return;
+        }
+        part.is_live = true;
+        part.dependencies.clone()
+    };
+
+    mark_file_live_for_tree_shaking(graph, options, source_index);
+    for dependency in dependencies {
+        mark_part_live_for_tree_shaking(
+            graph,
+            options,
+            dependency.source_index,
+            dependency.part_index,
+        );
+    }
+}
+
+/// Mark one file and all side-effect-relevant contents as live.
+///
+/// # Panics
+///
+/// Panics when import records or dependency parts violate linker graph
+/// invariants.
+pub fn mark_file_live_for_tree_shaking(
+    graph: &mut LinkerGraph,
+    options: &Options,
+    source_index: u32,
+) {
+    let file = &mut graph.files[source_index as usize];
+    if file.is_live {
+        return;
+    }
+    file.is_live = true;
+    let is_entry_point = file.is_entry_point();
+
+    let snapshot = match file
+        .input_file
+        .repr
+        .as_ref()
+        .expect("live file must have a representation")
+    {
+        InputFileRepr::Js(repr) => TreeShakingReprSnapshot::Js {
+            css_source_index: repr.css_source_index,
+            import_records: repr.ast.import_records.clone(),
+            parts: repr.ast.parts.clone(),
+        },
+        InputFileRepr::Css(repr) => TreeShakingReprSnapshot::Css(repr.ast.import_records.clone()),
+        InputFileRepr::Copy(_) => TreeShakingReprSnapshot::Copy,
+    };
+
+    match snapshot {
+        TreeShakingReprSnapshot::Js {
+            css_source_index,
+            import_records,
+            parts,
+        } => {
+            if css_source_index.is_valid() {
+                mark_file_live_for_tree_shaking(graph, options, css_source_index.get_index());
+            }
+            for (part_index, part) in parts.iter().enumerate() {
+                let mut can_be_removed_if_unused = part.can_be_removed_if_unused;
+                for &record_index in &part.import_record_indices {
+                    let record = &import_records[record_index as usize];
+                    if record.kind != ImportKind::Stmt {
+                        continue;
+                    }
+                    if record.source_index.is_valid() {
+                        let other_source_index = record.source_index.get_index();
+                        if graph.files[other_source_index as usize]
+                            .input_file
+                            .side_effects
+                            .kind
+                            != SideEffectsKind::HasSideEffects
+                            && !options.ignore_dce_annotations
+                        {
+                            continue;
+                        }
+                        mark_file_live_for_tree_shaking(graph, options, other_source_index);
+                    } else if record
+                        .flags
+                        .contains(ImportRecordFlags::IS_EXTERNAL_WITHOUT_SIDE_EFFECTS)
+                    {
+                        continue;
+                    }
+                    can_be_removed_if_unused = false;
+                }
+
+                if !can_be_removed_if_unused
+                    || (!part.force_tree_shaking && !options.tree_shaking && is_entry_point)
+                {
+                    mark_part_live_for_tree_shaking(
+                        graph,
+                        options,
+                        source_index,
+                        u32::try_from(part_index).expect("part index fits in u32"),
+                    );
+                }
+            }
+        }
+        TreeShakingReprSnapshot::Css(import_records) => {
+            for record in import_records {
+                if record.source_index.is_valid() {
+                    mark_file_live_for_tree_shaking(
+                        graph,
+                        options,
+                        record.source_index.get_index(),
+                    );
+                }
+            }
+        }
+        TreeShakingReprSnapshot::Copy => {}
+    }
+}
+
+/// Propagate an entry-point bit and minimum distance through all live files.
+///
+/// # Panics
+///
+/// Panics when entry bits, imports, or part dependencies violate linker graph
+/// invariants.
+pub fn mark_file_reachable_for_code_splitting(
+    graph: &mut LinkerGraph,
+    options: &Options,
+    source_index: u32,
+    entry_point_bit: usize,
+    distance_from_entry_point: u32,
+) {
+    let file = &mut graph.files[source_index as usize];
+    if !file.is_live {
+        return;
+    }
+    let mut traverse_again = false;
+    if distance_from_entry_point < file.distance_from_entry_point {
+        file.distance_from_entry_point = distance_from_entry_point;
+        traverse_again = true;
+    }
+    let distance_from_entry_point = distance_from_entry_point.wrapping_add(1);
+    if file.entry_bits.has_bit(entry_point_bit) && !traverse_again {
+        return;
+    }
+    file.entry_bits.set_bit(entry_point_bit);
+
+    let snapshot = match file
+        .input_file
+        .repr
+        .as_ref()
+        .expect("reachable file must have a representation")
+    {
+        InputFileRepr::Js(repr) => CodeSplittingReprSnapshot::Js {
+            css_source_index: repr.css_source_index,
+            import_records: repr.ast.import_records.clone(),
+            dependencies: repr
+                .ast
+                .parts
+                .iter()
+                .flat_map(|part| part.dependencies.iter().copied())
+                .collect(),
+        },
+        InputFileRepr::Css(repr) => CodeSplittingReprSnapshot::Css(repr.ast.import_records.clone()),
+        InputFileRepr::Copy(_) => CodeSplittingReprSnapshot::Copy,
+    };
+
+    match snapshot {
+        CodeSplittingReprSnapshot::Js {
+            css_source_index,
+            import_records,
+            dependencies,
+        } => {
+            if css_source_index.is_valid() {
+                mark_file_reachable_for_code_splitting(
+                    graph,
+                    options,
+                    css_source_index.get_index(),
+                    entry_point_bit,
+                    distance_from_entry_point,
+                );
+            }
+            for record in import_records {
+                if record.source_index.is_valid()
+                    && !is_external_dynamic_import(graph, options, &record, source_index)
+                {
+                    mark_file_reachable_for_code_splitting(
+                        graph,
+                        options,
+                        record.source_index.get_index(),
+                        entry_point_bit,
+                        distance_from_entry_point,
+                    );
+                }
+            }
+            for dependency in dependencies {
+                if dependency.source_index != source_index {
+                    mark_file_reachable_for_code_splitting(
+                        graph,
+                        options,
+                        dependency.source_index,
+                        entry_point_bit,
+                        distance_from_entry_point,
+                    );
+                }
+            }
+        }
+        CodeSplittingReprSnapshot::Css(import_records) => {
+            for record in import_records {
+                if record.source_index.is_valid() {
+                    mark_file_reachable_for_code_splitting(
+                        graph,
+                        options,
+                        record.source_index.get_index(),
+                        entry_point_bit,
+                        distance_from_entry_point,
+                    );
+                }
+            }
+        }
+        CodeSplittingReprSnapshot::Copy => {}
+    }
+}
+
+pub fn tree_shaking_and_code_splitting(graph: &mut LinkerGraph, options: &Options) {
+    let entry_points = graph.entry_points().to_vec();
+    for entry_point in &entry_points {
+        mark_file_live_for_tree_shaking(graph, options, entry_point.source_index);
+    }
+    for (entry_point_bit, entry_point) in entry_points.iter().enumerate() {
+        mark_file_reachable_for_code_splitting(
+            graph,
+            options,
+            entry_point.source_index,
+            entry_point_bit,
+            0,
+        );
+    }
+}
+
 #[must_use]
 pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
     left.len() == right.len()
@@ -1763,10 +2053,11 @@ mod tests {
         advance_import_tracker, append_or_extend_part_range, bind_imports_to_exports_for_file,
         classify_module_wrappers, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, match_import_with_export,
-        path_between_chunks, propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports,
+        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
+        match_import_with_export, path_between_chunks, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
+        tree_shaking_and_code_splitting,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -1778,8 +2069,8 @@ mod tests {
         css_lexer::TokenKind,
         fs::{MockKind, mock_fs},
         graph::{
-            CopyRepr, CssRepr, EntryPoint, InputFile, InputFileRepr, JsRepr, OutputFile, WrapKind,
-            clone_linker_graph,
+            CopyRepr, CssRepr, EntryPoint, InputFile, InputFileRepr, JsRepr, OutputFile,
+            SideEffects, SideEffectsKind, WrapKind, clone_linker_graph,
         },
         helpers::Joiner,
         js_ast::{self, ExportsKind, NamedExport, NamedImport},
@@ -3913,5 +4204,179 @@ mod tests {
         assert_eq!(esm.ast.parts[0].declared_symbols.len(), 1);
         assert_eq!(esm.ast.parts[0].dependencies.len(), 2);
         assert_eq!(esm.meta.imports_to_bind[&esm_runtime_ref].source_index, 0);
+    }
+
+    fn tree_shaking_fixture() -> Vec<InputFile> {
+        vec![
+            js_file(js_ast::Ast {
+                import_records: vec![
+                    ImportRecord {
+                        source_index: Index32::new(2),
+                        kind: ImportKind::Stmt,
+                        ..ImportRecord::default()
+                    },
+                    ImportRecord {
+                        source_index: Index32::new(3),
+                        kind: ImportKind::Stmt,
+                        ..ImportRecord::default()
+                    },
+                ],
+                parts: vec![
+                    js_ast::Part {
+                        dependencies: vec![js_ast::Dependency {
+                            source_index: 1,
+                            part_index: 0,
+                        }],
+                        ..js_ast::Part::default()
+                    },
+                    js_ast::Part {
+                        can_be_removed_if_unused: true,
+                        ..js_ast::Part::default()
+                    },
+                    js_ast::Part {
+                        import_record_indices: vec![0],
+                        can_be_removed_if_unused: true,
+                        ..js_ast::Part::default()
+                    },
+                    js_ast::Part {
+                        import_record_indices: vec![1],
+                        can_be_removed_if_unused: true,
+                        ..js_ast::Part::default()
+                    },
+                ],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                parts: vec![js_ast::Part {
+                    can_be_removed_if_unused: true,
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+            InputFile {
+                side_effects: SideEffects {
+                    kind: SideEffectsKind::NoSideEffectsPureData,
+                    ..SideEffects::default()
+                },
+                ..js_file(js_ast::Ast {
+                    parts: vec![js_ast::Part::default()],
+                    ..js_ast::Ast::default()
+                })
+            },
+        ]
+    }
+
+    #[test]
+    fn tree_shaking_marks_only_side_effect_relevant_parts() {
+        let input_files = tree_shaking_fixture();
+        let mut graph =
+            clone_linker_graph(&input_files, &[0, 1, 2, 3], &[EntryPoint::default()], false);
+        mark_file_live_for_tree_shaking(
+            &mut graph,
+            &Options {
+                tree_shaking: true,
+                ..Options::default()
+            },
+            0,
+        );
+
+        let entry = js_repr(&graph, 0);
+        assert!(entry.ast.parts[0].is_live);
+        assert!(!entry.ast.parts[1].is_live);
+        assert!(entry.ast.parts[2].is_live);
+        assert!(!entry.ast.parts[3].is_live);
+        assert!(graph.files[1].is_live);
+        assert!(js_repr(&graph, 1).ast.parts[0].is_live);
+        assert!(graph.files[2].is_live);
+        assert!(js_repr(&graph, 2).ast.parts[0].is_live);
+        assert!(!graph.files[3].is_live);
+
+        let mut graph =
+            clone_linker_graph(&input_files, &[0, 1, 2, 3], &[EntryPoint::default()], false);
+        mark_file_live_for_tree_shaking(
+            &mut graph,
+            &Options {
+                tree_shaking: true,
+                ignore_dce_annotations: true,
+                ..Options::default()
+            },
+            0,
+        );
+        assert!(js_repr(&graph, 0).ast.parts[3].is_live);
+        assert!(graph.files[3].is_live);
+    }
+
+    #[test]
+    fn code_splitting_propagates_entry_bits_but_skips_dynamic_entries() {
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                import_records: vec![
+                    ImportRecord {
+                        source_index: Index32::new(1),
+                        kind: ImportKind::Stmt,
+                        ..ImportRecord::default()
+                    },
+                    ImportRecord {
+                        source_index: Index32::new(2),
+                        kind: ImportKind::Dynamic,
+                        ..ImportRecord::default()
+                    },
+                ],
+                parts: vec![js_ast::Part {
+                    import_record_indices: vec![0, 1],
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(1),
+                    kind: ImportKind::Stmt,
+                    ..ImportRecord::default()
+                }],
+                parts: vec![js_ast::Part {
+                    import_record_indices: vec![0],
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let entry_points = [
+            EntryPoint {
+                source_index: 0,
+                ..EntryPoint::default()
+            },
+            EntryPoint {
+                source_index: 2,
+                ..EntryPoint::default()
+            },
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2], &entry_points, true);
+        tree_shaking_and_code_splitting(
+            &mut graph,
+            &Options {
+                code_splitting: true,
+                tree_shaking: true,
+                ..Options::default()
+            },
+        );
+
+        assert!(graph.files[0].entry_bits.has_bit(0));
+        assert!(!graph.files[0].entry_bits.has_bit(1));
+        assert!(graph.files[2].entry_bits.has_bit(1));
+        assert!(!graph.files[2].entry_bits.has_bit(0));
+        assert!(graph.files[1].entry_bits.has_bit(0));
+        assert!(graph.files[1].entry_bits.has_bit(1));
+        assert_eq!(graph.files[0].distance_from_entry_point, 0);
+        assert_eq!(graph.files[2].distance_from_entry_point, 0);
+        assert_eq!(graph.files[1].distance_from_entry_point, 1);
     }
 }
