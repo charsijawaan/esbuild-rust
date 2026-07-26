@@ -4328,7 +4328,10 @@ mod tests {
             locals.contains("value = (super(2), this.id = id, this)"),
             "{locals}"
         );
+    }
 
+    #[test]
+    fn initializes_type_script_parameter_properties_in_lexical_containers() {
         let arrow = code(transform(
             "class Box extends Base { constructor(public id: string) { const init = () => super(1); return init() } }",
             TransformOptions {
@@ -4342,6 +4345,17 @@ mod tests {
             arrow.contains("() => (super(1), this.id = id, this)"),
             "{arrow}"
         );
+
+        let jsx = code(transform(
+            "class Box extends Base { constructor(public id: string) { return <Widget value={super(1)}>{flag ? super(2) : null}</Widget> } }",
+            TransformOptions {
+                loader: Loader::Tsx,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(jsx.contains("\n  id;"), "{jsx}");
+        assert_eq!(jsx.matches("this.id = id").count(), 2, "{jsx}");
+        assert_eq!(jsx.matches("this.id = id, this").count(), 2, "{jsx}");
     }
 
     #[test]

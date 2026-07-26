@@ -1166,6 +1166,33 @@ fn insert_parameter_fields_after_super_expression(
             inserted
                 | insert_parameter_fields_after_super(&mut value.body.block.statements, assignments)
         }
+        Some(ExprData::JsxElement(value)) => {
+            let mut inserted =
+                insert_parameter_fields_after_super_expression(&mut value.tag_or_nil, assignments);
+            for property in &mut value.properties {
+                inserted |=
+                    insert_parameter_fields_after_super_expression(&mut property.key, assignments);
+                inserted |= insert_parameter_fields_after_super_expression(
+                    &mut property.value_or_nil,
+                    assignments,
+                );
+                inserted |= insert_parameter_fields_after_super_expression(
+                    &mut property.initializer_or_nil,
+                    assignments,
+                );
+                for decorator in &mut property.decorators {
+                    inserted |= insert_parameter_fields_after_super_expression(
+                        &mut decorator.value,
+                        assignments,
+                    );
+                }
+            }
+            inserted
+                | insert_parameter_fields_after_super_expressions(
+                    &mut value.nullable_children,
+                    assignments,
+                )
+        }
         Some(ExprData::Object(value)) => {
             let mut inserted = false;
             for property in &mut value.properties {
@@ -1241,7 +1268,6 @@ fn insert_parameter_fields_after_super_expression(
             | ExprData::ImportIdentifier(_)
             | ExprData::PrivateIdentifier(_)
             | ExprData::NameOfSymbol(_)
-            | ExprData::JsxElement(_)
             | ExprData::JsxText(_)
             | ExprData::Missing
             | ExprData::Number(_)
