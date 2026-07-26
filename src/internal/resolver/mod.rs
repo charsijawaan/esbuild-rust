@@ -1092,6 +1092,118 @@ fn posix_path_join(left: &str, right: &str) -> String {
     }
 }
 
+#[must_use]
+pub fn reverse_resolve_package_exports<S: BuildHasher>(
+    query: &str,
+    root: &PackageMapEntry,
+    conditions: &HashMap<String, bool, S>,
+) -> Option<(String, Range)> {
+    if root.kind == PackageMapKind::Object && root.keys_start_with_dot() {
+        reverse_resolve_package_map(query, root, conditions)
+    } else {
+        None
+    }
+}
+
+fn reverse_resolve_package_map<S: BuildHasher>(
+    query: &str,
+    map: &PackageMapEntry,
+    conditions: &HashMap<String, bool, S>,
+) -> Option<(String, Range)> {
+    if !query.ends_with('*') {
+        for property in &map.map {
+            if let Some(result) = reverse_resolve_package_target(
+                query,
+                &property.key,
+                &property.value,
+                PackageReverseKind::Exact,
+                conditions,
+            ) {
+                return Some(result);
+            }
+        }
+    }
+    for expansion in &map.expansion_keys {
+        if expansion.key.ends_with('*')
+            && let Some(result) = reverse_resolve_package_target(
+                query,
+                &expansion.key,
+                &expansion.value,
+                PackageReverseKind::Pattern,
+                conditions,
+            )
+        {
+            return Some(result);
+        }
+        if let Some(result) = reverse_resolve_package_target(
+            query,
+            &expansion.key,
+            &expansion.value,
+            PackageReverseKind::Prefix,
+            conditions,
+        ) {
+            return Some(result);
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum PackageReverseKind {
+    Exact,
+    Pattern,
+    Prefix,
+}
+
+fn reverse_resolve_package_target<S: BuildHasher>(
+    query: &str,
+    key: &str,
+    target: &PackageMapEntry,
+    kind: PackageReverseKind,
+    conditions: &HashMap<String, bool, S>,
+) -> Option<(String, Range)> {
+    match target.kind {
+        PackageMapKind::String => match kind {
+            PackageReverseKind::Exact if query == target.string => {
+                Some((key.to_string(), target.first_token))
+            }
+            PackageReverseKind::Prefix if query.starts_with(&target.string) => Some((
+                format!("{key}{}", &query[target.string.len()..]),
+                target.first_token,
+            )),
+            PackageReverseKind::Pattern => {
+                let key_without_star = key.strip_suffix('*').unwrap_or(key);
+                let Some(star) = target.string.find('*') else {
+                    return (query == target.string)
+                        .then(|| (key_without_star.to_string(), target.first_token));
+                };
+                let prefix = &target.string[..star];
+                let suffix = &target.string[star + 1..];
+                if suffix.contains('*') || !query.starts_with(prefix) {
+                    return None;
+                }
+                let after_prefix = &query[prefix.len()..];
+                after_prefix
+                    .strip_suffix(suffix)
+                    .map(|matched| (format!("{key_without_star}{matched}"), target.first_token))
+            }
+            _ => None,
+        },
+        PackageMapKind::Object => target.map.iter().find_map(|property| {
+            (property.key == "default" || conditions.get(&property.key).copied().unwrap_or(false))
+                .then(|| {
+                    reverse_resolve_package_target(query, key, &property.value, kind, conditions)
+                })
+                .flatten()
+        }),
+        PackageMapKind::Array => target
+            .array
+            .iter()
+            .find_map(|item| reverse_resolve_package_target(query, key, item, kind, conditions)),
+        PackageMapKind::Null | PackageMapKind::Invalid => None,
+    }
+}
+
 type ExtendsCallback<'a> = dyn FnMut(&str, Range) -> Option<TsConfigJson> + 'a;
 
 #[allow(clippy::too_many_lines)]
@@ -1628,7 +1740,7 @@ mod tests {
         handle_package_map_post_conditions, is_valid_tsconfig_path_no_base_url_pattern,
         match_tsconfig_path_candidates, parse_bare_identifier, parse_esm_package_name,
         parse_imports_exports_map, parse_tsconfig_json, resolve_package_exports,
-        resolve_package_imports, sort_package_expansion_keys,
+        resolve_package_imports, reverse_resolve_package_exports, sort_package_expansion_keys,
     };
     use crate::internal::{
         config::{MaybeBool, TsJsx, TsTarget},
@@ -2151,5 +2263,56 @@ mod tests {
                 status
             );
         }
+    }
+
+    #[test]
+    fn reverse_resolves_public_package_subpaths() {
+        let contents = r#"{
+          "./exact": "./dist/exact.js",
+          "./features/*": "./src/*.js",
+          "./legacy/": "./old/",
+          "./conditional": {
+            "browser": "./browser.js",
+            "default": "./default.js"
+          }
+        }"#;
+        let source = Source {
+            contents: Arc::from(contents.as_bytes()),
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let (json, ok) = parse_json(log.clone(), source.clone(), JsonOptions::default());
+        assert!(ok);
+        let exports = parse_imports_exports_map(&source, &log, &json, "exports", Loc::default())
+            .expect("exports map");
+
+        assert_eq!(
+            reverse_resolve_package_exports("./dist/exact.js", &exports.root, &HashMap::new())
+                .map(|result| result.0),
+            Some("./exact".into())
+        );
+        assert_eq!(
+            reverse_resolve_package_exports("./src/button.js", &exports.root, &HashMap::new())
+                .map(|result| result.0),
+            Some("./features/button".into())
+        );
+        assert_eq!(
+            reverse_resolve_package_exports("./old/file.js", &exports.root, &HashMap::new())
+                .map(|result| result.0),
+            Some("./legacy/file.js".into())
+        );
+        assert_eq!(
+            reverse_resolve_package_exports(
+                "./browser.js",
+                &exports.root,
+                &HashMap::from([("browser".into(), true)])
+            )
+            .map(|result| result.0),
+            Some("./conditional".into())
+        );
+        assert!(
+            reverse_resolve_package_exports("./private.js", &exports.root, &HashMap::new())
+                .is_none()
+        );
     }
 }
