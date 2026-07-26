@@ -6656,6 +6656,25 @@ pub fn compile_part_range_for_chunk(
     }
 }
 
+/// Compile every ordered JavaScript part range assigned to `chunk`.
+#[must_use]
+pub fn compile_part_ranges_for_chunk(
+    graph: &LinkerGraph,
+    options: &Options,
+    chunk: &ChunkInfo,
+    runtime_refs: ChunkRuntimeRefs,
+    renamer: &dyn crate::internal::renamer::Renamer,
+) -> Vec<CompiledPartRange> {
+    chunk
+        .parts_in_chunk_in_order
+        .iter()
+        .copied()
+        .map(|part_range| {
+            compile_part_range_for_chunk(graph, options, part_range, runtime_refs, renamer)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EntryPointTailRefs {
     pub to_common_js_ref: Ref,
@@ -8527,10 +8546,10 @@ mod tests {
         assemble_css_chunk, assemble_javascript_chunk, assign_chunk_path_templates,
         bind_imports_to_exports_for_file, bind_imports_to_parts_for_file,
         chunk_runtime_refs_from_graph, classify_module_wrappers, compile_part_range_for_chunk,
-        compile_prepared_css_asts, compute_chunks, compute_cross_chunk_dependencies,
-        compute_js_chunks, configure_entry_point_exports, convert_import_for_chunk,
-        convert_stmts_for_chunk, create_entry_point_part, create_exports_for_file,
-        create_wrapper_for_file, encode_import_constraints_for_file,
+        compile_part_ranges_for_chunk, compile_prepared_css_asts, compute_chunks,
+        compute_cross_chunk_dependencies, compute_js_chunks, configure_entry_point_exports,
+        convert_import_for_chunk, convert_stmts_for_chunk, create_entry_point_part,
+        create_exports_for_file, create_wrapper_for_file, encode_import_constraints_for_file,
         enforce_no_cyclic_chunk_imports, finalize_chunk_paths, finalize_javascript_chunk_outputs,
         finalize_part_dependencies_for_file, find_imported_css_files_in_js_order,
         find_imported_files_in_css_order, generate_code_for_lazy_exports,
@@ -11054,6 +11073,101 @@ mod tests {
                 is_wrapper_async: true,
             }
         );
+    }
+
+    #[test]
+    fn compiles_ordered_part_ranges_with_linked_import_metadata() {
+        let wrapper_ref = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(2),
+                    kind: ImportKind::Require,
+                    ..ImportRecord::default()
+                }],
+                parts: vec![
+                    js_ast::Part::default(),
+                    js_ast::Part {
+                        statements: vec![js_ast::Stmt::new(
+                            Loc::default(),
+                            js_ast::StmtData::Expr(js_ast::ExprStmt {
+                                value: js_ast::Expr::new(
+                                    Loc::default(),
+                                    js_ast::ExprData::RequireString(js_ast::RequireStringExpr {
+                                        import_record_index: 0,
+                                        ..js_ast::RequireStringExpr::default()
+                                    }),
+                                ),
+                                ..js_ast::ExprStmt::default()
+                            }),
+                        )],
+                        is_live: true,
+                        ..js_ast::Part::default()
+                    },
+                ],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "require_dep")],
+                wrapper_ref,
+                parts: vec![
+                    js_ast::Part::default(),
+                    js_ast::Part {
+                        statements: vec![js_ast::Stmt::new(
+                            Loc::default(),
+                            js_ast::StmtData::Expr(js_ast::ExprStmt {
+                                value: js_ast::Expr::new(
+                                    Loc::default(),
+                                    js_ast::ExprData::Number(2.0),
+                                ),
+                                ..js_ast::ExprStmt::default()
+                            }),
+                        )],
+                        is_live: true,
+                        ..js_ast::Part::default()
+                    },
+                ],
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2], &[], false);
+        let Some(InputFileRepr::Js(target)) = graph.files[2].input_file.repr.as_mut() else {
+            panic!("JavaScript target");
+        };
+        target.meta.wrap = WrapKind::Cjs;
+        let renamer = crate::internal::renamer::new_no_op_renamer(graph.symbols.clone());
+        let chunk = ChunkInfo {
+            parts_in_chunk_in_order: vec![
+                PartRange {
+                    source_index: 2,
+                    part_index_begin: 1,
+                    part_index_end: 2,
+                },
+                PartRange {
+                    source_index: 1,
+                    part_index_begin: 1,
+                    part_index_end: 2,
+                },
+            ],
+            ..ChunkInfo::default()
+        };
+
+        let compiled = compile_part_ranges_for_chunk(
+            &graph,
+            &Options::default(),
+            &chunk,
+            ChunkRuntimeRefs::default(),
+            &renamer,
+        );
+        assert_eq!(compiled.len(), 2);
+        assert_eq!(compiled[0].source_index, 2);
+        assert_eq!(compiled[0].js, b"2;\n");
+        assert_eq!(compiled[1].source_index, 1);
+        assert_eq!(compiled[1].js, b"require_dep();\n");
     }
 
     #[test]
