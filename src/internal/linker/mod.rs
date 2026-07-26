@@ -3378,6 +3378,7 @@ pub struct CompiledPartRange {
     pub source_index: u32,
     pub js: Vec<u8>,
     pub extracted_legal_comments: Vec<String>,
+    pub source_map_chunk: SourceMapChunk,
 }
 
 /// Compile one ordered range of live parts into JavaScript for a chunk.
@@ -3519,23 +3520,37 @@ pub fn compile_part_range_for_chunk(
         statements,
         ..js_ast::Part::default()
     }];
-    let printed = crate::internal::js_printer::print(
-        &tree,
-        renamer,
-        crate::internal::js_printer::Options {
-            unsupported_features: options.unsupported_js_features,
-            line_limit: options.line_limit,
-            indent: usize::from(options.output_format == Format::Iife),
-            minify_syntax: options.minify_syntax,
-            minify_whitespace: options.minify_whitespace,
-            ascii_only: options.ascii_only,
-            legal_comments: options.legal_comments,
-        },
-    );
+    let print_options = crate::internal::js_printer::Options {
+        unsupported_features: options.unsupported_js_features,
+        line_limit: options.line_limit,
+        indent: usize::from(options.output_format == Format::Iife),
+        minify_syntax: options.minify_syntax,
+        minify_whitespace: options.minify_whitespace,
+        ascii_only: options.ascii_only,
+        legal_comments: options.legal_comments,
+    };
+    let printed = if options.source_map == crate::internal::config::SourceMap::None {
+        crate::internal::js_printer::print(&tree, renamer, print_options)
+    } else {
+        crate::internal::js_printer::print_with_source_map(
+            &tree,
+            renamer,
+            print_options,
+            file.input_file
+                .input_source_map
+                .clone()
+                .map(std::sync::Arc::new),
+            crate::internal::sourcemap::generate_line_offset_tables(
+                &file.input_file.source.contents,
+                repr.ast.approximate_line_count.max(0),
+            ),
+        )
+    };
     CompiledPartRange {
         source_index: part_range.source_index,
         js: printed.js,
         extracted_legal_comments: printed.extracted_legal_comments,
+        source_map_chunk: printed.source_map_chunk,
     }
 }
 
@@ -6112,6 +6127,7 @@ mod tests {
             &Options {
                 mode: Mode::Bundle,
                 legal_comments: LegalComments::EndOfFile,
+                source_map: crate::internal::config::SourceMap::ExternalWithoutComment,
                 ..Options::default()
             },
             PartRange {
@@ -6124,6 +6140,7 @@ mod tests {
         );
         assert_eq!(result.js, b"1;\n");
         assert_eq!(result.extracted_legal_comments, ["/*! legal */"]);
+        assert!(!result.source_map_chunk.should_ignore);
 
         let wrapper_ref = Ref {
             source_index: 0,
@@ -6343,6 +6360,7 @@ mod tests {
                 source_index: 0,
                 js: b"  work();\n".to_vec(),
                 extracted_legal_comments: Vec::new(),
+                source_map_chunk: super::SourceMapChunk::default(),
             }],
             &super::PrintedCrossChunkBindings::default(),
             b"  return 1;\n",

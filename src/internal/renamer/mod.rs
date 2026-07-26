@@ -66,6 +66,10 @@ fn compute_reserved_names_for_scope(
 pub trait Renamer {
     fn name_for_symbol(&self, reference: Ref) -> String;
 
+    fn original_name_for_symbol(&self, reference: Ref) -> String {
+        self.name_for_symbol(reference)
+    }
+
     fn namespace_alias_for_symbol(&self, _reference: Ref) -> Option<NamespaceAlias> {
         None
     }
@@ -276,6 +280,11 @@ impl Renamer for MinifyRenamer {
             return symbol.original_name.clone();
         };
         self.slots[namespace as usize][index as usize].name.clone()
+    }
+
+    fn original_name_for_symbol(&self, reference: Ref) -> String {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).original_name.clone()
     }
 
     fn namespace_alias_for_symbol(&self, reference: Ref) -> Option<NamespaceAlias> {
@@ -559,6 +568,11 @@ impl Renamer for NumberRenamer {
         } else {
             name.clone()
         }
+    }
+
+    fn original_name_for_symbol(&self, reference: Ref) -> String {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).original_name.clone()
     }
 
     fn namespace_alias_for_symbol(&self, reference: Ref) -> Option<NamespaceAlias> {

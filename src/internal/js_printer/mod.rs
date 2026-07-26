@@ -1,6 +1,6 @@
 //! Port of upstream `internal/js_printer`.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::internal::ast::{ImportPhase, ImportRecord};
 use crate::internal::compat::JsFeature;
@@ -11,6 +11,9 @@ use crate::internal::js_ast::{
     Precedence, PropertyFlags, PropertyKind, Stmt, StmtData, is_identifier_es5_and_es_next,
 };
 use crate::internal::renamer::Renamer;
+use crate::internal::sourcemap::{
+    Chunk as SourceMapChunk, ChunkBuilder, LineOffsetTable, SourceMap, make_chunk_builder,
+};
 
 const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
 const FIRST_ASCII: u32 = 0x20;
@@ -391,6 +394,7 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
         import_records: &[],
         has_legal_comment: HashSet::new(),
         extracted_legal_comments: Vec::new(),
+        source_map_builder: None,
     };
     printer.print_expr_at(expr, Precedence::Lowest);
     printer.output
@@ -400,6 +404,7 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
 pub struct PrintResult {
     pub js: Vec<u8>,
     pub extracted_legal_comments: Vec<String>,
+    pub source_map_chunk: SourceMapChunk,
 }
 
 /// Prints all live AST parts as JavaScript.
@@ -410,6 +415,40 @@ pub struct PrintResult {
 /// ported.
 #[must_use]
 pub fn print(tree: &Ast, renamer: &dyn Renamer, options: Options) -> PrintResult {
+    print_internal(tree, renamer, options, None)
+}
+
+/// Print JavaScript while recording a reusable per-file source-map chunk.
+///
+/// # Panics
+///
+/// Panics if AST locations fall outside the supplied line-offset tables.
+#[must_use]
+pub fn print_with_source_map(
+    tree: &Ast,
+    renamer: &dyn Renamer,
+    options: Options,
+    input_source_map: Option<Arc<SourceMap>>,
+    line_offset_tables: Vec<LineOffsetTable>,
+) -> PrintResult {
+    print_internal(
+        tree,
+        renamer,
+        options,
+        Some(make_chunk_builder(
+            input_source_map,
+            line_offset_tables,
+            options.ascii_only,
+        )),
+    )
+}
+
+fn print_internal(
+    tree: &Ast,
+    renamer: &dyn Renamer,
+    options: Options,
+    source_map_builder: Option<ChunkBuilder>,
+) -> PrintResult {
     let mut printer = Printer {
         output: Vec::new(),
         renamer,
@@ -418,6 +457,7 @@ pub fn print(tree: &Ast, renamer: &dyn Renamer, options: Options) -> PrintResult
         import_records: &tree.import_records,
         has_legal_comment: HashSet::new(),
         extracted_legal_comments: Vec::new(),
+        source_map_builder,
     };
     if !tree.hashbang.is_empty() {
         printer.output.extend_from_slice(b"#!");
@@ -439,9 +479,16 @@ pub fn print(tree: &Ast, renamer: &dyn Renamer, options: Options) -> PrintResult
             printer.print_stmt(statement);
         }
     }
+    let source_map_chunk = printer
+        .source_map_builder
+        .take()
+        .map_or_else(SourceMapChunk::default, |builder| {
+            builder.generate_chunk(&printer.output)
+        });
     PrintResult {
         js: printer.output,
         extracted_legal_comments: printer.extracted_legal_comments,
+        source_map_chunk,
     }
 }
 
@@ -453,9 +500,19 @@ struct Printer<'a> {
     import_records: &'a [ImportRecord],
     has_legal_comment: HashSet<String>,
     extracted_legal_comments: Vec<String>,
+    source_map_builder: Option<ChunkBuilder>,
 }
 
 impl Printer<'_> {
+    fn add_source_mapping(&mut self, location: crate::internal::logger::Loc, original_name: &str) {
+        if location.start < 0 {
+            return;
+        }
+        if let Some(builder) = &mut self.source_map_builder {
+            builder.add_source_mapping(location, original_name, &self.output);
+        }
+    }
+
     fn print_indented_comment(&mut self, text: &str) {
         let escaped;
         let mut text = text;
@@ -488,6 +545,16 @@ impl Printer<'_> {
         let Some(data) = statement.data.as_deref() else {
             return;
         };
+        let should_add_source_mapping = match data {
+            StmtData::TypeScript(_) => false,
+            StmtData::Comment(comment) if comment.is_legal_comment => {
+                self.options.legal_comments == LegalComments::Inline
+            }
+            _ => true,
+        };
+        if should_add_source_mapping {
+            self.add_source_mapping(statement.loc, "");
+        }
         match data {
             StmtData::TypeScript(_) => {}
             StmtData::Empty => {
@@ -895,6 +962,13 @@ impl Printer<'_> {
     }
 
     fn print_binding(&mut self, binding: &Binding) {
+        let original_name = match binding.data.as_deref() {
+            Some(BindingData::Identifier(identifier)) => {
+                self.renamer.original_name_for_symbol(identifier.reference)
+            }
+            _ => String::new(),
+        };
+        self.add_source_mapping(binding.loc, &original_name);
         match binding.data.as_deref() {
             None | Some(BindingData::Missing) => {}
             Some(BindingData::Identifier(identifier)) => {
@@ -1263,6 +1337,13 @@ impl Printer<'_> {
         let Some(data) = expr.data.as_deref() else {
             return;
         };
+        let original_name = match data {
+            ExprData::Identifier(identifier) => {
+                self.renamer.original_name_for_symbol(identifier.reference)
+            }
+            _ => String::new(),
+        };
+        self.add_source_mapping(expr.loc, &original_name);
         let own_level = expr_precedence(data);
         let has_pure_comment = !self.options.minify_whitespace
             && match data {
@@ -1847,8 +1928,8 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use super::{
-        Options, format_non_negative_float, format_number, print, print_expr, quote_identifier,
-        quote_utf16,
+        Options, format_non_negative_float, format_number, print, print_expr,
+        print_with_source_map, quote_identifier, quote_utf16,
     };
     use crate::internal::{
         ast::SymbolMap,
@@ -1859,6 +1940,7 @@ mod tests {
         js_parser,
         logger::{DeferLogKind, Loc, Log, Source},
         renamer::new_no_op_renamer,
+        sourcemap::generate_line_offset_tables,
     };
 
     fn quoted(text: &str, options: Options, allow_backtick: bool) -> String {
@@ -1983,6 +2065,39 @@ mod tests {
             result.extracted_legal_comments,
             ["/*! top */", "/* @license nested */", "/*! eof */"]
         );
+    }
+
+    #[test]
+    fn emits_reusable_source_map_chunks() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(b"let value = 1;\nvalue++;\n".as_slice()),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) =
+            js_parser::parse(log.clone(), source.clone(), js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        let result = print_with_source_map(
+            &ast,
+            &renamer,
+            Options::default(),
+            None,
+            generate_line_offset_tables(&source.contents, ast.approximate_line_count),
+        );
+        assert_eq!(result.js, b"let value = 1;\nvalue++;\n");
+        assert!(!result.source_map_chunk.should_ignore);
+        assert!(!result.source_map_chunk.buffer.data.is_empty());
+        assert_eq!(
+            result.source_map_chunk.quoted_names,
+            [b"\"value\"".to_vec()]
+        );
+        assert_eq!(result.source_map_chunk.end_state.generated_line, 2);
+        assert_eq!(result.source_map_chunk.final_generated_column, 0);
     }
 
     #[test]
