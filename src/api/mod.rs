@@ -107,6 +107,16 @@ pub enum BuildSourceMap {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BuildLegalComments {
+    #[default]
+    Inline,
+    None,
+    EndOfFile,
+    Linked,
+    External,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Packages {
     #[default]
     Bundle,
@@ -125,6 +135,7 @@ pub struct BuildOptions {
     pub platform: BuildPlatform,
     pub global_name: String,
     pub sourcemap: BuildSourceMap,
+    pub legal_comments: BuildLegalComments,
     pub splitting: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
@@ -382,6 +393,13 @@ pub fn build(options: BuildOptions) -> BuildResult {
             BuildSourceMap::External => config::SourceMap::ExternalWithoutComment,
             BuildSourceMap::Inline => config::SourceMap::Inline,
             BuildSourceMap::InlineAndExternal => config::SourceMap::InlineAndExternal,
+        },
+        legal_comments: match options.legal_comments {
+            BuildLegalComments::Inline => config::LegalComments::Inline,
+            BuildLegalComments::None => config::LegalComments::None,
+            BuildLegalComments::EndOfFile => config::LegalComments::EndOfFile,
+            BuildLegalComments::Linked => config::LegalComments::LinkedWithComment,
+            BuildLegalComments::External => config::LegalComments::ExternalWithoutComment,
         },
         code_splitting: options.splitting,
         tree_shaking: true,
@@ -821,8 +839,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        BuildFormat, BuildOptions, BuildPlatform, BuildSourceMap, Loader, Packages,
-        TransformOptions, build, transform,
+        BuildFormat, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap, Loader,
+        Packages, TransformOptions, build, transform,
     };
 
     fn code(result: super::TransformResult) -> String {
@@ -986,6 +1004,52 @@ mod tests {
             );
             assert!(!javascript.contains("//# sourceMappingURL=entry.js.map"));
         }
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn emits_linked_legal_comment_files() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-legal-comments-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "/*! important license */ const value = 1; console.log(value)",
+        )
+        .expect("write entry file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::EsModule,
+            legal_comments: BuildLegalComments::Linked,
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 2);
+        let javascript = result
+            .output_files
+            .iter()
+            .find(|output| output.path.ends_with("/entry.js"))
+            .expect("JavaScript output");
+        let legal = result
+            .output_files
+            .iter()
+            .find(|output| output.path.ends_with("/entry.js.LEGAL.txt"))
+            .expect("legal comments output");
+        assert!(
+            String::from_utf8_lossy(&javascript.contents)
+                .contains("For license information please see entry.js.LEGAL.txt")
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&legal.contents),
+            "/*! important license */\n"
+        );
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

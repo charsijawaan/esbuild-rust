@@ -6,8 +6,8 @@ use std::{
 
 use esbuild_rs::{
     api::{
-        BuildFormat, BuildOptions, BuildPlatform, BuildSourceMap, Loader, Packages,
-        TransformOptions, build, transform,
+        BuildFormat, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap, Loader,
+        Packages, TransformOptions, build, transform,
     },
     internal::cli_helpers,
 };
@@ -49,6 +49,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut global_name = String::new();
     let mut splitting = false;
     let mut sourcemap = BuildSourceMap::None;
+    let mut legal_comments = BuildLegalComments::Inline;
     let mut external = Vec::new();
     let mut packages = Packages::Bundle;
     let mut build_loaders = HashMap::new();
@@ -84,6 +85,17 @@ fn run(arguments: &[String]) -> Result<Output, String> {
                 "inline" => BuildSourceMap::Inline,
                 "both" => BuildSourceMap::InlineAndExternal,
                 _ => return Err(format!("Invalid source map setting {value:?}")),
+            };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--legal-comments=") {
+            legal_comments = match value {
+                "none" => BuildLegalComments::None,
+                "inline" => BuildLegalComments::Inline,
+                "eof" => BuildLegalComments::EndOfFile,
+                "linked" => BuildLegalComments::Linked,
+                "external" => BuildLegalComments::External,
+                _ => return Err(format!("Invalid legal comments setting {value:?}")),
             };
             continue;
         }
@@ -214,6 +226,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             platform,
             global_name,
             sourcemap,
+            legal_comments,
             splitting,
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
@@ -328,6 +341,7 @@ fn help_text() -> String {
          \x20\x20--global-name=NAME\n\
          \x20\x20--splitting\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
+         \x20\x20--legal-comments=none|inline|eof|linked|external\n\
          \x20\x20--external:PATH\n\
          \x20\x20--packages=bundle|external\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
