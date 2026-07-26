@@ -37,7 +37,15 @@ pub(crate) fn parse_identifier_or_arrow_prefix(
             },
             ..Arg::default()
         };
-        return Some(parse_arrow_body(core, lexer, loc, vec![arg], false, false));
+        return Some(parse_arrow_body(
+            core,
+            lexer,
+            loc,
+            vec![arg],
+            false,
+            false,
+            false,
+        ));
     }
 
     Some(Expr::new(
@@ -58,7 +66,15 @@ pub(crate) fn parse_empty_parenthesized_arrow(
     if lexer.token != Token::EqualsGreaterThan {
         return None;
     }
-    Some(parse_arrow_body(core, lexer, loc, Vec::new(), false, true))
+    Some(parse_arrow_body(
+        core,
+        lexer,
+        loc,
+        Vec::new(),
+        false,
+        true,
+        false,
+    ))
 }
 
 pub(crate) fn parse_arrow_after_parenthesized_expression(
@@ -71,21 +87,34 @@ pub(crate) fn parse_arrow_after_parenthesized_expression(
         return None;
     }
     let mut args = Vec::new();
-    if !convert_expression_to_args(expression, &mut args) {
+    let mut has_rest_arg = false;
+    if !convert_expression_to_args(expression, &mut args, &mut has_rest_arg) {
         core.add_error_range(lexer.range(), "Invalid arrow function parameter list");
     }
-    Some(parse_arrow_body(core, lexer, loc, args, false, true))
+    Some(parse_arrow_body(
+        core,
+        lexer,
+        loc,
+        args,
+        false,
+        true,
+        has_rest_arg,
+    ))
 }
 
-fn convert_expression_to_args(expression: Expr, args: &mut Vec<Arg>) -> bool {
+fn convert_expression_to_args(
+    expression: Expr,
+    args: &mut Vec<Arg>,
+    has_rest_arg: &mut bool,
+) -> bool {
     let loc = expression.loc;
     let Some(data) = expression.data else {
         return false;
     };
     match *data {
         ExprData::Binary(binary) if binary.op == OpCode::BinaryComma => {
-            convert_expression_to_args(binary.left, args)
-                && convert_expression_to_args(binary.right, args)
+            convert_expression_to_args(binary.left, args, has_rest_arg)
+                && convert_expression_to_args(binary.right, args, has_rest_arg)
         }
         ExprData::Binary(binary) if binary.op == OpCode::BinaryAssign => {
             let Some(binding) = expression_to_binding(binary.left) else {
@@ -108,6 +137,17 @@ fn convert_expression_to_args(expression: Expr, args: &mut Vec<Arg>) -> bool {
                 },
                 ..Arg::default()
             });
+            true
+        }
+        ExprData::Spread(spread) => {
+            let Some(binding) = expression_to_binding(spread.value) else {
+                return false;
+            };
+            args.push(Arg {
+                binding,
+                ..Arg::default()
+            });
+            *has_rest_arg = true;
             true
         }
         _ => false,
@@ -134,6 +174,7 @@ pub(crate) fn parse_arrow_body(
     args: Vec<Arg>,
     is_async: bool,
     is_parenthesized: bool,
+    has_rest_arg: bool,
 ) -> Expr {
     if lexer.has_newline_before {
         core.add_error_range(lexer.range(), "Unexpected newline before \"=>\"");
@@ -189,6 +230,7 @@ pub(crate) fn parse_arrow_body(
             args,
             body,
             is_async,
+            has_rest_arg,
             prefer_expr,
             is_parenthesized,
             ..ArrowExpr::default()
@@ -231,14 +273,15 @@ pub(crate) fn parse_async_arrow_from_call(
         unreachable!("async arrow candidate must be a call");
     };
     let mut args = Vec::new();
+    let mut has_rest_arg = false;
     let mut valid = true;
     for argument in call.args {
-        valid &= convert_expression_to_args(argument, &mut args);
+        valid &= convert_expression_to_args(argument, &mut args, &mut has_rest_arg);
     }
     if !valid {
         core.add_error_range(lexer.range(), "Invalid arrow function parameter list");
     }
-    parse_arrow_body(core, lexer, loc, args, true, true)
+    parse_arrow_body(core, lexer, loc, args, true, true, has_rest_arg)
 }
 
 #[cfg(test)]
@@ -294,6 +337,28 @@ mod tests {
                 expression.data.as_deref(),
                 Some(ExprData::Arrow(arrow))
                     if arrow.is_async && arrow.args.len() == arg_count
+            ));
+            assert_eq!(lexer.token, Token::EndOfFile);
+        }
+    }
+
+    #[test]
+    fn parses_sync_and_async_rest_arguments() {
+        for text in [
+            "(first, ...rest) => rest",
+            "async (...values) => await values",
+        ] {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let source = Source {
+                contents: Arc::from(text.as_bytes()),
+                ..Source::default()
+            };
+            let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+            let mut core = super::ParserCore::new(source, Options::default());
+            let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+            assert!(matches!(
+                expression.data.as_deref(),
+                Some(ExprData::Arrow(arrow)) if arrow.has_rest_arg
             ));
             assert_eq!(lexer.token, Token::EndOfFile);
         }

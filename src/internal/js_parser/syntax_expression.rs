@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
-    js_ast::{BinaryExpr, Expr, ExprData, IfExpr, Precedence},
+    js_ast::{BinaryExpr, Expr, ExprData, IfExpr, Precedence, SpreadExpr},
     js_lexer::{Lexer, Token},
 };
 
@@ -123,6 +123,7 @@ pub(crate) fn parse_expression_suffix(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_prefix(
     core: &mut ParserCore,
     lexer: &mut Lexer,
@@ -192,12 +193,41 @@ fn parse_prefix(
                 return parse_empty_parenthesized_arrow(core, lexer, paren_loc)
                     .unwrap_or_else(|| lexer.unexpected());
             }
-            let expr = parse_expression(core, lexer, Precedence::Lowest, true);
+            let mut expr = parse_parenthesized_item(core, lexer);
+            let mut has_trailing_comma = false;
+            let mut has_rest = matches!(expr.data.as_deref(), Some(ExprData::Spread(_)));
+            while lexer.token == Token::Comma {
+                let comma_range = lexer.range();
+                lexer.next();
+                if lexer.token == Token::CloseParen {
+                    has_trailing_comma = true;
+                    if has_rest {
+                        core.add_error_range(comma_range, "Unexpected \",\" after rest pattern");
+                    }
+                    break;
+                }
+                if has_rest {
+                    core.add_error_range(comma_range, "Unexpected \",\" after rest pattern");
+                }
+                let right = parse_parenthesized_item(core, lexer);
+                has_rest |= matches!(right.data.as_deref(), Some(ExprData::Spread(_)));
+                expr = Expr::new(
+                    expr.loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: expr,
+                        right,
+                        op: crate::internal::js_ast::OpCode::BinaryComma,
+                    }),
+                );
+            }
             lexer.expect(Token::CloseParen);
             if lexer.token == Token::EqualsGreaterThan {
                 parse_arrow_after_parenthesized_expression(core, lexer, paren_loc, expr)
                     .expect("arrow token was checked")
             } else {
+                if has_trailing_comma || has_rest {
+                    lexer.unexpected();
+                }
                 expr
             }
         }
@@ -219,6 +249,17 @@ fn parse_new_target(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
         |core, lexer, precedence| parse_expression(core, lexer, precedence, true),
     );
     target
+}
+
+fn parse_parenthesized_item(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
+    if lexer.token == Token::DotDotDot {
+        let loc = lexer.loc();
+        lexer.next();
+        let value = parse_expression(core, lexer, Precedence::Comma, true);
+        Expr::new(loc, ExprData::Spread(SpreadExpr { value }))
+    } else {
+        parse_expression(core, lexer, Precedence::Comma, true)
+    }
 }
 
 #[cfg(test)]

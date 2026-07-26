@@ -57,6 +57,7 @@ pub(crate) fn parse_async_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
                 }],
                 true,
                 false,
+                false,
             ));
         }
     }
