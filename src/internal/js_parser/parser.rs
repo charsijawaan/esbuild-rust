@@ -907,19 +907,69 @@ fn class_has_static_name(class: &crate::internal::js_ast::Class) -> bool {
     })
 }
 
+fn insert_class_name_static_block(
+    core: &mut ParserCore,
+    class: &mut crate::internal::js_ast::Class,
+    name: &str,
+) -> bool {
+    if class_has_static_name(class) {
+        return false;
+    }
+    let loc = class.body_loc;
+    let call = core.call_runtime(
+        loc,
+        "__name",
+        vec![
+            Expr::new(loc, ExprData::This),
+            Expr::new(
+                loc,
+                ExprData::String(StringExpr {
+                    value: string_to_utf16(name.as_bytes()),
+                    ..StringExpr::default()
+                }),
+            ),
+        ],
+    );
+    class.properties.insert(
+        0,
+        crate::internal::js_ast::Property {
+            class_static_block: Some(Box::new(crate::internal::js_ast::ClassStaticBlock {
+                block: crate::internal::js_ast::BlockStmt {
+                    statements: vec![Stmt::new(
+                        loc,
+                        StmtData::Expr(ExprStmt {
+                            value: call,
+                            is_from_class_or_fn_that_can_be_removed_if_unused: true,
+                        }),
+                    )],
+                    ..crate::internal::js_ast::BlockStmt::default()
+                },
+                loc,
+            })),
+            loc,
+            kind: crate::internal::js_ast::PropertyKind::ClassStaticBlock,
+            ..crate::internal::js_ast::Property::default()
+        },
+    );
+    true
+}
+
 fn keep_inferred_declaration_name(core: &mut ParserCore, value: &mut Expr, reference: Ref) {
+    let name = core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+        .original_name
+        .clone();
+    if let Some(ExprData::Class(class)) = value.data.as_deref_mut() {
+        if class.class.name.is_none() {
+            insert_class_name_static_block(core, &mut class.class, &name);
+        }
+        return;
+    }
     let can_keep_name = match value.data.as_deref() {
         Some(ExprData::Function(function)) => function.function.name.is_none(),
-        Some(ExprData::Class(class)) => {
-            class.class.name.is_none() && !class_has_static_name(&class.class)
-        }
         Some(ExprData::Arrow(_)) => true,
         _ => false,
     };
     if can_keep_name {
-        let name = core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
-            .original_name
-            .clone();
         *value = keep_name_expression(core, std::mem::take(value), &name);
     }
 }
@@ -958,14 +1008,10 @@ fn default_export_name_to_keep(
         }
         Some(StmtData::Class(class)) => {
             visit_keep_name_class_blocks(core, &mut class.class);
-            if class_has_static_name(&class.class) {
-                None
-            } else {
-                existing_name_to_keep(core, class.class.name).or_else(|| {
-                    class.class.name = Some(export.default_name);
-                    Some((export.default_name.reference, "default".into(), true))
-                })
-            }
+            let name = existing_name_to_keep(core, class.class.name)
+                .map_or_else(|| "default".into(), |(_, name, _)| name);
+            insert_class_name_static_block(core, &mut class.class, &name);
+            None
         }
         _ => None,
     }
@@ -989,8 +1035,8 @@ fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<St
                 }
                 StmtData::Class(class) => {
                     visit_keep_name_class_blocks(core, &mut class.class);
-                    if !class_has_static_name(&class.class) {
-                        name_to_keep = existing_name_to_keep(core, class.class.name);
+                    if let Some((_, name, _)) = existing_name_to_keep(core, class.class.name) {
+                        insert_class_name_static_block(core, &mut class.class, &name);
                     }
                 }
                 StmtData::Local(local) => {

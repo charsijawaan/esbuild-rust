@@ -2907,7 +2907,7 @@ mod tests {
     #[test]
     fn keeps_function_and_class_names() {
         let transformed = code(transform(
-            "var __name = 1; function LongFunction() {} class LongClass {} class Shadowed { static name = 'custom' } const LongArrow = () => {}; const Different = function Inner() {}; const AnonymousShadowed = class { static name = 'custom' }; console.log(LongFunction.name, LongClass.name, Shadowed.name, LongArrow.name, Different.name, AnonymousShadowed.name, __name)",
+            "var __name = 1; function LongFunction() {} class LongClass {} class Timed { static observed = Timed.name } class Shadowed { static name = 'custom' } const LongArrow = () => {}; const Different = function Inner() {}; const AnonymousShadowed = class { static name = 'custom' }; console.log(LongFunction.name, LongClass.name, Timed.observed, Shadowed.name, LongArrow.name, Different.name, AnonymousShadowed.name, __name)",
             TransformOptions {
                 keep_names: true,
                 ..TransformOptions::default()
@@ -2915,13 +2915,21 @@ mod tests {
         ));
         assert!(transformed.starts_with("var __name2 = (target, value) =>"));
         assert!(transformed.contains("__name2(LongFunction, \"LongFunction\")"));
-        assert!(transformed.contains("__name2(LongClass, \"LongClass\")"));
+        assert!(transformed.contains("__name2(this, \"LongClass\")"));
         assert!(transformed.contains("__name2(() =>"));
         assert!(transformed.contains("\"LongArrow\")"));
         assert!(transformed.contains("__name2(function Inner()"));
         assert!(transformed.contains("\"Inner\")"));
         assert!(!transformed.contains("__name2(Shadowed"));
         assert!(!transformed.contains("\"AnonymousShadowed\")"));
+        assert!(
+            transformed
+                .find("__name2(this, \"Timed\")")
+                .expect("generated class name block")
+                < transformed
+                    .find("static observed")
+                    .expect("user static initializer")
+        );
 
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2987,18 +2995,26 @@ mod tests {
         assert!(!transformed.contains("from \"<runtime>\""));
         assert!(transformed.contains("({ pattern: pattern ="));
 
-        for source in ["export default function() {}", "export default class {}"] {
-            let transformed = code(transform(
-                source,
-                TransformOptions {
-                    keep_names: true,
-                    ..TransformOptions::default()
-                },
-            ));
-            assert!(transformed.contains("stdin_default"));
-            assert!(transformed.contains("stdin_default, \"default\""));
-            assert!(!transformed.contains("__name(default"));
-        }
+        let function = code(transform(
+            "export default function() {}",
+            TransformOptions {
+                keep_names: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(function.contains("stdin_default"));
+        assert!(function.contains("stdin_default, \"default\""));
+        assert!(!function.contains("__name(default"));
+
+        let class = code(transform(
+            "export default class {}",
+            TransformOptions {
+                keep_names: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(class.contains("__name(this, \"default\")"));
+        assert!(!class.contains("stdin_default"));
 
         let invalid = transform(
             "({ invalid = function() {} });",

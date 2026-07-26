@@ -57,19 +57,68 @@ fn class_has_static_name(class: &Class) -> bool {
     })
 }
 
+fn insert_class_name_static_block(core: &mut ParserCore, class: &mut Class, name: &str) -> bool {
+    if class_has_static_name(class) {
+        return false;
+    }
+    let loc = class.body_loc;
+    let call = core.call_runtime(
+        loc,
+        "__name",
+        vec![
+            Expr::new(loc, ExprData::This),
+            Expr::new(
+                loc,
+                ExprData::String(StringExpr {
+                    value: crate::internal::helpers::string_to_utf16(name.as_bytes()),
+                    ..StringExpr::default()
+                }),
+            ),
+        ],
+    );
+    class.properties.insert(
+        0,
+        crate::internal::js_ast::Property {
+            class_static_block: Some(Box::new(crate::internal::js_ast::ClassStaticBlock {
+                block: BlockStmt {
+                    statements: vec![Stmt::new(
+                        loc,
+                        StmtData::Expr(crate::internal::js_ast::ExprStmt {
+                            value: call,
+                            is_from_class_or_fn_that_can_be_removed_if_unused: true,
+                        }),
+                    )],
+                    ..BlockStmt::default()
+                },
+                loc,
+            })),
+            loc,
+            kind: PropertyKind::ClassStaticBlock,
+            ..crate::internal::js_ast::Property::default()
+        },
+    );
+    true
+}
+
 fn keep_inferred_name(core: &mut ParserCore, expression: &mut Expr, name: Option<String>) {
     let Some(name) = name else {
         return;
     };
+    if !core.options.keep_names {
+        return;
+    }
+    if let Some(ExprData::Class(class)) = expression.data.as_deref_mut() {
+        if class.class.name.is_none() {
+            insert_class_name_static_block(core, &mut class.class, &name);
+        }
+        return;
+    }
     let can_keep_name = match expression.data.as_deref() {
         Some(ExprData::Function(function)) => function.function.name.is_none(),
-        Some(ExprData::Class(class)) => {
-            class.class.name.is_none() && !class_has_static_name(&class.class)
-        }
         Some(ExprData::Arrow(_)) => true,
         _ => false,
     };
-    if !core.options.keep_names || !can_keep_name {
+    if !can_keep_name {
         return;
     }
     let loc = expression.loc;
@@ -1535,24 +1584,11 @@ fn visit_expr_with_target(
         }
         ExprData::Class(class) => {
             visit_class(core, &mut class.class, resolve_identifiers);
-            let has_static_name = class.class.properties.iter().any(|property| {
-                property.flags.contains(PropertyFlags::IS_STATIC)
-                    && matches!(
-                        property.key.data.as_deref(),
-                        Some(ExprData::String(value))
-                            if utf16_to_string(&value.value) == b"name"
-                    )
-            });
             if core.options.keep_names
-                && !has_static_name
                 && let Some(name) = class.class.name
             {
-                keep_name = Some(
-                    core.symbols
-                        [usize::try_from(name.reference.inner_index).expect("symbol index")]
-                    .original_name
-                    .clone(),
-                );
+                let name = symbol_name(core, name.reference);
+                insert_class_name_static_block(core, &mut class.class, &name);
             }
         }
         ExprData::Arrow(arrow) => {
