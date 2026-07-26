@@ -14,8 +14,8 @@ use crate::internal::{
     },
     bundler::{hash_for_file_name, path_relative_to_outbase},
     config::{
-        Format, Loader, Options, PathPlaceholder, PathPlaceholders, PathTemplate, has_placeholder,
-        substitute_template, template_to_string,
+        Format, Loader, Mode, Options, PathPlaceholder, PathPlaceholders, PathTemplate,
+        has_placeholder, substitute_template, template_to_string,
     },
     css_ast::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
@@ -2727,6 +2727,177 @@ fn require_namespace_statement(
     )
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ConvertedStmts {
+    pub inside_wrapper_prefix: Vec<js_ast::Stmt>,
+    pub inside_wrapper_suffix: Vec<js_ast::Stmt>,
+    pub outside_wrapper_prefix: Vec<js_ast::Stmt>,
+}
+
+impl ConvertedStmts {
+    fn push_esm_statement(&mut self, statement: js_ast::Stmt, extract_from_wrapper: bool) {
+        if extract_from_wrapper {
+            self.outside_wrapper_prefix.push(statement);
+        } else {
+            self.inside_wrapper_suffix.push(statement);
+        }
+    }
+}
+
+/// Convert a list of JavaScript statements for inclusion in a bundle chunk.
+///
+/// This ports the non-runtime-re-export cases from upstream's
+/// `convertStmtsForChunk`, including import hoisting, wrapper boundaries, and
+/// export syntax lowering.
+///
+/// # Panics
+///
+/// Panics when the source is not JavaScript, an import record is invalid, or
+/// an `export *` statement requires the runtime re-export helper. Runtime
+/// re-export generation is handled by the subsequent linker phase.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn convert_stmts_for_chunk(
+    graph: &LinkerGraph,
+    options: &Options,
+    source_index: u32,
+    part_statements: &[js_ast::Stmt],
+) -> ConvertedStmts {
+    let file = &graph.files[source_index as usize];
+    let Some(InputFileRepr::Js(repr)) = file.input_file.repr.as_ref() else {
+        panic!("statement source must be JavaScript");
+    };
+    let should_strip_exports = options.mode != Mode::PassThrough || !file.is_entry_point();
+    let extract_esm_from_wrapper = repr.meta.wrap != WrapKind::None;
+    let mut result = ConvertedStmts::default();
+
+    for original in part_statements {
+        let mut statement = original.clone();
+        match statement.data.as_deref_mut() {
+            Some(js_ast::StmtData::Import(import)) => {
+                let conversion = convert_import_for_chunk(
+                    graph,
+                    source_index,
+                    statement.loc,
+                    import.namespace_ref,
+                    import.import_record_index,
+                    options.output_format,
+                );
+                if let Some(prefix) = conversion.prefix_statement {
+                    result.inside_wrapper_prefix.push(prefix);
+                }
+                if !conversion.keep_original {
+                    continue;
+                }
+                result.push_esm_statement(statement, extract_esm_from_wrapper);
+                continue;
+            }
+            Some(js_ast::StmtData::ExportFrom(export)) => {
+                let conversion = convert_import_for_chunk(
+                    graph,
+                    source_index,
+                    statement.loc,
+                    export.namespace_ref,
+                    export.import_record_index,
+                    options.output_format,
+                );
+                if let Some(prefix) = conversion.prefix_statement {
+                    result.inside_wrapper_prefix.push(prefix);
+                }
+                if !conversion.keep_original {
+                    continue;
+                }
+                if should_strip_exports {
+                    for item in &mut export.items {
+                        item.alias.clone_from(&item.original_name);
+                    }
+                    statement.data = Some(Box::new(js_ast::StmtData::Import(js_ast::ImportStmt {
+                        namespace_ref: export.namespace_ref,
+                        items: Some(export.items.clone()),
+                        import_record_index: export.import_record_index,
+                        is_single_line: export.is_single_line,
+                        ..js_ast::ImportStmt::default()
+                    })));
+                }
+                result.push_esm_statement(statement, extract_esm_from_wrapper);
+                continue;
+            }
+            Some(js_ast::StmtData::ExportStar(export)) if export.alias.is_some() => {
+                let conversion = convert_import_for_chunk(
+                    graph,
+                    source_index,
+                    statement.loc,
+                    export.namespace_ref,
+                    export.import_record_index,
+                    options.output_format,
+                );
+                if let Some(prefix) = conversion.prefix_statement {
+                    result.inside_wrapper_prefix.push(prefix);
+                }
+                if !conversion.keep_original {
+                    continue;
+                }
+                if should_strip_exports {
+                    statement.data = Some(Box::new(js_ast::StmtData::Import(js_ast::ImportStmt {
+                        namespace_ref: export.namespace_ref,
+                        star_name_loc: export.alias.as_ref().map(|alias| alias.loc),
+                        import_record_index: export.import_record_index,
+                        ..js_ast::ImportStmt::default()
+                    })));
+                }
+                result.push_esm_statement(statement, extract_esm_from_wrapper);
+                continue;
+            }
+            Some(js_ast::StmtData::ExportStar(export)) if should_strip_exports => {
+                let record = &repr.ast.import_records[export.import_record_index as usize];
+                if record
+                    .flags
+                    .contains(ImportRecordFlags::CALLS_RUN_TIME_RE_EXPORT_FN)
+                {
+                    panic!("runtime export-star conversion must run in the runtime binding phase");
+                }
+                if !record.source_index.is_valid()
+                    && options.output_format.keep_esm_import_export_syntax()
+                {
+                    result.push_esm_statement(statement, extract_esm_from_wrapper);
+                } else if record.source_index.is_valid() {
+                    let conversion = convert_import_for_chunk(
+                        graph,
+                        source_index,
+                        original.loc,
+                        export.namespace_ref,
+                        export.import_record_index,
+                        options.output_format,
+                    );
+                    if let Some(prefix) = conversion.prefix_statement {
+                        result.inside_wrapper_prefix.push(prefix);
+                    }
+                }
+                continue;
+            }
+            Some(js_ast::StmtData::ExportClause(_)) if should_strip_exports => continue,
+            Some(js_ast::StmtData::ExportClause(_)) => {
+                result.push_esm_statement(statement, extract_esm_from_wrapper);
+                continue;
+            }
+            Some(
+                js_ast::StmtData::Function(_)
+                | js_ast::StmtData::Class(_)
+                | js_ast::StmtData::Local(_)
+                | js_ast::StmtData::ExportDefault(_),
+            ) if should_strip_exports => {
+                result
+                    .inside_wrapper_suffix
+                    .extend(strip_exports_from_stmts(std::slice::from_ref(&statement)));
+                continue;
+            }
+            _ => {}
+        }
+        result.inside_wrapper_suffix.push(statement);
+    }
+    result
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -3125,18 +3296,21 @@ mod tests {
         advance_import_tracker, append_or_extend_part_range, assign_chunk_path_templates,
         bind_imports_to_exports_for_file, classify_module_wrappers,
         compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
-        create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
-        generate_cross_chunk_stmts, generate_isolated_hash, has_dynamic_exports_due_to_export_star,
-        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
-        merge_adjacent_local_stmts, path_between_chunks, print_cross_chunk_bindings,
-        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
+        convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
+        finalize_chunk_paths, generate_cross_chunk_stmts, generate_isolated_hash,
+        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
+        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
+        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
+        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
+        tree_shaking_and_code_splitting,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
-        config::{Format, Loader, Options, PathPlaceholder, PathTemplate, template_to_string},
+        config::{
+            Format, Loader, Mode, Options, PathPlaceholder, PathTemplate, template_to_string,
+        },
         css_ast::{
             ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
             WhitespaceFlags,
@@ -3817,6 +3991,114 @@ mod tests {
         assert!(matches!(
             expression.value.data.as_deref(),
             Some(js_ast::ExprData::Await(_))
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn statement_conversion_preserves_wrapper_boundaries_and_order() {
+        let namespace_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                import_records: vec![
+                    ImportRecord::default(),
+                    ImportRecord {
+                        source_index: Index32::new(1),
+                        ..ImportRecord::default()
+                    },
+                ],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast::default()),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1], &[EntryPoint::default()], false);
+        let Some(InputFileRepr::Js(source)) = graph.files[0].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        source.meta.wrap = WrapKind::Cjs;
+        let Some(InputFileRepr::Js(target)) = graph.files[1].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        target.meta.wrap = WrapKind::Cjs;
+        let statements = vec![
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::Import(js_ast::ImportStmt {
+                    namespace_ref,
+                    import_record_index: 0,
+                    ..js_ast::ImportStmt::default()
+                }),
+            ),
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::Import(js_ast::ImportStmt {
+                    namespace_ref,
+                    import_record_index: 1,
+                    ..js_ast::ImportStmt::default()
+                }),
+            ),
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::ExportFrom(js_ast::ExportFromStmt {
+                    items: vec![js_ast::ClauseItem {
+                        alias: "bar".into(),
+                        original_name: "foo".into(),
+                        ..js_ast::ClauseItem::default()
+                    }],
+                    namespace_ref,
+                    ..js_ast::ExportFromStmt::default()
+                }),
+            ),
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::ExportClause(js_ast::ExportClauseStmt::default()),
+            ),
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::Local(js_ast::LocalStmt {
+                    is_export: true,
+                    ..js_ast::LocalStmt::default()
+                }),
+            ),
+        ];
+        let converted = convert_stmts_for_chunk(
+            &graph,
+            &Options {
+                mode: Mode::Bundle,
+                output_format: Format::EsModule,
+                ..Options::default()
+            },
+            0,
+            &statements,
+        );
+        assert_eq!(converted.inside_wrapper_prefix.len(), 1);
+        assert!(matches!(
+            converted.inside_wrapper_prefix[0].data.as_deref(),
+            Some(js_ast::StmtData::Local(_))
+        ));
+        assert_eq!(converted.outside_wrapper_prefix.len(), 2);
+        assert!(
+            converted
+                .outside_wrapper_prefix
+                .iter()
+                .all(|statement| matches!(
+                    statement.data.as_deref(),
+                    Some(js_ast::StmtData::Import(_))
+                ))
+        );
+        let Some(js_ast::StmtData::Import(re_export)) =
+            converted.outside_wrapper_prefix[1].data.as_deref()
+        else {
+            panic!("re-export must become an import");
+        };
+        assert_eq!(re_export.items.as_ref().expect("items")[0].alias, "foo");
+        assert_eq!(converted.inside_wrapper_suffix.len(), 1);
+        assert!(matches!(
+            converted.inside_wrapper_suffix[0].data.as_deref(),
+            Some(js_ast::StmtData::Local(local)) if !local.is_export
         ));
     }
 
