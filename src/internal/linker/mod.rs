@@ -2575,6 +2575,79 @@ pub fn scan_imports_and_exports<S: BuildHasher>(
     result
 }
 
+/// Preserve externally observable symbol names in pass-through mode.
+///
+/// Explicit exports are preserved for modules. Script-style files preserve all
+/// module-scope bindings because they may be observed from a classic script
+/// tag.
+pub fn prevent_exports_from_being_renamed(graph: &mut LinkerGraph, source_index: u32) {
+    let Some(repr) = graph.files[source_index as usize].input_file.repr.take() else {
+        return;
+    };
+    let InputFileRepr::Js(mut repr) = repr else {
+        graph.files[source_index as usize].input_file.repr = Some(repr);
+        return;
+    };
+    let mut has_import_or_export = false;
+    for part in &mut repr.ast.parts {
+        for statement in &mut part.statements {
+            match statement.data.as_deref_mut() {
+                Some(js_ast::StmtData::Import(import)) => {
+                    if !repr.ast.import_records[import.import_record_index as usize]
+                        .source_index
+                        .is_valid()
+                    {
+                        has_import_or_export = true;
+                    }
+                }
+                Some(js_ast::StmtData::Local(local)) if local.is_export => {
+                    js_ast::for_each_identifier_binding_in_decls(
+                        &mut local.declarations,
+                        &mut |_location, binding| {
+                            graph.symbols.get_mut(binding.reference).flags |=
+                                crate::internal::ast::SymbolFlags::MUST_NOT_BE_RENAMED;
+                        },
+                    );
+                    has_import_or_export = true;
+                }
+                Some(js_ast::StmtData::Function(function)) if function.is_export => {
+                    if let Some(name) = function.function.name {
+                        graph.symbols.get_mut(name.reference).kind = SymbolKind::Unbound;
+                    }
+                    has_import_or_export = true;
+                }
+                Some(js_ast::StmtData::Class(class)) if class.is_export => {
+                    if let Some(name) = class.class.name {
+                        graph.symbols.get_mut(name.reference).kind = SymbolKind::Unbound;
+                    }
+                    has_import_or_export = true;
+                }
+                Some(
+                    js_ast::StmtData::ExportClause(_)
+                    | js_ast::StmtData::ExportDefault(_)
+                    | js_ast::StmtData::ExportStar(_)
+                    | js_ast::StmtData::ExportFrom(_),
+                ) => {
+                    has_import_or_export = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if !has_import_or_export && let Some(scope) = &repr.ast.module_scope {
+        for member in scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .values()
+        {
+            graph.symbols.get_mut(member.reference).flags |=
+                crate::internal::ast::SymbolFlags::MUST_NOT_BE_RENAMED;
+        }
+    }
+    graph.files[source_index as usize].input_file.repr = Some(InputFileRepr::Js(repr));
+}
+
 /// Create the synthetic wrapper part used by wrapped `CommonJS` and ESM files.
 ///
 /// # Panics
@@ -2967,6 +3040,11 @@ pub fn tree_shaking_and_code_splitting(graph: &mut LinkerGraph, options: &Option
             entry_point_bit,
             0,
         );
+    }
+    if options.mode == Mode::PassThrough {
+        for entry_point in entry_points {
+            prevent_exports_from_being_renamed(graph, entry_point.source_index);
+        }
     }
 }
 
@@ -8170,11 +8248,12 @@ mod tests {
         is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
         lower_esm_lazy_export, mangle_local_css, mangle_props, mark_file_live_for_tree_shaking,
         match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
-        populate_css_stub_lazy_export, prepare_css_asts, print_cross_chunk_bindings,
-        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
-        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
+        populate_css_stub_lazy_export, prepare_css_asts, prevent_exports_from_being_renamed,
+        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
+        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
+        wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -8255,6 +8334,78 @@ mod tests {
         assert_eq!(repr.ast.exports_kind, ExportsKind::CommonJs);
         assert!(repr.ast.uses_exports_ref);
         assert!(repr.meta.force_include_exports_for_entry_point);
+    }
+
+    #[test]
+    fn pass_through_preserves_module_exports_and_script_globals() {
+        let exported_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let input_files = [js_file(js_ast::Ast {
+            symbols: vec![Symbol::new(SymbolKind::Other, "exported")],
+            parts: vec![js_ast::Part {
+                statements: vec![js_ast::Stmt::new(
+                    Loc::default(),
+                    js_ast::StmtData::Local(js_ast::LocalStmt {
+                        declarations: vec![js_ast::Decl {
+                            binding: js_ast::Binding {
+                                data: Some(Box::new(js_ast::BindingData::Identifier(
+                                    js_ast::IdentifierBinding {
+                                        reference: exported_ref,
+                                    },
+                                ))),
+                                ..js_ast::Binding::default()
+                            },
+                            ..js_ast::Decl::default()
+                        }],
+                        is_export: true,
+                        ..js_ast::LocalStmt::default()
+                    }),
+                )],
+                ..js_ast::Part::default()
+            }],
+            ..js_ast::Ast::default()
+        })];
+        let mut graph = clone_linker_graph(&input_files, &[0], &[], false);
+        prevent_exports_from_being_renamed(&mut graph, 0);
+        assert!(
+            graph
+                .symbols
+                .get(exported_ref)
+                .flags
+                .contains(crate::internal::ast::SymbolFlags::MUST_NOT_BE_RENAMED)
+        );
+
+        let global_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let module_scope = std::sync::Arc::new(std::sync::Mutex::new(js_ast::Scope {
+            members: HashMap::from([(
+                "global".into(),
+                js_ast::ScopeMember {
+                    reference: global_ref,
+                    ..js_ast::ScopeMember::default()
+                },
+            )]),
+            ..js_ast::Scope::default()
+        }));
+        let input_files = [js_file(js_ast::Ast {
+            symbols: vec![Symbol::new(SymbolKind::Other, "global")],
+            module_scope: Some(module_scope),
+            parts: vec![js_ast::Part::default()],
+            ..js_ast::Ast::default()
+        })];
+        let mut graph = clone_linker_graph(&input_files, &[0], &[], false);
+        prevent_exports_from_being_renamed(&mut graph, 0);
+        assert!(
+            graph
+                .symbols
+                .get(global_ref)
+                .flags
+                .contains(crate::internal::ast::SymbolFlags::MUST_NOT_BE_RENAMED)
+        );
     }
 
     #[test]
