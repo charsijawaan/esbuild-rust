@@ -3356,6 +3356,175 @@ pub fn wrap_esm_stmts(
     outside_wrapper_prefix
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChunkRuntimeRefs {
+    pub common_js_ref: Ref,
+    pub esm_ref: Ref,
+    pub re_export: Option<RuntimeReExportContext>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompiledPartRange {
+    pub source_index: u32,
+    pub js: Vec<u8>,
+}
+
+/// Compile one ordered range of live parts into JavaScript for a chunk.
+///
+/// # Panics
+///
+/// Panics when the part range is invalid, the source is not JavaScript, a
+/// wrapper marker conflicts with its wrapper kind, or printing encounters an
+/// unsupported AST invariant.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn compile_part_range_for_chunk(
+    graph: &LinkerGraph,
+    options: &Options,
+    part_range: PartRange,
+    runtime_refs: ChunkRuntimeRefs,
+    renamer: &dyn crate::internal::renamer::Renamer,
+) -> CompiledPartRange {
+    let file = &graph.files[part_range.source_index as usize];
+    let Some(InputFileRepr::Js(repr)) = file.input_file.repr.as_ref() else {
+        panic!("part range source must be JavaScript");
+    };
+    let mut converted = ConvertedStmts::default();
+    if repr.meta.wrap != WrapKind::None && !file.is_entry_point() {
+        converted
+            .inside_wrapper_prefix
+            .extend(repr.ast.directives.iter().map(|directive| {
+                js_ast::Stmt::new(
+                    crate::internal::logger::Loc::default(),
+                    js_ast::StmtData::Directive(js_ast::DirectiveStmt {
+                        value: crate::internal::helpers::string_to_utf16(directive.as_bytes()),
+                        ..js_ast::DirectiveStmt::default()
+                    }),
+                )
+            }));
+    }
+
+    let namespace_part_index = js_ast::NS_EXPORT_PART_INDEX;
+    if namespace_part_index >= part_range.part_index_begin
+        && namespace_part_index < part_range.part_index_end
+        && repr.ast.parts[namespace_part_index as usize].is_live
+    {
+        let namespace = convert_stmts_for_chunk(
+            graph,
+            options,
+            part_range.source_index,
+            &repr.ast.parts[namespace_part_index as usize].statements,
+            runtime_refs.re_export,
+        );
+        converted
+            .inside_wrapper_prefix
+            .extend(namespace.inside_wrapper_prefix);
+        converted
+            .outside_wrapper_prefix
+            .extend(namespace.outside_wrapper_prefix);
+        if repr.meta.wrap == WrapKind::Esm {
+            converted
+                .outside_wrapper_prefix
+                .extend(namespace.inside_wrapper_suffix);
+        } else {
+            converted
+                .inside_wrapper_prefix
+                .extend(namespace.inside_wrapper_suffix);
+        }
+    }
+
+    let mut needs_wrapper = false;
+    for part_index in part_range.part_index_begin..part_range.part_index_end {
+        let part = &repr.ast.parts[part_index as usize];
+        if !part.is_live || part_index == namespace_part_index {
+            continue;
+        }
+        if repr.meta.wrapper_part_index.is_valid()
+            && part_index == repr.meta.wrapper_part_index.get_index()
+        {
+            needs_wrapper = true;
+            continue;
+        }
+        let part_converted = convert_stmts_for_chunk(
+            graph,
+            options,
+            part_range.source_index,
+            &part.statements,
+            runtime_refs.re_export,
+        );
+        converted
+            .inside_wrapper_prefix
+            .extend(part_converted.inside_wrapper_prefix);
+        converted
+            .inside_wrapper_suffix
+            .extend(part_converted.inside_wrapper_suffix);
+        converted
+            .outside_wrapper_prefix
+            .extend(part_converted.outside_wrapper_prefix);
+    }
+
+    let mut body = converted.inside_wrapper_prefix;
+    body.extend(converted.inside_wrapper_suffix);
+    if options.minify_syntax {
+        body = merge_adjacent_local_stmts(body);
+    }
+    let statements = if needs_wrapper {
+        match repr.meta.wrap {
+            WrapKind::Cjs => wrap_common_js_stmts(
+                &repr.ast,
+                body,
+                converted.outside_wrapper_prefix,
+                runtime_refs.common_js_ref,
+                options,
+                file.input_file
+                    .source
+                    .pretty_paths
+                    .select(options.code_path_style),
+            ),
+            WrapKind::Esm => wrap_esm_stmts(
+                &repr.ast,
+                body,
+                converted.outside_wrapper_prefix,
+                runtime_refs.esm_ref,
+                options,
+                file.input_file
+                    .source
+                    .pretty_paths
+                    .select(options.code_path_style),
+                repr.meta.is_async_or_has_async_dependency,
+            ),
+            WrapKind::None => panic!("wrapper marker requires a wrapper kind"),
+        }
+    } else {
+        let mut statements = converted.outside_wrapper_prefix;
+        statements.extend(body);
+        statements
+    };
+
+    let mut tree = repr.ast.clone();
+    tree.directives.clear();
+    tree.hashbang.clear();
+    tree.parts = vec![js_ast::Part {
+        statements,
+        ..js_ast::Part::default()
+    }];
+    let printed = crate::internal::js_printer::print(
+        &tree,
+        renamer,
+        crate::internal::js_printer::Options {
+            unsupported_features: options.unsupported_js_features,
+            line_limit: options.line_limit,
+            minify_syntax: options.minify_syntax,
+            minify_whitespace: options.minify_whitespace,
+            ascii_only: options.ascii_only,
+        },
+    );
+    CompiledPartRange {
+        source_index: part_range.source_index,
+        js: printed.js,
+    }
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -3748,21 +3917,22 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::{
-        AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, CrossChunkImport,
-        CrossChunkImportItem, ImportStatus, ImportTracker, MatchImportKind, OutputPathContext,
-        OutputPiece, OutputPieceIndexKind, PartRange, RuntimeReExportContext, StableRef,
-        add_exports_for_export_star, advance_import_tracker, append_or_extend_part_range,
-        assign_chunk_path_templates, bind_imports_to_exports_for_file, classify_module_wrappers,
-        compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
-        convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
-        finalize_chunk_paths, generate_cross_chunk_stmts, generate_isolated_hash,
-        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
-        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
-        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
-        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
+        AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, ChunkRuntimeRefs,
+        CrossChunkImport, CrossChunkImportItem, ImportStatus, ImportTracker, MatchImportKind,
+        OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, RuntimeReExportContext,
+        StableRef, add_exports_for_export_star, advance_import_tracker,
+        append_or_extend_part_range, assign_chunk_path_templates, bind_imports_to_exports_for_file,
+        classify_module_wrappers, compile_part_range_for_chunk, compute_cross_chunk_dependencies,
+        compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
+        create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
+        generate_cross_chunk_stmts, generate_isolated_hash, has_dynamic_exports_due_to_export_star,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
+        merge_adjacent_local_stmts, path_between_chunks, print_cross_chunk_bindings,
+        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
+        wrap_common_js_stmts, wrap_esm_stmts,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -4833,6 +5003,117 @@ mod tests {
             panic!("combined declaration");
         };
         assert_eq!(combined.declarations.len(), 2);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn part_range_compilation_filters_dead_parts_and_emits_wrappers() {
+        let input_files = [js_file(js_ast::Ast {
+            parts: vec![
+                js_ast::Part::default(),
+                js_ast::Part {
+                    statements: vec![js_ast::Stmt::new(
+                        Loc::default(),
+                        js_ast::StmtData::Expr(js_ast::ExprStmt {
+                            value: js_ast::Expr::new(Loc::default(), js_ast::ExprData::Number(1.0)),
+                            ..js_ast::ExprStmt::default()
+                        }),
+                    )],
+                    is_live: true,
+                    ..js_ast::Part::default()
+                },
+                js_ast::Part {
+                    statements: vec![js_ast::Stmt::new(
+                        Loc::default(),
+                        js_ast::StmtData::Expr(js_ast::ExprStmt {
+                            value: js_ast::Expr::new(Loc::default(), js_ast::ExprData::Number(2.0)),
+                            ..js_ast::ExprStmt::default()
+                        }),
+                    )],
+                    ..js_ast::Part::default()
+                },
+            ],
+            ..js_ast::Ast::default()
+        })];
+        let graph = clone_linker_graph(&input_files, &[0], &[], false);
+        let renamer = crate::internal::renamer::new_no_op_renamer(graph.symbols.clone());
+        let result = compile_part_range_for_chunk(
+            &graph,
+            &Options {
+                mode: Mode::Bundle,
+                ..Options::default()
+            },
+            PartRange {
+                source_index: 0,
+                part_index_begin: 1,
+                part_index_end: 3,
+            },
+            ChunkRuntimeRefs::default(),
+            &renamer,
+        );
+        assert_eq!(result.js, b"1;\n");
+
+        let wrapper_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let runtime_ref = Ref {
+            source_index: 0,
+            inner_index: 1,
+        };
+        let input_files = [js_file(js_ast::Ast {
+            symbols: vec![
+                Symbol::new(SymbolKind::Other, "require_file"),
+                Symbol::new(SymbolKind::Other, "__commonJS"),
+            ],
+            wrapper_ref,
+            parts: vec![
+                js_ast::Part::default(),
+                js_ast::Part {
+                    statements: vec![js_ast::Stmt::new(
+                        Loc::default(),
+                        js_ast::StmtData::Expr(js_ast::ExprStmt {
+                            value: js_ast::Expr::new(Loc::default(), js_ast::ExprData::Number(1.0)),
+                            ..js_ast::ExprStmt::default()
+                        }),
+                    )],
+                    is_live: true,
+                    ..js_ast::Part::default()
+                },
+                js_ast::Part {
+                    is_live: true,
+                    ..js_ast::Part::default()
+                },
+            ],
+            ..js_ast::Ast::default()
+        })];
+        let mut graph = clone_linker_graph(&input_files, &[0], &[], false);
+        let Some(InputFileRepr::Js(repr)) = graph.files[0].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta.wrap = WrapKind::Cjs;
+        repr.meta.wrapper_part_index = Index32::new(2);
+        let renamer = crate::internal::renamer::new_no_op_renamer(graph.symbols.clone());
+        let result = compile_part_range_for_chunk(
+            &graph,
+            &Options {
+                mode: Mode::Bundle,
+                ..Options::default()
+            },
+            PartRange {
+                source_index: 0,
+                part_index_begin: 0,
+                part_index_end: 3,
+            },
+            ChunkRuntimeRefs {
+                common_js_ref: runtime_ref,
+                ..ChunkRuntimeRefs::default()
+            },
+            &renamer,
+        );
+        let output = String::from_utf8(result.js).expect("UTF-8");
+        assert!(output.contains("var require_file = __commonJS("));
+        assert!(output.contains("1;"));
     }
 
     #[test]
