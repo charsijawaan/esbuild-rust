@@ -1,16 +1,22 @@
 //! Port of upstream `internal/resolver`.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::internal::{
-    config::{TsAlwaysStrict, TsConfig, TsConfigJsx},
-    fs::DifferentCase,
-    js_ast::ModuleTypeData,
-    logger::{LineColumnTracker, Loc, Log, Msg, MsgData, MsgKind, Path, Range, Source},
+    config::{
+        MaybeBool, TsAlwaysStrict, TsConfig, TsConfigJsx, TsImportsNotUsedAsValues, TsJsx, TsTarget,
+    },
+    fs::{DifferentCase, Fs},
+    helpers::{is_inside_node_modules, utf16_to_string},
+    js_ast::{Expr, ExprData, ModuleTypeData},
+    js_lexer::{JsonFlavor, range_of_identifier},
+    js_parser::{JsonOptions, parse_json},
+    logger::{LineColumnTracker, Loc, Log, Msg, MsgData, MsgId, MsgKind, Path, Range, Source},
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -115,6 +121,497 @@ impl DebugMeta {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TsConfigJson {
+    pub abs_path: String,
+    pub base_url: Option<String>,
+    pub base_url_for_paths: String,
+    pub paths: Option<TsConfigPaths>,
+    ts_target_key: TsTargetKey,
+    pub ts_strict: Option<TsAlwaysStrict>,
+    pub ts_always_strict: Option<TsAlwaysStrict>,
+    pub jsx_settings: TsConfigJsx,
+    pub settings: TsConfig,
+}
+
+impl TsConfigJson {
+    pub fn apply_extended_config(&mut self, base: &Self) {
+        if base.ts_target_key.range.len > 0 {
+            self.ts_target_key.clone_from(&base.ts_target_key);
+        }
+        if base.ts_strict.is_some() {
+            self.ts_strict.clone_from(&base.ts_strict);
+        }
+        if base.ts_always_strict.is_some() {
+            self.ts_always_strict.clone_from(&base.ts_always_strict);
+        }
+        if base.base_url.is_some() {
+            self.base_url.clone_from(&base.base_url);
+        }
+        if base.paths.is_some() {
+            self.paths.clone_from(&base.paths);
+            self.base_url_for_paths.clone_from(&base.base_url_for_paths);
+        }
+        self.jsx_settings.apply_extended_config(&base.jsx_settings);
+        self.settings.apply_extended_config(base.settings);
+    }
+
+    #[must_use]
+    pub fn ts_always_strict_or_strict(&self) -> Option<&TsAlwaysStrict> {
+        self.ts_always_strict.as_ref().or(self.ts_strict.as_ref())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+struct TsTargetKey {
+    lower_value: String,
+    source: Source,
+    range: Range,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TsConfigPath {
+    pub text: String,
+    pub loc: Loc,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TsConfigPaths {
+    pub map: HashMap<String, Vec<TsConfigPath>>,
+    pub source: Source,
+}
+
+type ExtendsCallback<'a> = dyn FnMut(&str, Range) -> Option<TsConfigJson> + 'a;
+
+#[allow(clippy::too_many_lines)]
+pub fn parse_tsconfig_json(
+    log: &Log,
+    source: &Source,
+    file_system: &dyn Fs,
+    file_dir: &str,
+    config_dir: &str,
+    mut extends: Option<&mut ExtendsCallback<'_>>,
+) -> Option<TsConfigJson> {
+    let (json, ok) = parse_json(
+        log.clone(),
+        source.clone(),
+        JsonOptions {
+            flavor: JsonFlavor::TsConfigJson,
+            ..JsonOptions::default()
+        },
+    );
+    if !ok {
+        return None;
+    }
+
+    let mut result = TsConfigJson {
+        abs_path: source.key_path.text.clone(),
+        ..TsConfigJson::default()
+    };
+    let mut tracker = LineColumnTracker::new(Some(source));
+
+    if let Some(callback) = extends.as_mut()
+        && let Some((value, _)) = get_property(&json, "extends")
+    {
+        match value.data.as_deref() {
+            Some(ExprData::String(_)) => {
+                if let Some(text) = get_string(value)
+                    && let Some(base) = callback(&text, source.range_of_string(value.loc))
+                {
+                    result.apply_extended_config(&base);
+                }
+            }
+            Some(ExprData::Array(array)) => {
+                for item in &array.items {
+                    if let Some(text) = get_string(item)
+                        && let Some(base) = callback(&text, source.range_of_string(item.loc))
+                    {
+                        result.apply_extended_config(&base);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some((compiler_options, _)) = get_property(&json, "compilerOptions") {
+        if let Some((value, _)) = get_property(compiler_options, "baseUrl")
+            && let Some(mut text) = get_string(value)
+        {
+            text = substituted_path_with_config_dir_template(file_system, &text, config_dir);
+            if !file_system.is_abs(&text) {
+                text = file_system.join(&[file_dir, &text]);
+            }
+            result.base_url = Some(text);
+        }
+
+        if let Some((value, _)) = get_property(compiler_options, "jsx")
+            && let Some(text) = get_string(value)
+        {
+            result.jsx_settings.jsx = match text.to_lowercase().as_str() {
+                "preserve" => TsJsx::Preserve,
+                "react-native" => TsJsx::ReactNative,
+                "react" => TsJsx::React,
+                "react-jsx" => TsJsx::ReactJsx,
+                "react-jsxdev" => TsJsx::ReactJsxDev,
+                _ => result.jsx_settings.jsx,
+            };
+        }
+
+        if let Some((value, _)) = get_property(compiler_options, "jsxFactory")
+            && let Some(text) = get_string(value)
+        {
+            result.jsx_settings.jsx_factory =
+                parse_member_expression_for_jsx(log, source, &mut tracker, value.loc, &text);
+        }
+        if let Some((value, _)) = get_property(compiler_options, "jsxFragmentFactory")
+            && let Some(text) = get_string(value)
+        {
+            result.jsx_settings.jsx_fragment_factory =
+                parse_member_expression_for_jsx(log, source, &mut tracker, value.loc, &text);
+        }
+        if let Some((value, _)) = get_property(compiler_options, "jsxImportSource")
+            && let Some(text) = get_string(value)
+        {
+            result.jsx_settings.jsx_import_source = Some(text);
+        }
+
+        if let Some((value, _)) = get_property(compiler_options, "experimentalDecorators")
+            && let Some(boolean) = get_bool(value)
+        {
+            result.settings.experimental_decorators = maybe_bool(boolean);
+        }
+        if let Some((value, _)) = get_property(compiler_options, "useDefineForClassFields")
+            && let Some(boolean) = get_bool(value)
+        {
+            result.settings.use_define_for_class_fields = maybe_bool(boolean);
+        }
+
+        if let Some((value, key_loc)) = get_property(compiler_options, "target")
+            && let Some(text) = get_string(value)
+        {
+            let lower_value = text.to_lowercase();
+            let target = match lower_value.as_str() {
+                "es3" | "es5" | "es6" | "es2015" | "es2016" | "es2017" | "es2018" | "es2019"
+                | "es2020" | "es2021" => Some(TsTarget::BelowEs2022),
+                "es2022" | "es2023" | "es2024" | "es2025" | "esnext" => {
+                    Some(TsTarget::AtOrAboveEs2022)
+                }
+                _ => None,
+            };
+            if let Some(target) = target {
+                result.settings.target = target;
+                result.ts_target_key = TsTargetKey {
+                    source: source.clone(),
+                    range: source.range_of_string(key_loc),
+                    lower_value,
+                };
+            } else if !is_inside_node_modules(&source.key_path.text) {
+                log.add_id(
+                    MsgId::TsConfigJsonInvalidTarget,
+                    MsgKind::Warning,
+                    Some(&mut tracker),
+                    source.range_of_string(value.loc),
+                    format!("Unrecognized target environment {text:?}"),
+                );
+            }
+        }
+
+        if let Some((value, key_loc)) = get_property(compiler_options, "strict")
+            && let Some(boolean) = get_bool(value)
+        {
+            let value_range = range_of_identifier(source, value.loc);
+            result.ts_strict = Some(TsAlwaysStrict {
+                name: "strict".into(),
+                value: boolean,
+                source: source.clone(),
+                range: Range {
+                    loc: key_loc,
+                    len: value_range.end() - key_loc.start,
+                },
+            });
+        }
+        if let Some((value, key_loc)) = get_property(compiler_options, "alwaysStrict")
+            && let Some(boolean) = get_bool(value)
+        {
+            let value_range = range_of_identifier(source, value.loc);
+            result.ts_always_strict = Some(TsAlwaysStrict {
+                name: "alwaysStrict".into(),
+                value: boolean,
+                source: source.clone(),
+                range: Range {
+                    loc: key_loc,
+                    len: value_range.end() - key_loc.start,
+                },
+            });
+        }
+
+        if let Some((value, _)) = get_property(compiler_options, "importsNotUsedAsValues")
+            && let Some(text) = get_string(value)
+        {
+            match text.as_str() {
+                "remove" => {
+                    result.settings.imports_not_used_as_values = TsImportsNotUsedAsValues::Remove;
+                }
+                "preserve" => {
+                    result.settings.imports_not_used_as_values = TsImportsNotUsedAsValues::Preserve;
+                }
+                "error" => {
+                    result.settings.imports_not_used_as_values = TsImportsNotUsedAsValues::Error;
+                }
+                _ => {
+                    log.add_id(
+                        MsgId::TsConfigJsonInvalidImportsNotUsedAsValues,
+                        MsgKind::Warning,
+                        Some(&mut tracker),
+                        source.range_of_string(value.loc),
+                        format!("Invalid value {text:?} for \"importsNotUsedAsValues\""),
+                    );
+                }
+            }
+        }
+        if let Some((value, _)) = get_property(compiler_options, "preserveValueImports")
+            && let Some(boolean) = get_bool(value)
+        {
+            result.settings.preserve_value_imports = maybe_bool(boolean);
+        }
+        if let Some((value, _)) = get_property(compiler_options, "verbatimModuleSyntax")
+            && let Some(boolean) = get_bool(value)
+        {
+            result.settings.verbatim_module_syntax = maybe_bool(boolean);
+        }
+
+        if let Some((value, _)) = get_property(compiler_options, "paths")
+            && let Some(ExprData::Object(paths)) = value.data.as_deref()
+        {
+            let mut parsed_paths = TsConfigPaths {
+                source: source.clone(),
+                ..TsConfigPaths::default()
+            };
+            result.base_url_for_paths = file_dir.to_string();
+            for property in &paths.properties {
+                let Some(key) = get_string(&property.key) else {
+                    continue;
+                };
+                if !is_valid_tsconfig_path_pattern(
+                    &key,
+                    log,
+                    source,
+                    &mut tracker,
+                    property.key.loc,
+                ) {
+                    continue;
+                }
+                if let Some(ExprData::Array(array)) = property.value_or_nil.data.as_deref() {
+                    for item in &array.items {
+                        if let Some(mut text) = get_string(item)
+                            && is_valid_tsconfig_path_pattern(
+                                &text,
+                                log,
+                                source,
+                                &mut tracker,
+                                item.loc,
+                            )
+                        {
+                            text = substituted_path_with_config_dir_template(
+                                file_system,
+                                &text,
+                                config_dir,
+                            );
+                            parsed_paths
+                                .map
+                                .entry(key.clone())
+                                .or_default()
+                                .push(TsConfigPath {
+                                    text,
+                                    loc: item.loc,
+                                });
+                        }
+                    }
+                } else {
+                    log.add_id(
+                        MsgId::TsConfigJsonInvalidPaths,
+                        MsgKind::Warning,
+                        Some(&mut tracker),
+                        source.range_of_string(property.value_or_nil.loc),
+                        format!("Substitutions for pattern {key:?} should be an array"),
+                    );
+                }
+            }
+            result.paths = Some(parsed_paths);
+        }
+    }
+
+    if let Some(ExprData::Object(object)) = json.data.as_deref() {
+        'properties: for property in &object.properties {
+            let Some(key) = get_string(&property.key) else {
+                continue;
+            };
+            if matches!(
+                key.as_str(),
+                "alwaysStrict"
+                    | "baseUrl"
+                    | "experimentalDecorators"
+                    | "importsNotUsedAsValues"
+                    | "jsx"
+                    | "jsxFactory"
+                    | "jsxFragmentFactory"
+                    | "jsxImportSource"
+                    | "paths"
+                    | "preserveValueImports"
+                    | "strict"
+                    | "target"
+                    | "useDefineForClassFields"
+                    | "verbatimModuleSyntax"
+            ) {
+                log.add_id_with_notes(
+                    MsgId::TsConfigJsonInvalidTopLevelOption,
+                    MsgKind::Warning,
+                    Some(&mut tracker),
+                    source.range_of_string(property.key.loc),
+                    format!(
+                        "Expected the {key:?} option to be nested inside a \"compilerOptions\" object"
+                    ),
+                    Vec::new(),
+                );
+                break 'properties;
+            }
+        }
+    }
+
+    Some(result)
+}
+
+#[must_use]
+pub fn substituted_path_with_config_dir_template(
+    file_system: &dyn Fs,
+    value: &str,
+    base_path: &str,
+) -> String {
+    value.strip_prefix("${configDir}").map_or_else(
+        || value.to_string(),
+        |suffix| file_system.join(&[base_path, &format!("./{suffix}")]),
+    )
+}
+
+fn parse_member_expression_for_jsx(
+    log: &Log,
+    source: &Source,
+    tracker: &mut LineColumnTracker,
+    location: Loc,
+    text: &str,
+) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let parts: Vec<String> = text.split('.').map(str::to_string).collect();
+    if parts
+        .iter()
+        .any(|part| !crate::internal::js_ast::is_identifier(part))
+    {
+        log.add_id(
+            MsgId::TsConfigJsonInvalidJsx,
+            MsgKind::Warning,
+            Some(tracker),
+            source.range_of_string(location),
+            format!("Invalid JSX member expression: {text:?}"),
+        );
+        return Vec::new();
+    }
+    parts
+}
+
+fn is_valid_tsconfig_path_pattern(
+    text: &str,
+    log: &Log,
+    source: &Source,
+    tracker: &mut LineColumnTracker,
+    location: Loc,
+) -> bool {
+    if text.bytes().filter(|&byte| byte == b'*').count() <= 1 {
+        return true;
+    }
+    log.add_id(
+        MsgId::TsConfigJsonInvalidPaths,
+        MsgKind::Warning,
+        Some(tracker),
+        source.range_of_string(location),
+        format!("Invalid pattern {text:?}, must have at most one \"*\" character"),
+    );
+    false
+}
+
+#[allow(dead_code)]
+fn is_slash(byte: u8) -> bool {
+    matches!(byte, b'/' | b'\\')
+}
+
+#[allow(dead_code)]
+fn is_valid_tsconfig_path_no_base_url_pattern(
+    text: &str,
+    log: &Log,
+    source: &Source,
+    tracker: &mut Option<LineColumnTracker>,
+    location: Loc,
+) -> bool {
+    let bytes = text.as_bytes();
+    let c0 = bytes.first().copied().unwrap_or_default();
+    let c1 = bytes.get(1).copied().unwrap_or_default();
+    let c2 = bytes.get(2).copied().unwrap_or_default();
+    let length = bytes.len();
+    if (c0 == b'.' && (length == 1 || (length == 2 && c1 == b'.')))
+        || (c0 == b'.' && (is_slash(c1) || (c1 == b'.' && is_slash(c2))))
+        || is_slash(c0)
+        || (c0.is_ascii_alphabetic() && c1 == b':' && is_slash(c2))
+    {
+        return true;
+    }
+    let tracker = tracker.get_or_insert_with(|| LineColumnTracker::new(Some(source)));
+    log.add_id(
+        MsgId::TsConfigJsonInvalidPaths,
+        MsgKind::Warning,
+        Some(tracker),
+        source.range_of_string(location),
+        format!(
+            "Non-relative path {text:?} is not allowed when \"baseUrl\" is not set (did you forget a leading \"./\"?)"
+        ),
+    );
+    false
+}
+
+fn get_property<'a>(expression: &'a Expr, name: &str) -> Option<(&'a Expr, Loc)> {
+    let ExprData::Object(object) = expression.data.as_deref()? else {
+        return None;
+    };
+    object.properties.iter().find_map(|property| {
+        (get_string(&property.key).as_deref() == Some(name))
+            .then_some((&property.value_or_nil, property.key.loc))
+    })
+}
+
+fn get_string(expression: &Expr) -> Option<String> {
+    let ExprData::String(string) = expression.data.as_deref()? else {
+        return None;
+    };
+    Some(String::from_utf8_lossy(&utf16_to_string(&string.value)).into_owned())
+}
+
+fn get_bool(expression: &Expr) -> Option<bool> {
+    let ExprData::Boolean(value) = expression.data.as_deref()? else {
+        return None;
+    };
+    Some(*value)
+}
+
+const fn maybe_bool(value: bool) -> MaybeBool {
+    if value {
+        MaybeBool::True
+    } else {
+        MaybeBool::False
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataUrl {
     mime_type: String,
@@ -215,8 +712,15 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use super::{DataUrl, DebugMeta, MimeType, PathPair};
-    use crate::internal::logger::{DeferLogKind, Loc, Log, Path, PrettyPaths, Range, Source};
+    use super::{
+        DataUrl, DebugMeta, MimeType, PathPair, TsConfigJson,
+        is_valid_tsconfig_path_no_base_url_pattern, parse_tsconfig_json,
+    };
+    use crate::internal::{
+        config::{MaybeBool, TsJsx, TsTarget},
+        fs::{MockKind, mock_fs},
+        logger::{DeferLogKind, Loc, Log, Path, PrettyPaths, Range, Source},
+    };
 
     #[test]
     fn path_pair_iterates_primary_and_optional_secondary() {
@@ -306,5 +810,123 @@ mod tests {
                 .suggestion,
             "'good'"
         );
+    }
+
+    #[test]
+    fn parses_tsconfig_settings_paths_and_extends_in_order() {
+        let contents = r#"{
+          "extends": ["base", "second"],
+          "compilerOptions": {
+            "baseUrl": "${configDir}/src",
+            "jsx": "react-jsx",
+            "jsxFactory": "React.createElement",
+            "experimentalDecorators": true,
+            "useDefineForClassFields": false,
+            "target": "ES2022",
+            "strict": true,
+            "importsNotUsedAsValues": "preserve",
+            "preserveValueImports": true,
+            "verbatimModuleSyntax": true,
+            "paths": {
+              "@/*": ["${configDir}/lib/*"],
+              "invalid**": ["ignored"]
+            }
+          }
+        }"#;
+        let source = Source {
+            key_path: Path {
+                text: "/project/tsconfig.json".into(),
+                ..Path::default()
+            },
+            pretty_paths: PrettyPaths {
+                abs: "/project/tsconfig.json".into(),
+                rel: "tsconfig.json".into(),
+            },
+            contents: Arc::from(contents.as_bytes()),
+            ..Source::default()
+        };
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut seen = Vec::new();
+        let mut extends = |path: &str, _range: Range| {
+            seen.push(path.to_string());
+            Some(TsConfigJson {
+                settings: crate::internal::config::TsConfig {
+                    experimental_decorators: MaybeBool::False,
+                    ..crate::internal::config::TsConfig::default()
+                },
+                ..TsConfigJson::default()
+            })
+        };
+
+        let config = parse_tsconfig_json(
+            &log,
+            &source,
+            &file_system,
+            "/project",
+            "/configs",
+            Some(&mut extends),
+        )
+        .expect("valid tsconfig");
+
+        assert_eq!(seen, vec!["base", "second"]);
+        assert_eq!(config.base_url.as_deref(), Some("/configs/src"));
+        assert_eq!(config.jsx_settings.jsx, TsJsx::ReactJsx);
+        assert_eq!(
+            config.jsx_settings.jsx_factory,
+            vec!["React", "createElement"]
+        );
+        assert_eq!(config.settings.experimental_decorators, MaybeBool::True);
+        assert_eq!(
+            config.settings.use_define_for_class_fields,
+            MaybeBool::False
+        );
+        assert_eq!(config.settings.target, TsTarget::AtOrAboveEs2022);
+        assert!(config.ts_always_strict_or_strict().is_some_and(|x| x.value));
+        assert_eq!(
+            config
+                .paths
+                .as_ref()
+                .expect("paths")
+                .map
+                .get("@/*")
+                .expect("mapping")[0]
+                .text,
+            "/configs/lib/*"
+        );
+        assert!(
+            !config
+                .paths
+                .as_ref()
+                .expect("paths")
+                .map
+                .contains_key("invalid**")
+        );
+        assert_eq!(log.done().len(), 1);
+    }
+
+    #[test]
+    fn validates_paths_without_base_url_like_typescript() {
+        let source = Source {
+            contents: Arc::from(&b"\"package\""[..]),
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut tracker = None;
+        assert!(is_valid_tsconfig_path_no_base_url_pattern(
+            "../generated/*",
+            &log,
+            &source,
+            &mut tracker,
+            Loc::default()
+        ));
+        assert!(!is_valid_tsconfig_path_no_base_url_pattern(
+            "package/*",
+            &log,
+            &source,
+            &mut tracker,
+            Loc::default()
+        ));
+        assert_eq!(log.done().len(), 1);
     }
 }
