@@ -749,6 +749,24 @@ impl Printer<'_> {
                         self.print_indent();
                     }
                     self.output.extend_from_slice(b"else");
+                    if self.options.minify_whitespace
+                        && matches!(
+                            if_statement.no_or_nil.data.as_deref(),
+                            Some(
+                                StmtData::If(_)
+                                    | StmtData::While(_)
+                                    | StmtData::With(_)
+                                    | StmtData::DoWhile(_)
+                                    | StmtData::For(_)
+                                    | StmtData::ForIn(_)
+                                    | StmtData::ForOf(_)
+                                    | StmtData::Try(_)
+                                    | StmtData::Switch(_)
+                            )
+                        )
+                    {
+                        self.output.push(b' ');
+                    }
                     self.print_if_body(
                         &if_statement.no_or_nil,
                         if_statement.is_single_line_no,
@@ -777,6 +795,14 @@ impl Printer<'_> {
             StmtData::DoWhile(do_while) => {
                 self.print_indent();
                 self.output.extend_from_slice(b"do");
+                if self.options.minify_whitespace
+                    && !matches!(
+                        do_while.body.data.as_deref(),
+                        None | Some(StmtData::Empty | StmtData::Block(_))
+                    )
+                {
+                    self.output.push(b' ');
+                }
                 self.print_body(&do_while.body);
                 self.output.extend_from_slice(b"while");
                 self.print_optional_space();
@@ -1088,7 +1114,7 @@ impl Printer<'_> {
                 )
             )
         {
-            self.output.push(b' ');
+            self.print_optional_space();
             let indent = std::mem::take(&mut self.indent);
             self.print_stmt(body);
             self.indent = indent;

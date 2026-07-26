@@ -3775,6 +3775,16 @@ mod tests {
             )),
             "if (false) console.log(\"x\");\n"
         );
+        assert_eq!(
+            code(transform(
+                "if(a){b()}else if(c)d();while(y)z();do q();while(r)",
+                TransformOptions {
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "if(a){b()}else if(c)d();while(y)z();do q();while(r);\n"
+        );
     }
 
     #[test]
