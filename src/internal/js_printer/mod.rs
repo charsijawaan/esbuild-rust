@@ -2,7 +2,9 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use crate::internal::ast::{INVALID_REF, ImportPhase, ImportRecord, Ref};
+use crate::internal::ast::{
+    INVALID_REF, ImportKind, ImportPhase, ImportRecord, ImportRecordFlags, Ref,
+};
 use crate::internal::compat::JsFeature;
 use crate::internal::config::{LegalComments, MetafileFormat};
 use crate::internal::helpers::{escape_closing_tag, quote_for_json};
@@ -42,6 +44,14 @@ pub struct RequireOrImportMeta {
     pub wrapper_ref: Ref,
     pub exports_ref: Ref,
     pub is_wrapper_async: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct LinkerOptions<'a> {
+    pub require_or_import_meta_for_source: &'a dyn Fn(u32) -> RequireOrImportMeta,
+    pub to_common_js_ref: Ref,
+    pub to_esm_ref: Ref,
+    pub runtime_require_ref: Ref,
 }
 
 impl Default for RequireOrImportMeta {
@@ -410,6 +420,8 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
         output: Vec::new(),
         renamer,
         options,
+        linker_options: None,
+        module_type_is_esm: false,
         indent: options.indent,
         import_records: &[],
         has_legal_comment: HashSet::new(),
@@ -437,7 +449,18 @@ pub struct PrintResult {
 /// ported.
 #[must_use]
 pub fn print(tree: &Ast, renamer: &dyn Renamer, options: Options) -> PrintResult {
-    print_internal(tree, renamer, options, None)
+    print_internal(tree, renamer, options, None, None)
+}
+
+/// Print JavaScript using linker metadata to lower internal imports.
+#[must_use]
+pub fn print_linked(
+    tree: &Ast,
+    renamer: &dyn Renamer,
+    options: Options,
+    linker_options: LinkerOptions<'_>,
+) -> PrintResult {
+    print_internal(tree, renamer, options, Some(linker_options), None)
 }
 
 /// Print JavaScript while recording a reusable per-file source-map chunk.
@@ -457,6 +480,7 @@ pub fn print_with_source_map(
         tree,
         renamer,
         options,
+        None,
         Some(make_chunk_builder(
             input_source_map,
             line_offset_tables,
@@ -465,16 +489,42 @@ pub fn print_with_source_map(
     )
 }
 
-fn print_internal(
+/// Print linked JavaScript while recording a reusable per-file source-map chunk.
+#[must_use]
+pub fn print_linked_with_source_map(
     tree: &Ast,
     renamer: &dyn Renamer,
     options: Options,
+    linker_options: LinkerOptions<'_>,
+    input_source_map: Option<Arc<SourceMap>>,
+    line_offset_tables: Vec<LineOffsetTable>,
+) -> PrintResult {
+    print_internal(
+        tree,
+        renamer,
+        options,
+        Some(linker_options),
+        Some(make_chunk_builder(
+            input_source_map,
+            line_offset_tables,
+            options.ascii_only,
+        )),
+    )
+}
+
+fn print_internal<'a>(
+    tree: &'a Ast,
+    renamer: &'a dyn Renamer,
+    options: Options,
+    linker_options: Option<LinkerOptions<'a>>,
     source_map_builder: Option<ChunkBuilder>,
 ) -> PrintResult {
     let mut printer = Printer {
         output: Vec::new(),
         renamer,
         options,
+        linker_options,
+        module_type_is_esm: tree.module_type_data.module_type.is_esm(),
         indent: options.indent,
         import_records: &tree.import_records,
         has_legal_comment: HashSet::new(),
@@ -520,6 +570,8 @@ struct Printer<'a> {
     output: Vec<u8>,
     renamer: &'a dyn Renamer,
     options: Options,
+    linker_options: Option<LinkerOptions<'a>>,
+    module_type_is_esm: bool,
     indent: usize,
     import_records: &'a [ImportRecord],
     has_legal_comment: HashSet<String>,
@@ -1669,9 +1721,11 @@ impl Printer<'_> {
             ExprData::Class(class) => self.print_class(&class.class),
             ExprData::Template(template) => self.print_template(template),
             ExprData::RequireString(require) => {
-                self.output.extend_from_slice(b"require(");
-                self.print_import_path(require.import_record_index, true);
-                self.output.push(b')');
+                if !self.print_linked_require_or_import(require.import_record_index, level) {
+                    self.output.extend_from_slice(b"require(");
+                    self.print_import_path(require.import_record_index, true);
+                    self.output.push(b')');
+                }
             }
             ExprData::RequireResolveString(require) => {
                 self.output.extend_from_slice(b"require.resolve(");
@@ -1679,13 +1733,15 @@ impl Printer<'_> {
                 self.output.push(b')');
             }
             ExprData::ImportString(import) => {
-                let phase = self.import_records
-                    [usize::try_from(import.import_record_index).expect("import record index")]
-                .phase;
-                self.print_import_start(phase);
-                self.print_import_path(import.import_record_index, false);
-                self.print_import_attributes(import.import_record_index, true);
-                self.output.push(b')');
+                if !self.print_linked_require_or_import(import.import_record_index, level) {
+                    let phase = self.import_records
+                        [usize::try_from(import.import_record_index).expect("import record index")]
+                    .phase;
+                    self.print_import_start(phase);
+                    self.print_import_path(import.import_record_index, false);
+                    self.print_import_attributes(import.import_record_index, true);
+                    self.output.push(b')');
+                }
             }
             ExprData::ImportCall(import) => {
                 self.print_import_start(import.phase);
@@ -1703,6 +1759,121 @@ impl Printer<'_> {
         if wrap {
             self.output.push(b')');
         }
+    }
+
+    fn print_linked_require_or_import(
+        &mut self,
+        import_record_index: u32,
+        level: Precedence,
+    ) -> bool {
+        let Some(linker_options) = self.linker_options else {
+            return false;
+        };
+        let record = self.import_records
+            [usize::try_from(import_record_index).expect("import record index")]
+        .clone();
+        if !record.source_index.is_valid() {
+            return false;
+        }
+        let meta =
+            (linker_options.require_or_import_meta_for_source)(record.source_index.get_index());
+
+        if record.kind == ImportKind::Dynamic && meta.is_wrapper_async {
+            self.print_symbol(meta.wrapper_ref);
+            self.output.extend_from_slice(b"()");
+            if meta.exports_ref != INVALID_REF {
+                self.print_then_prefix();
+                self.print_symbol(meta.exports_ref);
+                self.print_then_suffix();
+            }
+            return true;
+        }
+
+        let expression_level = if record.kind == ImportKind::Dynamic {
+            self.output.extend_from_slice(b"Promise.resolve()");
+            self.print_then_prefix()
+        } else {
+            level
+        };
+        let wrap_comma = meta.exports_ref != INVALID_REF && expression_level >= Precedence::Comma;
+        if wrap_comma {
+            self.output.push(b'(');
+        }
+
+        let wrap_with_to_esm = record.flags.contains(ImportRecordFlags::WRAP_WITH_TO_ESM);
+        if wrap_with_to_esm {
+            self.print_symbol(linker_options.to_esm_ref);
+            self.output.push(b'(');
+        }
+
+        self.print_symbol(meta.wrapper_ref);
+        self.output.extend_from_slice(b"()");
+        if meta.exports_ref != INVALID_REF {
+            self.output.push(b',');
+            self.print_optional_space();
+            let wrap_with_to_cjs = record.flags.contains(ImportRecordFlags::WRAP_WITH_TO_CJS);
+            if wrap_with_to_cjs {
+                self.print_symbol(linker_options.to_common_js_ref);
+                self.output.push(b'(');
+            }
+            self.print_symbol(meta.exports_ref);
+            if wrap_with_to_cjs {
+                self.output.push(b')');
+            }
+        }
+
+        if wrap_with_to_esm {
+            if self.module_type_is_esm {
+                self.output.push(b',');
+                self.print_optional_space();
+                self.output.push(b'1');
+            }
+            self.output.push(b')');
+        }
+        if wrap_comma {
+            self.output.push(b')');
+        }
+        if record.kind == ImportKind::Dynamic {
+            self.print_then_suffix();
+        }
+        true
+    }
+
+    fn print_then_prefix(&mut self) -> Precedence {
+        if self.options.unsupported_features.contains(JsFeature::ARROW) {
+            self.output.extend_from_slice(b".then(function()");
+            self.print_optional_space();
+            self.output.push(b'{');
+            self.print_newline();
+            self.indent += 1;
+            self.print_indent();
+            self.output.extend_from_slice(b"return ");
+            Precedence::Lowest
+        } else {
+            self.output.extend_from_slice(b".then(()");
+            self.print_optional_space();
+            self.output.extend_from_slice(b"=>");
+            self.print_optional_space();
+            Precedence::Comma
+        }
+    }
+
+    fn print_then_suffix(&mut self) {
+        if self.options.unsupported_features.contains(JsFeature::ARROW) {
+            if !self.options.minify_whitespace {
+                self.output.push(b';');
+            }
+            self.print_newline();
+            self.indent -= 1;
+            self.print_indent();
+            self.output.extend_from_slice(b"})");
+        } else {
+            self.output.push(b')');
+        }
+    }
+
+    fn print_symbol(&mut self, reference: Ref) {
+        self.print_identifier(&self.renamer.name_for_symbol(reference));
     }
 
     fn print_arguments(&mut self, arguments: &[Expr]) {
@@ -1990,15 +2161,15 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use super::{
-        Options, format_non_negative_float, format_number, print, print_expr,
-        print_with_source_map, quote_identifier, quote_utf16,
+        LinkerOptions, Options, RequireOrImportMeta, format_non_negative_float, format_number,
+        print, print_expr, print_linked, print_with_source_map, quote_identifier, quote_utf16,
     };
     use crate::internal::{
-        ast::SymbolMap,
+        ast::{INVALID_REF, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind, SymbolMap},
         compat::JsFeature,
         config::LegalComments,
         helpers::string_to_utf16,
-        js_ast::{Ast, CommentStmt, ExprData, Part, Precedence, Stmt, StmtData},
+        js_ast::{Ast, CommentStmt, ExprData, ModuleType, Part, Precedence, Stmt, StmtData},
         js_parser,
         logger::{DeferLogKind, Loc, Log, Source},
         renamer::new_no_op_renamer,
@@ -2039,6 +2210,136 @@ mod tests {
             )
             .js,
             b"    foo();\n"
+        );
+    }
+
+    #[test]
+    fn lowers_linked_require_and_import_expressions() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"const cjs = require('./cjs');\
+                  const esm = require('./esm');\
+                  import('./async');"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (mut ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 3);
+        for (index, record) in ast.import_records.iter_mut().enumerate() {
+            record.source_index =
+                Index32::new(u32::try_from(index + 1).expect("small source index"));
+        }
+        ast.import_records[1].flags |= ImportRecordFlags::WRAP_WITH_TO_CJS;
+
+        let refs = |source_index, inner_index| Ref {
+            source_index,
+            inner_index,
+        };
+        let mut symbols = SymbolMap::new(4);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        symbols.symbols_for_source[1] = vec![Symbol::new(SymbolKind::Other, "require_cjs")];
+        symbols.symbols_for_source[2] = vec![
+            Symbol::new(SymbolKind::Other, "init_esm"),
+            Symbol::new(SymbolKind::Other, "esm_exports"),
+        ];
+        symbols.symbols_for_source[3] = vec![
+            Symbol::new(SymbolKind::Other, "init_async"),
+            Symbol::new(SymbolKind::Other, "async_exports"),
+        ];
+        let to_common_js_ref = refs(0, u32::try_from(ast.symbols.len()).expect("symbol count"));
+        symbols.symbols_for_source[0].push(Symbol::new(SymbolKind::Other, "__toCommonJS"));
+        let renamer = new_no_op_renamer(symbols);
+        let metadata = |source_index| match source_index {
+            1 => RequireOrImportMeta {
+                wrapper_ref: refs(1, 0),
+                exports_ref: INVALID_REF,
+                is_wrapper_async: false,
+            },
+            2 => RequireOrImportMeta {
+                wrapper_ref: refs(2, 0),
+                exports_ref: refs(2, 1),
+                is_wrapper_async: false,
+            },
+            3 => RequireOrImportMeta {
+                wrapper_ref: refs(3, 0),
+                exports_ref: refs(3, 1),
+                is_wrapper_async: true,
+            },
+            _ => panic!("unexpected linked source"),
+        };
+
+        assert_eq!(
+            print_linked(
+                &ast,
+                &renamer,
+                Options::default(),
+                LinkerOptions {
+                    require_or_import_meta_for_source: &metadata,
+                    to_common_js_ref,
+                    to_esm_ref: INVALID_REF,
+                    runtime_require_ref: INVALID_REF,
+                },
+            )
+            .js,
+            b"const cjs = require_cjs();\n\
+              const esm = (init_esm(), __toCommonJS(esm_exports));\n\
+              init_async().then(() => async_exports);\n"
+        );
+    }
+
+    #[test]
+    fn converts_synchronous_dynamic_imports_to_resolved_promises() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(b"import('./cjs');".as_slice()),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (mut ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        ast.module_type_data.module_type = ModuleType::EsmMjs;
+        ast.import_records[0].source_index = Index32::new(1);
+        ast.import_records[0].flags |= ImportRecordFlags::WRAP_WITH_TO_ESM;
+
+        let wrapper_ref = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let to_esm_ref = Ref {
+            source_index: 0,
+            inner_index: u32::try_from(ast.symbols.len()).expect("symbol count"),
+        };
+        let mut symbols = SymbolMap::new(2);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        symbols.symbols_for_source[0].push(Symbol::new(SymbolKind::Other, "__toESM"));
+        symbols.symbols_for_source[1] = vec![Symbol::new(SymbolKind::Other, "require_cjs")];
+        let renamer = new_no_op_renamer(symbols);
+        let metadata = |_| RequireOrImportMeta {
+            wrapper_ref,
+            exports_ref: INVALID_REF,
+            is_wrapper_async: false,
+        };
+
+        assert_eq!(
+            print_linked(
+                &ast,
+                &renamer,
+                Options::default(),
+                LinkerOptions {
+                    require_or_import_meta_for_source: &metadata,
+                    to_common_js_ref: INVALID_REF,
+                    to_esm_ref,
+                    runtime_require_ref: INVALID_REF,
+                },
+            )
+            .js,
+            b"Promise.resolve().then(() => __toESM(require_cjs(), 1));\n"
         );
     }
 

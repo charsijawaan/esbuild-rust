@@ -6398,6 +6398,9 @@ pub fn wrap_esm_stmts(
 pub struct ChunkRuntimeRefs {
     pub common_js_ref: Ref,
     pub esm_ref: Ref,
+    pub to_common_js_ref: Ref,
+    pub to_esm_ref: Ref,
+    pub runtime_require_ref: Ref,
     pub re_export: Option<RuntimeReExportContext>,
 }
 
@@ -6560,13 +6563,22 @@ pub fn compile_part_range_for_chunk(
         needs_metafile: options.needs_metafile,
         metafile_format: options.metafile_format,
     };
+    let require_or_import_meta_for_source =
+        |source_index| require_or_import_meta_for_source(graph, source_index);
+    let linker_options = crate::internal::js_printer::LinkerOptions {
+        require_or_import_meta_for_source: &require_or_import_meta_for_source,
+        to_common_js_ref: runtime_refs.to_common_js_ref,
+        to_esm_ref: runtime_refs.to_esm_ref,
+        runtime_require_ref: runtime_refs.runtime_require_ref,
+    };
     let printed = if options.source_map == crate::internal::config::SourceMap::None {
-        crate::internal::js_printer::print(&tree, renamer, print_options)
+        crate::internal::js_printer::print_linked(&tree, renamer, print_options, linker_options)
     } else {
-        crate::internal::js_printer::print_with_source_map(
+        crate::internal::js_printer::print_linked_with_source_map(
             &tree,
             renamer,
             print_options,
+            linker_options,
             file.input_file
                 .input_source_map
                 .clone()
