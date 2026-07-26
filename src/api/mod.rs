@@ -3959,6 +3959,40 @@ mod tests {
             enum_code.ends_with("const f = (a, b) => ({ x: a, 1: b });\n"),
             "{enum_code}"
         );
+        assert_eq!(
+            code(transform(
+                r#"x["foo"];x["x-y"];x["default"]"#,
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "x.foo, x[\"x-y\"], x.default;\n"
+        );
+        assert_eq!(
+            code(transform(
+                r#"x?.["foo"];const g=()=>{x();return y}"#,
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "x?.foo;\nconst g = () => (x(), y);\n"
+        );
+        assert_eq!(
+            enum_code,
+            "var E = /* @__PURE__ */ ((E2) => (E2.X = \"x\", E2[E2.N = 1] = \"N\", E2))(E || {});\nconst f = (a, b) => ({ x: a, 1: b });\n"
+        );
+        assert_eq!(
+            code(transform(
+                "enum E { X = \"x\" };const value=E.X",
+                TransformOptions {
+                    loader: Loader::Ts,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var E = /* @__PURE__ */ ((E2) => {\n  E2[\"X\"] = \"x\";\n  return E2;\n})(E || {});\n;\nconst value = \"x\" /* X */;\n"
+        );
     }
 
     #[test]

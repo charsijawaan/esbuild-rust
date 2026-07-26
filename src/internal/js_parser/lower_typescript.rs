@@ -6,8 +6,8 @@ use crate::internal::{
         Arg, ArrowExpr, BinaryExpr, Binding, BindingData, BlockStmt, Decl, DotExpr, EnumStmt, Expr,
         ExprData, ExprStmt, FunctionBody, IdentifierBinding, IdentifierExpr, IndexExpr, LocalKind,
         LocalStmt, NamespaceStmt, ObjectExpr, OpCode, PrimitiveType, ReturnStmt, Stmt, StmtData,
-        StringExpr, convert_binding_to_expr, for_each_identifier_binding, known_primitive_type,
-        make_helper_context,
+        StringExpr, convert_binding_to_expr, for_each_identifier_binding, is_identifier,
+        join_with_comma, known_primitive_type, make_helper_context,
     },
     logger::Loc,
 };
@@ -342,6 +342,7 @@ fn lower_enum(
             value.loc,
             value.name,
             value.value_or_nil,
+            core.options.minify_syntax,
         ));
         core.record_usage(enumeration.argument);
     }
@@ -364,6 +365,7 @@ fn lower_enum(
             enclosing_namespace,
         ),
         all_values_are_pure,
+        core.options.minify_syntax,
     );
     if enclosing_namespace.is_none() || is_first_declaration {
         result.push(Stmt::new(
@@ -395,8 +397,15 @@ fn lower_enum(
     core.record_usage(enumeration.argument);
 }
 
-fn lower_enum_value(argument: Ref, loc: Loc, name: Vec<u16>, value: Expr) -> Stmt {
+fn lower_enum_value(
+    argument: Ref,
+    loc: Loc,
+    name: Vec<u16>,
+    value: Expr,
+    minify_syntax: bool,
+) -> Stmt {
     let is_string = known_primitive_type(value.data.as_deref()) == PrimitiveType::String;
+    let member_name = String::from_utf16_lossy(&name);
     let name = Expr::new(
         loc,
         ExprData::String(StringExpr {
@@ -404,14 +413,26 @@ fn lower_enum_value(argument: Ref, loc: Loc, name: Vec<u16>, value: Expr) -> Stm
             ..StringExpr::default()
         }),
     );
-    let member = Expr::new(
-        loc,
-        ExprData::Index(IndexExpr {
-            target: identifier(loc, argument),
-            index: name.clone(),
-            ..IndexExpr::default()
-        }),
-    );
+    let member = if minify_syntax && is_identifier(&member_name) {
+        Expr::new(
+            loc,
+            ExprData::Dot(DotExpr {
+                target: identifier(loc, argument),
+                name: member_name,
+                name_loc: loc,
+                ..DotExpr::default()
+            }),
+        )
+    } else {
+        Expr::new(
+            loc,
+            ExprData::Index(IndexExpr {
+                target: identifier(loc, argument),
+                index: name.clone(),
+                ..IndexExpr::default()
+            }),
+        )
+    };
     let assignment = assign(loc, member, value);
     let expression = if is_string {
         assignment
@@ -481,10 +502,44 @@ fn enum_initial_value(
 fn enum_iife(
     loc: Loc,
     argument: Ref,
-    body: Vec<Stmt>,
+    mut body: Vec<Stmt>,
     initial_value: Expr,
     can_be_unwrapped_if_unused: bool,
+    minify_syntax: bool,
 ) -> Expr {
+    if minify_syntax
+        && let Some(StmtData::Return(return_statement)) =
+            body.last().and_then(|statement| statement.data.as_deref())
+        && return_statement.value_or_nil.data.is_some()
+        && body[..body.len() - 1]
+            .iter()
+            .all(|statement| matches!(statement.data.as_deref(), Some(StmtData::Expr(_))))
+    {
+        let mut combined = body[..body.len() - 1]
+            .iter()
+            .filter_map(|statement| match statement.data.as_deref() {
+                Some(StmtData::Expr(expression)) => Some(expression.value.clone()),
+                _ => None,
+            })
+            .fold(Expr::default(), |left, right| {
+                if left.data.is_none() {
+                    right
+                } else {
+                    join_with_comma(left, right)
+                }
+            });
+        combined = if combined.data.is_none() {
+            return_statement.value_or_nil.clone()
+        } else {
+            join_with_comma(combined, return_statement.value_or_nil.clone())
+        };
+        body = vec![Stmt::new(
+            loc,
+            StmtData::Return(ReturnStmt {
+                value_or_nil: combined,
+            }),
+        )];
+    }
     let arrow = Expr::new(
         loc,
         ExprData::Arrow(ArrowExpr {
@@ -499,6 +554,7 @@ fn enum_iife(
                 },
                 loc,
             },
+            prefer_expr: minify_syntax,
             ..ArrowExpr::default()
         }),
     );

@@ -13,7 +13,7 @@ use crate::internal::{
         ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionExpr,
         IdentifierExpr, IfExpr, ObjectExpr, OpCode, Property, PropertyFlags, PropertyKind,
         ScopeKind, Stmt, StmtData, StrictModeKind, StringExpr, for_each_identifier_binding,
-        is_identifier_es5_and_es_next, make_helper_context,
+        is_identifier, is_identifier_es5_and_es_next, join_with_comma, make_helper_context,
     },
 };
 
@@ -544,6 +544,10 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             _ => {}
         }
         if core.options.minify_syntax {
+            if matches!(statement.data.as_deref(), Some(StmtData::Empty)) {
+                statement.data = None;
+                continue;
+            }
             minify_constant_if_statement(statement);
             minify_control_flow_statement(statement);
             if let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() {
@@ -591,6 +595,54 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
         absorb_expressions_into_for_initializers(statements);
     }
     core.is_control_flow_dead = old_control_flow_dead;
+}
+
+fn collapse_expression_statements_into_return(statements: &mut Vec<Stmt>) -> bool {
+    let Some(StmtData::Return(return_statement)) = statements
+        .last()
+        .and_then(|statement| statement.data.as_deref())
+    else {
+        return false;
+    };
+    if return_statement.value_or_nil.data.is_none()
+        || !statements[..statements.len() - 1].iter().all(|statement| {
+            matches!(
+                statement.data.as_deref(),
+                Some(StmtData::Expr(expression))
+                    if !expression.is_from_class_or_fn_that_can_be_removed_if_unused
+            )
+        })
+    {
+        return false;
+    }
+    let loc = statements
+        .first()
+        .map_or_else(Loc::default, |statement| statement.loc);
+    let mut combined = statements[..statements.len() - 1]
+        .iter()
+        .filter_map(|statement| match statement.data.as_deref() {
+            Some(StmtData::Expr(expression)) => Some(expression.value.clone()),
+            _ => None,
+        })
+        .fold(Expr::default(), |left, right| {
+            if left.data.is_none() {
+                right
+            } else {
+                join_with_comma(left, right)
+            }
+        });
+    combined = if combined.data.is_none() {
+        return_statement.value_or_nil.clone()
+    } else {
+        join_with_comma(combined, return_statement.value_or_nil.clone())
+    };
+    *statements = vec![Stmt::new(
+        loc,
+        StmtData::Return(crate::internal::js_ast::ReturnStmt {
+            value_or_nil: combined,
+        }),
+    )];
+    true
 }
 
 fn statement_to_expr(statement: &Stmt) -> Option<Expr> {
@@ -3334,6 +3386,24 @@ fn visit_expr_with_target(
             };
             if let Some(replacement) = replacement {
                 *data = replacement;
+            } else if core.options.minify_syntax
+                && let Some(ExprData::String(string)) = index.index.data.as_deref()
+            {
+                let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                    &string.value,
+                ))
+                .into_owned();
+                if is_identifier(&name) {
+                    *data = ExprData::Dot(DotExpr {
+                        target: std::mem::take(&mut index.target),
+                        name,
+                        name_loc: index.index.loc,
+                        optional_chain: index.optional_chain,
+                        can_be_removed_if_unused: index.can_be_removed_if_unused,
+                        call_can_be_unwrapped_if_unused: index.call_can_be_unwrapped_if_unused,
+                        is_symbol_instance: index.is_symbol_instance,
+                    });
+                }
             }
         }
         ExprData::Object(object) => {
@@ -3532,6 +3602,11 @@ fn visit_expr_with_target(
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;
             core.visit_switch_depth = old_switch_depth;
+            if core.options.minify_syntax
+                && collapse_expression_statements_into_return(&mut arrow.body.block.statements)
+            {
+                arrow.prefer_expr = true;
+            }
         }
         ExprData::JsxElement(element) => {
             visit_expr(core, &mut element.tag_or_nil, resolve_identifiers);

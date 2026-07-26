@@ -665,9 +665,6 @@ pub(crate) fn parse_enum_statement(
     lexer.expect(Token::CloseBrace);
     core.fn_or_arrow_data_parse = old_context;
     core.pop_scope();
-    if lexer.token == Token::Semicolon {
-        lexer.next();
-    }
     Stmt::new(
         loc,
         StmtData::Enum(EnumStmt {
