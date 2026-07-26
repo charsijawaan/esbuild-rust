@@ -911,7 +911,7 @@ fn lower_type_script_constructor_parameter_fields(core: &ParserCore, class: &mut
             argument.is_typescript_ctor_field = false;
         }
     }
-    class.properties.splice(0..0, field_properties);
+    class.properties.extend(field_properties);
 }
 
 fn insert_parameter_fields_after_super(statements: &mut Vec<Stmt>, assignments: &[Stmt]) -> bool {

@@ -4231,6 +4231,11 @@ mod tests {
         assert!(defined.contains("id;\n  size;"), "{defined}");
         assert!(defined.contains("this.id = id;"), "{defined}");
         assert!(defined.contains("this.size = size;"), "{defined}");
+        assert!(
+            defined.find("constructor(").expect("constructor")
+                < defined.find("\n  id;\n").expect("synthetic field"),
+            "{defined}"
+        );
 
         let assigned = code(transform(
             "class Box { constructor(public id: string) {} }",
