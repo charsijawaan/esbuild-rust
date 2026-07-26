@@ -644,6 +644,7 @@ fn run_with_stdin_and_node_paths(
     options.define = defines;
     options.pure = pure;
     options.keep_names = keep_names;
+    options.platform = platform;
     options.legal_comments = legal_comments;
     options.sourcemap = sourcemap;
     options.source_root = source_root;
@@ -1221,6 +1222,33 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).expect("transform output is UTF-8"),
             "console.log(\"production\", false);\n"
+        );
+    }
+
+    #[test]
+    fn applies_platform_defaults_to_transforms() {
+        let Output::Code(browser) = run_with_stdin(&[], Some(b"console.log(process.env.NODE_ENV)"))
+            .expect("browser transform succeeds")
+        else {
+            panic!("expected transformed code");
+        };
+        assert!(
+            String::from_utf8(browser)
+                .expect("transform output is UTF-8")
+                .contains("\"development\"")
+        );
+
+        let Output::Code(node) = run_with_stdin(
+            &["--platform=node".into()],
+            Some(b"console.log(process.env.NODE_ENV)"),
+        )
+        .expect("node transform succeeds") else {
+            panic!("expected transformed code");
+        };
+        assert!(
+            String::from_utf8(node)
+                .expect("transform output is UTF-8")
+                .contains("process.env.NODE_ENV")
         );
     }
 

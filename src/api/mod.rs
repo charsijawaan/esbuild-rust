@@ -166,6 +166,7 @@ pub enum Loader {
 pub struct TransformOptions {
     pub sourcefile: String,
     pub loader: Loader,
+    pub platform: BuildPlatform,
     pub jsx: BuildJsx,
     pub jsx_factory: String,
     pub jsx_fragment: String,
@@ -234,6 +235,7 @@ pub enum BuildFormat {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BuildPlatform {
     #[default]
+    Default,
     Browser,
     Node,
     Neutral,
@@ -854,7 +856,7 @@ fn validate_defines(
             );
         }
     }
-    if platform == BuildPlatform::Browser
+    if matches!(platform, BuildPlatform::Default | BuildPlatform::Browser)
         && !raw.iter().any(|define| {
             let parts = define
                 .key_parts
@@ -1129,7 +1131,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         .collect();
     let output_format = match options.format {
         BuildFormat::Default if bundle => match options.platform {
-            BuildPlatform::Browser => config::Format::Iife,
+            BuildPlatform::Default | BuildPlatform::Browser => config::Format::Iife,
             BuildPlatform::Node => config::Format::CommonJs,
             BuildPlatform::Neutral => config::Format::EsModule,
         },
@@ -1149,7 +1151,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         mode,
         output_format,
         platform: match options.platform {
-            BuildPlatform::Browser => config::Platform::Browser,
+            BuildPlatform::Default | BuildPlatform::Browser => config::Platform::Browser,
             BuildPlatform::Node => config::Platform::Node,
             BuildPlatform::Neutral => config::Platform::Neutral,
         },
@@ -1665,9 +1667,14 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
         log,
         &options.define,
         &options.pure,
-        BuildPlatform::Neutral,
-        false,
+        options.platform,
+        options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
     ));
+    parser_options.platform = match options.platform {
+        BuildPlatform::Default | BuildPlatform::Browser => config::Platform::Browser,
+        BuildPlatform::Node => config::Platform::Node,
+        BuildPlatform::Neutral => config::Platform::Neutral,
+    };
     parser_options.minify_syntax = options.minify_syntax;
     parser_options.minify_identifiers = options.minify_identifiers;
     parser_options.minify_whitespace = options.minify_whitespace;
@@ -2929,6 +2936,35 @@ mod tests {
             Some("Invalid define value (must be an entity name or JS literal): 1 + 2")
         );
         assert!(invalid.code.is_empty());
+    }
+
+    #[test]
+    fn defaults_node_env_for_browser_transforms() {
+        let development = code(transform(
+            "console.log(process.env.NODE_ENV)",
+            TransformOptions::default(),
+        ));
+        assert!(development.contains("\"development\""), "{development}");
+
+        let production = code(transform(
+            "console.log(process.env.NODE_ENV)",
+            TransformOptions {
+                minify_whitespace: true,
+                minify_identifiers: true,
+                minify_syntax: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(production.contains("\"production\""), "{production}");
+
+        let node = code(transform(
+            "console.log(process.env.NODE_ENV)",
+            TransformOptions {
+                platform: BuildPlatform::Node,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(node.contains("process.env.NODE_ENV"), "{node}");
     }
 
     #[test]
