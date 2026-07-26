@@ -2,8 +2,8 @@
 
 use crate::internal::{
     js_ast::{
-        CallExpr, CallKind, Expr, ExprData, IndexExpr, OptionalChain, PrivateIdentifierExpr,
-        SpreadExpr, UnaryExpr, is_property_access,
+        CallExpr, CallKind, Expr, ExprData, IndexExpr, OpCode, OptionalChain, Precedence,
+        PrivateIdentifierExpr, SpreadExpr, UnaryExpr, is_property_access,
     },
     js_lexer::{Lexer, Token},
     logger::Loc,
@@ -13,6 +13,84 @@ use super::{
     parser_core::{ParserCore, WasOriginallyDotOrIndex},
     syntax_literals::parse_tagged_template_suffix,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BinaryOperator {
+    pub(crate) op: OpCode,
+    pub(crate) precedence: Precedence,
+    pub(crate) is_right_associative: bool,
+}
+
+pub(crate) fn binary_operator(token: Token) -> Option<BinaryOperator> {
+    let (op, precedence, is_right_associative) = match token {
+        Token::Comma => (OpCode::BinaryComma, Precedence::Comma, false),
+        Token::Equals => (OpCode::BinaryAssign, Precedence::Assign, true),
+        Token::PlusEquals => (OpCode::BinaryAddAssign, Precedence::Assign, true),
+        Token::MinusEquals => (OpCode::BinarySubtractAssign, Precedence::Assign, true),
+        Token::AsteriskEquals => (OpCode::BinaryMultiplyAssign, Precedence::Assign, true),
+        Token::SlashEquals => (OpCode::BinaryDivideAssign, Precedence::Assign, true),
+        Token::PercentEquals => (OpCode::BinaryRemainderAssign, Precedence::Assign, true),
+        Token::AsteriskAsteriskEquals => (OpCode::BinaryPowerAssign, Precedence::Assign, true),
+        Token::LessThanLessThanEquals => (OpCode::BinaryShiftLeftAssign, Precedence::Assign, true),
+        Token::GreaterThanGreaterThanEquals => {
+            (OpCode::BinaryShiftRightAssign, Precedence::Assign, true)
+        }
+        Token::GreaterThanGreaterThanGreaterThanEquals => (
+            OpCode::BinaryUnsignedShiftRightAssign,
+            Precedence::Assign,
+            true,
+        ),
+        Token::AmpersandEquals => (OpCode::BinaryBitwiseAndAssign, Precedence::Assign, true),
+        Token::BarEquals => (OpCode::BinaryBitwiseOrAssign, Precedence::Assign, true),
+        Token::CaretEquals => (OpCode::BinaryBitwiseXorAssign, Precedence::Assign, true),
+        Token::QuestionQuestionEquals => (
+            OpCode::BinaryNullishCoalescingAssign,
+            Precedence::Assign,
+            true,
+        ),
+        Token::AmpersandAmpersandEquals => {
+            (OpCode::BinaryLogicalAndAssign, Precedence::Assign, true)
+        }
+        Token::BarBarEquals => (OpCode::BinaryLogicalOrAssign, Precedence::Assign, true),
+        Token::QuestionQuestion => (
+            OpCode::BinaryNullishCoalescing,
+            Precedence::NullishCoalescing,
+            false,
+        ),
+        Token::BarBar => (OpCode::BinaryLogicalOr, Precedence::LogicalOr, false),
+        Token::AmpersandAmpersand => (OpCode::BinaryLogicalAnd, Precedence::LogicalAnd, false),
+        Token::Bar => (OpCode::BinaryBitwiseOr, Precedence::BitwiseOr, false),
+        Token::Caret => (OpCode::BinaryBitwiseXor, Precedence::BitwiseXor, false),
+        Token::Ampersand => (OpCode::BinaryBitwiseAnd, Precedence::BitwiseAnd, false),
+        Token::EqualsEquals => (OpCode::BinaryLooseEqual, Precedence::Equals, false),
+        Token::ExclamationEquals => (OpCode::BinaryLooseNotEqual, Precedence::Equals, false),
+        Token::EqualsEqualsEquals => (OpCode::BinaryStrictEqual, Precedence::Equals, false),
+        Token::ExclamationEqualsEquals => (OpCode::BinaryStrictNotEqual, Precedence::Equals, false),
+        Token::LessThan => (OpCode::BinaryLessThan, Precedence::Compare, false),
+        Token::LessThanEquals => (OpCode::BinaryLessThanOrEqual, Precedence::Compare, false),
+        Token::GreaterThan => (OpCode::BinaryGreaterThan, Precedence::Compare, false),
+        Token::GreaterThanEquals => (OpCode::BinaryGreaterThanOrEqual, Precedence::Compare, false),
+        Token::In => (OpCode::BinaryIn, Precedence::Compare, false),
+        Token::Instanceof => (OpCode::BinaryInstanceof, Precedence::Compare, false),
+        Token::LessThanLessThan => (OpCode::BinaryShiftLeft, Precedence::Shift, false),
+        Token::GreaterThanGreaterThan => (OpCode::BinaryShiftRight, Precedence::Shift, false),
+        Token::GreaterThanGreaterThanGreaterThan => {
+            (OpCode::BinaryUnsignedShiftRight, Precedence::Shift, false)
+        }
+        Token::Plus => (OpCode::BinaryAdd, Precedence::Add, false),
+        Token::Minus => (OpCode::BinarySubtract, Precedence::Add, false),
+        Token::Asterisk => (OpCode::BinaryMultiply, Precedence::Multiply, false),
+        Token::Slash => (OpCode::BinaryDivide, Precedence::Multiply, false),
+        Token::Percent => (OpCode::BinaryRemainder, Precedence::Multiply, false),
+        Token::AsteriskAsterisk => (OpCode::BinaryPower, Precedence::Exponentiation, true),
+        _ => return None,
+    };
+    Some(BinaryOperator {
+        op,
+        precedence,
+        is_right_associative,
+    })
+}
 
 pub(crate) fn parse_call_args(
     lexer: &mut Lexer,
@@ -239,7 +317,7 @@ pub(crate) fn parse_high_precedence_suffix_chain(
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use super::{parse_call_args, parse_high_precedence_suffix_chain};
+    use super::{binary_operator, parse_call_args, parse_high_precedence_suffix_chain};
     use crate::internal::{
         config::TsOptions,
         js_ast::{Expr, ExprData},
@@ -299,5 +377,29 @@ mod tests {
             Some(ExprData::Call(_))
         ));
         assert_eq!(lexer.token, Token::Plus);
+    }
+
+    #[test]
+    fn binary_operator_table_matches_precedence_and_associativity() {
+        let add = binary_operator(Token::Plus).expect("plus is binary");
+        assert_eq!(add.op, crate::internal::js_ast::OpCode::BinaryAdd);
+        assert_eq!(add.precedence, crate::internal::js_ast::Precedence::Add);
+        assert!(!add.is_right_associative);
+
+        let power = binary_operator(Token::AsteriskAsterisk).expect("power is binary");
+        assert_eq!(
+            power.precedence,
+            crate::internal::js_ast::Precedence::Exponentiation
+        );
+        assert!(power.is_right_associative);
+
+        let assign =
+            binary_operator(Token::QuestionQuestionEquals).expect("nullish assignment is binary");
+        assert_eq!(
+            assign.precedence,
+            crate::internal::js_ast::Precedence::Assign
+        );
+        assert!(assign.is_right_associative);
+        assert!(binary_operator(Token::CloseParen).is_none());
     }
 }
