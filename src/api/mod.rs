@@ -6335,6 +6335,26 @@ mod tests {
     }
 
     #[test]
+    fn minifies_booleans_and_jsx_object_spreads_like_esbuild() {
+        assert_eq!(
+            code(transform(
+                "x=true;y=false;z=true**n;\
+                 jsx=<foo bar {...{}}/>;jsx2=<foo bar {...{bar}}/>",
+                TransformOptions {
+                    loader: Loader::Jsx,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "x = !0, y = !1, z = (!0) ** n, ",
+                "jsx = /* @__PURE__ */ React.createElement(\"foo\", { bar: !0 }), ",
+                "jsx2 = /* @__PURE__ */ React.createElement(\"foo\", { bar: !0, bar });\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

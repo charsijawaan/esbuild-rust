@@ -1767,8 +1767,20 @@ impl Printer<'_> {
             ExprData::Null => self.output.extend_from_slice(b"null"),
             ExprData::Undefined => self.output.extend_from_slice(b"void 0"),
             ExprData::Boolean(value) => {
-                self.output
-                    .extend_from_slice(if *value { b"true" } else { b"false" });
+                if self.options.minify_syntax {
+                    let wrap_boolean = level >= Precedence::Prefix;
+                    if wrap_boolean {
+                        self.output.push(b'(');
+                    }
+                    self.output
+                        .extend_from_slice(if *value { b"!0" } else { b"!1" });
+                    if wrap_boolean {
+                        self.output.push(b')');
+                    }
+                } else {
+                    self.output
+                        .extend_from_slice(if *value { b"true" } else { b"false" });
+                }
             }
             ExprData::Number(value) => self
                 .output
