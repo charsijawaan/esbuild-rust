@@ -172,6 +172,17 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     record_binding(core, &mut declaration.binding);
                     visit_binding_initializers(core, &mut declaration.binding, resolve_identifiers);
                     visit_expr(core, &mut declaration.value_or_nil, resolve_identifiers);
+                    if core.options.minify_syntax
+                        && local.kind == crate::internal::js_ast::LocalKind::Const
+                        && let Some(BindingData::Identifier(identifier)) =
+                            declaration.binding.data.as_deref()
+                    {
+                        let value =
+                            crate::internal::js_ast::expr_to_const_value(&declaration.value_or_nil);
+                        if value.kind != crate::internal::js_ast::ConstValueKind::None {
+                            core.const_values.insert(identifier.reference, value);
+                        }
+                    }
                 }
             }
             Some(StmtData::Function(function)) => {
@@ -2857,6 +2868,16 @@ fn visit_expr_with_target(
             } else {
                 core.record_usage(identifier.reference);
             }
+            if assign_target == AssignTarget::None
+                && core.options.minify_syntax
+                && !identifier.must_keep_due_to_with_stmt
+                && let Some(value) = core.const_values.get(&identifier.reference)
+                && let Some(replacement) =
+                    crate::internal::js_ast::const_value_to_expr(expression.loc, value).data
+            {
+                *data = *replacement;
+                return;
+            }
             if assign_target == AssignTarget::None {
                 let symbol = &core.symbols[identifier.reference.inner_index as usize];
                 if symbol.kind == crate::internal::ast::SymbolKind::Unbound
@@ -2910,6 +2931,7 @@ fn visit_expr_with_target(
                     }
                     _ => {}
                 }
+                core.const_values.remove(&identifier.reference);
                 core.symbols[symbol_index].flags |=
                     crate::internal::ast::SymbolFlags::COULD_POTENTIALLY_BE_MUTATED;
             } else if let Some(value) = core

@@ -3706,6 +3706,52 @@ mod tests {
     }
 
     #[test]
+    fn inlines_primitive_constants_when_minifying() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                "const café=\"π😀\";\
+                 const count=2;\
+                 console.log(café,count)"
+                    .as_bytes(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(
+            log.clone(),
+            source,
+            js_parser::Options {
+                minify_syntax: true,
+                ..js_parser::Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.const_values.len(), 2);
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_syntax: true,
+                        ascii_only: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "const caf\\u00E9 = \"\\u03C0\\u{1F600}\", count = 2;\n\
+             console.log(\"\\u03C0\\u{1F600}\", 2);\n"
+        );
+    }
+
+    #[test]
     fn prints_try_and_switch_statements() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let source = Source {

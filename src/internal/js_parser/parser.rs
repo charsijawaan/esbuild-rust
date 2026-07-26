@@ -270,6 +270,7 @@ pub fn lazy_export_ast(
         approximate_line_count,
         exports_kind,
         has_lazy_export: true,
+        const_values: core.const_values,
         mangled_props: core.mangled_props,
         reserved_props: core.reserved_props,
         ..Ast::default()
@@ -498,6 +499,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             directives,
             top_level_symbol_to_parts_from_parser,
             ts_enums: core.ts_enums,
+            const_values: core.const_values,
             mangled_props: core.mangled_props,
             reserved_props: core.reserved_props,
             import_records: core.import_records,
