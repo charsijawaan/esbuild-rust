@@ -56,6 +56,7 @@ pub struct TransformOptions {
     pub jsx_import_source: String,
     pub jsx_development: bool,
     pub jsx_side_effects: bool,
+    pub pure: Vec<String>,
     pub banner: String,
     pub footer: String,
     pub line_limit: usize,
@@ -191,6 +192,7 @@ pub struct BuildOptions {
     pub loader: HashMap<String, Loader>,
     pub out_extension: HashMap<String, String>,
     pub define: HashMap<String, String>,
+    pub pure: Vec<String>,
     pub main_fields: Vec<String>,
     pub resolve_extensions: Vec<String>,
     pub conditions: Vec<String>,
@@ -450,16 +452,37 @@ fn validate_jsx_define(
     config::DefineExpr::default()
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_defines(
     log: &Log,
     defines: &HashMap<String, String>,
+    pure: &[String],
     platform: BuildPlatform,
     minify: bool,
 ) -> Arc<config::ProcessedDefines> {
     let mut keys = defines.keys().collect::<Vec<_>>();
     keys.sort();
-    let mut raw = Vec::with_capacity(keys.len());
+    let mut raw = Vec::with_capacity(keys.len() + pure.len());
     let mut injected_defines = Vec::new();
+    for value in pure {
+        let (key_parts, ok) = js_parser::parse_global_name(
+            log.clone(),
+            Source {
+                contents: Arc::from(value.as_bytes()),
+                ..Source::default()
+            },
+        );
+        if ok {
+            raw.push(config::DefineData {
+                key_parts: key_parts
+                    .into_iter()
+                    .map(|part| String::from_utf8_lossy(&part).into_owned())
+                    .collect(),
+                flags: config::DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
+                ..config::DefineData::default()
+            });
+        }
+    }
     for key in keys {
         let (key_parts, ok) = js_parser::parse_global_name(
             log.clone(),
@@ -643,6 +666,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
     let defines = validate_defines(
         &log,
         &options.define,
+        &options.pure,
         options.platform,
         options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
     );
@@ -1018,6 +1042,13 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
         .clone_from(&options.jsx_import_source);
     parser_options.jsx.development = options.jsx_development;
     parser_options.jsx.side_effects = options.jsx_side_effects;
+    parser_options.defines = Some(validate_defines(
+        log,
+        &HashMap::new(),
+        &options.pure,
+        BuildPlatform::Neutral,
+        false,
+    ));
     parser_options.minify_syntax = options.minify_syntax;
     parser_options.minify_identifiers = options.minify_identifiers;
     parser_options.minify_whitespace = options.minify_whitespace;
@@ -2472,6 +2503,47 @@ mod tests {
             "const call = /* @__PURE__ */ factory();\n\
              const instance = /* @__PURE__ */ new Factory();\n"
         );
+    }
+
+    #[test]
+    fn marks_configured_call_targets_as_pure() {
+        let transformed = code(transform(
+            "factory(); namespace.create(); other();",
+            TransformOptions {
+                pure: vec!["factory".into(), "namespace.create".into()],
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(transformed.contains("/* @__PURE__ */ factory();"));
+        assert!(transformed.contains("/* @__PURE__ */ namespace.create();"));
+        assert!(transformed.contains("\nother();"));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-pure-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "factory(); factory(sideEffect()); namespace.create(); other(); console.log('live')",
+        )
+        .expect("write entry file");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            pure: vec!["factory".into(), "namespace.create".into()],
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(!output.contains("factory"));
+        assert!(!output.contains("namespace.create"));
+        assert!(output.contains("sideEffect();"));
+        assert!(output.contains("other();"));
+        assert!(output.contains("console.log(\"live\")"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]

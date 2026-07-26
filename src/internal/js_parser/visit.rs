@@ -924,13 +924,24 @@ fn visit_expr_with_target(
                         .defines
                         .as_ref()
                         .and_then(|defines| defines.identifier_defines.get(&symbol.original_name))
-                        .and_then(|define| define.define_expr.as_ref())
                         .cloned()
-                    && let Some(replacement) =
-                        instantiate_define_expr(core, expression.loc, &define)
                 {
-                    *data = replacement;
-                    return;
+                    identifier.can_be_removed_if_unused = define
+                        .flags
+                        .contains(crate::internal::config::DefineFlags::CAN_BE_REMOVED_IF_UNUSED);
+                    identifier.call_can_be_unwrapped_if_unused = !core
+                        .options
+                        .ignore_dce_annotations
+                        && define.flags.contains(
+                            crate::internal::config::DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
+                        );
+                    if let Some(define_expr) = define.define_expr
+                        && let Some(replacement) =
+                            instantiate_define_expr(core, expression.loc, &define_expr)
+                    {
+                        *data = replacement;
+                        return;
+                    }
                 }
             }
             if assign_target != AssignTarget::None {
@@ -1085,6 +1096,14 @@ fn visit_expr_with_target(
             let target_was_identifier =
                 matches!(call.target.data.as_deref(), Some(ExprData::Identifier(_)));
             visit_expr(core, &mut call.target, resolve_identifiers);
+            call.can_be_unwrapped_if_unused |= match call.target.data.as_deref() {
+                Some(ExprData::Identifier(identifier)) => {
+                    identifier.call_can_be_unwrapped_if_unused
+                }
+                Some(ExprData::Dot(dot)) => dot.call_can_be_unwrapped_if_unused,
+                Some(ExprData::Index(index)) => index.call_can_be_unwrapped_if_unused,
+                _ => false,
+            };
             for argument in &mut call.args {
                 visit_expr(core, argument, resolve_identifiers);
             }
@@ -1149,17 +1168,26 @@ fn visit_expr_with_target(
                     .defines
                     .as_ref()
                     .and_then(|defines| defines.dot_defines.get(&dot.name))
-                    .and_then(|defines| {
-                        defines
-                            .iter()
-                            .find(|define| define.key_parts == parts)
-                            .and_then(|define| define.define_expr.as_ref())
-                    })
+                    .and_then(|defines| defines.iter().find(|define| define.key_parts == parts))
                     .cloned()
-                && let Some(replacement) = instantiate_define_expr(core, expression.loc, &define)
             {
-                *data = replacement;
-                return;
+                dot.can_be_removed_if_unused = define
+                    .flags
+                    .contains(crate::internal::config::DefineFlags::CAN_BE_REMOVED_IF_UNUSED);
+                dot.call_can_be_unwrapped_if_unused = !core.options.ignore_dce_annotations
+                    && define.flags.contains(
+                        crate::internal::config::DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
+                    );
+                dot.is_symbol_instance = define
+                    .flags
+                    .contains(crate::internal::config::DefineFlags::IS_SYMBOL_INSTANCE);
+                if let Some(define_expr) = define.define_expr
+                    && let Some(replacement) =
+                        instantiate_define_expr(core, expression.loc, &define_expr)
+                {
+                    *data = replacement;
+                    return;
+                }
             }
             let replacement = if assign_target == AssignTarget::None {
                 let reference = match dot.target.data.as_deref() {
@@ -1210,18 +1238,26 @@ fn visit_expr_with_target(
                         .defines
                         .as_ref()
                         .and_then(|defines| defines.dot_defines.get(&name))
-                        .and_then(|defines| {
-                            defines
-                                .iter()
-                                .find(|define| define.key_parts == parts)
-                                .and_then(|define| define.define_expr.as_ref())
-                        })
+                        .and_then(|defines| defines.iter().find(|define| define.key_parts == parts))
                         .cloned()
-                    && let Some(replacement) =
-                        instantiate_define_expr(core, expression.loc, &define)
                 {
-                    *data = replacement;
-                    return;
+                    index.can_be_removed_if_unused = define
+                        .flags
+                        .contains(crate::internal::config::DefineFlags::CAN_BE_REMOVED_IF_UNUSED);
+                    index.call_can_be_unwrapped_if_unused = !core.options.ignore_dce_annotations
+                        && define.flags.contains(
+                            crate::internal::config::DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
+                        );
+                    index.is_symbol_instance = define
+                        .flags
+                        .contains(crate::internal::config::DefineFlags::IS_SYMBOL_INSTANCE);
+                    if let Some(define_expr) = define.define_expr
+                        && let Some(replacement) =
+                            instantiate_define_expr(core, expression.loc, &define_expr)
+                    {
+                        *data = replacement;
+                        return;
+                    }
                 }
             }
             let replacement = if assign_target == AssignTarget::None {

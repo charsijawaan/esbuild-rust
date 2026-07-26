@@ -640,6 +640,26 @@ fn build_tree_shaking_parts(
         let first_generated_import_record = core.import_records.len();
         visit_top_level_statements(core, std::slice::from_mut(&mut statement));
         let mut statements = lower_context.lower_statements(core, vec![statement]);
+        if core.options.tree_shaking {
+            let helpers = make_helper_context(|reference| {
+                core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                    == SymbolKind::Unbound
+            });
+            for statement in &mut statements {
+                if let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() {
+                    expression.value = helpers.simplify_unused_expr(
+                        &expression.value,
+                        core.options.unsupported_js_features,
+                    );
+                }
+            }
+            statements.retain(|statement| {
+                !matches!(
+                    statement.data.as_deref(),
+                    Some(StmtData::Expr(expression)) if expression.value.data.is_none()
+                )
+            });
+        }
         scan_module_metadata_into(core, &mut statements, &mut metadata);
 
         uses_exports_ref |= core

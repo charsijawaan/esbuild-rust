@@ -69,6 +69,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut build_loaders = HashMap::new();
     let mut out_extensions = HashMap::new();
     let mut defines = HashMap::new();
+    let mut pure = Vec::new();
     let mut main_fields = Vec::new();
     let mut resolve_extensions = Vec::new();
     let mut conditions = Vec::new();
@@ -322,6 +323,13 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             defines.insert(key.into(), value.into());
             continue;
         }
+        if let Some(value) = argument.strip_prefix("--pure:") {
+            if value.is_empty() {
+                return Err("Invalid empty pure call target".into());
+            }
+            pure.push(value.into());
+            continue;
+        }
         if let Some(loader) = argument.strip_prefix("--loader=") {
             options.loader = parse_loader(loader)?;
             continue;
@@ -411,6 +419,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             loader: build_loaders,
             out_extension: out_extensions,
             define: defines,
+            pure,
             main_fields,
             resolve_extensions,
             conditions,
@@ -475,6 +484,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     options.jsx_import_source = jsx_import_source;
     options.jsx_development = jsx_development;
     options.jsx_side_effects = jsx_side_effects;
+    options.pure = pure;
     let input = if let Some(path) = input_paths.pop() {
         if options.sourcefile.is_empty() {
             options.sourcefile.clone_from(&path);
@@ -563,6 +573,7 @@ fn help_text() -> String {
          \x20\x20--loader:.EXT=LOADER\n\
          \x20\x20--out-extension:.js=.mjs\n\
          \x20\x20--define:KEY=VALUE\n\
+         \x20\x20--pure:CALL\n\
          \x20\x20--main-fields=FIELDS\n\
          \x20\x20--resolve-extensions=EXTENSIONS\n\
          \x20\x20--conditions=CONDITIONS\n\
@@ -624,6 +635,7 @@ mod tests {
         assert!(run(&["--out-extension:.js".into()]).is_err());
         assert!(run(&["--drop-labels=".into()]).is_err());
         assert!(run(&["--drop-labels=DEV,".into()]).is_err());
+        assert!(run(&["--pure:".into()]).is_err());
     }
 
     #[test]
@@ -740,6 +752,32 @@ mod tests {
             String::from_utf8(output).expect("transform output is UTF-8"),
             "<Widget />;\n"
         );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn marks_configured_calls_as_pure() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-pure-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "factory(); keep(); console.log('live')").expect("write entry file");
+
+        let Output::Code(output) = run(&[
+            "--bundle".into(),
+            "--pure:factory".into(),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("bundle succeeds") else {
+            panic!("expected bundled code");
+        };
+        let output = String::from_utf8(output).expect("bundle output is UTF-8");
+        assert!(!output.contains("factory"));
+        assert!(output.contains("keep();"));
+        assert!(output.contains("console.log(\"live\")"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
