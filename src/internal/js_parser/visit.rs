@@ -204,6 +204,25 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.visit_switch_depth += 1;
                 for case in &mut switch.cases {
                     visit_expr(core, &mut case.value_or_nil, resolve_identifiers);
+                    for statement in &case.body {
+                        if matches!(
+                            statement.data.as_deref(),
+                            Some(StmtData::Local(local))
+                                if matches!(
+                                    local.kind,
+                                    crate::internal::js_ast::LocalKind::Using
+                                        | crate::internal::js_ast::LocalKind::AwaitUsing
+                                )
+                        ) {
+                            core.add_error_range(
+                                crate::internal::js_lexer::range_of_identifier(
+                                    &core.source,
+                                    statement.loc,
+                                ),
+                                "Cannot use a \"using\" declaration directly inside a switch case",
+                            );
+                        }
+                    }
                     visit_statements(core, &mut case.body, resolve_identifiers);
                 }
                 core.visit_switch_depth -= 1;

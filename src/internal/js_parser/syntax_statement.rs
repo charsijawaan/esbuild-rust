@@ -58,6 +58,34 @@ pub(crate) fn parse_block_with_scope(
 #[allow(clippy::too_many_lines)]
 pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
+    if lexer.is_contextual_keyword(b"using") {
+        let reference = core.store_name_in_ref(lexer.identifier.clone());
+        lexer.next();
+        if !lexer.has_newline_before && lexer.token == Token::Identifier {
+            return parse_local_declarations(core, lexer, loc, LocalKind::Using, true, true, true);
+        }
+        let value = parse_expression_suffix(
+            core,
+            lexer,
+            Expr::new(
+                loc,
+                ExprData::Identifier(IdentifierExpr {
+                    reference,
+                    ..IdentifierExpr::default()
+                }),
+            ),
+            Precedence::Lowest,
+            true,
+        );
+        lexer.expect_or_insert_semicolon();
+        return Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value,
+                ..ExprStmt::default()
+            }),
+        );
+    }
     if lexer.is_contextual_keyword(b"let") {
         let name_loc = lexer.loc();
         let reference = core.store_name_in_ref(lexer.identifier.clone());
@@ -488,13 +516,26 @@ fn parse_local_declarations(
         } else {
             Expr::default()
         };
-        if require_const_initializer && kind == LocalKind::Const && value_or_nil.data.is_none() {
+        if require_const_initializer
+            && matches!(
+                kind,
+                LocalKind::Const | LocalKind::Using | LocalKind::AwaitUsing
+            )
+            && value_or_nil.data.is_none()
+        {
             core.add_error_range(
                 binding_range,
-                name_text.as_ref().map_or_else(
-                    || "The constant must be initialized".into(),
-                    |name| format!("The constant \"{name}\" must be initialized"),
-                ),
+                if kind == LocalKind::Const {
+                    name_text.as_ref().map_or_else(
+                        || "The constant must be initialized".into(),
+                        |name| format!("The constant \"{name}\" must be initialized"),
+                    )
+                } else {
+                    name_text.as_ref().map_or_else(
+                        || "The declaration must be initialized".into(),
+                        |name| format!("The declaration \"{name}\" must be initialized"),
+                    )
+                },
             );
         }
         declarations.push(Decl {

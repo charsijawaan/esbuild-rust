@@ -1971,6 +1971,47 @@ mod tests {
     }
 
     #[test]
+    fn parses_using_declarations_and_restricts_switch_cases() {
+        let (ast, ok, log) = parse_source("using resource = acquire(); use(resource);");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Local(local)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected using declaration");
+        };
+        assert_eq!(local.kind, crate::internal::js_ast::LocalKind::Using);
+        let Some(crate::internal::js_ast::BindingData::Identifier(binding)) =
+            local.declarations[0].binding.data.as_deref()
+        else {
+            panic!("expected using binding");
+        };
+        assert_eq!(
+            ast.parts[1].symbol_uses[&binding.reference].count_estimate,
+            1
+        );
+
+        let (_, ok, log) = parse_source("using resource;");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+
+        let (_, ok, log) = parse_source(
+            "switch (kind) {\
+               case 0: using direct = acquire(); break;\
+               case 1: { using wrapped = acquire(); }\
+             }",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+
+        let (ast, ok, log) = parse_source("using\nresource = acquire();");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert!(matches!(
+            ast.parts[1].statements[0].data.as_deref(),
+            Some(StmtData::Expr(_))
+        ));
+    }
+
+    #[test]
     fn for_loops_keep_lexical_bindings_in_a_loop_scope() {
         let (ast, ok, log) =
             parse_source("for (let item of items) { item; } item; for (let i = 0; i < 1; i++) {}");
