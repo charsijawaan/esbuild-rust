@@ -615,28 +615,63 @@ fn find_nearest_tsconfig(
     file_system: &dyn Fs,
     start_directory: &str,
 ) -> Option<resolver::TsConfigJson> {
+    fn load(
+        log: &Log,
+        file_system: &dyn Fs,
+        path: &str,
+        visited: &mut HashSet<String>,
+    ) -> Option<resolver::TsConfigJson> {
+        if !visited.insert(path.to_string()) {
+            return None;
+        }
+        let (contents, error, _) = file_system.read_file(path);
+        if error.is_some() {
+            return None;
+        }
+        let directory = file_system.dir(path);
+        let source = Source {
+            key_path: Path {
+                text: path.to_string(),
+                namespace: "file".into(),
+                ..Path::default()
+            },
+            contents: Arc::from(contents.into_bytes()),
+            ..Source::default()
+        };
+        let mut extends = |text: &str, _range: Range| {
+            if !text.starts_with('.') && !file_system.is_abs(text) {
+                return None;
+            }
+            let mut extended = if file_system.is_abs(text) {
+                text.to_string()
+            } else {
+                file_system.join(&[&directory, text])
+            };
+            if !std::path::Path::new(&extended)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            {
+                extended.push_str(".json");
+            }
+            load(log, file_system, &extended, visited)
+        };
+        resolver::parse_tsconfig_json(
+            log,
+            &source,
+            file_system,
+            &directory,
+            &directory,
+            Some(&mut extends),
+        )
+    }
+
     let mut directory = start_directory.to_string();
+    let mut visited = HashSet::new();
     loop {
         let path = file_system.join(&[&directory, "tsconfig.json"]);
-        let (contents, error, _) = file_system.read_file(&path);
+        let (_, error, _) = file_system.read_file(&path);
         if error.is_none() {
-            let source = Source {
-                key_path: Path {
-                    text: path,
-                    namespace: "file".into(),
-                    ..Path::default()
-                },
-                contents: Arc::from(contents.into_bytes()),
-                ..Source::default()
-            };
-            return resolver::parse_tsconfig_json(
-                log,
-                &source,
-                file_system,
-                &directory,
-                &directory,
-                None,
-            );
+            return load(log, file_system, &path, &mut visited);
         }
         let parent = file_system.dir(&directory);
         if parent.is_empty() || parent == directory {
@@ -3000,7 +3035,11 @@ mod tests {
             &HashMap::from([
                 (
                     "/project/tsconfig.json".into(),
-                    r#"{"compilerOptions":{"baseUrl":".","paths":{"@lib/*":["src/lib/*"]}}}"#
+                    r#"{"extends":"./config/base"}"#.into(),
+                ),
+                (
+                    "/project/config/base.json".into(),
+                    r#"{"compilerOptions":{"baseUrl":"..","paths":{"@lib/*":["src/lib/*"]}}}"#
                         .into(),
                 ),
                 (
