@@ -263,6 +263,19 @@ fn parse_class_property(
                 flags |= PropertyFlags::IS_COMPUTED;
                 lexer.next();
                 let key = parse_expression(core, lexer, Precedence::Comma, true);
+                if core.options.ts.parse
+                    && lexer.token == Token::Colon
+                    && matches!(key.data.as_deref(), Some(ExprData::Identifier(_)))
+                {
+                    super::syntax_typescript::skip_type_annotation(lexer, &[Token::CloseBracket]);
+                    lexer.expect(Token::CloseBracket);
+                    super::syntax_typescript::skip_type_annotation(
+                        lexer,
+                        &[Token::Semicolon, Token::CloseBrace],
+                    );
+                    lexer.expect_or_insert_semicolon();
+                    return None;
+                }
                 close_bracket_loc = lexer.loc();
                 lexer.expect(Token::CloseBracket);
                 key

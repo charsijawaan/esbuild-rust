@@ -222,6 +222,18 @@ pub(crate) fn parse_function_tail(
     let mut args = Vec::new();
     let mut has_rest_arg = false;
     while lexer.token != Token::CloseParen {
+        if core.options.ts.parse && lexer.token == Token::This {
+            lexer.next();
+            super::syntax_typescript::skip_type_annotation(
+                lexer,
+                &[Token::Comma, Token::CloseParen],
+            );
+            if lexer.token == Token::Comma {
+                lexer.next();
+                continue;
+            }
+            break;
+        }
         if lexer.token == Token::DotDotDot {
             lexer.next();
             has_rest_arg = true;

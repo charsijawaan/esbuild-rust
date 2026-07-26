@@ -2006,6 +2006,7 @@ mod tests {
             "class Box<T> extends Base<T> implements Readable<T> {\
                declare hidden: string;\
                readonly value!: T;\
+               readonly [key: string]: T;\
                map<U>(input: U): T { return this.value; }\
                static accessor count: number = initialize();\
                accessor #slot: number = 0;\
@@ -2886,7 +2887,7 @@ mod tests {
             "const count: number = 1;\
              let value!: string;\
              let pair: [number, string]\n\
-             function add<T extends number>(left: T, right?: number): number {\
+             function add<T extends number>(this: Calculator, left: T, right?: number): number {\
                return left + (right || 0);\
              }\
              try { throw 1 } catch (error: unknown) { use(error); }",
