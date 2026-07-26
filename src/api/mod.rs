@@ -4221,6 +4221,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn lowers_only_capture_safe_type_script_class_fields() {
         let capture_sensitive = code(transform(
             "const outer = 1; class Foo { initialized = outer; constructor() { let outer = 2; use(outer) } }",
@@ -4262,6 +4263,51 @@ mod tests {
         assert!(
             parameter_capture.contains("use(id2);"),
             "{parameter_capture}"
+        );
+
+        let nested_expressions = code(transform(
+            "const outer = 1; class Foo { arrow = () => outer; functionValue = function() { return outer }; nested = class { method() { return outer } }; constructor() { let outer = 2; use(outer) } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            nested_expressions.contains("this.arrow = () => outer;"),
+            "{nested_expressions}"
+        );
+        assert!(
+            nested_expressions.contains("this.functionValue = function()"),
+            "{nested_expressions}"
+        );
+        assert!(
+            nested_expressions.contains("this.nested = class {"),
+            "{nested_expressions}"
+        );
+        assert!(
+            nested_expressions.contains("let outer2 = 2;")
+                && nested_expressions.contains("use(outer2);"),
+            "{nested_expressions}"
+        );
+
+        let preserved_jsx = code(transform(
+            "const Component = Other; class Foo { node = <Component />; constructor() { let Component = Local; use(Component) } }",
+            TransformOptions {
+                loader: Loader::Tsx,
+                jsx: BuildJsx::Preserve,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            preserved_jsx.contains("this.node = <Component />;"),
+            "{preserved_jsx}"
+        );
+        assert!(
+            preserved_jsx.contains("let Component2 = Local;")
+                && preserved_jsx.contains("use(Component2);"),
+            "{preserved_jsx}"
         );
 
         let non_colliding = code(transform(

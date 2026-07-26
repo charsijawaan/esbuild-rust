@@ -1614,12 +1614,35 @@ fn class_field_initializer_has_binding_collision(
                 constructor_binding_names,
             )
         }
-        Some(
-            ExprData::Arrow(_)
-            | ExprData::Function(_)
-            | ExprData::Class(_)
-            | ExprData::JsxElement(_),
-        ) => true,
+        Some(ExprData::Arrow(value)) => {
+            arguments_have_binding_collision(core, &value.args, constructor_binding_names)
+                || statements_have_binding_collision(
+                    core,
+                    &value.body.block.statements,
+                    constructor_binding_names,
+                )
+        }
+        Some(ExprData::Function(value)) => {
+            function_has_binding_collision(core, &value.function, constructor_binding_names)
+        }
+        Some(ExprData::Class(value)) => {
+            class_has_binding_collision(core, &value.class, constructor_binding_names)
+        }
+        Some(ExprData::JsxElement(value)) => {
+            class_field_initializer_has_binding_collision(
+                core,
+                &value.tag_or_nil,
+                constructor_binding_names,
+            ) || value.properties.iter().any(|property| {
+                property_has_binding_collision(core, property, constructor_binding_names)
+            }) || value.nullable_children.iter().any(|child| {
+                class_field_initializer_has_binding_collision(
+                    core,
+                    child,
+                    constructor_binding_names,
+                )
+            })
+        }
         Some(
             ExprData::Boolean(_)
             | ExprData::Super
@@ -1638,6 +1661,256 @@ fn class_field_initializer_has_binding_collision(
             | ExprData::RequireString(_)
             | ExprData::RequireResolveString(_)
             | ExprData::ImportString(_),
+        )
+        | None => false,
+    }
+}
+
+fn binding_has_binding_collision(
+    core: &ParserCore,
+    binding: &Binding,
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
+    match binding.data.as_deref() {
+        Some(BindingData::Array(value)) => value.items.iter().any(|item| {
+            binding_has_binding_collision(core, &item.binding, constructor_binding_names)
+                || class_field_initializer_has_binding_collision(
+                    core,
+                    &item.default_value_or_nil,
+                    constructor_binding_names,
+                )
+        }),
+        Some(BindingData::Object(value)) => value.properties.iter().any(|property| {
+            (property.is_computed
+                && class_field_initializer_has_binding_collision(
+                    core,
+                    &property.key,
+                    constructor_binding_names,
+                ))
+                || binding_has_binding_collision(core, &property.value, constructor_binding_names)
+                || class_field_initializer_has_binding_collision(
+                    core,
+                    &property.default_value_or_nil,
+                    constructor_binding_names,
+                )
+        }),
+        Some(BindingData::Missing | BindingData::Identifier(_)) | None => false,
+    }
+}
+
+fn arguments_have_binding_collision(
+    core: &ParserCore,
+    arguments: &[crate::internal::js_ast::Arg],
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
+    arguments.iter().any(|argument| {
+        binding_has_binding_collision(core, &argument.binding, constructor_binding_names)
+            || class_field_initializer_has_binding_collision(
+                core,
+                &argument.default_or_nil,
+                constructor_binding_names,
+            )
+            || argument.decorators.iter().any(|decorator| {
+                class_field_initializer_has_binding_collision(
+                    core,
+                    &decorator.value,
+                    constructor_binding_names,
+                )
+            })
+    })
+}
+
+fn function_has_binding_collision(
+    core: &ParserCore,
+    function: &Function,
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
+    arguments_have_binding_collision(core, &function.args, constructor_binding_names)
+        || statements_have_binding_collision(
+            core,
+            &function.body.block.statements,
+            constructor_binding_names,
+        )
+}
+
+fn property_has_binding_collision(
+    core: &ParserCore,
+    property: &Property,
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
+    class_field_initializer_has_binding_collision(core, &property.key, constructor_binding_names)
+        || class_field_initializer_has_binding_collision(
+            core,
+            &property.value_or_nil,
+            constructor_binding_names,
+        )
+        || class_field_initializer_has_binding_collision(
+            core,
+            &property.initializer_or_nil,
+            constructor_binding_names,
+        )
+        || property.decorators.iter().any(|decorator| {
+            class_field_initializer_has_binding_collision(
+                core,
+                &decorator.value,
+                constructor_binding_names,
+            )
+        })
+        || property.class_static_block.as_ref().is_some_and(|block| {
+            statements_have_binding_collision(
+                core,
+                &block.block.statements,
+                constructor_binding_names,
+            )
+        })
+}
+
+fn class_has_binding_collision(
+    core: &ParserCore,
+    class: &Class,
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
+    class.decorators.iter().any(|decorator| {
+        class_field_initializer_has_binding_collision(
+            core,
+            &decorator.value,
+            constructor_binding_names,
+        )
+    }) || class_field_initializer_has_binding_collision(
+        core,
+        &class.extends_or_nil,
+        constructor_binding_names,
+    ) || class
+        .properties
+        .iter()
+        .any(|property| property_has_binding_collision(core, property, constructor_binding_names))
+}
+
+fn statements_have_binding_collision(
+    core: &ParserCore,
+    statements: &[Stmt],
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
+    statements.iter().any(|statement| {
+        statement_has_binding_collision(core, statement, constructor_binding_names)
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn statement_has_binding_collision(
+    core: &ParserCore,
+    statement: &Stmt,
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
+    let expression_collides = |expression| {
+        class_field_initializer_has_binding_collision(core, expression, constructor_binding_names)
+    };
+    let statement_collides =
+        |statement| statement_has_binding_collision(core, statement, constructor_binding_names);
+    match statement.data.as_deref() {
+        Some(StmtData::Block(value)) => {
+            statements_have_binding_collision(core, &value.statements, constructor_binding_names)
+        }
+        Some(StmtData::ExportDefault(value)) => statement_collides(&value.value),
+        Some(StmtData::ExportEquals(value)) => expression_collides(&value.value),
+        Some(StmtData::LazyExport(value)) => expression_collides(&value.value),
+        Some(StmtData::Expr(value)) => expression_collides(&value.value),
+        Some(StmtData::Enum(value)) => value
+            .values
+            .iter()
+            .any(|item| expression_collides(&item.value_or_nil)),
+        Some(StmtData::Namespace(value)) => {
+            statements_have_binding_collision(core, &value.statements, constructor_binding_names)
+        }
+        Some(StmtData::Function(value)) => {
+            function_has_binding_collision(core, &value.function, constructor_binding_names)
+        }
+        Some(StmtData::Class(value)) => {
+            class_has_binding_collision(core, &value.class, constructor_binding_names)
+        }
+        Some(StmtData::Label(value)) => statement_collides(&value.statement),
+        Some(StmtData::If(value)) => {
+            expression_collides(&value.test)
+                || statement_collides(&value.yes)
+                || statement_collides(&value.no_or_nil)
+        }
+        Some(StmtData::For(value)) => {
+            statement_collides(&value.init_or_nil)
+                || expression_collides(&value.test_or_nil)
+                || expression_collides(&value.update_or_nil)
+                || statement_collides(&value.body)
+        }
+        Some(StmtData::ForIn(value)) => {
+            statement_collides(&value.init)
+                || expression_collides(&value.value)
+                || statement_collides(&value.body)
+        }
+        Some(StmtData::ForOf(value)) => {
+            statement_collides(&value.init)
+                || expression_collides(&value.value)
+                || statement_collides(&value.body)
+        }
+        Some(StmtData::DoWhile(value)) => {
+            statement_collides(&value.body) || expression_collides(&value.test)
+        }
+        Some(StmtData::While(value)) => {
+            expression_collides(&value.test) || statement_collides(&value.body)
+        }
+        Some(StmtData::With(value)) => {
+            expression_collides(&value.value) || statement_collides(&value.body)
+        }
+        Some(StmtData::Try(value)) => {
+            statements_have_binding_collision(
+                core,
+                &value.block.statements,
+                constructor_binding_names,
+            ) || value.catch.as_ref().is_some_and(|catch| {
+                binding_has_binding_collision(
+                    core,
+                    &catch.binding_or_nil,
+                    constructor_binding_names,
+                ) || statements_have_binding_collision(
+                    core,
+                    &catch.block.statements,
+                    constructor_binding_names,
+                )
+            }) || value.finally.as_ref().is_some_and(|finally| {
+                statements_have_binding_collision(
+                    core,
+                    &finally.block.statements,
+                    constructor_binding_names,
+                )
+            })
+        }
+        Some(StmtData::Switch(value)) => {
+            expression_collides(&value.test)
+                || value.cases.iter().any(|case| {
+                    expression_collides(&case.value_or_nil)
+                        || statements_have_binding_collision(
+                            core,
+                            &case.body,
+                            constructor_binding_names,
+                        )
+                })
+        }
+        Some(StmtData::Return(value)) => expression_collides(&value.value_or_nil),
+        Some(StmtData::Throw(value)) => expression_collides(&value.value),
+        Some(StmtData::Local(value)) => value.declarations.iter().any(|declaration| {
+            binding_has_binding_collision(core, &declaration.binding, constructor_binding_names)
+                || expression_collides(&declaration.value_or_nil)
+        }),
+        Some(
+            StmtData::Comment(_)
+            | StmtData::Debugger
+            | StmtData::Directive(_)
+            | StmtData::Empty
+            | StmtData::TypeScript(_)
+            | StmtData::ExportClause(_)
+            | StmtData::ExportFrom(_)
+            | StmtData::ExportStar(_)
+            | StmtData::Import(_)
+            | StmtData::Break(_)
+            | StmtData::Continue(_),
         )
         | None => false,
     }
