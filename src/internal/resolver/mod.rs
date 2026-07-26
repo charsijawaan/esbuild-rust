@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -640,6 +641,457 @@ fn visit_package_map_entry(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PackageMapStatus {
+    #[default]
+    Undefined,
+    UndefinedNoConditionsMatch,
+    Null,
+    Exact,
+    ExactEndsWithStar,
+    Inexact,
+    PackageResolve,
+    InvalidModuleSpecifier,
+    InvalidPackageConfiguration,
+    InvalidPackageTarget,
+    PackagePathNotExported,
+    PackageImportNotDefined,
+    ModuleNotFound,
+    ModuleNotFoundMissingExtension,
+    UnsupportedDirectoryImport,
+    UnsupportedDirectoryImportMissingIndex,
+}
+
+impl PackageMapStatus {
+    #[must_use]
+    pub const fn is_undefined(self) -> bool {
+        matches!(self, Self::Undefined | Self::UndefinedNoConditionsMatch)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PackageMapDebug {
+    pub invalid_because: String,
+    pub unmatched_conditions: Vec<crate::internal::logger::Span>,
+    pub token: Range,
+    pub is_because_of_null_literal: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PackageMapResolution {
+    pub path: String,
+    pub status: PackageMapStatus,
+    pub debug: PackageMapDebug,
+}
+
+#[must_use]
+pub fn handle_package_map_post_conditions(
+    mut resolution: PackageMapResolution,
+) -> PackageMapResolution {
+    if !matches!(
+        resolution.status,
+        PackageMapStatus::Exact | PackageMapStatus::ExactEndsWithStar | PackageMapStatus::Inexact
+    ) {
+        return resolution;
+    }
+    let decoded = if let Ok(decoded) = decode_percent_escaped(resolution.path.as_bytes()) {
+        String::from_utf8_lossy(&decoded).into_owned()
+    } else {
+        resolution.status = PackageMapStatus::InvalidModuleSpecifier;
+        return resolution;
+    };
+    if ["%2f", "%2F", "%5c", "%5C"]
+        .iter()
+        .any(|encoding| resolution.path.contains(encoding))
+    {
+        resolution.status = PackageMapStatus::InvalidModuleSpecifier;
+        return resolution;
+    }
+    if decoded.ends_with(['/', '\\']) {
+        resolution.status = PackageMapStatus::UnsupportedDirectoryImport;
+        return resolution;
+    }
+    resolution.path = decoded;
+    resolution
+}
+
+#[must_use]
+pub fn resolve_package_imports<S: BuildHasher>(
+    specifier: &str,
+    imports: &PackageMapEntry,
+    conditions: &HashMap<String, bool, S>,
+) -> PackageMapResolution {
+    if imports.kind != PackageMapKind::Object {
+        return package_resolution(
+            "",
+            PackageMapStatus::InvalidPackageConfiguration,
+            imports.first_token,
+        );
+    }
+    let resolution = resolve_package_imports_exports(specifier, imports, "/", true, conditions);
+    if !matches!(
+        resolution.status,
+        PackageMapStatus::Null | PackageMapStatus::Undefined
+    ) {
+        return resolution;
+    }
+    package_resolution(
+        specifier,
+        PackageMapStatus::PackageImportNotDefined,
+        imports.first_token,
+    )
+}
+
+#[must_use]
+pub fn resolve_package_exports<S: BuildHasher>(
+    package_url: &str,
+    subpath: &str,
+    exports: &PackageMapEntry,
+    conditions: &HashMap<String, bool, S>,
+) -> PackageMapResolution {
+    if exports.kind == PackageMapKind::Invalid {
+        return package_resolution(
+            "",
+            PackageMapStatus::InvalidPackageConfiguration,
+            exports.first_token,
+        );
+    }
+
+    let mut debug = PackageMapDebug {
+        token: exports.first_token,
+        ..PackageMapDebug::default()
+    };
+    if subpath == "." {
+        let main_export = if matches!(exports.kind, PackageMapKind::String | PackageMapKind::Array)
+            || (exports.kind == PackageMapKind::Object && !exports.keys_start_with_dot())
+        {
+            Some(exports)
+        } else if exports.kind == PackageMapKind::Object {
+            exports.value_for_key(".")
+        } else {
+            None
+        };
+        if let Some(main_export) = main_export {
+            let resolution =
+                resolve_package_target(package_url, main_export, "", false, false, conditions);
+            if !matches!(
+                resolution.status,
+                PackageMapStatus::Null | PackageMapStatus::Undefined
+            ) {
+                return resolution;
+            }
+            debug = resolution.debug;
+        }
+    } else if exports.kind == PackageMapKind::Object && exports.keys_start_with_dot() {
+        let resolution =
+            resolve_package_imports_exports(subpath, exports, package_url, false, conditions);
+        if !matches!(
+            resolution.status,
+            PackageMapStatus::Null | PackageMapStatus::Undefined
+        ) {
+            return resolution;
+        }
+        debug = resolution.debug;
+    }
+
+    PackageMapResolution {
+        status: PackageMapStatus::PackagePathNotExported,
+        debug,
+        ..PackageMapResolution::default()
+    }
+}
+
+fn resolve_package_imports_exports<S: BuildHasher>(
+    match_key: &str,
+    match_object: &PackageMapEntry,
+    package_url: &str,
+    is_imports: bool,
+    conditions: &HashMap<String, bool, S>,
+) -> PackageMapResolution {
+    if !match_key.ends_with('/')
+        && !match_key.contains('*')
+        && let Some(target) = match_object.value_for_key(match_key)
+    {
+        return resolve_package_target(package_url, target, "", false, is_imports, conditions);
+    }
+
+    for expansion in &match_object.expansion_keys {
+        if let Some(star) = expansion.key.find('*') {
+            let pattern_base = &expansion.key[..star];
+            if match_key.starts_with(pattern_base) {
+                let pattern_trailer = &expansion.key[star + 1..];
+                if pattern_trailer.is_empty()
+                    || (match_key.ends_with(pattern_trailer)
+                        && match_key.len() >= expansion.key.len())
+                {
+                    let subpath =
+                        &match_key[pattern_base.len()..match_key.len() - pattern_trailer.len()];
+                    return resolve_package_target(
+                        package_url,
+                        &expansion.value,
+                        subpath,
+                        true,
+                        is_imports,
+                        conditions,
+                    );
+                }
+            }
+        } else if match_key.starts_with(&expansion.key) {
+            let subpath = &match_key[expansion.key.len()..];
+            let mut resolution = resolve_package_target(
+                package_url,
+                &expansion.value,
+                subpath,
+                false,
+                is_imports,
+                conditions,
+            );
+            if matches!(
+                resolution.status,
+                PackageMapStatus::Exact | PackageMapStatus::ExactEndsWithStar
+            ) {
+                resolution.status = PackageMapStatus::Inexact;
+            }
+            return resolution;
+        }
+    }
+    package_resolution("", PackageMapStatus::Null, match_object.first_token)
+}
+
+#[allow(clippy::too_many_lines)]
+fn resolve_package_target<S: BuildHasher>(
+    package_url: &str,
+    target: &PackageMapEntry,
+    subpath: &str,
+    pattern: bool,
+    internal: bool,
+    conditions: &HashMap<String, bool, S>,
+) -> PackageMapResolution {
+    match target.kind {
+        PackageMapKind::String => {
+            if !pattern && !subpath.is_empty() && !target.string.ends_with('/') {
+                return PackageMapResolution {
+                    path: target.string.clone(),
+                    status: PackageMapStatus::InvalidModuleSpecifier,
+                    debug: PackageMapDebug {
+                        token: target.first_token,
+                        invalid_because: " because it doesn't end in \"/\"".into(),
+                        ..PackageMapDebug::default()
+                    },
+                };
+            }
+            if !target.string.starts_with("./") {
+                if internal && !target.string.starts_with("../") && !target.string.starts_with('/')
+                {
+                    return package_resolution(
+                        &if pattern {
+                            target.string.replace('*', subpath)
+                        } else {
+                            format!("{}{subpath}", target.string)
+                        },
+                        PackageMapStatus::PackageResolve,
+                        target.first_token,
+                    );
+                }
+                return PackageMapResolution {
+                    path: target.string.clone(),
+                    status: PackageMapStatus::InvalidPackageTarget,
+                    debug: PackageMapDebug {
+                        token: target.first_token,
+                        invalid_because: " because it doesn't start with \"./\"".into(),
+                        ..PackageMapDebug::default()
+                    },
+                };
+            }
+            if let Some(segment) = find_invalid_package_segment(&target.string) {
+                return PackageMapResolution {
+                    path: target.string.clone(),
+                    status: PackageMapStatus::InvalidPackageTarget,
+                    debug: PackageMapDebug {
+                        token: target.first_token,
+                        invalid_because: format!(
+                            " because it contains invalid segment {segment:?}"
+                        ),
+                        ..PackageMapDebug::default()
+                    },
+                };
+            }
+            let resolved_target = posix_path_join(package_url, &target.string);
+            if let Some(segment) = find_invalid_package_segment(subpath) {
+                return PackageMapResolution {
+                    path: subpath.to_string(),
+                    status: PackageMapStatus::InvalidModuleSpecifier,
+                    debug: PackageMapDebug {
+                        token: target.first_token,
+                        invalid_because: format!(
+                            " because it contains invalid segment {segment:?}"
+                        ),
+                        ..PackageMapDebug::default()
+                    },
+                };
+            }
+            if pattern {
+                let status = if resolved_target.ends_with('*')
+                    && resolved_target.find('*') == Some(resolved_target.len() - 1)
+                {
+                    PackageMapStatus::ExactEndsWithStar
+                } else {
+                    PackageMapStatus::Exact
+                };
+                package_resolution(
+                    &resolved_target.replace('*', subpath),
+                    status,
+                    target.first_token,
+                )
+            } else {
+                package_resolution(
+                    &posix_path_join(&resolved_target, subpath),
+                    PackageMapStatus::Exact,
+                    target.first_token,
+                )
+            }
+        }
+        PackageMapKind::Object => {
+            let mut matched_but_undefined = None;
+            for property in &target.map {
+                if property.key == "default"
+                    || conditions.get(&property.key).copied().unwrap_or(false)
+                {
+                    let resolution = resolve_package_target(
+                        package_url,
+                        &property.value,
+                        subpath,
+                        pattern,
+                        internal,
+                        conditions,
+                    );
+                    if resolution.status.is_undefined() {
+                        matched_but_undefined = Some(&property.value);
+                        continue;
+                    }
+                    return resolution;
+                }
+            }
+            let unmatched_target = matched_but_undefined
+                .filter(|entry| {
+                    entry.kind == PackageMapKind::Object && !entry.keys_start_with_dot()
+                })
+                .unwrap_or(target);
+            if !unmatched_target.map.is_empty() && !unmatched_target.keys_start_with_dot() {
+                return PackageMapResolution {
+                    status: PackageMapStatus::UndefinedNoConditionsMatch,
+                    debug: PackageMapDebug {
+                        token: unmatched_target.first_token,
+                        unmatched_conditions: unmatched_target
+                            .map
+                            .iter()
+                            .map(|property| crate::internal::logger::Span {
+                                text: property.key.clone(),
+                                range: property.key_range,
+                            })
+                            .collect(),
+                        ..PackageMapDebug::default()
+                    },
+                    ..PackageMapResolution::default()
+                };
+            }
+            package_resolution("", PackageMapStatus::Undefined, target.first_token)
+        }
+        PackageMapKind::Array => {
+            if target.array.is_empty() {
+                return package_resolution("", PackageMapStatus::Null, target.first_token);
+            }
+            let mut last_status = PackageMapStatus::Undefined;
+            let mut last_debug = PackageMapDebug {
+                token: target.first_token,
+                ..PackageMapDebug::default()
+            };
+            for item in &target.array {
+                let resolution = resolve_package_target(
+                    package_url,
+                    item,
+                    subpath,
+                    pattern,
+                    internal,
+                    conditions,
+                );
+                if matches!(
+                    resolution.status,
+                    PackageMapStatus::InvalidPackageTarget | PackageMapStatus::Null
+                ) {
+                    last_status = resolution.status;
+                    last_debug = resolution.debug;
+                    continue;
+                }
+                if resolution.status.is_undefined() {
+                    continue;
+                }
+                return resolution;
+            }
+            PackageMapResolution {
+                status: last_status,
+                debug: last_debug,
+                ..PackageMapResolution::default()
+            }
+        }
+        PackageMapKind::Null => PackageMapResolution {
+            status: PackageMapStatus::Null,
+            debug: PackageMapDebug {
+                token: target.first_token,
+                is_because_of_null_literal: true,
+                ..PackageMapDebug::default()
+            },
+            ..PackageMapResolution::default()
+        },
+        PackageMapKind::Invalid => package_resolution(
+            "",
+            PackageMapStatus::InvalidPackageTarget,
+            target.first_token,
+        ),
+    }
+}
+
+fn package_resolution(path: &str, status: PackageMapStatus, token: Range) -> PackageMapResolution {
+    PackageMapResolution {
+        path: path.to_string(),
+        status,
+        debug: PackageMapDebug {
+            token,
+            ..PackageMapDebug::default()
+        },
+    }
+}
+
+fn posix_path_join(left: &str, right: &str) -> String {
+    let joined = if right.is_empty() {
+        left.to_string()
+    } else if left.is_empty() {
+        right.to_string()
+    } else {
+        format!("{left}/{right}")
+    };
+    let absolute = joined.starts_with('/');
+    let mut segments = Vec::new();
+    for segment in joined.split('/') {
+        match segment {
+            ".." if segments.last().is_some_and(|segment| *segment != "..") => {
+                segments.pop();
+            }
+            ".." if !absolute => segments.push(segment),
+            "" | "." | ".." => {}
+            _ => segments.push(segment),
+        }
+    }
+    let result = segments.join("/");
+    if absolute {
+        format!("/{result}")
+    } else if result.is_empty() {
+        ".".into()
+    } else {
+        result
+    }
+}
+
 type ExtendsCallback<'a> = dyn FnMut(&str, Range) -> Option<TsConfigJson> + 'a;
 
 #[allow(clippy::too_many_lines)]
@@ -1171,11 +1623,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        DataUrl, DebugMeta, MimeType, PackageMapKind, PathPair, TsConfigJson, TsConfigPath,
-        TsConfigPaths, find_invalid_package_segment, globstar_to_escaped_regexp,
-        is_valid_tsconfig_path_no_base_url_pattern, match_tsconfig_path_candidates,
-        parse_bare_identifier, parse_esm_package_name, parse_imports_exports_map,
-        parse_tsconfig_json, sort_package_expansion_keys,
+        DataUrl, DebugMeta, MimeType, PackageMapKind, PackageMapStatus, PathPair, TsConfigJson,
+        TsConfigPath, TsConfigPaths, find_invalid_package_segment, globstar_to_escaped_regexp,
+        handle_package_map_post_conditions, is_valid_tsconfig_path_no_base_url_pattern,
+        match_tsconfig_path_candidates, parse_bare_identifier, parse_esm_package_name,
+        parse_imports_exports_map, parse_tsconfig_json, resolve_package_exports,
+        resolve_package_imports, sort_package_expansion_keys,
     };
     use crate::internal::{
         config::{MaybeBool, TsJsx, TsTarget},
@@ -1587,5 +2040,116 @@ mod tests {
         assert!(
             parse_imports_exports_map(&source, &log, &json, "exports", Loc::default()).is_none()
         );
+    }
+
+    #[test]
+    fn resolves_package_exports_exact_patterns_and_prefixes() {
+        let contents =
+            r#"{"./features/*":"./src/*.js","./legacy/":"./old/","./bad":"../escape.js"}"#;
+        let source = Source {
+            contents: Arc::from(contents.as_bytes()),
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let (json, ok) = parse_json(log.clone(), source.clone(), JsonOptions::default());
+        assert!(ok);
+        let map = parse_imports_exports_map(&source, &log, &json, "exports", Loc::default())
+            .expect("package map");
+        let conditions = HashMap::new();
+
+        let pattern = resolve_package_exports("/pkg", "./features/button", &map.root, &conditions);
+        assert_eq!(pattern.status, PackageMapStatus::Exact);
+        assert_eq!(pattern.path, "/pkg/src/button.js");
+
+        let prefix = resolve_package_exports("/pkg", "./legacy/file", &map.root, &conditions);
+        assert_eq!(prefix.status, PackageMapStatus::Inexact);
+        assert_eq!(prefix.path, "/pkg/old/file");
+
+        assert_eq!(
+            resolve_package_exports("/pkg", "./missing", &map.root, &conditions).status,
+            PackageMapStatus::PackagePathNotExported
+        );
+        let invalid = resolve_package_exports("/pkg", "./bad", &map.root, &conditions);
+        assert_eq!(invalid.status, PackageMapStatus::InvalidPackageTarget);
+        assert_eq!(
+            invalid.debug.invalid_because,
+            " because it doesn't start with \"./\""
+        );
+    }
+
+    #[test]
+    fn resolves_package_conditions_arrays_and_internal_imports() {
+        let source = Source {
+            contents: Arc::from(&br#"{"import":"./esm.js","require":"./cjs.js"}"#[..]),
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let (json, ok) = parse_json(log.clone(), source.clone(), JsonOptions::default());
+        assert!(ok);
+        let exports = parse_imports_exports_map(&source, &log, &json, "exports", Loc::default())
+            .expect("exports map");
+        let import_conditions = HashMap::from([("import".into(), true)]);
+        let resolved = resolve_package_exports("/pkg", ".", &exports.root, &import_conditions);
+        assert_eq!(resolved.status, PackageMapStatus::Exact);
+        assert_eq!(resolved.path, "/pkg/esm.js");
+
+        let unmatched = resolve_package_exports("/pkg", ".", &exports.root, &HashMap::new());
+        assert_eq!(
+            unmatched.status,
+            PackageMapStatus::UndefinedNoConditionsMatch
+        );
+        assert_eq!(
+            unmatched
+                .debug
+                .unmatched_conditions
+                .iter()
+                .map(|condition| condition.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["import", "require"]
+        );
+
+        let source = Source {
+            contents: Arc::from(&br##"{"#dep":["../bad","package/subpath"]}"##[..]),
+            ..Source::default()
+        };
+        let (json, ok) = parse_json(log.clone(), source.clone(), JsonOptions::default());
+        assert!(ok);
+        let imports = parse_imports_exports_map(&source, &log, &json, "imports", Loc::default())
+            .expect("imports map");
+        let resolved = resolve_package_imports("#dep", &imports.root, &HashMap::new());
+        assert_eq!(resolved.status, PackageMapStatus::PackageResolve);
+        assert_eq!(resolved.path, "package/subpath");
+    }
+
+    #[test]
+    fn validates_package_map_post_conditions() {
+        use super::{PackageMapResolution, PackageMapStatus};
+
+        let decoded = handle_package_map_post_conditions(PackageMapResolution {
+            path: "/pkg/hello%20world.js".into(),
+            status: PackageMapStatus::Exact,
+            ..PackageMapResolution::default()
+        });
+        assert_eq!(decoded.path, "/pkg/hello world.js");
+        assert_eq!(decoded.status, PackageMapStatus::Exact);
+
+        for (path, status) in [
+            ("/pkg/a%2Fb.js", PackageMapStatus::InvalidModuleSpecifier),
+            ("/pkg/bad%xx", PackageMapStatus::InvalidModuleSpecifier),
+            (
+                "/pkg/directory/",
+                PackageMapStatus::UnsupportedDirectoryImport,
+            ),
+        ] {
+            assert_eq!(
+                handle_package_map_post_conditions(PackageMapResolution {
+                    path: path.into(),
+                    status: PackageMapStatus::Exact,
+                    ..PackageMapResolution::default()
+                })
+                .status,
+                status
+            );
+        }
     }
 }
