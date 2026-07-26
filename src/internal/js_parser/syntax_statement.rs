@@ -2,7 +2,8 @@
 
 use crate::internal::{
     js_ast::{
-        BlockStmt, Expr, ExprData, ExprStmt, Precedence, ReturnStmt, Stmt, StmtData, ThrowStmt,
+        BlockStmt, DoWhileStmt, Expr, ExprData, ExprStmt, IfStmt, Precedence, ReturnStmt, Stmt,
+        StmtData, ThrowStmt, WhileStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
@@ -28,6 +29,7 @@ pub(crate) fn parse_block(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, Blo
     )
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
     match lexer.token {
@@ -38,6 +40,59 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         Token::OpenBrace => {
             let (_, block) = parse_block(core, lexer);
             Stmt::new(loc, StmtData::Block(block))
+        }
+        Token::If => {
+            lexer.next();
+            lexer.expect(Token::OpenParen);
+            let test = parse_expression(core, lexer, Precedence::Lowest, true);
+            lexer.expect(Token::CloseParen);
+            let is_single_line_yes = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
+            let yes = parse_statement(core, lexer);
+            let (no_or_nil, is_single_line_no) = if lexer.token == Token::Else {
+                lexer.next();
+                let is_single_line = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
+                (parse_statement(core, lexer), is_single_line)
+            } else {
+                (Stmt::default(), false)
+            };
+            Stmt::new(
+                loc,
+                StmtData::If(IfStmt {
+                    test,
+                    yes,
+                    no_or_nil,
+                    is_single_line_yes,
+                    is_single_line_no,
+                }),
+            )
+        }
+        Token::Do => {
+            lexer.next();
+            let body = parse_statement(core, lexer);
+            lexer.expect(Token::While);
+            lexer.expect(Token::OpenParen);
+            let test = parse_expression(core, lexer, Precedence::Lowest, true);
+            lexer.expect(Token::CloseParen);
+            if lexer.token == Token::Semicolon {
+                lexer.next();
+            }
+            Stmt::new(loc, StmtData::DoWhile(DoWhileStmt { body, test }))
+        }
+        Token::While => {
+            lexer.next();
+            lexer.expect(Token::OpenParen);
+            let test = parse_expression(core, lexer, Precedence::Lowest, true);
+            lexer.expect(Token::CloseParen);
+            let is_single_line_body = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
+            let body = parse_statement(core, lexer);
+            Stmt::new(
+                loc,
+                StmtData::While(WhileStmt {
+                    test,
+                    body,
+                    is_single_line_body,
+                }),
+            )
         }
         Token::Return => {
             if core.fn_or_arrow_data_parse.is_return_disallowed {
@@ -126,6 +181,30 @@ mod tests {
         assert!(matches!(
             block.statements[2].data.as_deref(),
             Some(StmtData::Return(_))
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_if_else_while_and_do_while_statements() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"{if (a) while (b) work(); else do other(); while (c);}"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        let Some(StmtData::If(if_stmt)) = block.statements[0].data.as_deref() else {
+            panic!("expected if");
+        };
+        assert!(matches!(
+            if_stmt.yes.data.as_deref(),
+            Some(StmtData::While(_))
+        ));
+        assert!(matches!(
+            if_stmt.no_or_nil.data.as_deref(),
+            Some(StmtData::DoWhile(_))
         ));
         assert_eq!(lexer.token, Token::EndOfFile);
     }
