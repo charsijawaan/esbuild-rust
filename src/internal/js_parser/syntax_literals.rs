@@ -5,7 +5,8 @@ use crate::internal::{
     helpers::utf16_to_string,
     js_ast::{
         ArrayExpr, Expr, ExprData, IdentifierExpr, NameOfSymbolExpr, ObjectExpr, OpCode, Property,
-        PropertyKind, SpreadExpr, StringExpr, UnaryExpr, is_property_access,
+        PropertyKind, SpreadExpr, StringExpr, TemplateExpr, TemplatePart, UnaryExpr,
+        is_property_access,
     },
     js_lexer::{CommentBefore, Lexer, MaybeSubstring, Token},
     logger::Loc,
@@ -159,6 +160,56 @@ pub(crate) fn parse_object_prefix(
     ))
 }
 
+pub(crate) fn parse_untagged_template_prefix(
+    lexer: &mut Lexer,
+    mut parse_value: impl FnMut(&mut Lexer) -> Expr,
+) -> Option<Expr> {
+    if lexer.token != Token::TemplateHead {
+        return None;
+    }
+    let loc = lexer.loc();
+    let head_loc = lexer.loc();
+    let head_cooked = lexer.string_literal().to_vec();
+    let mut legacy_octal_loc = if lexer.legacy_octal_loc.start > loc.start {
+        lexer.legacy_octal_loc
+    } else {
+        Loc::default()
+    };
+    let mut parts = Vec::new();
+
+    loop {
+        lexer.next();
+        let value = parse_value(lexer);
+        let tail_loc = lexer.loc();
+        lexer.rescan_close_brace_as_template_token();
+        let tail_cooked = lexer.string_literal().to_vec();
+        if lexer.legacy_octal_loc.start > tail_loc.start {
+            legacy_octal_loc = lexer.legacy_octal_loc;
+        }
+        parts.push(TemplatePart {
+            value,
+            tail_cooked,
+            tail_loc,
+            ..TemplatePart::default()
+        });
+        if lexer.token == Token::TemplateTail {
+            lexer.next();
+            break;
+        }
+    }
+
+    Some(Expr::new(
+        loc,
+        ExprData::Template(TemplateExpr {
+            head_cooked,
+            parts,
+            head_loc,
+            legacy_octal_loc,
+            ..TemplateExpr::default()
+        }),
+    ))
+}
+
 pub(crate) fn parse_big_int_or_string_if_unsupported(core: &ParserCore, lexer: &Lexer) -> Expr {
     let loc = lexer.loc();
     let text = std::str::from_utf8(&lexer.identifier.string)
@@ -298,7 +349,7 @@ mod tests {
     use super::{
         parse_array_prefix, parse_big_int_or_string_if_unsupported, parse_numeric_literal,
         parse_object_prefix, parse_regular_expression_literal, parse_simple_prefix,
-        parse_string_literal, parse_unary_prefix,
+        parse_string_literal, parse_unary_prefix, parse_untagged_template_prefix,
     };
     use crate::internal::{
         config::TsOptions,
@@ -528,5 +579,36 @@ mod tests {
         assert_eq!(object.properties[1].kind, PropertyKind::Spread);
         assert!(object.comma_after_spread.start > 0);
         assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_untagged_template_parts_and_advances_after_tail() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"`a${1}b${2}c` + 3"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source, TsOptions::default());
+        let template = parse_untagged_template_prefix(&mut lexer, |lexer| {
+            let loc = lexer.loc();
+            let value = lexer.number;
+            lexer.next();
+            Expr::new(loc, ExprData::Number(value))
+        })
+        .expect("expected template");
+        let Some(ExprData::Template(template)) = template.data.as_deref() else {
+            panic!("expected template expression");
+        };
+        assert_eq!(template.head_cooked, "a".encode_utf16().collect::<Vec<_>>());
+        assert_eq!(template.parts.len(), 2);
+        assert_eq!(
+            template.parts[0].tail_cooked,
+            "b".encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            template.parts[1].tail_cooked,
+            "c".encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(lexer.token, Token::Plus);
     }
 }
