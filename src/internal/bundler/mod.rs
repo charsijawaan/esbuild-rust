@@ -2445,6 +2445,63 @@ mod tests {
     }
 
     #[test]
+    fn tree_shakes_dead_jsx_away_from_shared_generated_imports() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.jsx".into(),
+                    "const dead = <div />; console.log(<span />)".into(),
+                ),
+                (
+                    "/project/node_modules/react/package.json".into(),
+                    r#"{"main":"index.js","sideEffects":false}"#.into(),
+                ),
+                (
+                    "/project/node_modules/react/jsx-runtime.js".into(),
+                    "export function jsx(type, props) { return {type, props} }".into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            tree_shaking: true,
+            jsx: crate::internal::config::JsxOptions {
+                automatic_runtime: true,
+                ..crate::internal::config::JsxOptions::default()
+            },
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.jsx".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert!(
+            compiled.scan_result.import_issues.is_empty(),
+            "{:?}",
+            compiled.scan_result.import_issues
+        );
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(!output.contains("dead"));
+        assert!(output.contains("function jsx(type, props)"));
+        assert!(output.contains("console.log(/* @__PURE__ */ jsx(\"span\", {}));"));
+    }
+
+    #[test]
     fn renames_colliding_top_level_symbols_across_modules() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let file_system = mock_fs(

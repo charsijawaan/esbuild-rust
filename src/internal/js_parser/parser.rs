@@ -324,7 +324,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         core.hoist_symbols();
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
-        let (parts, module_metadata, uses_exports_ref, uses_module_ref) =
+        let (mut parts, module_metadata, uses_exports_ref, uses_module_ref) =
             if core.options.tree_shaking {
                 build_tree_shaking_parts(&mut core, statements, declared_symbols_by_statement)
             } else {
@@ -353,6 +353,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 }];
                 if !statements.is_empty() {
                     let import_record_indices = (0..core.import_records.len())
+                        .filter(|index| !is_generated_import_record(&core, *index))
                         .map(|index| u32::try_from(index).expect("import record count fits in u32"))
                         .collect();
                     parts.push(Part {
@@ -366,6 +367,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 }
                 (parts, module_metadata, uses_exports_ref, uses_module_ref)
             };
+        insert_generated_import_parts(&core, &module_metadata, &mut parts);
         assert_eq!(
             core.remaining_scope_count(),
             0,
@@ -462,6 +464,85 @@ struct ModuleMetadata {
     export_star_import_records: Vec<u32>,
 }
 
+fn insert_generated_import_parts(
+    core: &ParserCore,
+    metadata: &ModuleMetadata,
+    parts: &mut Vec<Part>,
+) {
+    let mut generated_imports = core
+        .jsx_import_records
+        .values()
+        .copied()
+        .collect::<Vec<_>>();
+    generated_imports.sort_unstable_by_key(|(record_index, _)| *record_index);
+
+    for (offset, (import_record_index, namespace_ref)) in generated_imports.into_iter().enumerate()
+    {
+        let mut imports = metadata
+            .named_imports
+            .iter()
+            .filter(|(_, import)| {
+                import.import_record_index == import_record_index
+                    && import.namespace_ref == namespace_ref
+            })
+            .map(|(reference, import)| (*reference, import))
+            .collect::<Vec<_>>();
+        imports.sort_unstable_by(|left, right| left.1.alias.cmp(&right.1.alias));
+
+        let mut declared_symbols = Vec::with_capacity(imports.len() + 1);
+        declared_symbols.push(DeclaredSymbol {
+            reference: namespace_ref,
+            is_top_level: true,
+        });
+        let items = imports
+            .into_iter()
+            .map(|(reference, import)| {
+                declared_symbols.push(DeclaredSymbol {
+                    reference,
+                    is_top_level: true,
+                });
+                ClauseItem {
+                    alias: import.alias.clone(),
+                    alias_loc: import.alias_loc,
+                    name: LocRef {
+                        loc: import.alias_loc,
+                        reference,
+                    },
+                    ..ClauseItem::default()
+                }
+            })
+            .collect();
+        let loc = core.import_records
+            [usize::try_from(import_record_index).expect("import record index")]
+        .range
+        .loc;
+        parts.insert(
+            1 + offset,
+            Part {
+                statements: vec![Stmt::new(
+                    loc,
+                    StmtData::Import(ImportStmt {
+                        items: Some(items),
+                        namespace_ref,
+                        import_record_index,
+                        is_single_line: true,
+                        ..ImportStmt::default()
+                    }),
+                )],
+                import_record_indices: vec![import_record_index],
+                declared_symbols,
+                ..Part::default()
+            },
+        );
+    }
+}
+
+fn is_generated_import_record(core: &ParserCore, index: usize) -> bool {
+    core.jsx_import_records.values().any(|(record_index, _)| {
+        usize::try_from(*record_index).expect("import record index") == index
+    })
+}
+
 fn split_top_level_local_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
     let mut result = Vec::with_capacity(statements.len());
     for statement in statements {
@@ -482,16 +563,15 @@ fn split_top_level_local_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
     result
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_tree_shaking_parts(
     core: &mut ParserCore,
     statements: Vec<Stmt>,
     declared_symbols_by_statement: Vec<Vec<DeclaredSymbol>>,
 ) -> (Vec<Part>, ModuleMetadata, bool, bool) {
-    let mut parts = vec![Part {
-        symbol_uses: HashMap::new(),
-        can_be_removed_if_unused: true,
-        ..Part::default()
-    }];
+    let mut before_parts = Vec::new();
+    let mut parts = Vec::new();
+    let mut after_parts = Vec::new();
     let mut metadata = ModuleMetadata::default();
     let mut lower_context = LowerTypeScriptContext::default();
     let mut uses_exports_ref = false;
@@ -501,6 +581,12 @@ fn build_tree_shaking_parts(
     for (mut statement, declared_symbols) in
         statements.into_iter().zip(declared_symbols_by_statement)
     {
+        let move_before = core.options.mode != crate::internal::config::Mode::PassThrough
+            && matches!(
+                statement.data.as_deref(),
+                Some(StmtData::Import(_) | StmtData::ExportFrom(_) | StmtData::ExportStar(_))
+            );
+        let move_after = matches!(statement.data.as_deref(), Some(StmtData::ExportEquals(_)));
         core.symbol_uses.clear();
         core.declared_symbols = declared_symbols;
         core.scopes_for_current_part.clear();
@@ -522,6 +608,7 @@ fn build_tree_shaking_parts(
 
         import_record_indices.extend(
             (first_generated_import_record..core.import_records.len())
+                .filter(|index| !is_generated_import_record(core, *index))
                 .map(|index| u32::try_from(index).expect("import record count fits in u32")),
         );
         import_record_indices.sort_unstable();
@@ -543,7 +630,7 @@ fn build_tree_shaking_parts(
             };
             helpers.stmts_can_be_removed_if_unused(&statements, flags)
         };
-        parts.push(Part {
+        let part = Part {
             statements,
             scopes: std::mem::take(&mut core.scopes_for_current_part),
             import_record_indices,
@@ -551,12 +638,28 @@ fn build_tree_shaking_parts(
             symbol_uses: std::mem::take(&mut core.symbol_uses),
             can_be_removed_if_unused,
             ..Part::default()
-        });
+        };
+        if move_before {
+            before_parts.push(part);
+        } else if move_after {
+            after_parts.push(part);
+        } else {
+            parts.push(part);
+        }
     }
 
     metadata
         .named_imports
         .extend(std::mem::take(&mut core.generated_named_imports));
+
+    let mut ordered_parts = vec![Part {
+        symbol_uses: HashMap::new(),
+        can_be_removed_if_unused: true,
+        ..Part::default()
+    }];
+    ordered_parts.extend(before_parts);
+    ordered_parts.extend(parts);
+    ordered_parts.extend(after_parts);
 
     let contains_direct_eval = core.module_scope.as_ref().is_some_and(|scope| {
         scope
@@ -565,7 +668,7 @@ fn build_tree_shaking_parts(
             .contains_direct_eval
     });
     if contains_direct_eval {
-        for part in &mut parts {
+        for part in &mut ordered_parts {
             if part
                 .declared_symbols
                 .iter()
@@ -576,7 +679,7 @@ fn build_tree_shaking_parts(
         }
     }
 
-    (parts, metadata, uses_exports_ref, uses_module_ref)
+    (ordered_parts, metadata, uses_exports_ref, uses_module_ref)
 }
 
 fn top_level_import_record_indices(statement: &Stmt) -> Vec<u32> {
@@ -1323,11 +1426,12 @@ mod tests {
     #[test]
     fn builds_independent_parts_when_tree_shaking_is_enabled() {
         let (ast, ok, log) = parse_source_with_options(
-            "import 'static';\
+            "console.log('effect');\
+             import 'static';\
              const dead = 1, live = 2;\
-             console.log(live);\
              import('dynamic')",
             Options {
+                mode: crate::internal::config::Mode::Bundle,
                 tree_shaking: true,
                 ..Options::default()
             },
@@ -1342,12 +1446,12 @@ mod tests {
         assert!(ast.parts[4].import_record_indices.is_empty());
         assert_eq!(ast.parts[5].import_record_indices, [1]);
         assert!(ast.parts[1].can_be_removed_if_unused);
-        assert!(ast.parts[2].can_be_removed_if_unused);
+        assert!(!ast.parts[2].can_be_removed_if_unused);
         assert!(ast.parts[3].can_be_removed_if_unused);
-        assert!(!ast.parts[4].can_be_removed_if_unused);
+        assert!(ast.parts[4].can_be_removed_if_unused);
         assert!(!ast.parts[5].can_be_removed_if_unused);
 
-        for part_index in [2_u32, 3] {
+        for part_index in [3_u32, 4] {
             let declared = ast.parts[part_index as usize]
                 .declared_symbols
                 .iter()
@@ -3162,7 +3266,10 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>(),
             std::collections::HashSet::from(["Fragment", "jsx", "jsxs"])
         );
-        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+        let Some(StmtData::Import(_)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected generated runtime import");
+        };
+        let Some(StmtData::Expr(statement)) = ast.parts[2].statements[0].data.as_deref() else {
             panic!("expected expression statement");
         };
         let Some(ExprData::Call(root)) = statement.value.data.as_deref() else {
@@ -3195,7 +3302,7 @@ mod tests {
         assert!(log.done().is_empty());
         assert_eq!(ast.import_records.len(), 1);
         assert_eq!(ast.import_records[0].path.text, "react");
-        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+        let Some(StmtData::Expr(statement)) = ast.parts[2].statements[0].data.as_deref() else {
             panic!("expected expression statement");
         };
         let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
@@ -3209,6 +3316,48 @@ mod tests {
         let (_, ok, log) = parse_source_with_options("<div __source=\"plugin\" />;", options);
         assert!(ok);
         assert_eq!(log.done().len(), 1);
+    }
+
+    #[test]
+    fn isolates_generated_jsx_imports_from_tree_shaken_code_parts() {
+        let (ast, ok, log) = parse_source_with_options(
+            "const dead = <div />; console.log(<span />);",
+            Options {
+                jsx: crate::internal::config::JsxOptions {
+                    parse: true,
+                    automatic_runtime: true,
+                    ..crate::internal::config::JsxOptions::default()
+                },
+                tree_shaking: true,
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts.len(), 4);
+        assert!(matches!(
+            ast.parts[1].statements[0].data.as_deref(),
+            Some(StmtData::Import(_))
+        ));
+        assert!(ast.parts[1].import_record_indices == [0]);
+        assert!(ast.parts[2].can_be_removed_if_unused);
+        assert!(!ast.parts[3].can_be_removed_if_unused);
+
+        let jsx_ref = ast
+            .named_imports
+            .iter()
+            .find(|(_, import)| import.alias == "jsx")
+            .map(|(reference, _)| *reference)
+            .expect("jsx import");
+        assert_eq!(ast.top_level_symbol_to_parts_from_parser[&jsx_ref], [1]);
+        assert!(
+            ast.parts[2]
+                .declared_symbols
+                .iter()
+                .all(|symbol| symbol.reference != jsx_ref)
+        );
+        assert_eq!(ast.parts[2].symbol_uses[&jsx_ref].count_estimate, 1);
+        assert_eq!(ast.parts[3].symbol_uses[&jsx_ref].count_estimate, 1);
     }
 
     #[test]
@@ -3229,7 +3378,7 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>(),
             std::collections::HashSet::from(["Fragment", "jsxDEV"])
         );
-        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+        let Some(StmtData::Expr(statement)) = ast.parts[2].statements[0].data.as_deref() else {
             panic!("expected expression statement");
         };
         let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {

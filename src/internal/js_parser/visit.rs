@@ -1809,13 +1809,11 @@ fn import_jsx_symbol(
                 crate::internal::ast::SymbolKind::Other,
                 format!("import_{alias}"),
             );
-            core.record_declared_symbol(namespace_ref);
             core.jsx_import_records
                 .insert(path, (import_record_index, namespace_ref));
             (import_record_index, namespace_ref)
         };
     let reference = core.new_symbol(crate::internal::ast::SymbolKind::Import, alias);
-    core.record_declared_symbol(reference);
     core.generated_named_imports.insert(
         reference,
         crate::internal::js_ast::NamedImport {
