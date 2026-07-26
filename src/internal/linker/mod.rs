@@ -1555,6 +1555,7 @@ pub fn create_exports_for_file(
     graph: &mut LinkerGraph,
     source_index: u32,
     export_runtime_ref: Ref,
+    entry_point_refs: Option<EntryPointTailRefs>,
     options: &Options,
 ) {
     let (aliases, resolved_exports, exports_ref, needs_exports_variable) = {
@@ -1741,6 +1742,33 @@ pub fn create_exports_for_file(
                     part_index,
                 }),
         );
+    }
+
+    let force_common_js_entry = {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            panic!("export source must be JavaScript");
+        };
+        repr.meta.force_include_exports_for_entry_point && options.output_format == Format::CommonJs
+    };
+    if force_common_js_entry {
+        let refs = entry_point_refs
+            .expect("CommonJS entry export generation requires runtime symbol references");
+        statements.push(expr_statement(js_ast::assign(
+            module_exports_expr(
+                refs.unbound_module_ref,
+                crate::internal::logger::Loc::default(),
+            ),
+            call_with_args(
+                refs.to_common_js_ref,
+                vec![identifier_expr(
+                    exports_ref,
+                    crate::internal::logger::Loc::default(),
+                )],
+                crate::internal::logger::Loc::default(),
+            ),
+        )));
     }
 
     if statements.is_empty() {
@@ -12464,7 +12492,7 @@ mod tests {
         repr.meta.sorted_and_filtered_export_aliases = vec!["__proto__".into(), "foo".into()];
         repr.meta.needs_exports_variable = true;
 
-        create_exports_for_file(&mut graph, 1, export_runtime_ref, &Options::default());
+        create_exports_for_file(&mut graph, 1, export_runtime_ref, None, &Options::default());
 
         let repr = js_repr(&graph, 1);
         let part = &repr.ast.parts[js_ast::NS_EXPORT_PART_INDEX as usize];
@@ -12519,6 +12547,100 @@ mod tests {
         ));
         assert!(repr.ast.uses_exports_ref);
         assert!(repr.meta.needs_export_symbol_from_runtime);
+    }
+
+    #[test]
+    fn common_js_entry_namespace_is_decorated_on_module_exports() {
+        let export_runtime_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let to_common_js_ref = Ref {
+            source_index: 0,
+            inner_index: 1,
+        };
+        let unbound_module_ref = Ref {
+            source_index: 0,
+            inner_index: 2,
+        };
+        let exports_ref = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let input_files = [
+            js_file(js_ast::Ast {
+                symbols: vec![
+                    Symbol::new(SymbolKind::Other, "__export"),
+                    Symbol::new(SymbolKind::Other, "__toCommonJS"),
+                    Symbol::new(SymbolKind::Unbound, "module"),
+                ],
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "exports")],
+                exports_ref,
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(
+            &input_files,
+            &[0, 1],
+            &[EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            }],
+            false,
+        );
+        let Some(InputFileRepr::Js(repr)) = graph.files[1].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta.needs_exports_variable = true;
+        repr.meta.force_include_exports_for_entry_point = true;
+
+        create_exports_for_file(
+            &mut graph,
+            1,
+            export_runtime_ref,
+            Some(EntryPointTailRefs {
+                to_common_js_ref,
+                unbound_module_ref,
+            }),
+            &Options {
+                output_format: Format::CommonJs,
+                ..Options::default()
+            },
+        );
+
+        let part = &js_repr(&graph, 1).ast.parts[js_ast::NS_EXPORT_PART_INDEX as usize];
+        assert_eq!(part.statements.len(), 2);
+        let Some(js_ast::StmtData::Expr(statement)) = part.statements[1].data.as_deref() else {
+            panic!("module exports assignment");
+        };
+        let Some(js_ast::ExprData::Binary(assignment)) = statement.value.data.as_deref() else {
+            panic!("assignment expression");
+        };
+        assert_eq!(assignment.op, js_ast::OpCode::BinaryAssign);
+        assert!(matches!(
+            assignment.left.data.as_deref(),
+            Some(js_ast::ExprData::Dot(dot))
+                if dot.name == "exports"
+                    && matches!(
+                        dot.target.data.as_deref(),
+                        Some(js_ast::ExprData::Identifier(identifier))
+                            if identifier.reference == unbound_module_ref
+                    )
+        ));
+        assert!(matches!(
+            assignment.right.data.as_deref(),
+            Some(js_ast::ExprData::Call(call))
+                if matches!(
+                    call.target.data.as_deref(),
+                    Some(js_ast::ExprData::Identifier(identifier))
+                        if identifier.reference == to_common_js_ref
+                )
+        ));
     }
 
     #[test]
