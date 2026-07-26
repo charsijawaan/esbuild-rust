@@ -56,6 +56,7 @@ pub(crate) struct ParserCore {
     pub(crate) esm_import_meta: Range,
     pub(crate) await_policy: AwaitOrYield,
     pub(crate) yield_policy: AwaitOrYield,
+    pub(crate) lower_all_of_these_private_names: HashMap<String, bool>,
 }
 
 impl ParserCore {
@@ -87,6 +88,7 @@ impl ParserCore {
             esm_import_meta: Range::default(),
             await_policy: AwaitOrYield::AllowIdentifier,
             yield_policy: AwaitOrYield::AllowIdentifier,
+            lower_all_of_these_private_names: HashMap::new(),
         }
     }
 

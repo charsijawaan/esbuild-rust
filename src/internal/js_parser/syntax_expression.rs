@@ -14,6 +14,7 @@ use super::{
         parse_unary_prefix, parse_untagged_template_prefix,
     },
     syntax_new::parse_new_prefix,
+    syntax_private::parse_private_brand_check_prefix,
     syntax_suffix::{binary_operator, parse_high_precedence_suffix_chain},
     syntax_yield_await::parse_await_or_yield_prefix,
 };
@@ -107,6 +108,10 @@ fn parse_prefix(
     minimum_precedence: Precedence,
     allow_in: bool,
 ) -> Expr {
+    if let Some(expr) = parse_private_brand_check_prefix(core, lexer, minimum_precedence, allow_in)
+    {
+        return expr;
+    }
     if let Some(expr) = parse_await_or_yield_prefix(
         core,
         lexer,
@@ -317,6 +322,28 @@ mod tests {
             }
             assert_eq!(lexer.token, Token::EndOfFile);
         }
+    }
+
+    #[test]
+    fn integrates_private_brand_check_with_binary_in() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"#field in object"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        assert!(matches!(
+            expression.data.as_deref(),
+            Some(ExprData::Binary(binary))
+                if binary.op == OpCode::BinaryIn
+                    && matches!(
+                        binary.left.data.as_deref(),
+                        Some(ExprData::PrivateIdentifier(_))
+                    )
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
     }
 
     #[test]
