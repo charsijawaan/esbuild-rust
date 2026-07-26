@@ -31,7 +31,8 @@ use crate::internal::{
     css_parser, css_printer,
     fs::Fs,
     graph::{
-        ExportData, ImportData, InputFileRepr, LinkerGraph, OutputFile, SideEffectsKind, WrapKind,
+        EntryPoint, ExportData, ImportData, InputFile, InputFileRepr, LinkerGraph, OutputFile,
+        SideEffectsKind, WrapKind, clone_linker_graph,
     },
     helpers::{
         BitSet, Joiner, encode_string_as_shortest_data_url, escape_closing_tag, quote_for_json,
@@ -222,6 +223,14 @@ pub struct ScanImportsAndExportsResult {
     pub import_issues: Vec<(u32, ImportMatchIssue)>,
     pub ambiguous_re_exports: Vec<(u32, AmbiguousReExport)>,
     pub arbitrary_namespace_issues: Vec<ArbitraryNamespaceIssue>,
+}
+
+#[derive(Debug, Default)]
+pub struct PreparedLinkerGraph {
+    pub graph: LinkerGraph,
+    pub chunks: Vec<ChunkInfo>,
+    pub scan_result: ScanImportsAndExportsResult,
+    pub unbound_module_ref: Ref,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -2698,6 +2707,64 @@ pub fn scan_imports_and_exports<S: BuildHasher>(
         encode_import_constraints_for_file(graph, source_index, options);
     }
     result
+}
+
+/// Clone scanner output and run the ordered linker preparation stages through
+/// cross-chunk statement generation.
+///
+/// # Panics
+///
+/// Panics when scanner output violates linker invariants or the parsed runtime
+/// module is missing required exports.
+#[must_use]
+pub fn prepare_linker_graph<S: BuildHasher>(
+    input_files: &[InputFile],
+    reachable_files: &[u32],
+    entry_points: &[EntryPoint],
+    options: &Options,
+    unique_key_prefix: &str,
+    local_names: &HashMap<Ref, String, S>,
+) -> PreparedLinkerGraph {
+    let mut graph = clone_linker_graph(
+        input_files,
+        reachable_files,
+        entry_points,
+        options.code_splitting,
+    );
+    let unbound_module_ref = if options.output_format == Format::CommonJs {
+        graph.generate_new_symbol(
+            crate::internal::runtime::SOURCE_INDEX,
+            SymbolKind::Unbound,
+            "module",
+        )
+    } else {
+        INVALID_REF
+    };
+    let runtime_refs = scan_runtime_refs_from_graph(&graph, unbound_module_ref);
+    let scan_result = scan_imports_and_exports(
+        &mut graph,
+        options,
+        unique_key_prefix,
+        local_names,
+        runtime_refs,
+    );
+    tree_shaking_and_code_splitting(&mut graph, options);
+    if options.mode == Mode::PassThrough {
+        for entry_point in graph.entry_points().to_vec() {
+            prevent_exports_from_being_renamed(&mut graph, entry_point.source_index);
+        }
+    }
+    let mut chunks = compute_chunks(&mut graph, options, unique_key_prefix);
+    compute_cross_chunk_dependencies(&mut graph, &mut chunks, options);
+    if options.code_splitting {
+        generate_cross_chunk_stmts(&graph, &mut chunks, options);
+    }
+    PreparedLinkerGraph {
+        graph,
+        chunks,
+        scan_result,
+        unbound_module_ref,
+    }
 }
 
 /// Preserve externally observable symbol names in pass-through mode.
@@ -8603,7 +8670,7 @@ mod tests {
         is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
         lower_esm_lazy_export, mangle_local_css, mangle_props, mark_file_live_for_tree_shaking,
         match_import_with_export, maybe_correct_export_typo, merge_adjacent_local_stmts,
-        path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts,
+        path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts, prepare_linker_graph,
         prevent_exports_from_being_renamed, print_cross_chunk_bindings,
         propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
         require_or_import_meta_for_source, resolve_export_stars, runtime_symbol_ref,
@@ -11296,6 +11363,70 @@ mod tests {
                 unbound_module_ref: Some(unbound_module_ref),
             })
         );
+    }
+
+    #[test]
+    fn prepares_scanner_files_through_cross_chunk_generation() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            tree_shaking: true,
+            ..Options::default()
+        };
+        let runtime_result = crate::internal::bundler::parse_file(
+            &log,
+            crate::internal::runtime::source(options.unsupported_js_features),
+            Loader::Js,
+            &options,
+        );
+        let entry_result = crate::internal::bundler::parse_file(
+            &log,
+            Source {
+                index: 1,
+                key_path: Path {
+                    text: "/entry.js".into(),
+                    namespace: "file".into(),
+                    ..Path::default()
+                },
+                pretty_paths: PrettyPaths {
+                    abs: "/entry.js".into(),
+                    rel: "entry.js".into(),
+                },
+                contents: std::sync::Arc::from(b"console.log(1);".as_slice()),
+                ..Source::default()
+            },
+            Loader::Js,
+            &options,
+        );
+        assert!(runtime_result.ok);
+        assert!(entry_result.ok);
+        assert!(log.done().is_empty());
+        let input_files = [runtime_result.file.input_file, entry_result.file.input_file];
+
+        let prepared = prepare_linker_graph(
+            &input_files,
+            &[0, 1],
+            &[EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            }],
+            &options,
+            PREFIX,
+            &HashMap::new(),
+        );
+        assert!(prepared.scan_result.import_issues.is_empty());
+        assert!(prepared.scan_result.ambiguous_re_exports.is_empty());
+        assert!(prepared.scan_result.arbitrary_namespace_issues.is_empty());
+        assert_eq!(
+            prepared.unbound_module_ref,
+            crate::internal::ast::INVALID_REF
+        );
+        assert_eq!(prepared.chunks.len(), 1);
+        assert!(prepared.chunks[0].is_entry_point);
+        assert_eq!(prepared.chunks[0].source_index, 1);
+        assert!(!prepared.chunks[0].parts_in_chunk_in_order.is_empty());
+        assert!(prepared.graph.files[1].is_live);
     }
 
     #[test]
