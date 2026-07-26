@@ -6,7 +6,9 @@ use std::{
 };
 
 use crate::internal::{
-    ast::{INVALID_REF, LocRef, NamespaceAlias, Ref, Symbol, SymbolFlags, SymbolKind},
+    ast::{
+        INVALID_REF, ImportRecord, LocRef, NamespaceAlias, Ref, Symbol, SymbolFlags, SymbolKind,
+    },
     compat::JsFeature,
     config::{Mode, pretty_print_target_environment},
     helpers::contains_non_bmp_code_point,
@@ -40,6 +42,7 @@ pub(crate) struct ParserCore {
     pub(crate) scopes_in_order: Vec<ScopeOrder>,
     pub(crate) scopes_for_current_part: Vec<ScopeRef>,
     pub(crate) symbols: Vec<Symbol>,
+    pub(crate) import_records: Vec<ImportRecord>,
     pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
     pub(crate) runtime_imports: HashMap<String, LocRef>,
     pub(crate) allocated_names: Vec<Vec<u8>>,
@@ -71,6 +74,7 @@ impl ParserCore {
             scopes_in_order: Vec::new(),
             scopes_for_current_part: Vec::new(),
             symbols: Vec::new(),
+            import_records: Vec::new(),
             symbol_uses: HashMap::new(),
             runtime_imports: HashMap::new(),
             allocated_names: Vec::new(),

@@ -28,6 +28,7 @@ const MODULE_SCOPE_LOC: Loc = Loc { start: -1 };
 /// Panics if parser invariants are violated. Syntax errors from the lexer are
 /// caught and reported through the returned boolean instead.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
     let mut result = Ast::default();
     let parsed = catch_unwind(AssertUnwindSafe(|| {
@@ -53,6 +54,27 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         }
 
         let directives = strip_directive_prologue(&core, &mut statements);
+        let has_esm_syntax = statements.iter().any(|statement| {
+            matches!(
+                statement.data.as_deref(),
+                Some(
+                    StmtData::Import(_)
+                        | StmtData::ExportClause(_)
+                        | StmtData::ExportFrom(_)
+                        | StmtData::ExportDefault(_)
+                        | StmtData::ExportStar(_)
+                )
+            ) || matches!(
+                statement.data.as_deref(),
+                Some(StmtData::Local(local)) if local.is_export
+            ) || matches!(
+                statement.data.as_deref(),
+                Some(StmtData::Function(function)) if function.is_export
+            ) || matches!(
+                statement.data.as_deref(),
+                Some(StmtData::Class(class)) if class.is_export
+            )
+        });
         let module_scope = core
             .module_scope
             .clone()
@@ -74,15 +96,19 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             ..Part::default()
         }];
         if !statements.is_empty() {
+            let import_record_indices = (0..core.import_records.len())
+                .map(|index| u32::try_from(index).expect("import record count fits in u32"))
+                .collect();
             parts.push(Part {
                 statements,
                 scopes: vec![module_scope.clone()],
+                import_record_indices,
                 symbol_uses: std::mem::take(&mut core.symbol_uses),
                 ..Part::default()
             });
         }
 
-        let exports_kind = if core.options.module_type_data.module_type.is_esm() {
+        let exports_kind = if has_esm_syntax || core.options.module_type_data.module_type.is_esm() {
             ExportsKind::Esm
         } else if core.options.module_type_data.module_type.is_common_js() {
             ExportsKind::CommonJs
@@ -102,6 +128,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             top_level_symbol_to_parts_from_parser,
             mangled_props: core.mangled_props,
             reserved_props: core.reserved_props,
+            import_records: core.import_records,
             source_map_comment: lexer.source_mapping_url.clone(),
             exports_ref,
             module_ref,
@@ -223,5 +250,69 @@ mod tests {
         assert!(!ok);
         assert!(ast.parts.is_empty());
         assert!(!log.done().is_empty());
+    }
+
+    #[test]
+    fn parses_static_imports_and_exports_with_import_records() {
+        let (ast, ok, log) = parse_source(
+            "import main, {read as load} from 'pkg';\
+             import * as helpers from './helpers.js';\
+             import 'side-effect';\
+             export {load as read};\
+             export {value as renamed} from './value.js';\
+             export * as namespace from './all.js';\
+             export const answer = 42;\
+             export default function() {}",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+        assert_eq!(ast.parts[1].statements.len(), 8);
+        assert_eq!(ast.import_records.len(), 5);
+        assert_eq!(
+            ast.import_records
+                .iter()
+                .map(|record| record.path.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "pkg",
+                "./helpers.js",
+                "side-effect",
+                "./value.js",
+                "./all.js"
+            ]
+        );
+        assert_eq!(ast.parts[1].import_record_indices, [0, 1, 2, 3, 4]);
+        assert!(
+            ast.import_records[2]
+                .flags
+                .contains(crate::internal::ast::ImportRecordFlags::WAS_ORIGINALLY_BARE_IMPORT)
+        );
+
+        let Some(StmtData::Import(import)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected import statement");
+        };
+        assert!(import.default_name.is_some());
+        let items = import.items.as_ref().expect("expected named imports");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].alias, "read");
+        assert_eq!(items[0].original_name, "load");
+
+        assert!(matches!(
+            ast.parts[1].statements[4].data.as_deref(),
+            Some(StmtData::ExportFrom(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[5].data.as_deref(),
+            Some(StmtData::ExportStar(export)) if export.alias.is_some()
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[6].data.as_deref(),
+            Some(StmtData::Local(local)) if local.is_export
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[7].data.as_deref(),
+            Some(StmtData::ExportDefault(_))
+        ));
     }
 }

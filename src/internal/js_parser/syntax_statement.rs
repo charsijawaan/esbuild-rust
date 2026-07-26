@@ -18,6 +18,7 @@ use super::{
     syntax_class::parse_class_prefix,
     syntax_expression::{parse_expression, parse_expression_suffix},
     syntax_function::{parse_async_prefix, parse_function_prefix},
+    syntax_module::{parse_export_statement, parse_import_statement},
 };
 
 pub(crate) fn parse_block(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, BlockStmt) {
@@ -145,6 +146,8 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             let expression = parse_class_prefix(core, lexer).expect("class token was checked");
             class_declaration_from_expression(core, loc, expression)
         }
+        Token::Import => parse_import_statement(core, lexer),
+        Token::Export => parse_export_statement(core, lexer),
         Token::If => {
             lexer.next();
             lexer.expect(Token::OpenParen);

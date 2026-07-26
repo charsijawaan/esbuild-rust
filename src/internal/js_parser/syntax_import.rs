@@ -12,13 +12,22 @@ use super::parser_core::ParserCore;
 pub(crate) fn parse_import_prefix(
     core: &mut ParserCore,
     lexer: &mut Lexer,
-    mut parse_argument: impl FnMut(&mut ParserCore, &mut Lexer) -> Expr,
+    parse_argument: impl FnMut(&mut ParserCore, &mut Lexer) -> Expr,
 ) -> Option<Expr> {
     if lexer.token != Token::Import {
         return None;
     }
     let loc = lexer.loc();
     lexer.next();
+    Some(parse_import_after_keyword(core, lexer, loc, parse_argument))
+}
+
+pub(crate) fn parse_import_after_keyword(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    loc: crate::internal::logger::Loc,
+    mut parse_argument: impl FnMut(&mut ParserCore, &mut Lexer) -> Expr,
+) -> Expr {
     let mut phase = ImportPhase::Evaluation;
 
     if lexer.token == Token::Dot {
@@ -30,12 +39,12 @@ pub(crate) fn parse_import_prefix(
                 len: lexer.range().end() - loc.start,
             };
             lexer.next();
-            return Some(Expr::new(
+            return Expr::new(
                 loc,
                 ExprData::ImportMeta(ImportMetaExpr {
                     range_len: core.esm_import_meta.len,
                 }),
-            ));
+            );
         }
         phase = if name == b"defer" {
             ImportPhase::Defer
@@ -61,7 +70,7 @@ pub(crate) fn parse_import_prefix(
     }
     let close_paren_loc = lexer.loc();
     lexer.expect(Token::CloseParen);
-    Some(Expr::new(
+    Expr::new(
         loc,
         ExprData::ImportCall(ImportCallExpr {
             expr,
@@ -69,7 +78,7 @@ pub(crate) fn parse_import_prefix(
             close_paren_loc,
             phase,
         }),
-    ))
+    )
 }
 
 #[cfg(test)]
