@@ -609,11 +609,11 @@ fn visit_expr_with_target(
                     core.record_usage(core.exports_ref);
                 }
             }
-            let kind = if is_identifier_named(core, &call.target, "require") {
+            let kind = if is_unbound_identifier_named(core, &call.target, "require") {
                 Some(crate::internal::ast::ImportKind::Require)
             } else if let Some(ExprData::Dot(dot)) = call.target.data.as_deref()
                 && dot.name == "resolve"
-                && is_identifier_named(core, &dot.target, "require")
+                && is_unbound_identifier_named(core, &dot.target, "require")
             {
                 Some(crate::internal::ast::ImportKind::RequireResolve)
             } else {
@@ -800,4 +800,16 @@ fn is_identifier_named(core: &ParserCore, expression: &Expr, expected: &str) -> 
     core.symbols
         .get(usize::try_from(identifier.reference.inner_index).unwrap_or(usize::MAX))
         .is_some_and(|symbol| symbol.original_name == expected)
+}
+
+fn is_unbound_identifier_named(core: &ParserCore, expression: &Expr, expected: &str) -> bool {
+    let Some(ExprData::Identifier(identifier)) = expression.data.as_deref() else {
+        return false;
+    };
+    core.symbols
+        .get(usize::try_from(identifier.reference.inner_index).unwrap_or(usize::MAX))
+        .is_some_and(|symbol| {
+            symbol.original_name == expected
+                && symbol.kind == crate::internal::ast::SymbolKind::Unbound
+        })
 }

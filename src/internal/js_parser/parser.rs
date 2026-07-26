@@ -1462,6 +1462,40 @@ mod tests {
     }
 
     #[test]
+    fn shadowed_require_calls_are_not_import_records() {
+        let (ast, ok, log) = parse_source(
+            "function load(require) {\
+               return require('local') + require.resolve('also-local');\
+             }\
+             const global = require('package');",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 1);
+        assert_eq!(ast.import_records[0].path.text, "package");
+
+        let Some(StmtData::Function(function)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected function");
+        };
+        let Some(StmtData::Return(return_statement)) =
+            function.function.body.block.statements[0].data.as_deref()
+        else {
+            panic!("expected return");
+        };
+        let Some(ExprData::Binary(binary)) = return_statement.value_or_nil.data.as_deref() else {
+            panic!("expected binary expression");
+        };
+        assert!(matches!(
+            binary.left.data.as_deref(),
+            Some(ExprData::Call(_))
+        ));
+        assert!(matches!(
+            binary.right.data.as_deref(),
+            Some(ExprData::Call(_))
+        ));
+    }
+
+    #[test]
     fn catch_bindings_shadow_outer_names_in_a_dedicated_scope() {
         let (ast, ok, log) = parse_source(
             "let error = outer;\
