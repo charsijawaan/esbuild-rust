@@ -3203,7 +3203,7 @@ mod tests {
         let mut options = Options::default();
         options.ts.parse = true;
         let (ast, ok, log) = parse_source_with_options(
-            "enum Color { Red, Green = 2, Yellow = Green, Blue = 'blue', Computed = make() }\
+            "enum Color { Red, Green = 2, Yellow = Green + 3, Blue = 'blue', Computed = make() }\
              const red = Color.Red;\
              const blue = Color.Blue;\
              Color.Red = 3;\
@@ -3227,9 +3227,7 @@ mod tests {
         ));
         assert!(matches!(
             color.values[2].value_or_nil.data.as_deref(),
-            Some(ExprData::InlinedEnum(value))
-                if matches!(value.value.data.as_deref(), Some(ExprData::Number(2.0)))
-                    && value.comment == "Green"
+            Some(ExprData::Number(5.0))
         ));
         assert!(matches!(
             color.values[3].value_or_nil.data.as_deref(),
@@ -3246,6 +3244,7 @@ mod tests {
         );
         assert!(ast.ts_enums[&color.name.reference]["Red"].number.abs() < f64::EPSILON);
         assert!((ast.ts_enums[&color.name.reference]["Green"].number - 2.0).abs() < f64::EPSILON);
+        assert!((ast.ts_enums[&color.name.reference]["Yellow"].number - 5.0).abs() < f64::EPSILON);
         assert_eq!(
             crate::internal::helpers::utf16_to_string(
                 &ast.ts_enums[&color.name.reference]["Blue"].string
@@ -3297,6 +3296,42 @@ mod tests {
                 .iter()
                 .any(|symbol| symbol.reference == color.argument)
         );
+    }
+
+    #[test]
+    fn folds_type_script_enum_constant_expressions() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "enum Folded {\
+                Add = 1 + 2,\
+                Sub = -1 - 2,\
+                Mul = 10 * 20,\
+                Div = 10 / 20,\
+                Mod = 123 % 100,\
+                Pow = 2.25 ** 3,\
+                Complement = ~1,\
+                Shift = 8 >> 2,\
+                Previous = Add + 4\
+            }",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Enum(enumeration)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected enum declaration");
+        };
+        let expected = [3.0, -3.0, 200.0, 0.5, 23.0, 11.390_625, -2.0, 2.0, 7.0];
+        for (value, expected) in enumeration.values.iter().zip(expected) {
+            assert!(
+                matches!(
+                    value.value_or_nil.data.as_deref(),
+                    Some(ExprData::Number(actual)) if (*actual - expected).abs() < f64::EPSILON
+                ),
+                "expected {expected:?}, got {:?}",
+                value.value_or_nil.data
+            );
+        }
     }
 
     #[test]

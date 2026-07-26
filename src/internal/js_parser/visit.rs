@@ -53,6 +53,8 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 let mut next_numeric_value = 0.0;
                 let mut has_numeric_value = true;
                 let mut constants = HashMap::new();
+                let old_should_fold = core.should_fold_type_script_constant_expressions;
+                core.should_fold_type_script_constant_expressions = true;
                 for value in &mut enumeration.values {
                     if value.reference != crate::internal::ast::INVALID_REF {
                         core.record_declared_symbol(value.reference);
@@ -109,6 +111,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                         }
                     }
                 }
+                core.should_fold_type_script_constant_expressions = old_should_fold;
                 core.pop_scope();
                 core.ts_enums.insert(enumeration.name.reference, constants);
             }
@@ -901,6 +904,22 @@ fn visit_expr_with_target(
                 resolve_identifiers,
                 unary.op.unary_assign_target(),
             );
+            if core.should_fold_type_script_constant_expressions {
+                let number = crate::internal::js_ast::to_number_without_side_effects(
+                    unary.value.data.as_deref(),
+                );
+                let replacement = match unary.op {
+                    OpCode::UnaryPositive => number,
+                    OpCode::UnaryNegative => number.map(|value| -value),
+                    OpCode::UnaryComplement => {
+                        number.map(|value| f64::from(!crate::internal::js_ast::to_int32(value)))
+                    }
+                    _ => None,
+                };
+                if let Some(number) = replacement {
+                    *data = ExprData::Number(number);
+                }
+            }
         }
         ExprData::Binary(binary) => {
             let left_target =
@@ -911,6 +930,13 @@ fn visit_expr_with_target(
                 };
             visit_expr_with_target(core, &mut binary.left, resolve_identifiers, left_target);
             visit_expr(core, &mut binary.right, resolve_identifiers);
+            if core.should_fold_type_script_constant_expressions
+                && let Some(folded) =
+                    crate::internal::js_ast::fold_binary_operator(expression.loc, binary)
+                && let Some(folded) = folded.data
+            {
+                *data = *folded;
+            }
         }
         ExprData::New(new) => {
             visit_expr(core, &mut new.target, resolve_identifiers);

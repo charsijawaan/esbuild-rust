@@ -78,6 +78,7 @@ pub(crate) struct ParserCore {
     pub(crate) has_top_level_return: bool,
     pub(crate) has_jsx_element: bool,
     pub(crate) has_type_script_export: bool,
+    pub(crate) should_fold_type_script_constant_expressions: bool,
 }
 
 impl ParserCore {
@@ -126,6 +127,7 @@ impl ParserCore {
             has_top_level_return: false,
             has_jsx_element: false,
             has_type_script_export: false,
+            should_fold_type_script_constant_expressions: false,
         }
     }
 
