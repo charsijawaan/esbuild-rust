@@ -137,6 +137,10 @@ pub fn quote_utf16(data: &[u16], options: Options, allow_backtick: bool) -> Vec<
     } else {
         b'"'
     };
+    quote_utf16_with_quote(data, options, quote)
+}
+
+fn quote_utf16_with_quote(data: &[u16], options: Options, quote: u8) -> Vec<u8> {
     let mut output = vec![quote];
     print_unquoted_utf16(&mut output, data, quote, options);
     output.push(quote);
@@ -1757,8 +1761,19 @@ impl Printer<'_> {
                 self.output.push(b'n');
             }
             ExprData::String(value) => {
-                self.output
-                    .extend(quote_utf16(&value.value, self.options, true));
+                if value.prefer_template
+                    && !self.options.minify_syntax
+                    && !self
+                        .options
+                        .unsupported_features
+                        .contains(JsFeature::TEMPLATE_LITERAL)
+                {
+                    self.output
+                        .extend(quote_utf16_with_quote(&value.value, self.options, b'`'));
+                } else {
+                    self.output
+                        .extend(quote_utf16(&value.value, self.options, true));
+                }
             }
             ExprData::RegExp(value) => self.output.extend_from_slice(value.as_bytes()),
             ExprData::This => self.output.extend_from_slice(b"this"),

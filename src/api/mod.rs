@@ -4971,7 +4971,7 @@ mod tests {
             },
         ));
         assert!(
-            literal_template.contains("this.message = \"hello\";"),
+            literal_template.contains("this.message = `hello`;"),
             "{literal_template}"
         );
 
@@ -5929,6 +5929,35 @@ mod tests {
                 }
             )),
             "function f(n){return n}function g(){return arguments}\n"
+        );
+    }
+
+    #[test]
+    fn preserves_template_literals_without_syntax_minification() {
+        let input = "function f(){return `x`}";
+        assert_eq!(
+            code(transform(input, TransformOptions::default())),
+            "function f() {\n  return `x`;\n}\n"
+        );
+        assert_eq!(
+            code(transform(
+                input,
+                TransformOptions {
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function f(){return`x`}\n"
+        );
+        assert_eq!(
+            code(transform(
+                input,
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function f() {\n  return \"x\";\n}\n"
         );
     }
 
