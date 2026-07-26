@@ -290,7 +290,7 @@ pub enum Loader {
     Tsx,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TransformOptions {
     pub sourcefile: String,
@@ -321,6 +321,41 @@ pub struct TransformOptions {
     pub source_root: String,
     pub sources_content: BuildSourcesContent,
     pub tsconfig_raw: String,
+}
+
+impl Default for TransformOptions {
+    fn default() -> Self {
+        Self {
+            sourcefile: String::new(),
+            loader: Loader::default(),
+            platform: BuildPlatform::default(),
+            jsx: BuildJsx::default(),
+            jsx_factory: String::new(),
+            jsx_fragment: String::new(),
+            jsx_import_source: String::new(),
+            jsx_development: false,
+            jsx_side_effects: false,
+            define: HashMap::new(),
+            pure: Vec::new(),
+            keep_names: false,
+            banner: String::new(),
+            footer: String::new(),
+            line_limit: 0,
+            minify_whitespace: false,
+            minify_identifiers: false,
+            minify_syntax: false,
+            ascii_only: true,
+            drop_console: false,
+            drop_debugger: false,
+            drop_labels: Vec::new(),
+            ignore_annotations: false,
+            legal_comments: BuildLegalComments::default(),
+            sourcemap: BuildSourceMap::default(),
+            source_root: String::new(),
+            sources_content: BuildSourcesContent::default(),
+            tsconfig_raw: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -546,7 +581,7 @@ pub enum BuildJsx {
     Automatic,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildOptions {
     pub bundle: bool,
@@ -607,6 +642,71 @@ pub struct BuildOptions {
     pub resolve_extensions: Vec<String>,
     pub conditions: Vec<String>,
     pub node_paths: Vec<String>,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            bundle: false,
+            entry_points: Vec::new(),
+            entry_points_advanced: Vec::new(),
+            stdin: None,
+            outdir: String::new(),
+            outfile: String::new(),
+            outbase: String::new(),
+            abs_working_dir: String::new(),
+            tsconfig: String::new(),
+            tsconfig_raw: String::new(),
+            metafile: false,
+            format: BuildFormat::default(),
+            platform: BuildPlatform::default(),
+            global_name: String::new(),
+            public_path: String::new(),
+            entry_names: String::new(),
+            chunk_names: String::new(),
+            asset_names: String::new(),
+            sourcemap: BuildSourceMap::default(),
+            source_root: String::new(),
+            sources_content: BuildSourcesContent::default(),
+            legal_comments: BuildLegalComments::default(),
+            line_limit: 0,
+            tree_shaking: BuildTreeShaking::default(),
+            jsx: BuildJsx::default(),
+            jsx_factory: String::new(),
+            jsx_fragment: String::new(),
+            jsx_import_source: String::new(),
+            jsx_development: false,
+            jsx_side_effects: false,
+            splitting: false,
+            preserve_symlinks: false,
+            allow_overwrite: false,
+            write: false,
+            minify_whitespace: false,
+            minify_identifiers: false,
+            minify_syntax: false,
+            ascii_only: true,
+            drop_console: false,
+            drop_debugger: false,
+            drop_labels: Vec::new(),
+            ignore_annotations: false,
+            banner: String::new(),
+            footer: String::new(),
+            css_banner: String::new(),
+            css_footer: String::new(),
+            external: Vec::new(),
+            alias: HashMap::new(),
+            packages: Packages::default(),
+            loader: HashMap::new(),
+            out_extension: HashMap::new(),
+            define: HashMap::new(),
+            pure: Vec::new(),
+            keep_names: false,
+            main_fields: Vec::new(),
+            resolve_extensions: Vec::new(),
+            conditions: Vec::new(),
+            node_paths: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3823,6 +3923,26 @@ mod tests {
             },
         ));
         assert!(node.contains("process.env.NODE_ENV"), "{node}");
+    }
+
+    #[test]
+    fn defaults_public_options_to_ascii_charset() {
+        assert!(TransformOptions::default().ascii_only);
+        assert!(BuildOptions::default().ascii_only);
+        assert_eq!(
+            code(transform("\"π😀\"", TransformOptions::default())),
+            "\"\\u03C0\\u{1F600}\";\n"
+        );
+        assert_eq!(
+            code(transform(
+                "\"π😀\"",
+                TransformOptions {
+                    ascii_only: false,
+                    ..TransformOptions::default()
+                }
+            )),
+            "\"π😀\";\n"
+        );
     }
 
     #[test]
