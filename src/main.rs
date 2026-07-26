@@ -1,17 +1,48 @@
 use std::{
     collections::HashMap,
-    env, fs,
-    io::{self, Read, Write},
+    env,
+    fmt::Write as _,
+    fs,
+    io::{self, IsTerminal, Read, Write},
 };
 
 use esbuild_rs::{
     api::{
         AnalyzeMetafileOptions, BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments,
         BuildOptions, BuildPlatform, BuildSourceMap, BuildSourcesContent, BuildStdin,
-        BuildTreeShaking, Loader, Packages, TransformOptions, analyze_metafile, build, transform,
+        BuildTreeShaking, FormatMessagesOptions, Loader, Message, MessageKind, Packages,
+        TransformOptions, analyze_metafile, build, format_messages, transform,
     },
     internal::cli_helpers,
 };
+
+fn format_cli_messages(arguments: &[String], messages: &[Message], kind: MessageKind) -> String {
+    let color = if arguments.iter().any(|argument| argument == "--color=true") {
+        true
+    } else if arguments.iter().any(|argument| argument == "--color=false") {
+        false
+    } else {
+        io::stderr().is_terminal()
+    };
+    let terminal_width = esbuild_rs::internal::logger::get_terminal_info(&io::stderr()).width;
+    let mut output = format_messages(
+        messages.to_vec(),
+        FormatMessagesOptions {
+            terminal_width,
+            kind,
+            color,
+        },
+    )
+    .concat();
+    let noun = match (kind, messages.len()) {
+        (MessageKind::Error, 1) => "error",
+        (MessageKind::Error, _) => "errors",
+        (MessageKind::Warning, 1) => "warning",
+        (MessageKind::Warning, _) => "warnings",
+    };
+    write!(&mut output, "{} {noun}", messages.len()).expect("writing to a string cannot fail");
+    output
+}
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
@@ -599,12 +630,11 @@ fn run_with_stdin_and_node_paths(
             ..BuildOptions::default()
         });
         if !result.errors.is_empty() {
-            return Err(result
-                .errors
-                .iter()
-                .map(|message| format!("error: {}", message.text))
-                .collect::<Vec<_>>()
-                .join("\n"));
+            return Err(format_cli_messages(
+                arguments,
+                &result.errors,
+                MessageKind::Error,
+            ));
         }
         for warning in result.warnings {
             eprintln!("warning: {}", warning.text);
@@ -743,12 +773,11 @@ fn run_with_stdin_and_node_paths(
 
     let result = transform(input, options);
     if !result.errors.is_empty() {
-        return Err(result
-            .errors
-            .iter()
-            .map(|message| format!("error: {}", message.text))
-            .collect::<Vec<_>>()
-            .join("\n"));
+        return Err(format_cli_messages(
+            arguments,
+            &result.errors,
+            MessageKind::Error,
+        ));
     }
     for warning in result.warnings {
         eprintln!("warning: {}", warning.text);
@@ -1256,7 +1285,7 @@ mod tests {
         };
         assert_eq!(
             error,
-            "error: Must use \"sourcefile\" with \"sourcemap\" to set the original file name"
+            "✘ [ERROR] Must use \"sourcefile\" with \"sourcemap\" to set the original file name\n\n1 error"
         );
 
         for mode in ["linked", "external", "both"] {
