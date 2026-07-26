@@ -8,7 +8,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
-    ast::{ImportKind, ImportRecordFlags, Index32},
+    ast::{AssertOrWithKeyword, ImportKind, ImportRecordFlags, Index32},
     cache::{CacheSet, SourceIndexCache, SourceIndexKind},
     compat::{CssFeature, JsFeature},
     config::{
@@ -22,7 +22,8 @@ use crate::internal::{
         SideEffects, SideEffectsKind,
     },
     helpers::{
-        encode_string_as_shortest_data_url, mime_type_by_extension, quote_for_json, string_to_utf16,
+        encode_string_as_shortest_data_url, mime_type_by_extension, quote_for_json,
+        string_to_utf16, utf16_to_string,
     },
     js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
     js_parser::{self, HelperCall},
@@ -117,6 +118,34 @@ pub fn parse_file_with_unique_key_prefix(
             &options.extension_to_loader,
             &format!("{base}{extension}"),
         );
+    }
+    if loader != Loader::Copy {
+        for attribute in source.key_path.import_attributes.decode_into_array() {
+            if attribute.key != "type" {
+                log.add_error(
+                    None,
+                    Range::default(),
+                    format!(
+                        "Importing with the {:?} attribute is not supported",
+                        attribute.key
+                    ),
+                );
+                return ParseResult::default();
+            }
+            loader = match attribute.value.as_str() {
+                "json" => Loader::WithTypeJson,
+                "bytes" => Loader::Binary,
+                "text" => Loader::Text,
+                value => {
+                    log.add_error(
+                        None,
+                        Range::default(),
+                        format!("Importing with a type attribute of {value:?} is not supported"),
+                    );
+                    return ParseResult::default();
+                }
+            };
+        }
     }
     if source.identifier_name.is_empty() {
         source.identifier_name = js_ast::generate_non_unique_name_from_path(&source.key_path.text);
@@ -354,7 +383,27 @@ pub fn resolve_import_records(
             record.kind,
             ImportKind::Require | ImportKind::RequireResolve
         );
-        let Some(resolve_result) = resolver::resolve_with_metadata(
+        let import_attributes = record
+            .assert_or_with
+            .as_ref()
+            .filter(|clause| clause.keyword == AssertOrWithKeyword::With)
+            .map(|clause| {
+                logger::ImportAttributes::encode(
+                    &clause
+                        .entries
+                        .iter()
+                        .map(|entry| {
+                            (
+                                String::from_utf8_lossy(&utf16_to_string(&entry.key)).into_owned(),
+                                String::from_utf8_lossy(&utf16_to_string(&entry.value))
+                                    .into_owned(),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+        let Some(mut resolve_result) = resolver::resolve_with_metadata(
             log,
             file_system,
             &source_directory,
@@ -377,6 +426,9 @@ pub fn resolve_import_records(
             }
             continue;
         };
+        for path in resolve_result.path_pair.iter_mut() {
+            path.import_attributes.clone_from(&import_attributes);
+        }
 
         if record.kind == ImportKind::RequireResolve {
             if resolve_result.path_pair.is_external {
@@ -793,6 +845,17 @@ fn validate_scan_imports(log: &Log, options: &Options, files: &[ScannerFile]) {
                 .source
                 .pretty_paths
                 .select(options.log_path_style);
+            if record.flags.contains(ImportRecordFlags::ASSERT_TYPE_JSON)
+                && !matches!(target.input_file.loader, Loader::Json | Loader::Copy)
+            {
+                let loader_name =
+                    crate::internal::config::LOADER_TO_STRING[target.input_file.loader as usize];
+                log.add_error(
+                    None,
+                    record.range,
+                    format!("The file {target_path:?} was loaded with the {loader_name:?} loader"),
+                );
+            }
             match record.kind {
                 ImportKind::ComposesFrom
                     if matches!(target.input_file.repr, Some(InputFileRepr::Js(_)))
@@ -2317,6 +2380,79 @@ mod tests {
                 "Cannot use \"composes\" with \"script.js\"",
                 "Cannot use \"other.css\" as a URL",
             ])
+        );
+    }
+
+    #[test]
+    fn scan_applies_import_attributes_and_validates_json_assertions() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import textJson from './data.txt' with { type: 'json' };\
+                     import json from './data.json' assert { type: 'json' };\
+                     import bad from './code.js' assert { type: 'json' };\
+                     console.log(textJson, json, bad)"
+                        .into(),
+                ),
+                ("/project/data.txt".into(), r#"{"text":true}"#.into()),
+                ("/project/data.json".into(), r#"{"json":true}"#.into()),
+                ("/project/code.js".into(), "export default 1".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into(), ".json".into(), ".txt".into()],
+            ..Options::default()
+        };
+        let bundle = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        let text_json = bundle
+            .files
+            .iter()
+            .find(|file| file.input_file.source.key_path.text == "/project/data.txt")
+            .expect("JSON imported through an attribute");
+        assert_eq!(text_json.input_file.loader, Loader::WithTypeJson);
+        assert_eq!(
+            text_json
+                .input_file
+                .source
+                .key_path
+                .import_attributes
+                .decode_into_map()
+                .get("type")
+                .map(String::as_str),
+            Some("json")
+        );
+        let Some(InputFileRepr::Js(text_json_repr)) = &text_json.input_file.repr else {
+            panic!("expected lazy JSON JavaScript representation");
+        };
+        assert_eq!(text_json_repr.ast.exports_kind, ExportsKind::Esm);
+
+        let ordinary_json = bundle
+            .files
+            .iter()
+            .find(|file| file.input_file.source.key_path.text == "/project/data.json")
+            .expect("ordinary JSON assertion target");
+        assert_eq!(ordinary_json.input_file.loader, Loader::Json);
+
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].data.text,
+            "The file \"code.js\" was loaded with the \"js\" loader"
         );
     }
 }

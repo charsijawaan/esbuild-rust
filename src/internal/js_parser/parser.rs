@@ -3672,4 +3672,58 @@ mod tests {
                 .any(|import| import.alias == "__toBinary")
         );
     }
+
+    #[test]
+    fn parses_static_import_attributes_and_assertions() {
+        let (ast, ok, log) = parse_source(
+            "import data from './data.json' with { type: 'json', mode: 'full' };\
+             export {value} from './legacy.json' assert { type: 'json' };",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 2);
+
+        let attributes = ast.import_records[0]
+            .assert_or_with
+            .as_ref()
+            .expect("import attributes");
+        assert_eq!(
+            attributes.keyword,
+            crate::internal::ast::AssertOrWithKeyword::With
+        );
+        assert_eq!(attributes.entries.len(), 2);
+        assert_eq!(
+            crate::internal::helpers::utf16_to_string(&attributes.entries[0].key),
+            b"type"
+        );
+        assert!(
+            !ast.import_records[0]
+                .flags
+                .contains(crate::internal::ast::ImportRecordFlags::ASSERT_TYPE_JSON)
+        );
+
+        let assertion = ast.import_records[1]
+            .assert_or_with
+            .as_ref()
+            .expect("import assertion");
+        assert_eq!(
+            assertion.keyword,
+            crate::internal::ast::AssertOrWithKeyword::Assert
+        );
+        assert!(
+            ast.import_records[1]
+                .flags
+                .contains(crate::internal::ast::ImportRecordFlags::ASSERT_TYPE_JSON)
+        );
+    }
+
+    #[test]
+    fn reports_duplicate_static_import_attributes() {
+        let (_, ok, log) = parse_source("import './data.json' with { type: 'json', type: 'json' }");
+        assert!(ok);
+        assert_eq!(
+            log.done()[0].data.text,
+            "Duplicate import attribute \"type\""
+        );
+    }
 }

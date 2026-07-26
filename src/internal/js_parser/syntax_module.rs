@@ -1,8 +1,13 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 use crate::internal::{
-    ast::{ImportKind, ImportRecord, ImportRecordFlags, LocRef, SymbolKind},
-    helpers::utf16_to_string,
+    ast::{
+        AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportKind, ImportRecord,
+        ImportRecordFlags, LocRef, SymbolKind,
+    },
+    helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         Binding, BindingData, ClauseItem, Decl, ExportClauseStmt, ExportDefaultStmt,
         ExportEqualsStmt, ExportFromStmt, ExportStarAlias, ExportStarStmt, ExprStmt,
@@ -157,7 +162,7 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
         }
     }
 
-    let (path_range, path) = parse_path(lexer);
+    let (path_range, path, assert_or_with, path_flags) = parse_path(core, lexer);
     lexer.expect_or_insert_semicolon();
     if core.options.ts.parse
         && was_bare
@@ -176,12 +181,14 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
             format!("import_{}", generate_non_unique_name_from_path(&path)),
         );
     }
-    let flags = if was_bare {
+    let mut flags = if was_bare {
         ImportRecordFlags::WAS_ORIGINALLY_BARE_IMPORT
     } else {
         ImportRecordFlags::default()
     };
-    statement.import_record_index = add_import_record(core, path_range, path, flags);
+    flags |= path_flags;
+    statement.import_record_index =
+        add_import_record(core, path_range, path, assert_or_with, flags);
     Stmt::new(loc, StmtData::Import(statement))
 }
 
@@ -284,7 +291,7 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
             let (items, is_single_line, had_type_only_items) = parse_clause(core, lexer, true);
             if lexer.is_contextual_keyword(b"from") {
                 lexer.next();
-                let (path_range, path) = parse_path(lexer);
+                let (path_range, path, assert_or_with, flags) = parse_path(core, lexer);
                 lexer.expect_or_insert_semicolon();
                 if had_type_only_items && items.is_empty() {
                     core.has_type_script_export = true;
@@ -298,7 +305,7 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
                     format!("import_{}", generate_non_unique_name_from_path(&path)),
                 );
                 let import_record_index =
-                    add_import_record(core, path_range, path, ImportRecordFlags::default());
+                    add_import_record(core, path_range, path, assert_or_with, flags);
                 Stmt::new(
                     loc,
                     StmtData::ExportFrom(ExportFromStmt {
@@ -417,14 +424,13 @@ fn parse_export_star(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Stmt
         None
     };
     lexer.expect_contextual_keyword(b"from");
-    let (path_range, path) = parse_path(lexer);
+    let (path_range, path, assert_or_with, flags) = parse_path(core, lexer);
     lexer.expect_or_insert_semicolon();
     let namespace_ref = core.new_symbol(
         SymbolKind::Other,
         format!("{}_star", generate_non_unique_name_from_path(&path)),
     );
-    let import_record_index =
-        add_import_record(core, path_range, path, ImportRecordFlags::default());
+    let import_record_index = add_import_record(core, path_range, path, assert_or_with, flags);
     Stmt::new(
         loc,
         StmtData::ExportStar(ExportStarStmt {
@@ -549,24 +555,110 @@ fn name_for_ref(core: &ParserCore, reference: crate::internal::ast::Ref) -> Stri
     String::from_utf8_lossy(core.load_name_from_ref(reference)).into_owned()
 }
 
-fn parse_path(lexer: &mut Lexer) -> (crate::internal::logger::Range, String) {
+fn parse_path(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+) -> (
+    crate::internal::logger::Range,
+    String,
+    Option<ImportAssertOrWith>,
+    ImportRecordFlags,
+) {
     if lexer.token != Token::StringLiteral {
         lexer.expected(Token::StringLiteral);
     }
     let range = lexer.range();
     let path = String::from_utf8_lossy(&utf16_to_string(lexer.string_literal())).into_owned();
     lexer.next();
-    (range, path)
+    let mut flags = ImportRecordFlags::default();
+    let mut assert_or_with = None;
+    if lexer.token == Token::With
+        || (!lexer.has_newline_before && lexer.is_contextual_keyword(b"assert"))
+    {
+        let keyword = if lexer.token == Token::With {
+            AssertOrWithKeyword::With
+        } else {
+            AssertOrWithKeyword::Assert
+        };
+        let keyword_loc = lexer.loc();
+        lexer.next();
+        let inner_open_brace_loc = lexer.loc();
+        lexer.expect(Token::OpenBrace);
+        let mut entries = Vec::new();
+        let mut duplicates = HashMap::new();
+        while lexer.token != Token::CloseBrace {
+            let key_loc = lexer.loc();
+            let key_range = lexer.range();
+            let (key, key_text, prefer_quoted_key) = if lexer.is_identifier_or_keyword() {
+                let key_text = String::from_utf8_lossy(lexer.raw()).into_owned();
+                (string_to_utf16(key_text.as_bytes()), key_text, false)
+            } else if lexer.token == Token::StringLiteral {
+                let key = lexer.string_literal().to_vec();
+                let key_text = String::from_utf8_lossy(&utf16_to_string(&key)).into_owned();
+                (key, key_text, !core.options.minify_syntax)
+            } else {
+                lexer.expected(Token::Identifier);
+            };
+            if duplicates.insert(key_text.clone(), key_range).is_some() {
+                core.add_error_range(
+                    key_range,
+                    format!(
+                        "Duplicate import {} {key_text:?}",
+                        if keyword == AssertOrWithKeyword::Assert {
+                            "assertion"
+                        } else {
+                            "attribute"
+                        }
+                    ),
+                );
+            }
+            lexer.next();
+            lexer.expect(Token::Colon);
+            let value_loc = lexer.loc();
+            let value = lexer.string_literal().to_vec();
+            lexer.expect(Token::StringLiteral);
+            if keyword == AssertOrWithKeyword::Assert
+                && key_text == "type"
+                && utf16_to_string(&value) == b"json"
+            {
+                flags |= ImportRecordFlags::ASSERT_TYPE_JSON;
+            }
+            entries.push(AssertOrWithEntry {
+                key,
+                value,
+                key_loc,
+                value_loc,
+                prefer_quoted_key,
+            });
+            if lexer.token != Token::Comma {
+                break;
+            }
+            lexer.next();
+        }
+        let inner_close_brace_loc = lexer.loc();
+        lexer.expect(Token::CloseBrace);
+        assert_or_with = Some(ImportAssertOrWith {
+            entries,
+            keyword_loc,
+            inner_open_brace_loc,
+            inner_close_brace_loc,
+            keyword,
+            ..ImportAssertOrWith::default()
+        });
+    }
+    (range, path, assert_or_with, flags)
 }
 
 fn add_import_record(
     core: &mut ParserCore,
     range: crate::internal::logger::Range,
     path: String,
+    assert_or_with: Option<ImportAssertOrWith>,
     flags: ImportRecordFlags,
 ) -> u32 {
     let index = u32::try_from(core.import_records.len()).expect("import record count fits in u32");
     core.import_records.push(ImportRecord {
+        assert_or_with,
         path: Path {
             text: path,
             ..Path::default()
