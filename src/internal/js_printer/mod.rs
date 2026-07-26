@@ -1723,7 +1723,18 @@ impl Printer<'_> {
                     }
                     self.print_class_key(property);
                     let is_shorthand = property.flags.contains(PropertyFlags::WAS_SHORTHAND)
-                        && property.initializer_or_nil.data.is_none();
+                        && property.initializer_or_nil.data.is_none()
+                        && matches!(
+                            (
+                                property.key.data.as_deref(),
+                                property.value_or_nil.data.as_deref()
+                            ),
+                            (
+                                Some(ExprData::String(key)),
+                                Some(ExprData::Identifier(value))
+                            ) if String::from_utf16_lossy(&key.value)
+                                == self.renamer.name_for_symbol(value.reference)
+                        );
                     if !is_shorthand {
                         self.output.push(b':');
                         self.print_optional_space();
@@ -1901,10 +1912,28 @@ impl Printer<'_> {
             }
             ExprData::Function(function) => self.print_function(&function.function),
             ExprData::Arrow(arrow) => {
+                let can_omit_parameter_parentheses = self.options.minify_whitespace
+                    && !arrow.has_rest_arg
+                    && matches!(
+                        arrow.args.as_slice(),
+                        [argument]
+                            if argument.default_or_nil.data.is_none()
+                                && matches!(
+                                    argument.binding.data.as_deref(),
+                                    Some(BindingData::Identifier(_))
+                                )
+                    );
                 if arrow.is_async {
-                    self.output.extend_from_slice(b"async ");
+                    self.output.extend_from_slice(b"async");
+                    if can_omit_parameter_parentheses {
+                        self.output.push(b' ');
+                    } else {
+                        self.print_optional_space();
+                    }
                 }
-                self.output.push(b'(');
+                if !can_omit_parameter_parentheses {
+                    self.output.push(b'(');
+                }
                 for (index, argument) in arrow.args.iter().enumerate() {
                     if index > 0 {
                         self.output.push(b',');
@@ -1921,7 +1950,9 @@ impl Printer<'_> {
                         self.print_expr_at(&argument.default_or_nil, Precedence::Spread);
                     }
                 }
-                self.output.push(b')');
+                if !can_omit_parameter_parentheses {
+                    self.output.push(b')');
+                }
                 self.print_optional_space();
                 self.output.extend_from_slice(b"=>");
                 self.print_optional_space();
@@ -1930,7 +1961,17 @@ impl Printer<'_> {
                     && let Some(StmtData::Return(return_statement)) = statement.data.as_deref()
                     && return_statement.value_or_nil.data.is_some()
                 {
+                    let wrap_object = matches!(
+                        return_statement.value_or_nil.data.as_deref(),
+                        Some(ExprData::Object(_))
+                    );
+                    if wrap_object {
+                        self.output.push(b'(');
+                    }
                     self.print_expr_at(&return_statement.value_or_nil, Precedence::Assign);
+                    if wrap_object {
+                        self.output.push(b')');
+                    }
                 } else {
                     self.print_block(&arrow.body.block, false);
                 }
@@ -3268,7 +3309,7 @@ mod tests {
                 .js,
             )
             .expect("printer output is UTF-8"),
-            "function add(a,b=1){return a+b}const twice=(value)=>value*2;async function load(){await work();return()=>1}function*values(){yield 1;yield*other}"
+            "function add(a,b=1){return a+b}const twice=value=>value*2;async function load(){await work();return()=>1}function*values(){yield 1;yield*other}"
         );
     }
 

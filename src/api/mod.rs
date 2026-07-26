@@ -3871,6 +3871,16 @@ mod tests {
             )),
             "function longName(e) {\n  return externalValue + e;\n}\n"
         );
+        assert_eq!(
+            code(transform(
+                "const fn = ({x}) => ({x})",
+                TransformOptions {
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const fn = ({ x: n }) => ({ x: n });\n"
+        );
     }
 
     #[test]
