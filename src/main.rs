@@ -4,7 +4,7 @@ use std::{
 };
 
 use esbuild_rs::{
-    api::{Loader, TransformOptions, transform},
+    api::{BuildFormat, BuildOptions, Loader, TransformOptions, build, transform},
     internal::cli_helpers,
 };
 
@@ -32,9 +32,15 @@ enum Output {
     Code(Vec<u8>),
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(arguments: &[String]) -> Result<Output, String> {
     let mut options = TransformOptions::default();
-    let mut input_path = None;
+    let mut input_paths = Vec::new();
+    let mut bundle = false;
+    let mut outdir = String::new();
+    let mut outfile = String::new();
+    let mut format = BuildFormat::Iife;
+    let mut splitting = false;
     for argument in arguments {
         if argument == "--help" || argument == "-h" {
             return Ok(Output::Text(help_text()));
@@ -46,6 +52,31 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             options.minify_whitespace = true;
             options.minify_identifiers = true;
             options.minify_syntax = true;
+            continue;
+        }
+        if argument == "--bundle" {
+            bundle = true;
+            continue;
+        }
+        if argument == "--splitting" {
+            splitting = true;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--outdir=") {
+            outdir = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--outfile=") {
+            outfile = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--format=") {
+            format = match value {
+                "iife" => BuildFormat::Iife,
+                "cjs" => BuildFormat::CommonJs,
+                "esm" => BuildFormat::EsModule,
+                _ => return Err(format!("Invalid format {value:?}")),
+            };
             continue;
         }
         if argument == "--minify-whitespace" {
@@ -93,12 +124,66 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         if argument.starts_with('-') {
             return Err(format!("Invalid option {argument:?}"));
         }
-        if input_path.replace(argument.clone()).is_some() {
-            return Err("Only one input file can be transformed at a time".into());
-        }
+        input_paths.push(argument.clone());
     }
 
-    let input = if let Some(path) = input_path {
+    if bundle {
+        if input_paths.is_empty() {
+            return Err("Bundling from stdin is not implemented yet".into());
+        }
+        if !outdir.is_empty() && !outfile.is_empty() {
+            return Err("Cannot use both \"--outfile\" and \"--outdir\"".into());
+        }
+        if options.loader != Loader::None {
+            return Err("\"--loader\" with \"--bundle\" is not implemented yet".into());
+        }
+        let result = build(BuildOptions {
+            entry_points: input_paths,
+            outdir: outdir.clone(),
+            outfile: outfile.clone(),
+            format,
+            splitting,
+            minify_whitespace: options.minify_whitespace,
+            minify_identifiers: options.minify_identifiers,
+            minify_syntax: options.minify_syntax,
+            ascii_only: options.ascii_only,
+            banner: options.banner,
+            footer: options.footer,
+            ..BuildOptions::default()
+        });
+        if !result.errors.is_empty() {
+            return Err(result
+                .errors
+                .iter()
+                .map(|message| format!("error: {}", message.text))
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
+        for warning in result.warnings {
+            eprintln!("warning: {}", warning.text);
+        }
+        if outdir.is_empty() && outfile.is_empty() {
+            let [output] = result.output_files.as_slice() else {
+                return Err("Must use \"--outdir\" when there are multiple output files".into());
+            };
+            return Ok(Output::Code(output.contents.clone()));
+        }
+        for output in result.output_files {
+            let path = std::path::Path::new(&output.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+            }
+            fs::write(path, output.contents)
+                .map_err(|error| format!("Could not write {:?}: {error}", output.path))?;
+        }
+        return Ok(Output::Text(String::new()));
+    }
+
+    if input_paths.len() > 1 {
+        return Err("Only one input file can be transformed at a time".into());
+    }
+    let input = if let Some(path) = input_paths.pop() {
         if options.sourcefile.is_empty() {
             options.sourcefile.clone_from(&path);
         }
@@ -156,6 +241,11 @@ fn help_text() -> String {
         "esbuild-rs {}\n\
          Usage: esbuild [options] [input-file]\n\n\
          Options:\n\
+         \x20\x20--bundle\n\
+         \x20\x20--outdir=DIR\n\
+         \x20\x20--outfile=FILE\n\
+         \x20\x20--format=iife|cjs|esm\n\
+         \x20\x20--splitting\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
@@ -201,5 +291,28 @@ mod tests {
     fn rejects_unknown_options() {
         assert!(run(&["--not-a-real-option".into()]).is_err());
         assert!(run(&["--loader=wat".into()]).is_err());
+        assert!(run(&["--format=wat".into()]).is_err());
+    }
+
+    #[test]
+    fn bundles_entry_files_to_stdout() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "console.log('cli bundle')").expect("write entry file");
+
+        let Output::Code(output) = run(&["--bundle".into(), entry.to_string_lossy().into_owned()])
+            .expect("bundle succeeds")
+        else {
+            panic!("expected bundled code");
+        };
+        let output = String::from_utf8(output).expect("bundle output is UTF-8");
+        assert!(output.contains("console.log(\"cli bundle\");"));
+        assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }
