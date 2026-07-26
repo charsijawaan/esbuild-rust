@@ -22,18 +22,19 @@ use crate::internal::{
         template_to_string,
     },
     css_ast::{
-        AtMediaRule, ImportConditions, KnownAtRule, Rule, RuleData,
-        clone_media_queries_with_import_records, clone_tokens_with_import_records,
+        Ast as CssAst, AtImportRule, AtLayerRule, AtMediaRule, ImportConditions, KnownAtRule, Rule,
+        RuleData, clone_media_queries_with_import_records, clone_tokens_with_import_records,
         media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
     },
     css_lexer::TokenKind,
+    css_printer,
     fs::Fs,
     graph::{
         ExportData, ImportData, InputFileRepr, LinkerGraph, OutputFile, SideEffectsKind, WrapKind,
     },
     helpers::{
-        BitSet, Joiner, escape_closing_tag, quote_for_json, string_array_arrays_equal,
-        utf16_to_string,
+        BitSet, Joiner, encode_string_as_shortest_data_url, escape_closing_tag, quote_for_json,
+        string_array_arrays_equal, utf16_to_string,
     },
     js_ast::{self, ExportsKind},
     logger::{Log, Path, Range},
@@ -2645,6 +2646,177 @@ pub fn wrap_rules_with_conditions(
         }
     }
     (rules, import_records)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PreparedCssAst {
+    pub ast: CssAst,
+    pub source_index: Index32,
+    pub has_charset: bool,
+}
+
+/// Convert CSS import-order entries into standalone ASTs ready for printing.
+///
+/// This removes rules that the linker represents separately and encodes nested
+/// external import conditions as data-URL stylesheets, matching the only CSS
+/// representation that preserves arbitrary condition nesting.
+///
+/// # Panics
+///
+/// Panics if a source entry is not CSS or if condition import records are
+/// internally inconsistent.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn prepare_css_asts(
+    graph: &LinkerGraph,
+    order: &[CssImportOrder],
+    options: &Options,
+) -> Vec<PreparedCssAst> {
+    order
+        .iter()
+        .map(|entry| match entry.kind {
+            CssImportKind::None => PreparedCssAst::default(),
+            CssImportKind::Layers => {
+                let rules = if entry.layers.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Rule {
+                        data: RuleData::AtLayer(AtLayerRule {
+                            names: entry.layers.clone(),
+                            ..AtLayerRule::default()
+                        }),
+                        loc: crate::internal::logger::Loc::default(),
+                    }]
+                };
+                let (rules, import_records) = wrap_rules_with_conditions(
+                    rules,
+                    Vec::new(),
+                    &entry.conditions,
+                    &entry.condition_import_records,
+                );
+                PreparedCssAst {
+                    ast: CssAst {
+                        import_records,
+                        rules,
+                        ..CssAst::default()
+                    },
+                    ..PreparedCssAst::default()
+                }
+            }
+            CssImportKind::ExternalPath => {
+                let mut external_path = entry.external_path.clone();
+                for condition_index in (1..entry.conditions.len()).rev() {
+                    let mut import_records = entry.condition_import_records.clone();
+                    let import_record_index = u32::try_from(import_records.len())
+                        .expect("CSS import record count fits in u32");
+                    import_records.push(ImportRecord {
+                        kind: ImportKind::At,
+                        path: external_path,
+                        ..ImportRecord::default()
+                    });
+                    let ast = CssAst {
+                        import_records,
+                        rules: vec![Rule {
+                            data: RuleData::AtImport(AtImportRule {
+                                import_record_index,
+                                import_conditions: Some(entry.conditions[condition_index].clone()),
+                            }),
+                            loc: crate::internal::logger::Loc::default(),
+                        }],
+                        ..CssAst::default()
+                    };
+                    let result = css_printer::print(
+                        &ast,
+                        &graph.symbols,
+                        css_printer::Options {
+                            minify_whitespace: options.minify_whitespace,
+                            ascii_only: options.ascii_only,
+                            ..css_printer::Options::default()
+                        },
+                    );
+                    external_path = Path {
+                        text: encode_string_as_shortest_data_url(
+                            "text/css",
+                            result.css.trim_ascii(),
+                        ),
+                        ..Path::default()
+                    };
+                }
+
+                let mut import_records = entry.condition_import_records.clone();
+                let import_record_index = u32::try_from(import_records.len())
+                    .expect("CSS import record count fits in u32");
+                import_records.push(ImportRecord {
+                    kind: ImportKind::At,
+                    path: external_path,
+                    ..ImportRecord::default()
+                });
+                PreparedCssAst {
+                    ast: CssAst {
+                        import_records,
+                        rules: vec![Rule {
+                            data: RuleData::AtImport(AtImportRule {
+                                import_record_index,
+                                import_conditions: entry.conditions.first().cloned(),
+                            }),
+                            loc: crate::internal::logger::Loc::default(),
+                        }],
+                        ..CssAst::default()
+                    },
+                    ..PreparedCssAst::default()
+                }
+            }
+            CssImportKind::SourceIndex => {
+                let Some(InputFileRepr::Css(repr)) = graph.files[entry.source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                else {
+                    panic!("CSS AST preparation reached a non-CSS file");
+                };
+                let mut ast = repr.ast.clone();
+                let mut rules = Vec::with_capacity(ast.rules.len());
+                let mut has_charset = false;
+                let mut did_find_at_import = false;
+                let mut did_find_at_layer = false;
+                for rule in ast.rules {
+                    match &rule.data {
+                        RuleData::AtCharset(_) => {
+                            has_charset = true;
+                            continue;
+                        }
+                        RuleData::AtLayer(_) => did_find_at_layer = true,
+                        RuleData::AtImport(_) => {
+                            if !did_find_at_import {
+                                did_find_at_import = true;
+                                if did_find_at_layer {
+                                    rules.retain(|rule: &Rule| {
+                                        !matches!(rule.data, RuleData::AtLayer(_))
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    rules.push(rule);
+                }
+                let (rules, import_records) = wrap_rules_with_conditions(
+                    rules,
+                    ast.import_records,
+                    &entry.conditions,
+                    &entry.condition_import_records,
+                );
+                ast.rules = rules;
+                ast.import_records = import_records;
+                PreparedCssAst {
+                    ast,
+                    source_index: Index32::new(entry.source_index),
+                    has_charset,
+                }
+            }
+        })
+        .collect()
 }
 
 /// Discover symbol edges that cross JavaScript chunk boundaries and assign
@@ -5855,7 +6027,7 @@ mod tests {
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
         match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
-        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        prepare_css_asts, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
         recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
         sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
         tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
@@ -8409,6 +8581,150 @@ mod tests {
             panic!("expected layer wrapper");
         };
         assert_eq!(layer.prelude[0].payload_index, 1);
+    }
+
+    #[test]
+    fn prepares_linked_css_by_filtering_linker_owned_rules() {
+        let mut source = css_file(
+            vec![(
+                ImportRecord {
+                    path: Path {
+                        text: "dependency.css".into(),
+                        ..Path::default()
+                    },
+                    kind: ImportKind::At,
+                    ..ImportRecord::default()
+                },
+                None,
+            )],
+            vec![],
+            vec![],
+        );
+        let Some(InputFileRepr::Css(repr)) = source.repr.as_mut() else {
+            panic!("expected CSS");
+        };
+        repr.ast.rules = vec![
+            Rule {
+                data: RuleData::AtCharset(crate::internal::css_ast::AtCharsetRule {
+                    encoding: "UTF-8".into(),
+                }),
+                loc: Loc::default(),
+            },
+            Rule {
+                data: RuleData::AtLayer(crate::internal::css_ast::AtLayerRule {
+                    names: vec![vec!["before".into()]],
+                    ..crate::internal::css_ast::AtLayerRule::default()
+                }),
+                loc: Loc::default(),
+            },
+            Rule {
+                data: RuleData::AtImport(AtImportRule {
+                    import_record_index: 0,
+                    ..AtImportRule::default()
+                }),
+                loc: Loc::default(),
+            },
+            Rule {
+                data: RuleData::AtLayer(crate::internal::css_ast::AtLayerRule {
+                    names: vec![vec!["after".into()]],
+                    ..crate::internal::css_ast::AtLayerRule::default()
+                }),
+                loc: Loc::default(),
+            },
+            Rule {
+                data: RuleData::Comment(crate::internal::css_ast::CommentRule {
+                    text: "contents".into(),
+                }),
+                loc: Loc::default(),
+            },
+        ];
+        let input_files = [css_file(vec![], vec![], vec![]), source];
+        let graph = clone_linker_graph(&input_files, &[0, 1], &[], false);
+        let prepared = prepare_css_asts(
+            &graph,
+            &[super::CssImportOrder {
+                kind: CssImportKind::SourceIndex,
+                source_index: 1,
+                ..super::CssImportOrder::default()
+            }],
+            &Options::default(),
+        );
+        assert!(prepared[0].has_charset);
+        assert_eq!(prepared[0].source_index.get_index(), 1);
+        assert_eq!(prepared[0].ast.rules.len(), 2);
+        let RuleData::AtLayer(layer) = &prepared[0].ast.rules[0].data else {
+            panic!("expected post-import layer");
+        };
+        assert_eq!(layer.names, [vec!["after"]]);
+        assert!(matches!(
+            prepared[0].ast.rules[1].data,
+            RuleData::Comment(_)
+        ));
+    }
+
+    #[test]
+    fn prepares_synthetic_css_layer_entries() {
+        let input_files = [css_file(vec![], vec![], vec![])];
+        let graph = clone_linker_graph(&input_files, &[0], &[], false);
+        let prepared = prepare_css_asts(
+            &graph,
+            &[super::CssImportOrder {
+                kind: CssImportKind::Layers,
+                layers: vec![vec!["reset".into()], vec!["theme".into()]],
+                ..super::CssImportOrder::default()
+            }],
+            &Options::default(),
+        );
+        let RuleData::AtLayer(layer) = &prepared[0].ast.rules[0].data else {
+            panic!("expected synthetic layer");
+        };
+        assert_eq!(layer.names, [vec!["reset"], vec!["theme"]]);
+        assert!(!prepared[0].source_index.is_valid());
+    }
+
+    #[test]
+    fn prepares_nested_external_css_imports_as_data_urls() {
+        let input_files = [css_file(vec![], vec![], vec![])];
+        let graph = clone_linker_graph(&input_files, &[0], &[], false);
+        let prepared = prepare_css_asts(
+            &graph,
+            &[super::CssImportOrder {
+                kind: CssImportKind::ExternalPath,
+                external_path: Path {
+                    text: "https://example.com/theme.css".into(),
+                    ..Path::default()
+                },
+                conditions: vec![
+                    ImportConditions::default(),
+                    ImportConditions {
+                        queries: vec![MediaQuery {
+                            loc: Loc::default(),
+                            data: MediaQueryData::ArbitraryTokens(MediaArbitraryTokensQuery {
+                                tokens: vec![Token {
+                                    kind: TokenKind::Ident,
+                                    text: "screen".into(),
+                                    ..Token::default()
+                                }],
+                            }),
+                        }],
+                        ..ImportConditions::default()
+                    },
+                ],
+                ..super::CssImportOrder::default()
+            }],
+            &Options::default(),
+        );
+        assert_eq!(prepared[0].ast.import_records.len(), 1);
+        assert!(
+            prepared[0].ast.import_records[0]
+                .path
+                .text
+                .starts_with("data:text/css")
+        );
+        let RuleData::AtImport(at_import) = &prepared[0].ast.rules[0].data else {
+            panic!("expected external import");
+        };
+        assert!(at_import.import_conditions.is_some());
     }
 
     fn js_repr(graph: &crate::internal::graph::LinkerGraph, source_index: usize) -> &JsRepr {
