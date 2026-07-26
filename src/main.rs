@@ -675,9 +675,6 @@ fn run_with_stdin_and_node_paths(
         });
     }
 
-    if !metafile_path.is_empty() {
-        return Err("\"--metafile\" without \"--bundle\" is not implemented yet".into());
-    }
     if bare_sourcemap {
         sourcemap = BuildSourceMap::Inline;
     }
@@ -1458,7 +1455,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_bundle_metafiles() {
+    fn writes_build_metafiles() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock is after epoch")
@@ -1485,6 +1482,25 @@ mod tests {
         assert!(metadata.contains("\"outputs\": {"));
         assert!(metadata.contains("entry.js\": {"));
         assert!(metadata.contains("out/entry.js\": {"));
+
+        let non_bundle_output_directory = directory.join("non-bundle");
+        let non_bundle_metafile = directory.join("reports/non-bundle.json");
+        let Output::Text(output) = run(&[
+            format!("--outdir={}", non_bundle_output_directory.display()),
+            format!("--metafile={}", non_bundle_metafile.display()),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("non-bundled build succeeds") else {
+            panic!("expected file output");
+        };
+        assert!(output.is_empty());
+        let metadata =
+            std::fs::read_to_string(&non_bundle_metafile).expect("read non-bundle metafile");
+        assert!(metadata.contains("\"inputs\": {"));
+        assert!(metadata.contains("\"outputs\": {"));
+        assert!(metadata.contains("entry.js\": {"));
+        assert!(metadata.contains("non-bundle/entry.js\": {"));
+
         assert!(
             run(&[
                 "--bundle".into(),
