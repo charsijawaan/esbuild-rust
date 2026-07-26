@@ -1,9 +1,11 @@
 use crate::internal::{
-    js_ast::{Stmt, StmtData, TypeScriptStmt},
+    js_ast::{
+        Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, Stmt, StmtData, TypeScriptStmt,
+    },
     js_lexer::{Lexer, Token},
 };
 
-use super::parser_core::ParserCore;
+use super::{parser_core::ParserCore, syntax_expression::parse_expression_suffix};
 
 pub(crate) fn skip_type_parameters(lexer: &mut Lexer) {
     if lexer.token != Token::LessThan {
@@ -161,6 +163,7 @@ pub(crate) fn parse_type_script_statement(
         ));
     }
     if lexer.is_contextual_keyword(b"type") {
+        let reference = core.store_name_in_ref(lexer.identifier.clone());
         lexer.next();
         if is_export && matches!(lexer.token, Token::OpenBrace | Token::Asterisk) {
             if lexer.token == Token::OpenBrace {
@@ -176,6 +179,29 @@ pub(crate) fn parse_type_script_statement(
             return Some(Stmt::new(
                 loc,
                 StmtData::TypeScript(TypeScriptStmt::default()),
+            ));
+        }
+        if !is_export && lexer.token != Token::Identifier {
+            let value = parse_expression_suffix(
+                core,
+                lexer,
+                Expr::new(
+                    loc,
+                    ExprData::Identifier(IdentifierExpr {
+                        reference,
+                        ..IdentifierExpr::default()
+                    }),
+                ),
+                Precedence::Lowest,
+                true,
+            );
+            lexer.expect_or_insert_semicolon();
+            return Some(Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value,
+                    ..ExprStmt::default()
+                }),
             ));
         }
         lexer.expect(Token::Identifier);

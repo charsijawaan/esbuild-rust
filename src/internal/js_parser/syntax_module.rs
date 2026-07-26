@@ -20,6 +20,7 @@ use super::{
     syntax_import::parse_import_after_keyword,
 };
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
     lexer.expect(Token::Import);
@@ -36,6 +37,30 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
                 value,
                 ..ExprStmt::default()
             }),
+        );
+    }
+    if core.options.ts.parse && lexer.is_contextual_keyword(b"type") {
+        lexer.next();
+        let mut delimiters = Vec::new();
+        while lexer.token != Token::StringLiteral || !delimiters.is_empty() {
+            match lexer.token {
+                Token::OpenBrace => delimiters.push(Token::CloseBrace),
+                Token::OpenBracket => delimiters.push(Token::CloseBracket),
+                Token::OpenParen => delimiters.push(Token::CloseParen),
+                token if delimiters.last() == Some(&token) => {
+                    delimiters.pop();
+                }
+                Token::EndOfFile => lexer.expected(Token::StringLiteral),
+                _ => {}
+            }
+            lexer.next();
+        }
+        lexer.next();
+        lexer.expect_or_insert_semicolon();
+        core.has_type_script_export = true;
+        return Stmt::new(
+            loc,
+            StmtData::TypeScript(crate::internal::js_ast::TypeScriptStmt::default()),
         );
     }
     if !core.is_current_scope_module_scope() {
@@ -58,9 +83,10 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
             lexer.expect_contextual_keyword(b"from");
         }
         Token::OpenBrace => {
-            let (items, is_single_line) = parse_clause(core, lexer, false);
+            let (items, is_single_line, had_type_only_items) = parse_clause(core, lexer, false);
             statement.items = Some(items);
             statement.is_single_line = is_single_line;
+            was_bare = had_type_only_items && statement.items.as_ref().is_some_and(Vec::is_empty);
             lexer.expect_contextual_keyword(b"from");
         }
         Token::Identifier => {
@@ -80,7 +106,7 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
                         lexer.expect(Token::Identifier);
                     }
                     Token::OpenBrace => {
-                        let (items, is_single_line) = parse_clause(core, lexer, false);
+                        let (items, is_single_line, _) = parse_clause(core, lexer, false);
                         statement.items = Some(items);
                         statement.is_single_line = is_single_line;
                     }
@@ -94,6 +120,17 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
 
     let (path_range, path) = parse_path(lexer);
     lexer.expect_or_insert_semicolon();
+    if core.options.ts.parse
+        && was_bare
+        && statement.items.as_ref().is_some_and(Vec::is_empty)
+        && statement.default_name.is_none()
+    {
+        core.has_type_script_export = true;
+        return Stmt::new(
+            loc,
+            StmtData::TypeScript(crate::internal::js_ast::TypeScriptStmt::default()),
+        );
+    }
     if statement.star_name_loc.is_none() {
         statement.namespace_ref = core.new_symbol(
             SymbolKind::Other,
@@ -146,11 +183,18 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
         Token::Default => parse_export_default(core, lexer, loc),
         Token::Asterisk => parse_export_star(core, lexer, loc),
         Token::OpenBrace => {
-            let (items, is_single_line) = parse_clause(core, lexer, true);
+            let (items, is_single_line, had_type_only_items) = parse_clause(core, lexer, true);
             if lexer.is_contextual_keyword(b"from") {
                 lexer.next();
                 let (path_range, path) = parse_path(lexer);
                 lexer.expect_or_insert_semicolon();
+                if had_type_only_items && items.is_empty() {
+                    core.has_type_script_export = true;
+                    return Stmt::new(
+                        loc,
+                        StmtData::TypeScript(crate::internal::js_ast::TypeScriptStmt::default()),
+                    );
+                }
                 let namespace_ref = core.new_symbol(
                     SymbolKind::Other,
                     format!("import_{}", generate_non_unique_name_from_path(&path)),
@@ -168,6 +212,13 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
                 )
             } else {
                 lexer.expect_or_insert_semicolon();
+                if had_type_only_items && items.is_empty() {
+                    core.has_type_script_export = true;
+                    return Stmt::new(
+                        loc,
+                        StmtData::TypeScript(crate::internal::js_ast::TypeScriptStmt::default()),
+                    );
+                }
                 Stmt::new(
                     loc,
                     StmtData::ExportClause(ExportClauseStmt {
@@ -280,21 +331,45 @@ fn parse_clause(
     core: &mut ParserCore,
     lexer: &mut Lexer,
     is_export: bool,
-) -> (Vec<ClauseItem>, bool) {
+) -> (Vec<ClauseItem>, bool, bool) {
     lexer.expect(Token::OpenBrace);
     let mut is_single_line = !lexer.has_newline_before;
     let mut items = Vec::new();
+    let mut had_type_only_items = false;
     while lexer.token != Token::CloseBrace {
-        let name_loc = lexer.loc();
-        let source_can_be_local_name = lexer.token == Token::Identifier;
-        let (mut alias, alias_ref) = clause_alias(lexer);
+        let mut is_type_only = false;
+        let mut prefetched_type = None;
+        if core.options.ts.parse && lexer.is_contextual_keyword(b"type") {
+            let type_loc = lexer.loc();
+            let type_ref = lexer.identifier.clone();
+            lexer.next();
+            if matches!(lexer.token, Token::Comma | Token::CloseBrace)
+                || lexer.is_contextual_keyword(b"as")
+            {
+                prefetched_type = Some((type_loc, type_ref));
+            } else {
+                is_type_only = true;
+                had_type_only_items = true;
+            }
+        }
+        let name_loc = prefetched_type
+            .as_ref()
+            .map_or_else(|| lexer.loc(), |item| item.0);
+        let source_can_be_local_name =
+            prefetched_type.is_some() || lexer.token == Token::Identifier;
+        let (mut alias, alias_ref) = if let Some((_, type_ref)) = prefetched_type {
+            ("type".into(), type_ref)
+        } else {
+            let item = clause_alias(lexer);
+            lexer.next();
+            item
+        };
         let original_name = alias.clone();
         let mut alias_loc = name_loc;
         let mut name = LocRef {
             loc: name_loc,
             reference: core.store_name_in_ref(alias_ref),
         };
-        lexer.next();
 
         if lexer.is_contextual_keyword(b"as") {
             lexer.next();
@@ -316,16 +391,18 @@ fn parse_clause(
         } else if !is_export && !source_can_be_local_name {
             lexer.expected_string("\"as\"");
         }
-        items.push(ClauseItem {
-            alias,
-            original_name: if is_export {
-                original_name
-            } else {
-                name_for_ref(core, name.reference)
-            },
-            alias_loc,
-            name,
-        });
+        if !is_type_only {
+            items.push(ClauseItem {
+                alias,
+                original_name: if is_export {
+                    original_name
+                } else {
+                    name_for_ref(core, name.reference)
+                },
+                alias_loc,
+                name,
+            });
+        }
 
         if lexer.token != Token::Comma {
             break;
@@ -342,7 +419,7 @@ fn parse_clause(
         is_single_line = false;
     }
     lexer.expect(Token::CloseBrace);
-    (items, is_single_line)
+    (items, is_single_line, had_type_only_items)
 }
 
 fn clause_alias(lexer: &mut Lexer) -> (String, MaybeSubstring) {

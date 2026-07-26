@@ -2721,6 +2721,58 @@ mod tests {
     }
 
     #[test]
+    fn erases_type_only_imports_and_specifiers() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        options.mode = crate::internal::config::Mode::Bundle;
+        let (ast, ok, log) = parse_source_with_options(
+            "import type {Shape} from './types';\
+             import {type Hidden, value, type Other as Alias} from './runtime';\
+             value;",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].statements.len(), 3);
+        assert!(matches!(
+            ast.parts[1].statements[0].data.as_deref(),
+            Some(StmtData::TypeScript(_))
+        ));
+        let Some(StmtData::Import(import)) = ast.parts[1].statements[1].data.as_deref() else {
+            panic!("expected retained runtime import");
+        };
+        assert_eq!(import.items.as_ref().map_or(0, Vec::len), 1);
+        assert_eq!(ast.import_records.len(), 1);
+        assert_eq!(ast.import_records[0].path.text, "./runtime");
+        assert_eq!(ast.named_imports.len(), 1);
+        assert_eq!(
+            ast.named_imports
+                .values()
+                .next()
+                .expect("named import")
+                .alias,
+            "value"
+        );
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+
+        let mut options = Options::default();
+        options.ts.parse = true;
+        options.mode = crate::internal::config::Mode::Bundle;
+        let (ast, ok, log) = parse_source_with_options(
+            "import {type, type as kind} from './runtime'; type; kind;",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Import(import)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected runtime imports named type");
+        };
+        assert_eq!(import.items.as_ref().map_or(0, Vec::len), 2);
+        assert_eq!(ast.named_imports.len(), 2);
+        assert!(ast.named_imports.values().all(|item| item.alias == "type"));
+    }
+
+    #[test]
     fn for_loops_keep_lexical_bindings_in_a_loop_scope() {
         let (ast, ok, log) =
             parse_source("for (let item of items) { item; } item; for (let i = 0; i < 1; i++) {}");
