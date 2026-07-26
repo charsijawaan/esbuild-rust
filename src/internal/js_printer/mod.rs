@@ -20,6 +20,7 @@ const LAST_LOW_SURROGATE: u16 = 0xdfff;
 pub struct Options {
     pub unsupported_features: JsFeature,
     pub line_limit: usize,
+    pub indent: usize,
     pub minify_syntax: bool,
     pub minify_whitespace: bool,
     pub ascii_only: bool,
@@ -381,7 +382,7 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
         output: Vec::new(),
         renamer,
         options,
-        indent: 0,
+        indent: options.indent,
         import_records: &[],
     };
     printer.print_expr_at(expr, Precedence::Lowest);
@@ -405,7 +406,7 @@ pub fn print(tree: &Ast, renamer: &dyn Renamer, options: Options) -> PrintResult
         output: Vec::new(),
         renamer,
         options,
-        indent: 0,
+        indent: options.indent,
         import_records: &tree.import_records,
     };
     if !tree.hashbang.is_empty() {
@@ -1812,6 +1813,34 @@ mod tests {
             allow_backtick,
         ))
         .expect("printer output is UTF-8")
+    }
+
+    #[test]
+    fn applies_initial_indentation() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(b"foo();".as_slice()),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            print(
+                &ast,
+                &renamer,
+                Options {
+                    indent: 2,
+                    ..Options::default()
+                },
+            )
+            .js,
+            b"    foo();\n"
+        );
     }
 
     #[test]

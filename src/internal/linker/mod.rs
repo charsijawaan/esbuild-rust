@@ -2471,6 +2471,7 @@ pub fn print_cross_chunk_bindings(
     let print_options = crate::internal::js_printer::Options {
         unsupported_features: options.unsupported_js_features,
         line_limit: options.line_limit,
+        indent: usize::from(options.output_format == Format::Iife),
         minify_syntax: options.minify_syntax,
         minify_whitespace: options.minify_whitespace,
         ascii_only: options.ascii_only,
@@ -3515,6 +3516,7 @@ pub fn compile_part_range_for_chunk(
         crate::internal::js_printer::Options {
             unsupported_features: options.unsupported_js_features,
             line_limit: options.line_limit,
+            indent: usize::from(options.output_format == Format::Iife),
             minify_syntax: options.minify_syntax,
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
@@ -3720,6 +3722,7 @@ pub fn generate_entry_point_tail(
         crate::internal::js_printer::Options {
             unsupported_features: options.unsupported_js_features,
             line_limit: options.line_limit,
+            indent: usize::from(options.output_format == Format::Iife),
             minify_syntax: options.minify_syntax,
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
@@ -5602,7 +5605,7 @@ mod tests {
         assert_eq!(tail(Format::Preserve, Vec::new()), "require_entry();\n");
         assert_eq!(
             tail(Format::Iife, vec!["Bundle".into()]),
-            "return require_entry();\n"
+            "  return require_entry();\n"
         );
         assert_eq!(
             tail(Format::CommonJs, Vec::new()),
