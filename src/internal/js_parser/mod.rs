@@ -14,6 +14,7 @@ mod source_map;
 mod standalone_helpers;
 mod symbols;
 mod syntax_literals;
+mod syntax_suffix;
 
 pub use define::parse_define_expr;
 pub use global_name::parse_global_name;
