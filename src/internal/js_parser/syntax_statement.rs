@@ -82,6 +82,20 @@ pub(crate) fn parse_block_with_scope(
     block
 }
 
+fn parse_if_branch_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
+    if lexer.token != Token::Function {
+        return parse_statement(core, lexer);
+    }
+    let loc = lexer.loc();
+    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Block, loc);
+    let mut statement = parse_statement(core, lexer);
+    if let Some(StmtData::Function(function)) = statement.data.as_deref_mut() {
+        function.function.has_if_scope = true;
+    }
+    core.pop_scope();
+    statement
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
@@ -364,11 +378,11 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             let test = parse_expression(core, lexer, Precedence::Lowest, true);
             lexer.expect(Token::CloseParen);
             let is_single_line_yes = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
-            let yes = parse_statement(core, lexer);
+            let yes = parse_if_branch_statement(core, lexer);
             let (no_or_nil, is_single_line_no) = if lexer.token == Token::Else {
                 lexer.next();
                 let is_single_line = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
-                (parse_statement(core, lexer), is_single_line)
+                (parse_if_branch_statement(core, lexer), is_single_line)
             } else {
                 (Stmt::default(), false)
             };

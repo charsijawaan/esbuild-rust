@@ -75,6 +75,7 @@ pub(crate) struct ParserCore {
     pub(crate) top_level_await_keyword: Range,
     pub(crate) fn_or_arrow_data_parse: FnOrArrowDataParse,
     pub(crate) lower_all_of_these_private_names: HashMap<String, bool>,
+    pub(crate) hoisted_ref_for_sloppy_mode_block_fn: HashMap<Ref, Ref>,
     pub(crate) visit_loop_depth: usize,
     pub(crate) visit_switch_depth: usize,
     pub(crate) visit_new_target_allowed: bool,
@@ -128,6 +129,7 @@ impl ParserCore {
             top_level_await_keyword: Range::default(),
             fn_or_arrow_data_parse: FnOrArrowDataParse::default(),
             lower_all_of_these_private_names: HashMap::new(),
+            hoisted_ref_for_sloppy_mode_block_fn: HashMap::new(),
             visit_loop_depth: 0,
             visit_switch_depth: 0,
             visit_new_target_allowed: false,
@@ -483,12 +485,13 @@ impl ParserCore {
     }
 
     fn hoist_symbols_in_scope(&mut self, scope: &ScopeRef) {
-        let (kind, parent, mut members, children) = {
+        let (kind, strict_mode, parent, mut members, children) = {
             let scope = scope
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             (
                 scope.kind,
+                scope.strict_mode,
                 scope.parent.as_ref().and_then(std::sync::Weak::upgrade),
                 scope.members.values().copied().collect::<Vec<_>>(),
                 scope.children.clone(),
@@ -497,14 +500,33 @@ impl ParserCore {
         members.sort_by_key(|member| (member.reference.inner_index, member.reference.source_index));
 
         if !kind.stops_hoisting() {
-            for member in members {
-                let symbol_index =
+            for mut member in members {
+                let original_reference = member.reference;
+                let mut symbol_index =
                     usize::try_from(member.reference.inner_index).expect("symbol index fits usize");
                 let symbol_kind = self.symbols[symbol_index].kind;
                 if !symbol_kind.is_hoisted() {
                     continue;
                 }
                 let name = self.symbols[symbol_index].original_name.clone();
+                let mut is_sloppy_mode_block_function = false;
+                if symbol_kind == SymbolKind::HoistedFunction {
+                    if strict_mode != StrictModeKind::Sloppy {
+                        continue;
+                    }
+                    let hoisted_reference = self.new_symbol(SymbolKind::Hoisted, name.clone());
+                    scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .generated
+                        .push(hoisted_reference);
+                    self.hoisted_ref_for_sloppy_mode_block_fn
+                        .insert(original_reference, hoisted_reference);
+                    member.reference = hoisted_reference;
+                    symbol_index = usize::try_from(hoisted_reference.inner_index)
+                        .expect("symbol index fits usize");
+                    is_sloppy_mode_block_function = true;
+                }
                 let mut target = parent.clone();
                 while let Some(target_scope) = target {
                     let (existing, target_kind, next_parent) = {
@@ -527,15 +549,26 @@ impl ParserCore {
                         let existing_kind = self.symbols[existing_index].kind;
                         if existing_kind == SymbolKind::Unbound
                             || existing_kind == SymbolKind::Hoisted
-                            || (existing_kind.is_function()
-                                && symbol_kind.is_function()
-                                && target_kind.stops_hoisting())
+                            || (existing_kind.is_function() && target_kind.stops_hoisting())
                         {
                             self.symbols[symbol_index].link = existing.reference;
                         } else if existing_kind != SymbolKind::CatchIdentifier
                             && existing_kind != SymbolKind::Arguments
                         {
-                            self.add_symbol_already_declared_error(&name, member.loc, existing.loc);
+                            if is_sloppy_mode_block_function
+                                && parent
+                                    .as_ref()
+                                    .is_some_and(|parent| Arc::ptr_eq(parent, &target_scope))
+                            {
+                                self.hoisted_ref_for_sloppy_mode_block_fn
+                                    .remove(&original_reference);
+                            } else {
+                                self.add_symbol_already_declared_error(
+                                    &name,
+                                    member.loc,
+                                    existing.loc,
+                                );
+                            }
                         }
                         break;
                     }

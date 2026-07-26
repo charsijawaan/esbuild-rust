@@ -117,9 +117,10 @@ pub(crate) fn stmt_cares_about_scope(statement: &Stmt) -> bool {
             | StmtData::Continue(_)
             | StmtData::Directive(_)
             | StmtData::Label(_),
-        ) => false,
+        )
+        | None => false,
         Some(StmtData::Local(local)) => local.kind != LocalKind::Var,
-        Some(_) | None => true,
+        Some(_) => true,
     }
 }
 
@@ -240,7 +241,13 @@ pub(crate) fn append_if_or_label_body_preserving_scope(
     if let Some(StmtData::Block(block)) = body.data.as_deref()
         && !stmts_care_about_scope(&block.statements)
     {
-        statements.extend(block.statements.clone());
+        statements.extend(
+            block
+                .statements
+                .iter()
+                .filter(|statement| statement.data.is_some())
+                .cloned(),
+        );
     } else if stmt_cares_about_scope(&body) {
         statements.push(Stmt::new(
             body.loc,

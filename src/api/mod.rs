@@ -6135,6 +6135,62 @@ mod tests {
     }
 
     #[test]
+    fn lowers_annex_b_block_functions_like_esbuild() {
+        let options = TransformOptions {
+            minify_syntax: true,
+            ..TransformOptions::default()
+        };
+        assert_eq!(
+            code(transform(
+                "while(x){if(y)continue;function y(){}}\
+                 if(flag){function f(){}}use(f);\
+                 if(1)function g(){}let g",
+                options.clone()
+            )),
+            concat!(
+                "for (; x; ) {\n",
+                "  let y2 = function() {\n",
+                "  };\n",
+                "  var y = y2;\n",
+                "}\n",
+                "if (flag)\n",
+                "  var f = function() {\n",
+                "  };\n",
+                "use(f);\n",
+                "{\n",
+                "  let g2 = function() {\n",
+                "  };\n",
+                "}\n",
+                "let g;\n",
+            )
+        );
+        assert_eq!(
+            code(transform(
+                "\"use strict\";{function f(){}use(f)}",
+                options.clone()
+            )),
+            concat!(
+                "\"use strict\";\n",
+                "{\n",
+                "  let f = function() {\n",
+                "  };\n",
+                "  use(f);\n",
+                "}\n",
+            )
+        );
+        assert_eq!(
+            code(transform("{eval(\"\");function f(){}use(f)}", options)),
+            concat!(
+                "{\n",
+                "  function f() {\n",
+                "  }\n",
+                "  eval(\"\"), use(f);\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

@@ -8,14 +8,15 @@ use crate::internal::{
         AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportRecordFlags, Ref,
         SymbolFlags, SymbolKind,
     },
+    compat::JsFeature,
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         Arg, AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
-        ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody,
-        FunctionExpr, IdentifierExpr, IfExpr, IfStmt, LocalKind, ObjectExpr, OpCode, OptionalChain,
-        Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind, Stmt, StmtData,
-        StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, UnaryExpr,
-        for_each_identifier_binding, inline_primitives_into_template,
+        ClassStaticBlock, Decl, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody,
+        FunctionExpr, IdentifierBinding, IdentifierExpr, IfExpr, IfStmt, LocalKind, LocalStmt,
+        ObjectExpr, OpCode, OptionalChain, Property, PropertyFlags, PropertyKind, ReturnStmt,
+        ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr,
+        UnaryExpr, for_each_identifier_binding, inline_primitives_into_template,
         inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
         is_primitive_literal, join_with_comma, make_helper_context,
     },
@@ -165,6 +166,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
     let old_control_flow_dead = core.is_control_flow_dead;
     for statement in statements.iter_mut() {
         let was_control_flow_dead = core.is_control_flow_dead;
+        let mut has_if_scope = false;
         match statement.data.as_deref_mut() {
             Some(StmtData::Block(block)) => {
                 visit_block(core, statement.loc, block, resolve_identifiers);
@@ -198,6 +200,10 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 }
             }
             Some(StmtData::Function(function)) => {
+                has_if_scope = function.function.has_if_scope;
+                if has_if_scope {
+                    core.push_next_scope_for_visit_pass(ScopeKind::Block);
+                }
                 visit_function(core, &mut function.function, resolve_identifiers);
             }
             Some(StmtData::Class(class)) => {
@@ -542,6 +548,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                         }
                     }
                     visit_statements(core, &mut case.body, resolve_identifiers);
+                    lower_block_level_function_declarations(core, &mut case.body);
                     lower_nested_type_script_statements(core, &mut case.body, None);
                 }
                 core.visit_switch_depth -= 1;
@@ -570,6 +577,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 if let Some(finally) = &mut try_statement.finally {
                     core.push_next_scope_for_visit_pass(ScopeKind::Block);
                     visit_statements(core, &mut finally.block.statements, resolve_identifiers);
+                    lower_block_level_function_declarations(core, &mut finally.block.statements);
                     lower_nested_type_script_statements(core, &mut finally.block.statements, None);
                     core.pop_scope();
                 }
@@ -596,6 +604,14 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 bind_label_reference(core, &mut continue_statement.label, true);
             }
             _ => {}
+        }
+        if has_if_scope {
+            let loc = statement.loc;
+            let mut lowered = vec![std::mem::take(statement)];
+            lower_block_level_function_declarations(core, &mut lowered);
+            *statement =
+                super::standalone_helpers::stmts_to_single_stmt(loc, lowered, Loc::default());
+            core.pop_scope();
         }
         if core.options.minify_syntax {
             if matches!(statement.data.as_deref(), Some(StmtData::Empty)) {
@@ -1811,7 +1827,9 @@ fn minify_constant_if_statement(statement: &mut Stmt) {
     }
     let mut replacements =
         super::control_flow::append_if_or_label_body_preserving_scope(Vec::new(), live.clone());
-    if replacements.len() == 1 {
+    if replacements.is_empty() {
+        statement.data = None;
+    } else if replacements.len() == 1 {
         *statement = replacements.pop().expect("single replacement");
     } else {
         statement.data = Some(Box::new(StmtData::Block(BlockStmt {
@@ -1915,6 +1933,177 @@ fn visit_statement(core: &mut ParserCore, statement: &mut Stmt, resolve_identifi
     visit_statements(core, std::slice::from_mut(statement), resolve_identifiers);
 }
 
+fn identifier_binding(loc: Loc, reference: Ref) -> Binding {
+    Binding {
+        data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+            reference,
+        }))),
+        loc,
+    }
+}
+
+fn preserve_block_functions_with_direct_eval(core: &mut ParserCore, functions: &[Stmt]) {
+    for statement in functions {
+        let Some(StmtData::Function(function)) = statement.data.as_deref() else {
+            unreachable!("block function classification changed");
+        };
+        let name = function
+            .function
+            .name
+            .expect("function declarations have names");
+        if let Some(&hoisted_reference) = core
+            .hoisted_ref_for_sloppy_mode_block_fn
+            .get(&name.reference)
+        {
+            core.symbols[usize::try_from(hoisted_reference.inner_index).expect("symbol index")]
+                .link = name.reference;
+        }
+    }
+}
+
+fn lower_block_functions_to_declarations(
+    core: &mut ParserCore,
+    functions: Vec<Stmt>,
+    visited: Vec<Stmt>,
+) -> Vec<Stmt> {
+    let mut declaration_index_by_reference: HashMap<Ref, usize> = HashMap::new();
+    let mut lexical_declarations: Vec<Decl> = Vec::new();
+    let mut hoisted_declarations = Vec::new();
+    for statement in functions {
+        let loc = statement.loc;
+        let Some(StmtData::Function(mut function)) = statement.data.map(|data| *data) else {
+            unreachable!("block function classification changed");
+        };
+        let name = function
+            .function
+            .name
+            .take()
+            .expect("function declarations have names");
+        let value = Expr::new(
+            loc,
+            ExprData::Function(FunctionExpr {
+                function: function.function,
+                ..FunctionExpr::default()
+            }),
+        );
+        if let Some(&index) = declaration_index_by_reference.get(&name.reference) {
+            lexical_declarations[index].value_or_nil = value;
+            continue;
+        }
+
+        declaration_index_by_reference.insert(name.reference, lexical_declarations.len());
+        lexical_declarations.push(Decl {
+            binding: identifier_binding(name.loc, name.reference),
+            value_or_nil: value,
+        });
+        if let Some(&hoisted_reference) = core
+            .hoisted_ref_for_sloppy_mode_block_fn
+            .get(&name.reference)
+        {
+            core.record_declared_symbol(hoisted_reference);
+            core.record_usage(name.reference);
+            hoisted_declarations.push(Decl {
+                binding: identifier_binding(name.loc, hoisted_reference),
+                value_or_nil: Expr::new(
+                    name.loc,
+                    ExprData::Identifier(IdentifierExpr {
+                        reference: name.reference,
+                        ..IdentifierExpr::default()
+                    }),
+                ),
+            });
+        }
+    }
+
+    let lexical_kind = if core
+        .options
+        .unsupported_js_features
+        .contains(JsFeature::CONST_AND_LET)
+    {
+        LocalKind::Var
+    } else {
+        LocalKind::Let
+    };
+    let lexical_loc = lexical_declarations
+        .first()
+        .map_or_else(Loc::default, |declaration| declaration.value_or_nil.loc);
+    let mut lowered = Vec::with_capacity(2 + visited.len());
+    if !lexical_declarations.is_empty() {
+        lowered.push(Stmt::new(
+            lexical_loc,
+            StmtData::Local(LocalStmt {
+                declarations: lexical_declarations,
+                kind: lexical_kind,
+                ..LocalStmt::default()
+            }),
+        ));
+    }
+    if !hoisted_declarations.is_empty() {
+        let hoisted_loc = hoisted_declarations[0].value_or_nil.loc;
+        lowered.push(Stmt::new(
+            hoisted_loc,
+            StmtData::Local(LocalStmt {
+                declarations: hoisted_declarations,
+                kind: LocalKind::Var,
+                ..LocalStmt::default()
+            }),
+        ));
+    }
+    lowered.extend(visited);
+    lowered
+}
+
+fn lower_block_level_function_declarations(core: &mut ParserCore, statements: &mut Vec<Stmt>) {
+    let Some(scope) = core.current_scope.as_ref() else {
+        return;
+    };
+    let (kind, contains_direct_eval) = {
+        let scope = scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (scope.kind, scope.contains_direct_eval)
+    };
+    if kind.stops_hoisting() {
+        return;
+    }
+
+    let mut functions = Vec::new();
+    let mut visited = Vec::with_capacity(statements.len());
+    for statement in std::mem::take(statements) {
+        let is_block_function = matches!(
+            statement.data.as_deref(),
+            Some(StmtData::Function(function))
+                if function.function.name.is_some_and(|name| {
+                    core.symbols
+                        [usize::try_from(name.reference.inner_index).expect("symbol index")]
+                    .kind
+                        == SymbolKind::HoistedFunction
+                })
+        );
+        if is_block_function {
+            functions.push(statement);
+        } else {
+            visited.push(statement);
+        }
+    }
+    if functions.is_empty() {
+        *statements = visited;
+        return;
+    }
+
+    if contains_direct_eval {
+        preserve_block_functions_with_direct_eval(core, &functions);
+        functions.extend(visited);
+        *statements = functions;
+        return;
+    }
+
+    *statements = lower_block_functions_to_declarations(core, functions, visited);
+    if core.options.minify_syntax {
+        inline_single_use_declarations(core, statements);
+    }
+}
+
 fn visit_block(
     core: &mut ParserCore,
     loc: crate::internal::logger::Loc,
@@ -1923,6 +2112,7 @@ fn visit_block(
 ) {
     core.push_scope_for_visit_pass(ScopeKind::Block, loc);
     visit_statements(core, &mut block.statements, resolve_identifiers);
+    lower_block_level_function_declarations(core, &mut block.statements);
     lower_nested_type_script_statements(core, &mut block.statements, None);
     core.pop_scope();
 }
