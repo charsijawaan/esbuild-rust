@@ -3,9 +3,9 @@
 use crate::internal::{
     js_ast::{
         Binding, BindingData, BlockStmt, BreakStmt, Catch, ContinueStmt, Decl, DoWhileStmt, Expr,
-        ExprData, ExprStmt, Finally, IdentifierBinding, IdentifierExpr, IfStmt, LocalKind,
-        LocalStmt, Precedence, ReturnStmt, Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt,
-        TryStmt, WhileStmt, WithStmt,
+        ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt, ForStmt, IdentifierBinding,
+        IdentifierExpr, IfStmt, LocalKind, LocalStmt, Precedence, ReturnStmt, Stmt, StmtData,
+        SwitchCase, SwitchStmt, ThrowStmt, TryStmt, WhileStmt, WithStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
@@ -44,7 +44,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             lexer.token,
             Token::Identifier | Token::OpenBracket | Token::OpenBrace
         ) {
-            return parse_local_declarations(core, lexer, loc, LocalKind::Let);
+            return parse_local_declarations(core, lexer, loc, LocalKind::Let, true, true, true);
         }
         let value = parse_expression_suffix(
             core,
@@ -133,12 +133,13 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         }
         Token::Var => {
             lexer.next();
-            parse_local_declarations(core, lexer, loc, LocalKind::Var)
+            parse_local_declarations(core, lexer, loc, LocalKind::Var, true, true, true)
         }
         Token::Const => {
             lexer.next();
-            parse_local_declarations(core, lexer, loc, LocalKind::Const)
+            parse_local_declarations(core, lexer, loc, LocalKind::Const, true, true, true)
         }
+        Token::For => parse_for_statement(core, lexer, loc),
         Token::Break => {
             lexer.next();
             let label = parse_optional_label(core, lexer);
@@ -352,6 +353,9 @@ fn parse_local_declarations(
     lexer: &mut Lexer,
     loc: Loc,
     kind: LocalKind,
+    consume_semicolon: bool,
+    require_const_initializer: bool,
+    allow_in: bool,
 ) -> Stmt {
     let mut declarations = Vec::new();
     loop {
@@ -375,11 +379,11 @@ fn parse_local_declarations(
         lexer.next();
         let value_or_nil = if lexer.token == Token::Equals {
             lexer.next();
-            parse_expression(core, lexer, Precedence::Comma, true)
+            parse_expression(core, lexer, Precedence::Comma, allow_in)
         } else {
             Expr::default()
         };
-        if kind == LocalKind::Const && value_or_nil.data.is_none() {
+        if require_const_initializer && kind == LocalKind::Const && value_or_nil.data.is_none() {
             core.add_error_range(
                 binding_range,
                 format!("The constant \"{name_text}\" must be initialized"),
@@ -394,7 +398,9 @@ fn parse_local_declarations(
         }
         lexer.next();
     }
-    lexer.expect_or_insert_semicolon();
+    if consume_semicolon {
+        lexer.expect_or_insert_semicolon();
+    }
     Stmt::new(
         loc,
         StmtData::Local(LocalStmt {
@@ -403,6 +409,199 @@ fn parse_local_declarations(
             ..LocalStmt::default()
         }),
     )
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Stmt {
+    lexer.expect(Token::For);
+    let mut await_range = Range::default();
+    if lexer.is_contextual_keyword(b"await") {
+        await_range = lexer.range();
+        if core.fn_or_arrow_data_parse.await_policy
+            != super::parser_types::AwaitOrYield::AllowExpression
+        {
+            core.add_error_range(
+                await_range,
+                "Cannot use \"await\" outside an async function",
+            );
+            await_range = Range::default();
+        }
+        lexer.next();
+    }
+    lexer.expect(Token::OpenParen);
+
+    let init_loc = lexer.loc();
+    let init_or_nil = match lexer.token {
+        Token::Semicolon => Stmt::default(),
+        Token::Var => {
+            lexer.next();
+            parse_local_declarations(core, lexer, init_loc, LocalKind::Var, false, false, false)
+        }
+        Token::Const => {
+            lexer.next();
+            parse_local_declarations(core, lexer, init_loc, LocalKind::Const, false, false, false)
+        }
+        _ if lexer.is_contextual_keyword(b"let") => {
+            let let_reference = core.store_name_in_ref(lexer.identifier.clone());
+            lexer.next();
+            if matches!(
+                lexer.token,
+                Token::Identifier | Token::OpenBracket | Token::OpenBrace
+            ) {
+                parse_local_declarations(core, lexer, init_loc, LocalKind::Let, false, false, false)
+            } else {
+                Stmt::new(
+                    init_loc,
+                    StmtData::Expr(ExprStmt {
+                        value: parse_expression_suffix(
+                            core,
+                            lexer,
+                            Expr::new(
+                                init_loc,
+                                ExprData::Identifier(IdentifierExpr {
+                                    reference: let_reference,
+                                    ..IdentifierExpr::default()
+                                }),
+                            ),
+                            Precedence::Lowest,
+                            false,
+                        ),
+                        ..ExprStmt::default()
+                    }),
+                )
+            }
+        }
+        _ => Stmt::new(
+            init_loc,
+            StmtData::Expr(ExprStmt {
+                value: parse_expression(core, lexer, Precedence::Lowest, false),
+                ..ExprStmt::default()
+            }),
+        ),
+    };
+
+    if lexer.is_contextual_keyword(b"of") || await_range.len > 0 {
+        if !lexer.is_contextual_keyword(b"of") {
+            lexer.expected_string("\"of\"");
+        }
+        validate_loop_declaration(core, &init_or_nil, "of", false);
+        lexer.next();
+        let value = parse_expression(core, lexer, Precedence::Comma, true);
+        lexer.expect(Token::CloseParen);
+        let is_single_line_body = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
+        let body = parse_statement(core, lexer);
+        return Stmt::new(
+            loc,
+            StmtData::ForOf(ForOfStmt {
+                init: init_or_nil,
+                value,
+                body,
+                await_range,
+                is_single_line_body,
+            }),
+        );
+    }
+
+    if lexer.token == Token::In {
+        let is_var = matches!(
+            init_or_nil.data.as_deref(),
+            Some(StmtData::Local(local)) if local.kind == LocalKind::Var
+        );
+        validate_loop_declaration(core, &init_or_nil, "in", is_var);
+        lexer.next();
+        let value = parse_expression(core, lexer, Precedence::Lowest, true);
+        lexer.expect(Token::CloseParen);
+        let is_single_line_body = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
+        let body = parse_statement(core, lexer);
+        return Stmt::new(
+            loc,
+            StmtData::ForIn(ForInStmt {
+                init: init_or_nil,
+                value,
+                body,
+                is_single_line_body,
+            }),
+        );
+    }
+
+    lexer.expect(Token::Semicolon);
+    require_for_const_initializers(core, &init_or_nil);
+    let test_or_nil = if lexer.token == Token::Semicolon {
+        Expr::default()
+    } else {
+        parse_expression(core, lexer, Precedence::Lowest, true)
+    };
+    lexer.expect(Token::Semicolon);
+    let update_or_nil = if lexer.token == Token::CloseParen {
+        Expr::default()
+    } else {
+        parse_expression(core, lexer, Precedence::Lowest, true)
+    };
+    lexer.expect(Token::CloseParen);
+    let is_single_line_body = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
+    let body = parse_statement(core, lexer);
+    Stmt::new(
+        loc,
+        StmtData::For(ForStmt {
+            init_or_nil,
+            test_or_nil,
+            update_or_nil,
+            body,
+            is_single_line_body,
+            ..ForStmt::default()
+        }),
+    )
+}
+
+fn validate_loop_declaration(
+    core: &mut ParserCore,
+    init: &Stmt,
+    loop_type: &str,
+    allow_var_initializer: bool,
+) {
+    let Some(StmtData::Local(local)) = init.data.as_deref() else {
+        return;
+    };
+    if local.declarations.len() > 1 {
+        core.add_error_range(
+            Range {
+                loc: local.declarations[0].binding.loc,
+                len: 0,
+            },
+            format!("for-{loop_type} loops must have a single declaration"),
+        );
+    } else if let Some(declaration) = local.declarations.first()
+        && declaration.value_or_nil.data.is_some()
+        && !(allow_var_initializer && local.kind == LocalKind::Var)
+    {
+        core.add_error_range(
+            Range {
+                loc: declaration.value_or_nil.loc,
+                len: 0,
+            },
+            format!("for-{loop_type} loop variables cannot have an initializer"),
+        );
+    }
+}
+
+fn require_for_const_initializers(core: &mut ParserCore, init: &Stmt) {
+    let Some(StmtData::Local(local)) = init.data.as_deref() else {
+        return;
+    };
+    if local.kind != LocalKind::Const {
+        return;
+    }
+    for declaration in &local.declarations {
+        if declaration.value_or_nil.data.is_none() {
+            core.add_error_range(
+                Range {
+                    loc: declaration.binding.loc,
+                    len: 0,
+                },
+                "The constant must be initialized",
+            );
+        }
+    }
 }
 
 fn parse_optional_label(
@@ -602,6 +801,52 @@ mod tests {
         assert_eq!(switch_stmt.cases.len(), 3);
         assert_eq!(switch_stmt.cases[0].body.len(), 2);
         assert_eq!(log.peek().len(), 1);
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_classic_for_in_and_for_of_loops() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"{for (let i = 0; i < 3; i++) work(i); for (const key in object) use(key); for (const value of values) use(value);}"[..],
+            ),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        assert!(matches!(
+            block.statements[0].data.as_deref(),
+            Some(StmtData::For(_))
+        ));
+        assert!(matches!(
+            block.statements[1].data.as_deref(),
+            Some(StmtData::ForIn(_))
+        ));
+        assert!(matches!(
+            block.statements[2].data.as_deref(),
+            Some(StmtData::ForOf(_))
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_for_await_of_inside_async_context() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"{for await (const value of values) use(value);}"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        core.fn_or_arrow_data_parse.await_policy =
+            crate::internal::js_parser::parser_types::AwaitOrYield::AllowExpression;
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        assert!(matches!(
+            block.statements[0].data.as_deref(),
+            Some(StmtData::ForOf(for_of)) if for_of.await_range.len > 0
+        ));
         assert_eq!(lexer.token, Token::EndOfFile);
     }
 }
