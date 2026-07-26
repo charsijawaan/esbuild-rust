@@ -786,6 +786,118 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
                 )
             }
         }
+        _ if lexer.is_contextual_keyword(b"using") => {
+            let using_reference = core.store_name_in_ref(lexer.identifier.clone());
+            lexer.next();
+            if !lexer.has_newline_before
+                && lexer.token == Token::Identifier
+                && !lexer.is_contextual_keyword(b"of")
+            {
+                parse_local_declarations(
+                    core,
+                    lexer,
+                    init_loc,
+                    LocalKind::Using,
+                    false,
+                    false,
+                    false,
+                )
+            } else {
+                Stmt::new(
+                    init_loc,
+                    StmtData::Expr(ExprStmt {
+                        value: parse_expression_suffix(
+                            core,
+                            lexer,
+                            Expr::new(
+                                init_loc,
+                                ExprData::Identifier(IdentifierExpr {
+                                    reference: using_reference,
+                                    ..IdentifierExpr::default()
+                                }),
+                            ),
+                            Precedence::Lowest,
+                            false,
+                        ),
+                        ..ExprStmt::default()
+                    }),
+                )
+            }
+        }
+        _ if lexer.is_contextual_keyword(b"await")
+            && core.fn_or_arrow_data_parse.await_policy
+                == super::parser_types::AwaitOrYield::AllowExpression =>
+        {
+            let await_range = lexer.range();
+            if !core.is_inside_function_scope() && core.top_level_await_keyword.len == 0 {
+                core.top_level_await_keyword = await_range;
+            }
+            lexer.next();
+            if !lexer.has_newline_before && lexer.is_contextual_keyword(b"using") {
+                let using_loc = lexer.loc();
+                let using_reference = core.store_name_in_ref(lexer.identifier.clone());
+                lexer.next();
+                if !lexer.has_newline_before && lexer.token == Token::Identifier {
+                    parse_local_declarations(
+                        core,
+                        lexer,
+                        init_loc,
+                        LocalKind::AwaitUsing,
+                        false,
+                        false,
+                        false,
+                    )
+                } else {
+                    let operand = parse_expression_suffix(
+                        core,
+                        lexer,
+                        Expr::new(
+                            using_loc,
+                            ExprData::Identifier(IdentifierExpr {
+                                reference: using_reference,
+                                ..IdentifierExpr::default()
+                            }),
+                        ),
+                        Precedence::Prefix,
+                        false,
+                    );
+                    if lexer.token == Token::AsteriskAsterisk {
+                        lexer.unexpected();
+                    }
+                    Stmt::new(
+                        init_loc,
+                        StmtData::Expr(ExprStmt {
+                            value: parse_expression_suffix(
+                                core,
+                                lexer,
+                                Expr::new(init_loc, ExprData::Await(AwaitExpr { value: operand })),
+                                Precedence::Lowest,
+                                false,
+                            ),
+                            ..ExprStmt::default()
+                        }),
+                    )
+                }
+            } else {
+                let operand = parse_expression(core, lexer, Precedence::Prefix, false);
+                if lexer.token == Token::AsteriskAsterisk {
+                    lexer.unexpected();
+                }
+                Stmt::new(
+                    init_loc,
+                    StmtData::Expr(ExprStmt {
+                        value: parse_expression_suffix(
+                            core,
+                            lexer,
+                            Expr::new(init_loc, ExprData::Await(AwaitExpr { value: operand })),
+                            Precedence::Lowest,
+                            false,
+                        ),
+                        ..ExprStmt::default()
+                    }),
+                )
+            }
+        }
         _ => Stmt::new(
             init_loc,
             StmtData::Expr(ExprStmt {
@@ -844,7 +956,19 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
     }
 
     lexer.expect(Token::Semicolon);
-    require_for_const_initializers(core, &init_or_nil);
+    if matches!(
+        init_or_nil.data.as_deref(),
+        Some(StmtData::Local(local)) if local.kind == LocalKind::AwaitUsing
+    ) {
+        core.add_error_range(
+            Range {
+                loc: init_or_nil.loc,
+                len: 5,
+            },
+            "\"await using\" declarations are not allowed here",
+        );
+    }
+    require_for_initializers(core, &init_or_nil);
     let test_or_nil = if lexer.token == Token::Semicolon {
         Expr::default()
     } else {
@@ -903,23 +1027,59 @@ fn validate_loop_declaration(
             format!("for-{loop_type} loop variables cannot have an initializer"),
         );
     }
+    if loop_type == "in" && local.declarations.len() == 1 {
+        let message = match local.kind {
+            LocalKind::Using => Some("\"using\" declarations are not allowed here"),
+            LocalKind::AwaitUsing => Some("\"await using\" declarations are not allowed here"),
+            _ => None,
+        };
+        if let Some(message) = message {
+            core.add_error_range(
+                Range {
+                    loc: init.loc,
+                    len: 5,
+                },
+                message,
+            );
+        }
+    }
 }
 
-fn require_for_const_initializers(core: &mut ParserCore, init: &Stmt) {
+fn require_for_initializers(core: &mut ParserCore, init: &Stmt) {
     let Some(StmtData::Local(local)) = init.data.as_deref() else {
         return;
     };
-    if local.kind != LocalKind::Const {
+    if !matches!(local.kind, LocalKind::Const | LocalKind::Using) {
         return;
     }
     for declaration in &local.declarations {
         if declaration.value_or_nil.data.is_none() {
+            let name = match declaration.binding.data.as_deref() {
+                Some(BindingData::Identifier(binding)) => core
+                    .symbols
+                    .get(
+                        usize::try_from(binding.reference.inner_index)
+                            .expect("symbol index must fit in usize"),
+                    )
+                    .map(|symbol| symbol.original_name.as_str()),
+                _ => None,
+            };
             core.add_error_range(
                 Range {
                     loc: declaration.binding.loc,
                     len: 0,
                 },
-                "The constant must be initialized",
+                match local.kind {
+                    LocalKind::Const => name.map_or_else(
+                        || "The constant must be initialized".into(),
+                        |name| format!("The constant \"{name}\" must be initialized"),
+                    ),
+                    LocalKind::Using => name.map_or_else(
+                        || "The declaration must be initialized".into(),
+                        |name| format!("The declaration \"{name}\" must be initialized"),
+                    ),
+                    _ => unreachable!(),
+                },
             );
         }
     }

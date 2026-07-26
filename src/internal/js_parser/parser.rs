@@ -2062,6 +2062,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_using_declarations_in_for_loops() {
+        let (ast, ok, log) = parse_source(
+            "for (using item of items) use(item);\
+             for (await using resource of resources) use(resource);\
+             for await (using stream of streams) use(stream);",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].statements.len(), 3);
+        let Some(StmtData::ForOf(first)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected for-of statement");
+        };
+        assert!(matches!(
+            first.init.data.as_deref(),
+            Some(StmtData::Local(local)) if local.kind == crate::internal::js_ast::LocalKind::Using
+        ));
+        let Some(StmtData::ForOf(second)) = ast.parts[1].statements[1].data.as_deref() else {
+            panic!("expected await-using for-of statement");
+        };
+        assert!(matches!(
+            second.init.data.as_deref(),
+            Some(StmtData::Local(local))
+                if local.kind == crate::internal::js_ast::LocalKind::AwaitUsing
+        ));
+        let Some(StmtData::ForOf(third)) = ast.parts[1].statements[2].data.as_deref() else {
+            panic!("expected for-await-of statement");
+        };
+        assert!(matches!(
+            third.init.data.as_deref(),
+            Some(StmtData::Local(local)) if local.kind == crate::internal::js_ast::LocalKind::Using
+        ));
+        assert_ne!(third.await_range.len, 0);
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+
+        for source in [
+            "for (using item in items) ;",
+            "for (using item;;) ;",
+            "for (using item = value of items) ;",
+            "for (await using item in items) ;",
+            "for (await using item = value;;) ;",
+            "for (await using item = value of items) ;",
+        ] {
+            let (_, ok, log) = parse_source(source);
+            assert!(ok, "{source}");
+            assert_eq!(log.done().len(), 1, "{source}");
+        }
+    }
+
+    #[test]
     fn for_loops_keep_lexical_bindings_in_a_loop_scope() {
         let (ast, ok, log) =
             parse_source("for (let item of items) { item; } item; for (let i = 0; i < 1; i++) {}");
