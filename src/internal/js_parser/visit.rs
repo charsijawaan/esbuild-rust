@@ -8,9 +8,9 @@ use crate::internal::{
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
-        ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, Function, FunctionExpr,
-        IdentifierExpr, ObjectExpr, OpCode, Property, PropertyFlags, PropertyKind, ScopeKind, Stmt,
-        StmtData, StrictModeKind, StringExpr, for_each_identifier_binding,
+        ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionExpr,
+        IdentifierExpr, IfExpr, ObjectExpr, OpCode, Property, PropertyFlags, PropertyKind,
+        ScopeKind, Stmt, StmtData, StrictModeKind, StringExpr, for_each_identifier_binding,
         is_identifier_es5_and_es_next,
     },
 };
@@ -151,7 +151,7 @@ pub(crate) fn visit_top_level_statements(core: &mut ParserCore, statements: &mut
 #[allow(clippy::too_many_lines)]
 fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_identifiers: bool) {
     let old_control_flow_dead = core.is_control_flow_dead;
-    for statement in statements {
+    for statement in statements.iter_mut() {
         let was_control_flow_dead = core.is_control_flow_dead;
         match statement.data.as_deref_mut() {
             Some(StmtData::Block(block)) => {
@@ -506,6 +506,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
         }
         if core.options.minify_syntax {
             minify_constant_if_statement(statement);
+            minify_control_flow_statement(statement);
         }
         if core.options.drop_console
             && matches!(
@@ -536,7 +537,109 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             core.is_control_flow_dead = true;
         }
     }
+    if core.options.minify_syntax {
+        absorb_expressions_into_for_initializers(statements);
+    }
     core.is_control_flow_dead = old_control_flow_dead;
+}
+
+fn statement_to_expr(statement: &Stmt) -> Option<Expr> {
+    match statement.data.as_deref()? {
+        StmtData::Expr(expression) => Some(expression.value.clone()),
+        StmtData::Block(block)
+            if block.statements.len() == 1
+                && !super::control_flow::stmts_care_about_scope(&block.statements) =>
+        {
+            statement_to_expr(&block.statements[0])
+        }
+        _ => None,
+    }
+}
+
+fn unwrap_single_statement_block(statement: Stmt) -> Stmt {
+    let Some(StmtData::Block(block)) = statement.data.as_deref() else {
+        return statement;
+    };
+    if block.statements.len() == 1
+        && !super::control_flow::stmts_care_about_scope(&block.statements)
+    {
+        return block.statements[0].clone();
+    }
+    statement
+}
+
+fn minify_control_flow_statement(statement: &mut Stmt) {
+    match statement.data.as_deref() {
+        Some(StmtData::If(value)) => {
+            let Some(yes) = statement_to_expr(&value.yes) else {
+                return;
+            };
+            let expression = if value.no_or_nil.data.is_some() {
+                let Some(no) = statement_to_expr(&value.no_or_nil) else {
+                    return;
+                };
+                Expr::new(
+                    statement.loc,
+                    ExprData::If(IfExpr {
+                        test: value.test.clone(),
+                        yes,
+                        no,
+                    }),
+                )
+            } else {
+                Expr::new(
+                    statement.loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: value.test.clone(),
+                        right: yes,
+                        op: OpCode::BinaryLogicalAnd,
+                    }),
+                )
+            };
+            statement.data = Some(Box::new(StmtData::Expr(ExprStmt {
+                value: expression,
+                ..ExprStmt::default()
+            })));
+        }
+        Some(StmtData::While(value)) => {
+            statement.data = Some(Box::new(StmtData::For(ForStmt {
+                test_or_nil: value.test.clone(),
+                body: unwrap_single_statement_block(value.body.clone()),
+                is_single_line_body: value.is_single_line_body,
+                ..ForStmt::default()
+            })));
+        }
+        Some(StmtData::DoWhile(value)) => {
+            let mut value = value.clone();
+            value.body = unwrap_single_statement_block(value.body);
+            statement.data = Some(Box::new(StmtData::DoWhile(value)));
+        }
+        _ => {}
+    }
+}
+
+fn absorb_expressions_into_for_initializers(statements: &mut [Stmt]) {
+    for index in 1..statements.len() {
+        let (before, after) = statements.split_at_mut(index);
+        let previous = &mut before[index - 1];
+        let Some(StmtData::Expr(expression)) = previous.data.as_deref() else {
+            continue;
+        };
+        let Some(StmtData::For(for_statement)) = after[0].data.as_deref_mut() else {
+            continue;
+        };
+        if for_statement.init_or_nil.data.is_some() {
+            continue;
+        }
+        for_statement.init_or_nil = Stmt::new(
+            previous.loc,
+            StmtData::Expr(ExprStmt {
+                value: expression.value.clone(),
+                ..ExprStmt::default()
+            }),
+        );
+        previous.data = None;
+    }
 }
 
 fn minify_constant_if_statement(statement: &mut Stmt) {

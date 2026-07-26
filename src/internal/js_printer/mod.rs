@@ -863,13 +863,13 @@ impl Printer<'_> {
                 self.output.push(b'(');
                 self.print_for_init(&for_statement.init_or_nil);
                 self.output.push(b';');
+                self.print_optional_space();
                 if for_statement.test_or_nil.data.is_some() {
-                    self.print_optional_space();
                     self.print_expr_at(&for_statement.test_or_nil, Precedence::Lowest);
                 }
                 self.output.push(b';');
+                self.print_optional_space();
                 if for_statement.update_or_nil.data.is_some() {
-                    self.print_optional_space();
                     self.print_expr_at_with_usage(
                         &for_statement.update_or_nil,
                         Precedence::Lowest,
@@ -2899,7 +2899,7 @@ mod tests {
             )
             .js,
             b"init_esm(), init_esm();\n\
-              for (init_esm();; init_esm()) {\n\
+              for (init_esm(); ; init_esm()) {\n\
               }\n"
         );
     }
@@ -3635,6 +3635,73 @@ mod tests {
             )
             .expect("printer output is UTF-8"),
             "label:{foo();break label;var kept}"
+        );
+    }
+
+    #[test]
+    fn minifies_expression_control_flow() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"function f() {\
+                    if (a) { b(); } else if (c) { d(); } else { e(); }\
+                    while (x) { y(); }\
+                    do { z(); } while (q);\
+                  }"
+                .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(
+            log.clone(),
+            source,
+            js_parser::Options {
+                minify_syntax: true,
+                ..js_parser::Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_syntax: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "function f() {\n\
+             \x20\x20for (a ? b() : c ? d() : e(); x; )\n\
+             \x20\x20\x20\x20y();\n\
+             \x20\x20do\n\
+             \x20\x20\x20\x20z();\n\
+             \x20\x20while (q);\n\
+             }\n"
+        );
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_syntax: true,
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "function f(){for(a?b():c?d():e();x;)y();do z();while(q)}"
         );
     }
 
