@@ -15,15 +15,36 @@ type and ownership systems allow it. Behavioral compatibility with the pinned
 upstream revision is the acceptance criterion. Upstream tests are translated
 or exercised as differential tests as each subsystem lands.
 
-This is an in-progress port and is not yet usable as an esbuild replacement.
-See [PORTING.md](PORTING.md) for the live package matrix and [UPSTREAM.md](UPSTREAM.md)
-for the exact upstream revision.
+This repository is now a frozen experimental snapshot instead of an active
+attempt to reach complete parity. Its release binary passes all 9 scenarios in
+the bounded bundler evaluation, with the same runtime results as the pinned
+upstream executable. That is encouraging, but it is not evidence of complete
+compatibility and this project is not a drop-in or production-ready esbuild
+replacement.
+
+See [EVALUATION.md](EVALUATION.md) for the reproducible bundler evaluation,
+[PORTING.md](PORTING.md) for the final package matrix, and
+[UPSTREAM.md](UPSTREAM.md) for the exact upstream revision.
 
 ## Development
 
 ```sh
 cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
+```
+
+## Bundler evaluation
+
+```sh
+cargo build --release --locked
+node scripts/evaluate_bundler.mjs
+```
+
+Set `UPSTREAM_ESBUILD` to an upstream esbuild executable to also compare
+runtime behavior:
+
+```sh
+UPSTREAM_ESBUILD=/path/to/esbuild node scripts/evaluate_bundler.mjs
 ```
 
 The project retains esbuild's MIT license.
