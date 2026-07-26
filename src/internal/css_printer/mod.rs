@@ -152,6 +152,14 @@ struct Printer<'a> {
 }
 
 impl Printer<'_> {
+    fn add_source_mapping(&mut self, location: crate::internal::logger::Loc, original_name: &str) {
+        if self.options.add_source_mappings
+            && let Some(builder) = &mut self.source_map_builder
+        {
+            builder.add_source_mapping(location, original_name, &self.css);
+        }
+    }
+
     fn record_import_path_for_metafile(&mut self, import_record_index: u32) {
         if !self.options.needs_metafile {
             return;
@@ -210,10 +218,13 @@ impl Printer<'_> {
                 LegalComments::Inline => {}
             }
         }
-        if self.options.add_source_mappings
-            && let Some(builder) = &mut self.source_map_builder
-        {
-            builder.add_source_mapping(rule.loc, "", &self.css);
+        let skip_rule_mapping = (self.indent == 0 || self.options.minify_whitespace)
+            && matches!(
+                rule.data,
+                RuleData::Selector(_) | RuleData::Qualified(_) | RuleData::BadDeclaration(_)
+            );
+        if !skip_rule_mapping {
+            self.add_source_mapping(rule.loc, "");
         }
         if !self.options.minify_whitespace {
             self.print_indent();
@@ -248,7 +259,7 @@ impl Printer<'_> {
                 self.css.push(b'@');
                 self.print_ident(&rule.at_token);
                 self.css.push(b' ');
-                self.print_symbol(rule.name.reference);
+                self.print_symbol(rule.name.loc, rule.name.reference);
                 self.print_space();
                 self.open_block();
                 for block in &rule.blocks {
@@ -560,12 +571,16 @@ impl Printer<'_> {
     }
 
     fn print_token(&mut self, token: &Token) {
+        self.add_source_mapping(token.loc, "");
         match token.kind {
             TokenKind::Ident => self.print_ident(&token.text),
-            TokenKind::Symbol => self.print_symbol(Ref {
-                source_index: self.options.input_source_index,
-                inner_index: token.payload_index,
-            }),
+            TokenKind::Symbol => self.print_symbol(
+                token.loc,
+                Ref {
+                    source_index: self.options.input_source_index,
+                    inner_index: token.payload_index,
+                },
+            ),
             TokenKind::Function => {
                 self.print_ident(&token.text);
                 self.css.push(b'(');
@@ -618,6 +633,7 @@ impl Printer<'_> {
     }
 
     fn print_media_query(&mut self, query: &MediaQuery, needs_parentheses: bool) {
+        self.add_source_mapping(query.loc, "");
         match &query.data {
             MediaQueryData::Type(query) => {
                 match query.op {
@@ -708,6 +724,7 @@ impl Printer<'_> {
                 }
             }
             for (compound_index, compound) in complex.selectors.iter().enumerate() {
+                self.add_source_mapping(compound.combinator.loc, "");
                 if compound.combinator.byte == 0 {
                     if compound_index > 0 {
                         self.css.push(b' ');
@@ -724,10 +741,12 @@ impl Printer<'_> {
                 if let Some(name) = &compound.type_selector {
                     self.print_namespaced_name(name);
                 }
-                for _ in &compound.nesting_selector_locs {
+                for &location in &compound.nesting_selector_locs {
+                    self.add_source_mapping(location, "");
                     self.css.push(b'&');
                 }
                 for subclass in &compound.subclass_selectors {
+                    self.add_source_mapping(subclass.range.loc, "");
                     self.print_subclass(&subclass.data);
                 }
             }
@@ -736,9 +755,11 @@ impl Printer<'_> {
 
     fn print_namespaced_name(&mut self, name: &NamespacedName) {
         if let Some(prefix) = &name.namespace_prefix {
+            self.add_source_mapping(prefix.range.loc, "");
             self.print_ident(&prefix.text);
             self.css.push(b'|');
         }
+        self.add_source_mapping(name.name.range.loc, "");
         if matches!(
             name.name.kind,
             TokenKind::DelimAsterisk | TokenKind::DelimAmpersand
@@ -753,11 +774,11 @@ impl Printer<'_> {
         match subclass {
             SubclassData::Hash(selector) => {
                 self.css.push(b'#');
-                self.print_symbol(selector.name.reference);
+                self.print_symbol(selector.name.loc, selector.name.reference);
             }
             SubclassData::Class(selector) => {
                 self.css.push(b'.');
-                self.print_symbol(selector.name.reference);
+                self.print_symbol(selector.name.loc, selector.name.reference);
             }
             SubclassData::Attribute(selector) => {
                 self.css.push(b'[');
@@ -827,14 +848,22 @@ impl Printer<'_> {
         }
     }
 
-    fn print_symbol(&mut self, reference: Ref) {
+    fn print_symbol(&mut self, location: crate::internal::logger::Loc, reference: Ref) {
         let reference = self.symbols.follow_symbols_const(reference);
-        if let Some(name) = self.options.local_names.get(&reference).cloned() {
-            self.print_ident(&name);
+        let original_name = self.symbols.get(reference).original_name.clone();
+        let name = self
+            .options
+            .local_names
+            .get(&reference)
+            .cloned()
+            .unwrap_or_else(|| original_name.clone());
+        let source_map_name = if name == original_name {
+            ""
         } else {
-            let name = self.symbols.get(reference).original_name.clone();
-            self.print_ident(&name);
-        }
+            &original_name
+        };
+        self.add_source_mapping(location, source_map_name);
+        self.print_ident(&name);
     }
 
     fn print_ident(&mut self, text: &str) {
@@ -937,9 +966,11 @@ impl Printer<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{Options, Printer, best_quote_char, print};
     use crate::internal::{
-        ast::{ImportKind, ImportRecord, SymbolMap},
+        ast::{ImportKind, ImportRecord, Ref, Symbol, SymbolKind, SymbolMap},
         config::{LegalComments, MetafileFormat},
         css_ast::{
             Ast, AtImportRule, Combinator, CommentRule, ComplexSelector, CompoundSelector,
@@ -1196,6 +1227,48 @@ mod tests {
             },
         );
         assert!(!result.source_map_chunk.should_ignore);
+        assert!(!result.source_map_chunk.buffer.data.is_empty());
+    }
+
+    #[test]
+    fn records_precise_css_symbol_token_mappings() {
+        let reference = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0].push(Symbol {
+            kind: SymbolKind::GlobalCss,
+            original_name: "original".into(),
+            ..Symbol::default()
+        });
+        let tree = Ast {
+            rules: vec![Rule {
+                loc: Loc::default(),
+                data: RuleData::Qualified(QualifiedRule {
+                    prelude: vec![Token {
+                        kind: TokenKind::Symbol,
+                        payload_index: 0,
+                        loc: Loc::default(),
+                        ..Token::default()
+                    }],
+                    ..QualifiedRule::default()
+                }),
+            }],
+            ..Ast::default()
+        };
+        let result = print(
+            &tree,
+            &symbols,
+            Options {
+                line_offset_tables: generate_line_offset_tables(b"original{}", 1),
+                local_names: HashMap::from([(reference, "a".into())]),
+                source_map: crate::internal::config::SourceMap::LinkedWithComment,
+                add_source_mappings: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(result.css, b"a {\n}\n");
         assert!(!result.source_map_chunk.buffer.data.is_empty());
     }
 }
