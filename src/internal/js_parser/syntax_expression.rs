@@ -7,6 +7,7 @@ use crate::internal::{
 
 use super::{
     parser_core::ParserCore,
+    syntax_function::parse_function_prefix,
     syntax_import::parse_import_prefix,
     syntax_literals::{
         parse_array_prefix, parse_big_int_or_string_if_unsupported, parse_numeric_literal,
@@ -129,6 +130,7 @@ fn parse_prefix(
         return expr;
     }
     match lexer.token {
+        Token::Function => parse_function_prefix(core, lexer).expect("function token was checked"),
         Token::New => parse_new_prefix(core, lexer, parse_new_target, |core, lexer| {
             parse_expression(core, lexer, Precedence::Comma, true)
         })
@@ -400,6 +402,36 @@ mod tests {
             object.properties[3].kind,
             crate::internal::js_ast::PropertyKind::Spread
         );
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn integrates_function_expression_bodies_and_call_suffixes() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"function named(a) { return a + 1 }(2)"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        let Some(ExprData::Call(call)) = expression.data.as_deref() else {
+            panic!("expected call");
+        };
+        let Some(ExprData::Function(function)) = call.target.data.as_deref() else {
+            panic!("expected function target");
+        };
+        assert_eq!(function.function.args.len(), 1);
+        assert!(matches!(
+            function.function.body.block.statements[0]
+                .data
+                .as_deref(),
+            Some(crate::internal::js_ast::StmtData::Return(return_stmt))
+                if matches!(
+                    return_stmt.value_or_nil.data.as_deref(),
+                    Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryAdd
+                )
+        ));
         assert_eq!(lexer.token, Token::EndOfFile);
     }
 

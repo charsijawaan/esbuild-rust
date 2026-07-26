@@ -10,12 +10,14 @@ pub(crate) enum AwaitOrYield {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct FnOrArrowDataParse {
     pub(crate) await_policy: AwaitOrYield,
     pub(crate) yield_policy: AwaitOrYield,
     pub(crate) allow_super_call: bool,
     pub(crate) allow_super_property: bool,
     pub(crate) is_this_disallowed: bool,
+    pub(crate) is_return_disallowed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
