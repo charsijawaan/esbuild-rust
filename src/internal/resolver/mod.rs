@@ -298,6 +298,12 @@ pub fn is_package_path(path: &str) -> bool {
         && path != ".."
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct ResolverContext<'a> {
+    pub tsconfig: Option<&'a TsConfigJson>,
+    pub pnp: Option<&'a PnpData>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_file_or_package(
     log: &Log,
@@ -309,6 +315,92 @@ pub fn resolve_file_or_package(
     configured_main_fields: Option<&[String]>,
     is_require: bool,
 ) -> Option<LoadedPathPair> {
+    resolve_file_or_package_with_context(
+        log,
+        file_system,
+        source_dir,
+        import_path,
+        extension_order,
+        platform,
+        configured_main_fields,
+        is_require,
+        ResolverContext::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_file_or_package_with_context(
+    log: &Log,
+    file_system: &dyn Fs,
+    source_dir: &str,
+    import_path: &str,
+    extension_order: &[String],
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+    is_require: bool,
+    context: ResolverContext<'_>,
+) -> Option<LoadedPathPair> {
+    resolve_file_or_package_core(
+        log,
+        file_system,
+        source_dir,
+        import_path,
+        extension_order,
+        platform,
+        configured_main_fields,
+        is_require,
+        context,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn resolve_file_or_package_core(
+    log: &Log,
+    file_system: &dyn Fs,
+    source_dir: &str,
+    import_path: &str,
+    extension_order: &[String],
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+    is_require: bool,
+    context: ResolverContext<'_>,
+    forbid_package_imports: bool,
+) -> Option<LoadedPathPair> {
+    if let Some(tsconfig) = context.tsconfig {
+        if let Some(candidates) = match_tsconfig_path_candidates(tsconfig, import_path, file_system)
+        {
+            for candidate in candidates {
+                if let Some(result) = load_as_file_or_directory(
+                    log,
+                    file_system,
+                    &candidate.path,
+                    extension_order,
+                    platform,
+                    configured_main_fields,
+                    is_require,
+                ) {
+                    return Some(result);
+                }
+            }
+        }
+        if is_package_path(import_path)
+            && let Some(base_url) = &tsconfig.base_url
+        {
+            let base_path = file_system.join(&[base_url, import_path]);
+            if let Some(result) = load_as_file_or_directory(
+                log,
+                file_system,
+                &base_path,
+                extension_order,
+                platform,
+                configured_main_fields,
+                is_require,
+            ) {
+                return Some(result);
+            }
+        }
+    }
     if import_path.starts_with('/') || file_system.is_abs(import_path) {
         return load_as_file_or_directory(
             log,
@@ -333,6 +425,96 @@ pub fn resolve_file_or_package(
         );
     }
 
+    if import_path.starts_with('#') && !forbid_package_imports {
+        let mut current = source_dir.to_string();
+        loop {
+            if let Some(package) =
+                read_package_json(log, file_system, &current, platform, configured_main_fields)
+                && let Some(imports) = &package.imports_map
+            {
+                let resolution = handle_package_map_post_conditions(resolve_package_imports(
+                    import_path,
+                    &imports.root,
+                    &package_conditions(platform, is_require),
+                ));
+                if resolution.status == PackageMapStatus::PackageResolve {
+                    return resolve_file_or_package_core(
+                        log,
+                        file_system,
+                        &current,
+                        &resolution.path,
+                        extension_order,
+                        platform,
+                        configured_main_fields,
+                        is_require,
+                        context,
+                        true,
+                    );
+                }
+                return finalize_package_map_resolution(
+                    log,
+                    file_system,
+                    &current,
+                    &resolution,
+                    extension_order,
+                    platform,
+                    configured_main_fields,
+                    is_require,
+                );
+            }
+            let parent = file_system.dir(&current);
+            if parent == current {
+                break;
+            }
+            current = parent;
+        }
+        return None;
+    }
+
+    if let Some(pnp) = context.pnp {
+        let result = pnp.resolve_to_unqualified(import_path, source_dir, file_system);
+        if result.status.is_error() {
+            return None;
+        }
+        if result.status == PnpStatus::Success {
+            let absolute = file_system.join(&[&result.package_dir_path, &result.package_subpath]);
+            if let Some(package) = read_package_json(
+                log,
+                file_system,
+                &result.package_dir_path,
+                platform,
+                configured_main_fields,
+            ) && let Some(exports) = &package.exports_map
+            {
+                let resolution = handle_package_map_post_conditions(resolve_package_exports(
+                    "/",
+                    &format!(".{}", result.package_subpath),
+                    &exports.root,
+                    &package_conditions(platform, is_require),
+                ));
+                return finalize_package_map_resolution(
+                    log,
+                    file_system,
+                    &result.package_dir_path,
+                    &resolution,
+                    extension_order,
+                    platform,
+                    configured_main_fields,
+                    is_require,
+                );
+            }
+            return load_as_file_or_directory(
+                log,
+                file_system,
+                &absolute,
+                extension_order,
+                platform,
+                configured_main_fields,
+                is_require,
+            );
+        }
+    }
+
     let (package_name, package_subpath) = parse_esm_package_name(import_path)?;
     let mut current = source_dir.to_string();
     loop {
@@ -347,22 +529,11 @@ pub fn resolve_file_or_package(
                 configured_main_fields,
             ) && let Some(exports) = &package.exports_map
             {
-                let mut conditions = HashMap::from([("default".into(), true)]);
-                conditions.insert(if is_require { "require" } else { "import" }.into(), true);
-                conditions.insert(
-                    match platform {
-                        Platform::Browser => "browser",
-                        Platform::Node => "node",
-                        Platform::Neutral => "default",
-                    }
-                    .into(),
-                    true,
-                );
                 let resolution = handle_package_map_post_conditions(resolve_package_exports(
                     "/",
                     &package_subpath,
                     &exports.root,
-                    &conditions,
+                    &package_conditions(platform, is_require),
                 ));
                 return finalize_package_map_resolution(
                     log,
@@ -396,6 +567,22 @@ pub fn resolve_file_or_package(
         current = parent;
     }
     None
+}
+
+fn package_conditions(platform: Platform, is_require: bool) -> HashMap<String, bool> {
+    HashMap::from([
+        ("default".into(), true),
+        (if is_require { "require" } else { "import" }.into(), true),
+        (
+            match platform {
+                Platform::Browser => "browser",
+                Platform::Node => "node",
+                Platform::Neutral => "default",
+            }
+            .into(),
+            true,
+        ),
+    ])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2834,14 +3021,14 @@ mod tests {
 
     use super::{
         DataUrl, DebugMeta, MimeType, PackageMapKind, PackageMapStatus, PathPair, PnpStatus,
-        TsConfigJson, TsConfigPath, TsConfigPaths, compile_yarn_pnp_data,
+        ResolverContext, TsConfigJson, TsConfigPath, TsConfigPaths, compile_yarn_pnp_data,
         find_invalid_package_segment, globstar_to_escaped_regexp,
         handle_package_map_post_conditions, is_package_path,
         is_valid_tsconfig_path_no_base_url_pattern, load_as_directory, load_as_file, load_as_index,
         match_tsconfig_path_candidates, parse_bare_identifier, parse_esm_package_name,
         parse_imports_exports_map, parse_package_json, parse_tsconfig_json,
-        resolve_file_or_package, resolve_package_exports, resolve_package_imports,
-        reverse_resolve_package_exports, sort_package_expansion_keys,
+        resolve_file_or_package, resolve_file_or_package_with_context, resolve_package_exports,
+        resolve_package_imports, reverse_resolve_package_exports, sort_package_expansion_keys,
     };
     use crate::internal::{
         config::{MaybeBool, Platform, TsJsx, TsTarget},
@@ -3792,6 +3979,79 @@ mod tests {
             .primary
             .text,
             "/project/src/node_modules/nearest/index.js"
+        );
+    }
+
+    #[test]
+    fn resolver_context_applies_tsconfig_and_package_imports() {
+        let file_system = mock_fs(
+            &HashMap::from([
+                ("/project/generated/alias.ts".into(), String::new()),
+                (
+                    "/project/package.json".into(),
+                    r##"{"imports":{"#internal":"./internal.js"}}"##.into(),
+                ),
+                ("/project/internal.js".into(), String::new()),
+            ]),
+            MockKind::Unix,
+            "/",
+        );
+        let extensions = vec![".js".into(), ".ts".into()];
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let tsconfig = TsConfigJson {
+            base_url_for_paths: "/project".into(),
+            paths: Some(TsConfigPaths {
+                map: HashMap::from([(
+                    "@app/*".into(),
+                    vec![TsConfigPath {
+                        text: "generated/*".into(),
+                        ..TsConfigPath::default()
+                    }],
+                )]),
+                ..TsConfigPaths::default()
+            }),
+            ..TsConfigJson::default()
+        };
+        let context = ResolverContext {
+            tsconfig: Some(&tsconfig),
+            pnp: None,
+        };
+
+        assert_eq!(
+            resolve_file_or_package_with_context(
+                &log,
+                &file_system,
+                "/project/src",
+                "@app/alias",
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+                context,
+            )
+            .expect("tsconfig path")
+            .paths
+            .primary
+            .text,
+            "/project/generated/alias.ts"
+        );
+        assert_eq!(
+            resolve_file_or_package_with_context(
+                &log,
+                &file_system,
+                "/project/src",
+                "#internal",
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+                context,
+            )
+            .expect("package import")
+            .paths
+            .primary
+            .text,
+            "/project/internal.js"
         );
     }
 }
