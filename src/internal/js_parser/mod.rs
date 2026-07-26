@@ -29,6 +29,7 @@ mod syntax_statement;
 mod syntax_suffix;
 mod syntax_super;
 mod syntax_yield_await;
+mod visit;
 
 pub use define::parse_define_expr;
 pub use global_name::parse_global_name;

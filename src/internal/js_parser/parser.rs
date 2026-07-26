@@ -15,7 +15,8 @@ use crate::internal::{
 };
 
 use super::{
-    Options, parser_core::ParserCore, parser_types::AwaitOrYield, syntax_statement::parse_statement,
+    Options, parser_core::ParserCore, parser_types::AwaitOrYield,
+    syntax_statement::parse_statement, visit::visit_top_level_statements,
 };
 
 const MODULE_SCOPE_LOC: Loc = Loc { start: -1 };
@@ -90,6 +91,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         });
         let declared_symbols = declare_top_level_symbols(&mut core, &mut statements);
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
+        visit_top_level_statements(&mut core, &mut statements);
         let module_scope = core
             .module_scope
             .clone()
@@ -340,7 +342,7 @@ mod tests {
         assert_eq!(ast.parts[1].statements.len(), 2);
         assert_eq!(ast.parts[1].scopes.len(), 1);
         assert!(ast.module_scope.is_some());
-        assert_eq!(ast.symbols.len(), 6);
+        assert_eq!(ast.symbols.len(), 7);
         assert_eq!(
             ast.module_scope
                 .as_ref()
@@ -486,6 +488,37 @@ mod tests {
         assert_eq!(
             ast.symbols[usize::try_from(ast.exports_ref.inner_index).expect("symbol index")].kind,
             crate::internal::ast::SymbolKind::Hoisted
+        );
+    }
+
+    #[test]
+    fn resolves_top_level_identifier_uses_and_records_counts() {
+        let (ast, ok, log) = parse_source("let value = external; value + external;");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let value_ref = ast
+            .symbols
+            .iter()
+            .position(|symbol| symbol.original_name == "value")
+            .map(|index| crate::internal::ast::Ref {
+                source_index: 0,
+                inner_index: u32::try_from(index).expect("symbol index"),
+            })
+            .expect("value symbol");
+        let external_ref = ast
+            .symbols
+            .iter()
+            .position(|symbol| symbol.original_name == "external")
+            .map(|index| crate::internal::ast::Ref {
+                source_index: 0,
+                inner_index: u32::try_from(index).expect("symbol index"),
+            })
+            .expect("external symbol");
+        assert_eq!(ast.parts[1].symbol_uses[&value_ref].count_estimate, 1);
+        assert_eq!(ast.parts[1].symbol_uses[&external_ref].count_estimate, 2);
+        assert_eq!(
+            ast.symbols[usize::try_from(external_ref.inner_index).expect("symbol index")].kind,
+            crate::internal::ast::SymbolKind::Unbound
         );
     }
 }
