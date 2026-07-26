@@ -447,12 +447,18 @@ fn run_with_stdin_and_node_paths(
         input_paths.push(argument.clone());
     }
 
-    if bundle {
+    let use_build_api = bundle
+        || !outdir.is_empty()
+        || !outfile.is_empty()
+        || !metafile_path.is_empty()
+        || input_paths.len() > 1
+        || input_paths.iter().any(|path| path.contains('='));
+    if use_build_api {
         if !outdir.is_empty() && !outfile.is_empty() {
             return Err("Cannot use both \"--outfile\" and \"--outdir\"".into());
         }
         if !input_paths.is_empty() && options.loader != Loader::None {
-            return Err("Use \"--loader:.ext=loader\" when bundling".into());
+            return Err("\"loader\" without extension only applies when reading from stdin".into());
         }
         if !metafile_path.is_empty() && outdir.is_empty() && outfile.is_empty() {
             return Err("Cannot use \"--metafile\" without an output path".into());
@@ -488,7 +494,7 @@ fn run_with_stdin_and_node_paths(
             }
             Some(BuildStdin {
                 contents: String::from_utf8(contents)
-                    .map_err(|_| "Bundled stdin must be valid UTF-8".to_string())?,
+                    .map_err(|_| "Stdin must be valid UTF-8".to_string())?,
                 resolve_dir: env::current_dir()
                     .ok()
                     .and_then(|path| path.to_str().map(str::to_string))
@@ -500,7 +506,7 @@ fn run_with_stdin_and_node_paths(
             None
         };
         let result = build(BuildOptions {
-            bundle: true,
+            bundle,
             entry_points,
             entry_points_advanced,
             stdin,
@@ -929,6 +935,48 @@ mod tests {
             std::fs::read_to_string(generated)
                 .expect("read generated entry")
                 .contains("console.log(\"advanced entry\")")
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn writes_multiple_non_bundled_entry_points() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-pass-through-{unique}"));
+        let output_directory = directory.join("out");
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let first = directory.join("first.js");
+        let second = directory.join("second.js");
+        std::fs::write(
+            &first,
+            "import './dependency.js'; const unused = 1; console.log('first')",
+        )
+        .expect("write first entry");
+        std::fs::write(&second, "console.log('second')").expect("write second entry");
+
+        let Output::Text(output) = run(&[
+            format!("--outdir={}", output_directory.display()),
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ])
+        .expect("non-bundled build succeeds") else {
+            panic!("expected file output");
+        };
+        assert!(output.is_empty());
+        let first_output =
+            std::fs::read_to_string(output_directory.join("first.js")).expect("read first output");
+        assert!(
+            first_output.contains("import \"./dependency.js\";"),
+            "{first_output}"
+        );
+        assert!(first_output.contains("const unused = 1;"), "{first_output}");
+        assert!(
+            std::fs::read_to_string(output_directory.join("second.js"))
+                .expect("read second output")
+                .contains("console.log(\"second\")")
         );
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
