@@ -4241,7 +4241,7 @@ mod tests {
         );
         assert!(ok);
         assert!(log.done().is_empty());
-        assert_eq!(ast.parts[1].statements.len(), 9);
+        assert_eq!(ast.parts[1].statements.len(), 7);
         let color_ref = ast
             .ts_enums
             .keys()
@@ -4261,20 +4261,15 @@ mod tests {
         );
         assert!(matches!(
             ast.parts[1].statements[0].data.as_deref(),
-            Some(StmtData::Local(local)) if local.kind == LocalKind::Var
+            Some(StmtData::Local(local))
+                if local.kind == LocalKind::Var
+                    && matches!(
+                        local.declarations[0].value_or_nil.data.as_deref(),
+                        Some(ExprData::Call(_))
+                    )
         ));
         assert!(matches!(
             ast.parts[1].statements[1].data.as_deref(),
-            Some(StmtData::Expr(statement))
-                if matches!(
-                    statement.value.data.as_deref(),
-                    Some(ExprData::Binary(binary))
-                        if binary.op == crate::internal::js_ast::OpCode::BinaryAssign
-                            && matches!(binary.right.data.as_deref(), Some(ExprData::Call(_)))
-                )
-        ));
-        assert!(matches!(
-            ast.parts[1].statements[2].data.as_deref(),
             Some(StmtData::Local(local))
                 if matches!(
                     local.declarations[0].value_or_nil.data.as_deref(),
@@ -4283,7 +4278,7 @@ mod tests {
                 )
         ));
         assert!(matches!(
-            ast.parts[1].statements[7].data.as_deref(),
+            ast.parts[1].statements[6].data.as_deref(),
             Some(StmtData::Local(local)) if local.is_export && local.kind == LocalKind::Var
         ));
         assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);

@@ -3367,8 +3367,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(print(&ast, &renamer, Options::default()).js)
                 .expect("printer output is UTF-8"),
-            "var Color;\n\
-             Color = /* @__PURE__ */ ((Color) => {\n\
+            "var Color = /* @__PURE__ */ ((Color) => {\n\
              \x20\x20Color[Color[\"Red\"] = 0] = \"Red\";\n\
              \x20\x20Color[\"Blue\"] = \"blue\";\n\
              \x20\x20return Color;\n\
@@ -3418,8 +3417,7 @@ mod tests {
              \x20\x20\x20\x20}\n\
              \x20\x20\x20\x20Nested.Item = Item;\n\
              \x20\x20})(Nested = Tools.Nested || (Tools.Nested = {}));\n\
-             \x20\x20let Mode;\n\
-             \x20\x20Mode = /* @__PURE__ */ ((Mode) => {\n\
+             \x20\x20let Mode = /* @__PURE__ */ ((Mode) => {\n\
              \x20\x20\x20\x20Mode[Mode[\"Ready\"] = 0] = \"Ready\";\n\
              \x20\x20\x20\x20return Mode;\n\
              \x20\x20})(Tools.Mode || (Tools.Mode = {}));\n\

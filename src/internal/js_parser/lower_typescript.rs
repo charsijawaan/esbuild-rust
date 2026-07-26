@@ -333,24 +333,7 @@ fn lower_enum(
             .iter()
             .all(|value| helpers.expr_can_be_removed_if_unused(&value.value_or_nil))
     };
-    if should_emit_namespace_var(core, name_ref, emitted) {
-        result.push(Stmt::new(
-            loc,
-            StmtData::Local(LocalStmt {
-                declarations: vec![Decl {
-                    binding: identifier_binding(enumeration.name.loc, name_ref),
-                    ..Decl::default()
-                }],
-                kind: if enclosing_namespace.is_some() {
-                    LocalKind::Let
-                } else {
-                    LocalKind::Var
-                },
-                is_export: enumeration.is_export && enclosing_namespace.is_none(),
-                ..LocalStmt::default()
-            }),
-        ));
-    }
+    let is_first_declaration = should_emit_namespace_var(core, name_ref, emitted);
 
     let mut body = Vec::with_capacity(enumeration.values.len() + 1);
     for value in enumeration.values {
@@ -369,30 +352,46 @@ fn lower_enum(
         }),
     ));
 
-    result.push(Stmt::new(
+    let initializer = enum_iife(
         loc,
-        StmtData::Expr(ExprStmt {
-            value: assign(
-                loc,
-                identifier(enumeration.name.loc, name_ref),
-                enum_iife(
-                    loc,
-                    enumeration.argument,
-                    body,
-                    enum_initial_value(
-                        core,
-                        enumeration.name.loc,
-                        name_ref,
-                        enumeration.is_export,
-                        enclosing_namespace,
-                    ),
-                    all_values_are_pure,
-                ),
-            ),
-            ..ExprStmt::default()
-        }),
-    ));
-    core.record_usage(name_ref);
+        enumeration.argument,
+        body,
+        enum_initial_value(
+            core,
+            enumeration.name.loc,
+            name_ref,
+            enumeration.is_export,
+            enclosing_namespace,
+        ),
+        all_values_are_pure,
+    );
+    if enclosing_namespace.is_none() || is_first_declaration {
+        result.push(Stmt::new(
+            loc,
+            StmtData::Local(LocalStmt {
+                declarations: vec![Decl {
+                    binding: identifier_binding(enumeration.name.loc, name_ref),
+                    value_or_nil: initializer,
+                }],
+                kind: if enclosing_namespace.is_some() {
+                    LocalKind::Let
+                } else {
+                    LocalKind::Var
+                },
+                is_export: enumeration.is_export && enclosing_namespace.is_none(),
+                ..LocalStmt::default()
+            }),
+        ));
+    } else {
+        result.push(Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value: assign(loc, identifier(enumeration.name.loc, name_ref), initializer),
+                ..ExprStmt::default()
+            }),
+        ));
+        core.record_usage(name_ref);
+    }
     core.record_usage(enumeration.argument);
 }
 

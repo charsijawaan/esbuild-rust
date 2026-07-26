@@ -5183,8 +5183,7 @@ mod tests {
                     ..TransformOptions::default()
                 }
             )),
-            "var Color;\n\
-             Color = /* @__PURE__ */ ((Color2) => {\n\
+            "var Color = /* @__PURE__ */ ((Color2) => {\n\
              \x20\x20Color2[Color2[\"Red\"] = 0] = \"Red\";\n\
              \x20\x20Color2[\"Blue\"] = \"blue\";\n\
              \x20\x20return Color2;\n\
@@ -5198,8 +5197,27 @@ mod tests {
                 ..TransformOptions::default()
             },
         ));
-        assert!(impure.contains("Value = ((Value2) =>"));
+        assert!(impure.contains("var Value = ((Value2) =>"));
         assert!(!impure.contains("@__PURE__"));
+
+        let merged = code(transform(
+            "enum Foo { A = 1 } enum Foo { B = 2 }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(merged.matches("var Foo =").count(), 2, "{merged}");
+
+        let nested = code(transform(
+            "namespace N { export enum E { A = 1 } export enum E { B = 2 } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(nested.matches("let E =").count(), 1, "{nested}");
+        assert!(nested.contains("\n  E = /* @__PURE__ */"), "{nested}");
     }
 
     #[test]
