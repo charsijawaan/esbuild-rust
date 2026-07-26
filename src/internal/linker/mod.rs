@@ -3067,6 +3067,24 @@ pub fn compile_prepared_css_asts(
         .collect()
 }
 
+/// Prepare, print, and assemble one CSS chunk.
+///
+/// # Panics
+///
+/// Panics if the supplied chunk is not CSS or contains invalid CSS import
+/// ordering data.
+pub fn generate_css_chunk(
+    graph: &LinkerGraph,
+    chunk: &mut ChunkInfo,
+    options: &Options,
+    output_paths: &OutputPathContext<'_>,
+) {
+    assert!(chunk.is_css, "CSS generation requires a CSS chunk");
+    let prepared = prepare_css_asts(graph, &chunk.imports_in_css_order, options);
+    let compiled = compile_prepared_css_asts(graph, &prepared, options);
+    assemble_css_chunk(graph, chunk, &compiled, options, output_paths);
+}
+
 /// Concatenate printed CSS files into one chunk and split temporary output
 /// paths into intermediate pieces.
 #[allow(clippy::too_many_lines)]
@@ -6205,6 +6223,27 @@ pub fn finalize_javascript_chunk_outputs(
     let output_paths = OutputPathContext::new("", assets, &chunk_paths);
     let mut output_files = Vec::new();
     for chunk in chunks {
+        if chunk.is_css {
+            for entry in &chunk.imports_in_css_order {
+                if entry.kind == CssImportKind::SourceIndex {
+                    output_files.extend(
+                        graph.files[entry.source_index as usize]
+                            .input_file
+                            .additional_files
+                            .clone(),
+                    );
+                }
+            }
+        } else {
+            for &source_index in &chunk.files_in_chunk_in_order {
+                output_files.extend(
+                    graph.files[source_index as usize]
+                        .input_file
+                        .additional_files
+                        .clone(),
+                );
+            }
+        }
         let final_directory = file_system.dir(&chunk.final_rel_path);
         let intermediate_output = std::mem::take(&mut chunk.intermediate_output);
         let (mut joiner, shifts) =
@@ -6457,8 +6496,8 @@ mod tests {
         convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
         finalize_chunk_paths, finalize_javascript_chunk_outputs,
         find_imported_css_files_in_js_order, find_imported_files_in_css_order,
-        generate_cross_chunk_stmts, generate_entry_point_tail, generate_global_name_prefix,
-        generate_isolated_hash, generate_source_map_for_chunk,
+        generate_cross_chunk_stmts, generate_css_chunk, generate_entry_point_tail,
+        generate_global_name_prefix, generate_isolated_hash, generate_source_map_for_chunk,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
         match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
@@ -9002,6 +9041,58 @@ mod tests {
             [2, 1]
         );
         assert_eq!(graph.files[1].entry_point_chunk_index, 0);
+    }
+
+    #[test]
+    fn generates_css_chunks_and_preserves_additional_files() {
+        let mut stylesheet = css_file(vec![], vec![], vec![]);
+        let Some(InputFileRepr::Css(repr)) = stylesheet.repr.as_mut() else {
+            panic!("expected CSS");
+        };
+        repr.ast.rules = vec![Rule {
+            data: RuleData::Comment(crate::internal::css_ast::CommentRule {
+                text: ".app{color:red}".into(),
+            }),
+            loc: Loc::default(),
+        }];
+        stylesheet.additional_files = vec![OutputFile {
+            abs_path: "/out/image.png".into(),
+            contents: b"image".to_vec(),
+            ..OutputFile::default()
+        }];
+        let input_files = [js_file(js_ast::Ast::default()), stylesheet];
+        let entry_points = [EntryPoint {
+            source_index: 1,
+            ..EntryPoint::default()
+        }];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1], &entry_points, false);
+        let mut chunks = compute_chunks(&mut graph, &Options::default(), PREFIX);
+        assert_eq!(chunks.len(), 1);
+        chunks[0].final_template = vec![PathTemplate {
+            data: "app.css".into(),
+            ..PathTemplate::default()
+        }];
+        generate_css_chunk(
+            &graph,
+            &mut chunks[0],
+            &Options::default(),
+            &context(&[], &[]),
+        );
+        let outputs = finalize_javascript_chunk_outputs(
+            &mock_fs(&HashMap::new(), MockKind::Unix, "/"),
+            &graph,
+            &mut chunks,
+            &[],
+            &Options {
+                abs_output_dir: "/out".into(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].abs_path, "/out/image.png");
+        assert_eq!(outputs[0].contents, b"image");
+        assert_eq!(outputs[1].abs_path, "/out/app.css");
+        assert_eq!(outputs[1].contents, b".app{color:red}\n");
     }
 
     #[test]
