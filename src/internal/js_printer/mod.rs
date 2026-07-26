@@ -3,7 +3,7 @@
 use crate::internal::compat::JsFeature;
 use crate::internal::js_ast::{
     Ast, Binding, BindingData, BlockStmt, Expr, ExprData, LocalKind, OpCode, OptionalChain,
-    Precedence, Stmt, StmtData, is_identifier_es5_and_es_next,
+    Precedence, PropertyFlags, PropertyKind, Stmt, StmtData, is_identifier_es5_and_es_next,
 };
 use crate::internal::renamer::Renamer;
 
@@ -468,7 +468,17 @@ impl Printer<'_> {
             }
             StmtData::Expr(expression) => {
                 self.print_indent();
+                let wrap = matches!(
+                    expression.value.data.as_deref(),
+                    Some(ExprData::Object(_) | ExprData::Function(_) | ExprData::Class(_))
+                );
+                if wrap {
+                    self.output.push(b'(');
+                }
                 self.print_expr_at(&expression.value, Precedence::Lowest);
+                if wrap {
+                    self.output.push(b')');
+                }
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -814,6 +824,47 @@ impl Printer<'_> {
                 }
                 self.output.push(b']');
             }
+            ExprData::Object(object) => {
+                self.output.push(b'{');
+                if !object.properties.is_empty() {
+                    self.print_optional_space();
+                }
+                for (index, property) in object.properties.iter().enumerate() {
+                    if index > 0 {
+                        self.output.push(b',');
+                        self.print_optional_space();
+                    }
+                    if property.kind == PropertyKind::Spread {
+                        self.output.extend_from_slice(b"...");
+                        self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                        continue;
+                    }
+                    if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+                        self.output.push(b'[');
+                        self.print_expr_at(&property.key, Precedence::Lowest);
+                        self.output.push(b']');
+                    } else {
+                        self.print_property_key(&property.key);
+                    }
+                    let is_shorthand = property.flags.contains(PropertyFlags::WAS_SHORTHAND)
+                        && property.initializer_or_nil.data.is_none();
+                    if !is_shorthand {
+                        self.output.push(b':');
+                        self.print_optional_space();
+                        self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                    }
+                    if property.initializer_or_nil.data.is_some() {
+                        self.print_optional_space();
+                        self.output.push(b'=');
+                        self.print_optional_space();
+                        self.print_expr_at(&property.initializer_or_nil, Precedence::Comma);
+                    }
+                }
+                if !object.properties.is_empty() {
+                    self.print_optional_space();
+                }
+                self.output.push(b'}');
+            }
             ExprData::Spread(spread) => {
                 self.output.extend_from_slice(b"...");
                 self.print_expr_at(&spread.value, Precedence::Comma);
@@ -970,7 +1021,6 @@ impl Printer<'_> {
                 }
             }
             ExprData::Class(_)
-            | ExprData::Object(_)
             | ExprData::Template(_)
             | ExprData::JsxElement(_)
             | ExprData::JsxText(_)
@@ -996,6 +1046,20 @@ impl Printer<'_> {
             self.print_expr_at(argument, Precedence::Comma);
         }
         self.output.push(b')');
+    }
+
+    fn print_property_key(&mut self, key: &Expr) {
+        if let Some(ExprData::String(string)) = key.data.as_deref() {
+            let name = String::from_utf16_lossy(&string.value);
+            if is_identifier_es5_and_es_next(&name) {
+                self.print_identifier(&name);
+            } else {
+                self.output
+                    .extend(quote_utf16(&string.value, self.options, true));
+            }
+        } else {
+            self.print_expr_at(key, Precedence::Lowest);
+        }
     }
 
     fn print_identifier(&mut self, name: &str) {
@@ -1037,7 +1101,6 @@ fn expr_precedence(data: &ExprData) -> Precedence {
         ExprData::Unary(unary) => unary.op.table_entry().level,
         ExprData::Await(_) => Precedence::Prefix,
         ExprData::Arrow(_) => Precedence::Assign,
-        ExprData::Function(_) | ExprData::Class(_) | ExprData::Object(_) => Precedence::Lowest,
         ExprData::New(_) => Precedence::New,
         ExprData::Call(_) => Precedence::Call,
         ExprData::InlinedEnum(inlined) => inlined
@@ -1295,6 +1358,32 @@ mod tests {
              \x20\x20return a + b;\n\
              }\n\
              const twice = (value) => value * 2;\n"
+        );
+    }
+
+    #[test]
+    fn prints_object_literals_and_properties() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"const value = 1, rest = {};\
+                  const config = {name: 'demo', ['x']: value, value, ...rest};"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "const value = 1, rest = {};\n\
+             const config = { name: \"demo\", [\"x\"]: value, value, ...rest };\n"
         );
     }
 }
