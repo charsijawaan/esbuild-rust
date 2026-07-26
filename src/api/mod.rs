@@ -150,6 +150,7 @@ pub struct BuildOptions {
     pub outbase: String,
     pub abs_working_dir: String,
     pub tsconfig: String,
+    pub metafile: bool,
     pub format: BuildFormat,
     pub platform: BuildPlatform,
     pub global_name: String,
@@ -197,6 +198,7 @@ pub struct BuildOutputFile {
 pub struct BuildResult {
     pub errors: Vec<Message>,
     pub warnings: Vec<Message>,
+    pub metafile: String,
     pub output_files: Vec<BuildOutputFile>,
 }
 
@@ -731,6 +733,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         abs_output_file: output_file,
         abs_output_base,
         tsconfig_path,
+        needs_metafile: options.metafile,
         ..config::Options::default()
     };
     let entry_points: Vec<_> = options
@@ -763,6 +766,11 @@ pub fn build(options: BuildOptions) -> BuildResult {
                 }),
         );
     }
+    let metafile = if errors.is_empty() {
+        compiled.metafile
+    } else {
+        String::new()
+    };
     let output_files = if errors.is_empty() {
         compiled
             .output_files
@@ -779,6 +787,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
     BuildResult {
         errors,
         warnings,
+        metafile,
         output_files,
     }
 }
@@ -1190,6 +1199,59 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("console.log(\"api build\");"));
         assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn returns_bundle_metafile_with_input_and_output_details() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-metafile-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {value} from './dep.js'; import external from 'pkg'; console.log(value, external)",
+        )
+        .expect("write entry file");
+        std::fs::write(directory.join("dep.js"), "export const value = 42")
+            .expect("write dependency file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::EsModule,
+            external: vec!["pkg".into()],
+            metafile: true,
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 1);
+        let log = crate::internal::logger::Log::new_defer(
+            crate::internal::logger::DeferLogKind::All,
+            HashMap::new(),
+        );
+        let (_, valid) = crate::internal::js_parser::parse_json(
+            log.clone(),
+            crate::internal::logger::Source {
+                contents: std::sync::Arc::from(result.metafile.as_bytes()),
+                ..crate::internal::logger::Source::default()
+            },
+            crate::internal::js_parser::JsonOptions::default(),
+        );
+        assert!(valid);
+        assert!(log.done().is_empty());
+        assert!(result.metafile.contains("\"entry.js\": {"));
+        assert!(result.metafile.contains("\"dep.js\": {"));
+        assert!(result.metafile.contains("\"original\": \"./dep.js\""));
+        assert!(result.metafile.contains("\"path\": \"pkg\""));
+        assert!(result.metafile.contains("\"external\": true"));
+        assert!(result.metafile.contains("\"out/entry.js\": {"));
+        assert!(result.metafile.contains("\"bytesInOutput\":"));
+        assert!(result.metafile.ends_with("}\n"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

@@ -45,6 +45,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut outfile = String::new();
     let mut outbase = String::new();
     let mut tsconfig = String::new();
+    let mut metafile_path = String::new();
     let mut format = BuildFormat::Iife;
     let mut platform = BuildPlatform::Browser;
     let mut global_name = String::new();
@@ -171,6 +172,13 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         }
         if let Some(value) = argument.strip_prefix("--tsconfig=") {
             tsconfig = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--metafile=") {
+            if value.is_empty() {
+                return Err("Invalid empty metafile path".into());
+            }
+            metafile_path = value.into();
             continue;
         }
         if let Some(value) = argument.strip_prefix("--format=") {
@@ -340,12 +348,16 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         if options.loader != Loader::None {
             return Err("Use \"--loader:.ext=loader\" when bundling".into());
         }
+        if !metafile_path.is_empty() && outdir.is_empty() && outfile.is_empty() {
+            return Err("Cannot use \"--metafile\" without an output path".into());
+        }
         let result = build(BuildOptions {
             entry_points: input_paths,
             outdir: outdir.clone(),
             outfile: outfile.clone(),
             outbase,
             tsconfig,
+            metafile: !metafile_path.is_empty(),
             format,
             platform,
             global_name,
@@ -408,11 +420,26 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             fs::write(path, output.contents)
                 .map_err(|error| format!("Could not write {:?}: {error}", output.path))?;
         }
+        if !metafile_path.is_empty() {
+            let path = std::path::Path::new(&metafile_path);
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+            }
+            fs::write(path, result.metafile)
+                .map_err(|error| format!("Could not write {metafile_path:?}: {error}"))?;
+        }
         return Ok(Output::Text(String::new()));
     }
 
     if !defines.is_empty() {
         return Err("\"--define\" without \"--bundle\" is not implemented yet".into());
+    }
+    if !metafile_path.is_empty() {
+        return Err("\"--metafile\" without \"--bundle\" is not implemented yet".into());
     }
     if sourcemap != BuildSourceMap::None {
         return Err("\"--sourcemap\" without \"--bundle\" is not implemented yet".into());
@@ -483,6 +510,7 @@ fn help_text() -> String {
          \x20\x20--outfile=FILE\n\
          \x20\x20--outbase=DIR\n\
          \x20\x20--tsconfig=FILE\n\
+         \x20\x20--metafile=FILE\n\
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--platform=browser|node|neutral\n\
          \x20\x20--global-name=NAME\n\
@@ -672,6 +700,45 @@ mod tests {
         let source_map =
             std::fs::read_to_string(output_directory.join("entry.js.map")).expect("read map");
         assert!(source_map.contains("\"version\": 3"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn writes_bundle_metafiles() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-metafile-{unique}"));
+        let output_directory = directory.join("out");
+        let metafile = directory.join("reports/meta.json");
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "console.log('cli metafile')").expect("write entry file");
+
+        let Output::Text(output) = run(&[
+            "--bundle".into(),
+            format!("--outdir={}", output_directory.display()),
+            format!("--metafile={}", metafile.display()),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("bundle succeeds") else {
+            panic!("expected file output");
+        };
+        assert!(output.is_empty());
+        let metadata = std::fs::read_to_string(&metafile).expect("read metafile");
+        assert!(metadata.contains("\"inputs\": {"));
+        assert!(metadata.contains("\"outputs\": {"));
+        assert!(metadata.contains("entry.js\": {"));
+        assert!(metadata.contains("out/entry.js\": {"));
+        assert!(
+            run(&[
+                "--bundle".into(),
+                "--metafile=meta.json".into(),
+                entry.to_string_lossy().into_owned(),
+            ])
+            .is_err()
+        );
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

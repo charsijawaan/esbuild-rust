@@ -66,6 +66,7 @@ pub struct ScannedBundle {
 
 #[derive(Debug, Default)]
 pub struct CompiledBundle {
+    pub metafile: String,
     pub output_files: Vec<OutputFile>,
     pub scan_result: linker::ScanImportsAndExportsResult,
 }
@@ -187,10 +188,75 @@ pub fn compile_javascript_bundle(
         &assets,
         options,
     );
+    let metafile = generate_metadata_json(file_system, bundle, &output_files, options);
     CompiledBundle {
+        metafile,
         output_files,
         scan_result: prepared.scan_result,
     }
+}
+
+fn generate_metadata_json(
+    file_system: &dyn Fs,
+    bundle: &ScannedBundle,
+    output_files: &[OutputFile],
+    options: &Options,
+) -> String {
+    if !options.needs_metafile {
+        return String::new();
+    }
+    let fragment = |text: &str| options.metafile_format.maybe_remove_whitespace(text);
+    let mut result = fragment("{\n  \"inputs\": {");
+    let mut is_first = true;
+    let mut input_paths = HashSet::new();
+    for file in &bundle.files {
+        if file.input_file.omit_from_source_maps_and_metafile || file.json_metadata_chunk.is_empty()
+        {
+            continue;
+        }
+        let path = file
+            .input_file
+            .source
+            .pretty_paths
+            .select(options.metafile_path_style);
+        if !input_paths.insert(path.to_string()) {
+            continue;
+        }
+        result.push_str(&fragment(if is_first { "\n    " } else { ",\n    " }));
+        is_first = false;
+        result.push_str(&file.json_metadata_chunk);
+    }
+
+    result.push_str(&fragment("\n  },\n  \"outputs\": {"));
+    is_first = true;
+    let mut output_paths = HashSet::new();
+    for output in output_files {
+        if output.json_metadata_chunk.is_empty() {
+            continue;
+        }
+        let path = if options.metafile_path_style == logger::PathStyle::Absolute {
+            output.abs_path.clone()
+        } else {
+            file_system
+                .rel(file_system.cwd(), &output.abs_path)
+                .unwrap_or_else(|| output.abs_path.clone())
+                .replace('\\', "/")
+        };
+        if !output_paths.insert(path.clone()) {
+            continue;
+        }
+        result.push_str(&fragment(if is_first { "\n    " } else { ",\n    " }));
+        is_first = false;
+        result.push_str(
+            &String::from_utf8(quote_for_json(path.as_bytes(), options.ascii_only))
+                .expect("quoted JSON is UTF-8"),
+        );
+        result.push_str(&fragment(": "));
+        result.push_str(&output.json_metadata_chunk);
+    }
+    result.push_str(&fragment("\n  }\n}"));
+    result.push('\n');
+    result
 }
 
 /// Scan filesystem entry points and compile them as a JavaScript bundle.
@@ -924,6 +990,7 @@ pub fn scan_bundle(
         }
     }
     finalize_scan_import_records(log, caches, options, &mut bundle.files, &resolution_slots);
+    generate_scan_metadata_chunks(options, &resolution_slots, &mut bundle.files);
     validate_top_level_await(log, options, &mut bundle.files);
     generate_additional_files(
         file_system,
@@ -932,6 +999,136 @@ pub fn scan_bundle(
         &mut bundle.files,
     );
     bundle
+}
+
+#[allow(clippy::too_many_lines)]
+fn generate_scan_metadata_chunks(
+    options: &Options,
+    resolution_slots: &HashMap<u32, Vec<Option<ResolveResult>>>,
+    files: &mut [ScannerFile],
+) {
+    if !options.needs_metafile {
+        return;
+    }
+    let fragment = |text: &str| options.metafile_format.maybe_remove_whitespace(text);
+    for &source_index in resolution_slots.keys() {
+        let index = usize::try_from(source_index).expect("source index fits usize");
+        let Some(file) = files.get(index) else {
+            continue;
+        };
+        let source = &file.input_file.source;
+        let path = source.pretty_paths.select(options.metafile_path_style);
+        let Some(records) = file
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+        else {
+            continue;
+        };
+        let mut metadata = String::from_utf8(quote_for_json(path.as_bytes(), options.ascii_only))
+            .expect("quoted JSON is UTF-8");
+        metadata.push_str(&fragment(&format!(
+            ": {{\n      \"bytes\": {},\n      \"imports\": [",
+            source.contents.len()
+        )));
+        for (record_index, record) in records.iter().enumerate() {
+            if record_index != 0 {
+                metadata.push(',');
+            }
+            metadata.push_str(&fragment("\n        {\n          \"path\": "));
+            let target_index = if record.source_index.is_valid() {
+                Some(record.source_index.get_index())
+            } else if record.copy_source_index.is_valid() {
+                Some(record.copy_source_index.get_index())
+            } else {
+                None
+            };
+            let import_path = target_index
+                .and_then(|target| {
+                    files.get(usize::try_from(target).expect("source index fits usize"))
+                })
+                .map_or(record.path.text.as_str(), |target| {
+                    target
+                        .input_file
+                        .source
+                        .pretty_paths
+                        .select(options.metafile_path_style)
+                });
+            metadata.push_str(
+                &String::from_utf8(quote_for_json(import_path.as_bytes(), options.ascii_only))
+                    .expect("quoted JSON is UTF-8"),
+            );
+            metadata.push_str(&fragment(",\n          \"kind\": "));
+            metadata.push_str(
+                &String::from_utf8(quote_for_json(
+                    record.kind.string_for_metafile().as_bytes(),
+                    options.ascii_only,
+                ))
+                .expect("quoted JSON is UTF-8"),
+            );
+            if target_index.is_none() {
+                metadata.push_str(&fragment(",\n          \"external\": true"));
+            } else {
+                metadata.push_str(&fragment(",\n          \"original\": "));
+                metadata.push_str(
+                    &String::from_utf8(quote_for_json(
+                        record.path.text.as_bytes(),
+                        options.ascii_only,
+                    ))
+                    .expect("quoted JSON is UTF-8"),
+                );
+            }
+            if let Some(clause) = record
+                .assert_or_with
+                .as_ref()
+                .filter(|clause| clause.keyword == AssertOrWithKeyword::With)
+                && !clause.entries.is_empty()
+            {
+                metadata.push_str(&fragment(",\n          \"with\": {"));
+                for (entry_index, entry) in clause.entries.iter().enumerate() {
+                    metadata.push_str(&fragment(if entry_index == 0 {
+                        "\n            "
+                    } else {
+                        ",\n            "
+                    }));
+                    metadata.push_str(
+                        &String::from_utf8(quote_for_json(
+                            &utf16_to_string(&entry.key),
+                            options.ascii_only,
+                        ))
+                        .expect("quoted JSON is UTF-8"),
+                    );
+                    metadata.push_str(&fragment(": "));
+                    metadata.push_str(
+                        &String::from_utf8(quote_for_json(
+                            &utf16_to_string(&entry.value),
+                            options.ascii_only,
+                        ))
+                        .expect("quoted JSON is UTF-8"),
+                    );
+                }
+                metadata.push_str(&fragment("\n          }"));
+            }
+            metadata.push_str(&fragment("\n        }"));
+        }
+        if !records.is_empty() {
+            metadata.push_str(&fragment("\n      "));
+        }
+        metadata.push(']');
+        if let Some(InputFileRepr::Js(repr)) = file.input_file.repr.as_ref() {
+            let format = match repr.ast.exports_kind {
+                ExportsKind::CommonJs => Some("cjs"),
+                ExportsKind::Esm | ExportsKind::EsmWithDynamicFallback => Some("esm"),
+                ExportsKind::None => None,
+            };
+            if let Some(format) = format {
+                metadata.push_str(&fragment(&format!(",\n      \"format\": {format:?}")));
+            }
+        }
+        metadata.push_str(&fragment("\n    }"));
+        files[index].json_metadata_chunk = metadata;
+    }
 }
 
 #[allow(clippy::too_many_lines)]
