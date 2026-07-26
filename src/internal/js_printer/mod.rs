@@ -500,7 +500,15 @@ impl Printer<'_> {
                 self.output.push(b';');
                 self.print_newline();
             }
-            StmtData::Block(block) => self.print_block(block),
+            StmtData::Block(block) => self.print_block(block, true),
+            StmtData::Function(function) => {
+                self.print_indent();
+                if function.is_export {
+                    self.output.extend_from_slice(b"export ");
+                }
+                self.print_function(&function.function);
+                self.print_newline();
+            }
             StmtData::Return(return_statement) => {
                 self.print_indent();
                 self.output.extend_from_slice(b"return");
@@ -596,7 +604,6 @@ impl Printer<'_> {
             | StmtData::ExportStar(_)
             | StmtData::Enum(_)
             | StmtData::Namespace(_)
-            | StmtData::Function(_)
             | StmtData::Class(_)
             | StmtData::Label(_)
             | StmtData::For(_)
@@ -611,7 +618,7 @@ impl Printer<'_> {
         }
     }
 
-    fn print_block(&mut self, block: &BlockStmt) {
+    fn print_block(&mut self, block: &BlockStmt, trailing_newline: bool) {
         self.output.push(b'{');
         self.print_newline();
         self.indent += 1;
@@ -621,13 +628,15 @@ impl Printer<'_> {
         self.indent -= 1;
         self.print_indent();
         self.output.push(b'}');
-        self.print_newline();
+        if trailing_newline {
+            self.print_newline();
+        }
     }
 
     fn print_body(&mut self, body: &Stmt) {
         if let Some(StmtData::Block(block)) = body.data.as_deref() {
             self.print_optional_space();
-            self.print_block(block);
+            self.print_block(block, true);
         } else {
             self.print_newline();
             self.indent += 1;
@@ -694,6 +703,44 @@ impl Printer<'_> {
                 self.output.push(b'}');
             }
         }
+    }
+
+    fn print_function(&mut self, function: &crate::internal::js_ast::Function) {
+        if function.is_async {
+            self.output.extend_from_slice(b"async ");
+        }
+        self.output.extend_from_slice(b"function");
+        if function.is_generator {
+            self.output.push(b'*');
+        }
+        if let Some(name) = function.name {
+            self.output.push(b' ');
+            self.print_identifier(&self.renamer.name_for_symbol(name.reference));
+        }
+        self.print_function_arguments(function);
+        self.print_optional_space();
+        self.print_block(&function.body.block, false);
+    }
+
+    fn print_function_arguments(&mut self, function: &crate::internal::js_ast::Function) {
+        self.output.push(b'(');
+        for (index, argument) in function.args.iter().enumerate() {
+            if index > 0 {
+                self.output.push(b',');
+                self.print_optional_space();
+            }
+            if function.has_rest_arg && index + 1 == function.args.len() {
+                self.output.extend_from_slice(b"...");
+            }
+            self.print_binding(&argument.binding);
+            if argument.default_or_nil.data.is_some() {
+                self.print_optional_space();
+                self.output.push(b'=');
+                self.print_optional_space();
+                self.print_expr_at(&argument.default_or_nil, Precedence::Comma);
+            }
+        }
+        self.output.push(b')');
     }
 
     fn print_indent(&mut self) {
@@ -886,9 +933,43 @@ impl Printer<'_> {
                 });
                 self.print_expr_at(&yield_expression.value_or_nil, Precedence::Yield);
             }
-            ExprData::Arrow(_)
-            | ExprData::Function(_)
-            | ExprData::Class(_)
+            ExprData::Function(function) => self.print_function(&function.function),
+            ExprData::Arrow(arrow) => {
+                if arrow.is_async {
+                    self.output.extend_from_slice(b"async ");
+                }
+                self.output.push(b'(');
+                for (index, argument) in arrow.args.iter().enumerate() {
+                    if index > 0 {
+                        self.output.push(b',');
+                        self.print_optional_space();
+                    }
+                    if arrow.has_rest_arg && index + 1 == arrow.args.len() {
+                        self.output.extend_from_slice(b"...");
+                    }
+                    self.print_binding(&argument.binding);
+                    if argument.default_or_nil.data.is_some() {
+                        self.print_optional_space();
+                        self.output.push(b'=');
+                        self.print_optional_space();
+                        self.print_expr_at(&argument.default_or_nil, Precedence::Comma);
+                    }
+                }
+                self.output.push(b')');
+                self.print_optional_space();
+                self.output.extend_from_slice(b"=>");
+                self.print_optional_space();
+                if arrow.prefer_expr
+                    && let [statement] = arrow.body.block.statements.as_slice()
+                    && let Some(StmtData::Return(return_statement)) = statement.data.as_deref()
+                    && return_statement.value_or_nil.data.is_some()
+                {
+                    self.print_expr_at(&return_statement.value_or_nil, Precedence::Assign);
+                } else {
+                    self.print_block(&arrow.body.block, false);
+                }
+            }
+            ExprData::Class(_)
             | ExprData::Object(_)
             | ExprData::Template(_)
             | ExprData::JsxElement(_)
@@ -955,6 +1036,8 @@ fn expr_precedence(data: &ExprData) -> Precedence {
         ExprData::Spread(_) => Precedence::Spread,
         ExprData::Unary(unary) => unary.op.table_entry().level,
         ExprData::Await(_) => Precedence::Prefix,
+        ExprData::Arrow(_) => Precedence::Assign,
+        ExprData::Function(_) | ExprData::Class(_) | ExprData::Object(_) => Precedence::Lowest,
         ExprData::New(_) => Precedence::New,
         ExprData::Call(_) => Precedence::Call,
         ExprData::InlinedEnum(inlined) => inlined
@@ -1185,5 +1268,33 @@ mod tests {
             local.declarations[0].value_or_nil.data.as_deref(),
             Some(ExprData::Binary(_))
         ));
+    }
+
+    #[test]
+    fn prints_functions_and_arrow_expressions() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"function add(a, b = 1) { return a + b; }\
+                  const twice = (value) => value * 2;"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "function add(a, b = 1) {\n\
+             \x20\x20return a + b;\n\
+             }\n\
+             const twice = (value) => value * 2;\n"
+        );
     }
 }
