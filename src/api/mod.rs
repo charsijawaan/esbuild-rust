@@ -225,6 +225,7 @@ struct TransformPrint {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BuildFormat {
     #[default]
+    Default,
     Iife,
     CommonJs,
     EsModule,
@@ -309,6 +310,7 @@ pub enum BuildJsx {
 #[derive(Clone, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildOptions {
+    pub bundle: bool,
     pub entry_points: Vec<String>,
     pub entry_points_advanced: Vec<BuildEntryPoint>,
     pub stdin: Option<BuildStdin>,
@@ -885,6 +887,7 @@ fn validate_defines(
 #[allow(clippy::too_many_lines)]
 pub fn build(options: BuildOptions) -> BuildResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let bundle = options.bundle;
     let write = options.write;
     let write_to_stdout = write && options.outdir.is_empty() && options.outfile.is_empty();
     let allow_overwrite = options.allow_overwrite;
@@ -903,6 +906,27 @@ pub fn build(options: BuildOptions) -> BuildResult {
             };
         }
     };
+    if !bundle {
+        let mut errors = Vec::new();
+        if !options.external.is_empty() {
+            errors.push(Message {
+                text: "Cannot use \"external\" without \"bundle\"".into(),
+                kind: MessageKind::Error,
+            });
+        }
+        if !options.alias.is_empty() {
+            errors.push(Message {
+                text: "Cannot use \"alias\" without \"bundle\"".into(),
+                kind: MessageKind::Error,
+            });
+        }
+        if !errors.is_empty() {
+            return BuildResult {
+                errors,
+                ..BuildResult::default()
+            };
+        }
+    }
     let external_settings = match validate_externals(file_system.as_ref(), &options.external) {
         Ok(settings) => settings,
         Err(errors) => {
@@ -1103,13 +1127,27 @@ pub fn build(options: BuildOptions) -> BuildResult {
             }
         })
         .collect();
-    let mut internal_options = config::Options {
-        mode: Mode::Bundle,
-        output_format: match options.format {
-            BuildFormat::Iife => config::Format::Iife,
-            BuildFormat::CommonJs => config::Format::CommonJs,
-            BuildFormat::EsModule => config::Format::EsModule,
+    let output_format = match options.format {
+        BuildFormat::Default if bundle => match options.platform {
+            BuildPlatform::Browser => config::Format::Iife,
+            BuildPlatform::Node => config::Format::CommonJs,
+            BuildPlatform::Neutral => config::Format::EsModule,
         },
+        BuildFormat::Default => config::Format::Preserve,
+        BuildFormat::Iife => config::Format::Iife,
+        BuildFormat::CommonJs => config::Format::CommonJs,
+        BuildFormat::EsModule => config::Format::EsModule,
+    };
+    let mode = if bundle {
+        Mode::Bundle
+    } else if output_format == config::Format::Preserve {
+        Mode::PassThrough
+    } else {
+        Mode::ConvertFormat
+    };
+    let mut internal_options = config::Options {
+        mode,
+        output_format,
         platform: match options.platform {
             BuildPlatform::Browser => config::Platform::Browser,
             BuildPlatform::Node => config::Platform::Node,
@@ -1124,12 +1162,16 @@ pub fn build(options: BuildOptions) -> BuildResult {
         },
         source_root: options.source_root,
         exclude_sources_content: options.sources_content == BuildSourcesContent::Exclude,
-        legal_comments: internal_legal_comments(options.legal_comments, true),
+        legal_comments: internal_legal_comments(options.legal_comments, bundle),
         line_limit: options.line_limit,
         code_splitting: options.splitting,
         preserve_symlinks: options.preserve_symlinks,
         allow_overwrite: options.allow_overwrite,
-        tree_shaking: options.tree_shaking != BuildTreeShaking::Disabled,
+        tree_shaking: match options.tree_shaking {
+            BuildTreeShaking::Default => bundle || output_format == config::Format::Iife,
+            BuildTreeShaking::Enabled => true,
+            BuildTreeShaking::Disabled => false,
+        },
         jsx: jsx_options,
         ts: ts_options,
         ts_always_strict,
@@ -1842,12 +1884,58 @@ mod tests {
     use super::{
         BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
         BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, Loader, Packages,
-        TransformOptions, build, transform,
+        TransformOptions, build as build_api, transform,
     };
+
+    fn build(mut options: BuildOptions) -> super::BuildResult {
+        options.bundle = true;
+        build_api(options)
+    }
 
     fn code(result: super::TransformResult) -> String {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         String::from_utf8(result.code).expect("transform output is UTF-8")
+    }
+
+    #[test]
+    fn defaults_build_api_to_pass_through_mode() {
+        let result = super::build(BuildOptions {
+            stdin: Some(BuildStdin {
+                contents: "import {value} from './dependency.js'; const unused = 1; use(value);"
+                    .into(),
+                sourcefile: "entry.js".into(),
+                ..BuildStdin::default()
+            }),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(
+            output.contains("import { value } from \"./dependency.js\";"),
+            "{output}"
+        );
+        assert!(output.contains("const unused = 1;"), "{output}");
+    }
+
+    #[test]
+    fn validates_bundle_only_build_options() {
+        let external = super::build(BuildOptions {
+            external: vec!["pkg".into()],
+            ..BuildOptions::default()
+        });
+        assert_eq!(
+            external.errors.first().map(|message| message.text.as_str()),
+            Some("Cannot use \"external\" without \"bundle\"")
+        );
+
+        let alias = super::build(BuildOptions {
+            alias: HashMap::from([("old".into(), "new".into())]),
+            ..BuildOptions::default()
+        });
+        assert_eq!(
+            alias.errors.first().map(|message| message.text.as_str()),
+            Some("Cannot use \"alias\" without \"bundle\"")
+        );
     }
 
     #[test]

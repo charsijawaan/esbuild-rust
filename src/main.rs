@@ -69,7 +69,7 @@ fn run_with_stdin_and_node_paths(
     let mut tsconfig = String::new();
     let mut tsconfig_raw = String::new();
     let mut metafile_path = String::new();
-    let mut format = BuildFormat::Iife;
+    let mut format = BuildFormat::Default;
     let mut platform = BuildPlatform::Browser;
     let mut global_name = String::new();
     let mut public_path = String::new();
@@ -500,6 +500,7 @@ fn run_with_stdin_and_node_paths(
             None
         };
         let result = build(BuildOptions {
+            bundle: true,
             entry_points,
             entry_points_advanced,
             stdin,
