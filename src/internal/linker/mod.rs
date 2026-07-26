@@ -25,7 +25,7 @@ use crate::internal::{
     graph::{
         ExportData, ImportData, InputFileRepr, LinkerGraph, OutputFile, SideEffectsKind, WrapKind,
     },
-    helpers::{BitSet, Joiner},
+    helpers::{BitSet, Joiner, escape_closing_tag},
     js_ast::{self, ExportsKind},
     logger::{Log, Range},
     sourcemap::{LineColumnOffset, SourceMapPieces, SourceMapShift},
@@ -65,6 +65,7 @@ pub struct ChunkInfo {
     pub final_rel_path: String,
     pub intermediate_output: IntermediateOutput,
     pub output_source_map: SourceMapPieces,
+    pub external_legal_comments: Vec<u8>,
     pub isolated_hash: Vec<u8>,
     pub entry_point_bit: usize,
     pub source_index: u32,
@@ -2478,7 +2479,7 @@ pub fn print_cross_chunk_bindings(
         minify_syntax: options.minify_syntax,
         minify_whitespace: options.minify_whitespace,
         ascii_only: options.ascii_only,
-        legal_comments: LegalComments::Inline,
+        legal_comments: options.legal_comments,
     };
     let prefix = crate::internal::js_printer::print(
         &js_ast::Ast {
@@ -3373,6 +3374,7 @@ pub struct ChunkRuntimeRefs {
 pub struct CompiledPartRange {
     pub source_index: u32,
     pub js: Vec<u8>,
+    pub extracted_legal_comments: Vec<String>,
 }
 
 /// Compile one ordered range of live parts into JavaScript for a chunk.
@@ -3524,12 +3526,13 @@ pub fn compile_part_range_for_chunk(
             minify_syntax: options.minify_syntax,
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
-            legal_comments: LegalComments::Inline,
+            legal_comments: options.legal_comments,
         },
     );
     CompiledPartRange {
         source_index: part_range.source_index,
         js: printed.js,
+        extracted_legal_comments: printed.extracted_legal_comments,
     }
 }
 
@@ -3731,7 +3734,7 @@ pub fn generate_entry_point_tail(
             minify_syntax: options.minify_syntax,
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
-            legal_comments: LegalComments::Inline,
+            legal_comments: options.legal_comments,
         },
     )
     .js
@@ -3969,6 +3972,139 @@ fn global_name_accessor(name: &str, options: &Options) -> String {
     }
 }
 
+#[derive(Clone, Debug)]
+struct LegalCommentEntry {
+    source_index: u32,
+    comments: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ThirdPartyLegalCommentEntry {
+    package_paths: Vec<String>,
+    comments: Vec<String>,
+}
+
+fn package_path_for_legal_comment(graph: &LinkerGraph, source_index: u32) -> String {
+    let source = &graph.files[source_index as usize].input_file.source;
+    if source.key_path.namespace == "dataurl" {
+        return String::new();
+    }
+    let normalized = source.key_path.text.replace('\\', "/");
+    let components: Vec<_> = normalized.split('/').collect();
+    let Some(index) = components
+        .iter()
+        .rposition(|component| *component == "node_modules")
+    else {
+        return String::new();
+    };
+    if index + 1 == components.len() {
+        String::new()
+    } else {
+        components[index + 1..].join("/")
+    }
+}
+
+fn append_legal_comments(
+    graph: &LinkerGraph,
+    legal_comments: LegalComments,
+    legal_comment_list: &[LegalCommentEntry],
+    chunk: &mut ChunkInfo,
+    joiner: &mut Joiner,
+    slash_tag: &str,
+) {
+    if matches!(legal_comments, LegalComments::None | LegalComments::Inline) {
+        return;
+    }
+
+    let mut unique_first_party_comments = Vec::new();
+    let mut third_party_comments = Vec::<ThirdPartyLegalCommentEntry>::new();
+    let mut has_first_party_comment = HashSet::new();
+    for entry in legal_comment_list {
+        let package_path = package_path_for_legal_comment(graph, entry.source_index);
+        if package_path.is_empty() {
+            for comment in &entry.comments {
+                if has_first_party_comment.insert(comment.clone()) {
+                    unique_first_party_comments.push(comment.clone());
+                }
+            }
+        } else {
+            third_party_comments.push(ThirdPartyLegalCommentEntry {
+                package_paths: vec![package_path],
+                comments: entry.comments.clone(),
+            });
+        }
+    }
+
+    let mut identical = HashMap::<String, usize>::new();
+    let mut merged_third_party_comments = Vec::<ThirdPartyLegalCommentEntry>::new();
+    for entry in third_party_comments {
+        let key = entry.comments.join("\0");
+        if let Some(&index) = identical.get(&key) {
+            merged_third_party_comments[index]
+                .package_paths
+                .extend(entry.package_paths);
+        } else {
+            identical.insert(key, merged_third_party_comments.len());
+            merged_third_party_comments.push(entry);
+        }
+    }
+
+    match legal_comments {
+        LegalComments::EndOfFile => {
+            for comment in unique_first_party_comments {
+                joiner.add_string(escape_closing_tag(&comment, slash_tag));
+                joiner.add_string("\n");
+            }
+            if !merged_third_party_comments.is_empty() {
+                joiner.add_string("/*! Bundled license information:\n");
+                for entry in merged_third_party_comments {
+                    joiner.add_string("\n");
+                    for package_path in entry.package_paths {
+                        joiner.add_string(format!(
+                            "{}:\n",
+                            escape_closing_tag(&package_path, slash_tag)
+                        ));
+                    }
+                    for comment in entry.comments {
+                        let comment = escape_closing_tag(&comment, slash_tag);
+                        if let Some(comment) = comment.strip_prefix("//") {
+                            joiner.add_string(format!("  (*{comment} *)\n"));
+                        } else if comment.starts_with("/*") && comment.ends_with("*/") {
+                            let comment = comment[1..comment.len() - 1].replace('\n', "\n  ");
+                            joiner.add_string(format!("  ({comment})\n"));
+                        }
+                    }
+                }
+                joiner.add_string("*/\n");
+            }
+        }
+        LegalComments::LinkedWithComment | LegalComments::ExternalWithoutComment => {
+            let mut comments = Joiner::default();
+            for comment in unique_first_party_comments {
+                comments.add_string(comment);
+                comments.add_string("\n");
+            }
+            if !merged_third_party_comments.is_empty() {
+                if !comments.is_empty() {
+                    comments.add_string("\n");
+                }
+                comments.add_string("Bundled license information:\n");
+                for entry in merged_third_party_comments {
+                    comments.add_string("\n");
+                    for package_path in entry.package_paths {
+                        comments.add_string(format!("{package_path}:\n"));
+                    }
+                    for comment in entry.comments {
+                        comments.add_string(format!("  {}\n", comment.replace('\n', "\n  ")));
+                    }
+                }
+            }
+            chunk.external_legal_comments = comments.done();
+        }
+        LegalComments::None | LegalComments::Inline => unreachable!(),
+    }
+}
+
 /// Join all generated JavaScript fragments for one chunk and split temporary
 /// asset/chunk paths into intermediate output pieces.
 ///
@@ -3988,10 +4124,12 @@ pub fn assemble_javascript_chunk(
     output_paths: &OutputPathContext<'_>,
 ) -> bool {
     let mut joiner = Joiner::default();
+    let mut legal_comment_list = Vec::new();
     let newline = if options.minify_whitespace { "" } else { "\n" };
     let space = if options.minify_whitespace { "" } else { " " };
     let mut newline_before_comment = false;
     let mut is_executable = false;
+    chunk.external_legal_comments.clear();
 
     if chunk.is_entry_point {
         let Some(InputFileRepr::Js(repr)) = graph.files[chunk.source_index as usize]
@@ -4058,6 +4196,12 @@ pub fn assemble_javascript_chunk(
 
     let mut previous_source = None;
     for compiled in compiled_parts {
+        if !compiled.extracted_legal_comments.is_empty() {
+            legal_comment_list.push(LegalCommentEntry {
+                source_index: compiled.source_index,
+                comments: compiled.extracted_legal_comments.clone(),
+            });
+        }
         if options.mode == Mode::Bundle
             && !options.minify_whitespace
             && previous_source != Some(compiled.source_index)
@@ -4102,6 +4246,22 @@ pub fn assemble_javascript_chunk(
         joiner.add_string(format!("}})();{newline}"));
     }
     joiner.ensure_newline_at_end();
+    let slash_tag = if options
+        .unsupported_js_features
+        .contains(crate::internal::compat::JsFeature::INLINE_SCRIPT)
+    {
+        ""
+    } else {
+        "/script"
+    };
+    append_legal_comments(
+        graph,
+        options.legal_comments,
+        &legal_comment_list,
+        chunk,
+        &mut joiner,
+        slash_tag,
+    );
     if !options.js_footer.is_empty() {
         joiner.add_string(options.js_footer.clone());
         joiner.add_string("\n");
@@ -4362,32 +4522,63 @@ pub fn finalize_javascript_chunk_outputs(
         })
         .collect();
     let output_paths = OutputPathContext::new("", assets, &chunk_paths);
-    chunks
-        .iter_mut()
-        .map(|chunk| {
-            let final_directory = file_system.dir(&chunk.final_rel_path);
-            let intermediate_output = std::mem::take(&mut chunk.intermediate_output);
-            let (joiner, _) =
-                output_paths.substitute_final_paths(intermediate_output, |target_path| {
-                    path_between_chunks(
-                        file_system,
-                        &options.public_path,
-                        &final_directory,
-                        target_path,
-                    )
-                    .expect("chunk output paths must have a relative path")
-                });
-            OutputFile {
+    let mut output_files = Vec::new();
+    for chunk in chunks {
+        let final_directory = file_system.dir(&chunk.final_rel_path);
+        let intermediate_output = std::mem::take(&mut chunk.intermediate_output);
+        let (mut joiner, _) =
+            output_paths.substitute_final_paths(intermediate_output, |target_path| {
+                path_between_chunks(
+                    file_system,
+                    &options.public_path,
+                    &final_directory,
+                    target_path,
+                )
+                .expect("chunk output paths must have a relative path")
+            });
+
+        if !chunk.external_legal_comments.is_empty() {
+            let legal_rel_path = format!("{}.LEGAL.txt", chunk.final_rel_path);
+            if options.legal_comments == LegalComments::LinkedWithComment {
+                let import_path = path_between_chunks(
+                    file_system,
+                    &options.public_path,
+                    &final_directory,
+                    &legal_rel_path,
+                )
+                .expect("legal comment output path must have a relative path");
+                joiner.ensure_newline_at_end();
+                joiner.add_string(format!(
+                    "/*! For license information please see {} */\n",
+                    import_path.strip_prefix("./").unwrap_or(&import_path)
+                ));
+            }
+            let legal_contents = chunk.external_legal_comments.clone();
+            output_files.push(OutputFile {
                 abs_path: file_system.join(&[
                     options.abs_output_dir.as_str(),
-                    chunk.final_rel_path.as_str(),
+                    legal_rel_path.as_str(),
                 ]),
-                contents: joiner.done(),
-                is_executable: chunk.is_executable,
+                json_metadata_chunk: options.metafile_format.maybe_remove_whitespace(&format!(
+                    "{{\n      \"imports\": [],\n      \"exports\": [],\n      \"inputs\": {{}},\n      \"bytes\": {}\n    }}",
+                    legal_contents.len()
+                )),
+                contents: legal_contents,
                 ..OutputFile::default()
-            }
-        })
-        .collect()
+            });
+        }
+
+        output_files.push(OutputFile {
+            abs_path: file_system.join(&[
+                options.abs_output_dir.as_str(),
+                chunk.final_rel_path.as_str(),
+            ]),
+            contents: joiner.done(),
+            is_executable: chunk.is_executable,
+            ..OutputFile::default()
+        });
+    }
+    output_files
 }
 
 #[must_use]
@@ -4575,7 +4766,8 @@ mod tests {
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
         config::{
-            Format, Loader, Mode, Options, PathPlaceholder, PathTemplate, template_to_string,
+            Format, LegalComments, Loader, Mode, Options, PathPlaceholder, PathTemplate,
+            template_to_string,
         },
         css_ast::{
             ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
@@ -5650,13 +5842,25 @@ mod tests {
             parts: vec![
                 js_ast::Part::default(),
                 js_ast::Part {
-                    statements: vec![js_ast::Stmt::new(
-                        Loc::default(),
-                        js_ast::StmtData::Expr(js_ast::ExprStmt {
-                            value: js_ast::Expr::new(Loc::default(), js_ast::ExprData::Number(1.0)),
-                            ..js_ast::ExprStmt::default()
-                        }),
-                    )],
+                    statements: vec![
+                        js_ast::Stmt::new(
+                            Loc::default(),
+                            js_ast::StmtData::Comment(js_ast::CommentStmt {
+                                text: "/*! legal */".into(),
+                                is_legal_comment: true,
+                            }),
+                        ),
+                        js_ast::Stmt::new(
+                            Loc::default(),
+                            js_ast::StmtData::Expr(js_ast::ExprStmt {
+                                value: js_ast::Expr::new(
+                                    Loc::default(),
+                                    js_ast::ExprData::Number(1.0),
+                                ),
+                                ..js_ast::ExprStmt::default()
+                            }),
+                        ),
+                    ],
                     is_live: true,
                     ..js_ast::Part::default()
                 },
@@ -5679,6 +5883,7 @@ mod tests {
             &graph,
             &Options {
                 mode: Mode::Bundle,
+                legal_comments: LegalComments::EndOfFile,
                 ..Options::default()
             },
             PartRange {
@@ -5690,6 +5895,7 @@ mod tests {
             &renamer,
         );
         assert_eq!(result.js, b"1;\n");
+        assert_eq!(result.extracted_legal_comments, ["/*! legal */"]);
 
         let wrapper_ref = Ref {
             source_index: 0,
@@ -5908,6 +6114,7 @@ mod tests {
             &[super::CompiledPartRange {
                 source_index: 0,
                 js: b"  work();\n".to_vec(),
+                extracted_legal_comments: Vec::new(),
             }],
             &super::PrintedCrossChunkBindings::default(),
             b"  return 1;\n",
@@ -5923,6 +6130,151 @@ mod tests {
         ));
         assert!(output.contains("  // src/entry.js\n  work();\n  return 1;\n"));
         assert!(output.ends_with("})();\n/* footer */\n"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn groups_and_emits_javascript_legal_comments() {
+        let input = |path: &str| {
+            let mut file = js_file(js_ast::Ast::default());
+            file.source = Source {
+                key_path: Path {
+                    text: path.into(),
+                    namespace: "file".into(),
+                    ..Path::default()
+                },
+                ..Source::default()
+            };
+            file
+        };
+        let graph = clone_linker_graph(
+            &[
+                input("/project/src/entry.js"),
+                input("/project/node_modules/pkg-a/index.js"),
+                input(r"C:\project\node_modules\pkg-b\main.js"),
+            ],
+            &[0, 1, 2],
+            &[],
+            false,
+        );
+        let compiled_parts = [
+            super::CompiledPartRange {
+                source_index: 0,
+                extracted_legal_comments: vec![
+                    "/*! first </script> */".into(),
+                    "/*! first </script> */".into(),
+                ],
+                ..super::CompiledPartRange::default()
+            },
+            super::CompiledPartRange {
+                source_index: 1,
+                extracted_legal_comments: vec!["/*! dep */".into(), "// line".into()],
+                ..super::CompiledPartRange::default()
+            },
+            super::CompiledPartRange {
+                source_index: 2,
+                extracted_legal_comments: vec!["/*! dep */".into(), "// line".into()],
+                ..super::CompiledPartRange::default()
+            },
+        ];
+
+        let mut end_of_file_chunk = ChunkInfo::default();
+        assemble_javascript_chunk(
+            &graph,
+            &mut end_of_file_chunk,
+            &compiled_parts,
+            &super::PrintedCrossChunkBindings::default(),
+            &[],
+            &Options {
+                legal_comments: LegalComments::EndOfFile,
+                ..Options::default()
+            },
+            &context(&[], &[]),
+        );
+        let (joiner, _) = context(&[], &[])
+            .substitute_final_paths(end_of_file_chunk.intermediate_output, str::to_owned);
+        assert_eq!(
+            joiner.done(),
+            b"/*! first <\\/script> */\n/*! Bundled license information:\n\npkg-a/index.js:\npkg-b/main.js:\n  (*! dep *)\n  (* line *)\n*/\n"
+        );
+
+        let mut linked_chunk = ChunkInfo {
+            final_template: vec![PathTemplate {
+                data: "nested/app.js".into(),
+                ..PathTemplate::default()
+            }],
+            ..ChunkInfo::default()
+        };
+        let linked_options = Options {
+            abs_output_dir: "/out".into(),
+            legal_comments: LegalComments::LinkedWithComment,
+            ..Options::default()
+        };
+        assemble_javascript_chunk(
+            &graph,
+            &mut linked_chunk,
+            &compiled_parts,
+            &super::PrintedCrossChunkBindings::default(),
+            &[],
+            &linked_options,
+            &context(&[], &[]),
+        );
+        assert_eq!(
+            linked_chunk.external_legal_comments,
+            b"/*! first </script> */\n\nBundled license information:\n\npkg-a/index.js:\npkg-b/main.js:\n  /*! dep */\n  // line\n"
+        );
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let outputs = finalize_javascript_chunk_outputs(
+            &file_system,
+            &graph,
+            std::slice::from_mut(&mut linked_chunk),
+            &[],
+            &linked_options,
+        );
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].abs_path, "/out/nested/app.js.LEGAL.txt");
+        assert_eq!(
+            outputs[0].contents,
+            b"/*! first </script> */\n\nBundled license information:\n\npkg-a/index.js:\npkg-b/main.js:\n  /*! dep */\n  // line\n"
+        );
+        assert_eq!(outputs[1].abs_path, "/out/nested/app.js");
+        assert_eq!(
+            outputs[1].contents,
+            b"/*! For license information please see app.js.LEGAL.txt */\n"
+        );
+
+        let mut external_chunk = ChunkInfo {
+            final_template: vec![PathTemplate {
+                data: "external.js".into(),
+                ..PathTemplate::default()
+            }],
+            ..ChunkInfo::default()
+        };
+        let external_options = Options {
+            abs_output_dir: "/out".into(),
+            legal_comments: LegalComments::ExternalWithoutComment,
+            ..Options::default()
+        };
+        assemble_javascript_chunk(
+            &graph,
+            &mut external_chunk,
+            &compiled_parts,
+            &super::PrintedCrossChunkBindings::default(),
+            &[],
+            &external_options,
+            &context(&[], &[]),
+        );
+        let outputs = finalize_javascript_chunk_outputs(
+            &file_system,
+            &graph,
+            std::slice::from_mut(&mut external_chunk),
+            &[],
+            &external_options,
+        );
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].abs_path, "/out/external.js.LEGAL.txt");
+        assert_eq!(outputs[1].abs_path, "/out/external.js");
+        assert!(outputs[1].contents.is_empty());
     }
 
     #[test]

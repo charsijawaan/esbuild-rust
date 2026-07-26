@@ -464,10 +464,8 @@ fn parse_namespace_statement(
         vec![parse_namespace_statement(core, lexer, dot_loc, true)]
     } else {
         lexer.expect(Token::OpenBrace);
-        let mut statements = Vec::new();
-        while lexer.token != Token::CloseBrace {
-            statements.push(super::syntax_statement::parse_statement(core, lexer));
-        }
+        let statements =
+            super::syntax_statement::parse_statements_up_to(core, lexer, Token::CloseBrace);
         lexer.expect(Token::CloseBrace);
         statements
     };
