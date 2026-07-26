@@ -1932,6 +1932,15 @@ fn minify_numeric_tokens(tokens: &mut [Token]) {
                     token.unit_offset = unit_offset;
                     token.text = format!("{text}{unit}");
                 }
+                let value = token.dimension_value().to_owned();
+                let unit = token.dimension_unit().to_owned();
+                if let Some((value, unit)) = minify_dimension(&value, &unit) {
+                    let Ok(unit_offset) = u16::try_from(value.len()) else {
+                        continue;
+                    };
+                    token.unit_offset = unit_offset;
+                    token.text = format!("{value}{unit}");
+                }
             }
             _ => {}
         }
@@ -1952,6 +1961,62 @@ fn minify_decimal(text: &str) -> Option<String> {
         result.push('0');
     }
     (result.len() < text.len()).then_some(result)
+}
+
+fn minify_dimension(value: &str, unit: &str) -> Option<(String, &'static str)> {
+    if unit.eq_ignore_ascii_case("ms")
+        && let Some(shifted) = shift_decimal_point(value, -3)
+        && shifted.len() + 1 < value.len() + 2
+    {
+        return Some((shifted, "s"));
+    }
+    if unit.eq_ignore_ascii_case("s")
+        && let Some(shifted) = shift_decimal_point(value, 3)
+        && shifted.len() + 2 < value.len() + 1
+    {
+        return Some((shifted, "ms"));
+    }
+    None
+}
+
+fn shift_decimal_point(text: &str, dot_offset: isize) -> Option<String> {
+    if text.contains(['e', 'E']) {
+        return None;
+    }
+    let (sign, unsigned) = if text.starts_with(['-', '+']) {
+        (&text[..1], &text[1..])
+    } else {
+        ("", text)
+    };
+    let mut digits = unsigned.to_owned();
+    let mut dot = match digits.find('.') {
+        Some(index) => {
+            digits.remove(index);
+            isize::try_from(index).ok()?
+        }
+        None => isize::try_from(digits.len()).ok()?,
+    };
+    dot += dot_offset;
+
+    while dot > 0 && digits.starts_with('0') {
+        digits.remove(0);
+        dot -= 1;
+    }
+    while isize::try_from(digits.len()).ok()? > dot && digits.ends_with('0') {
+        digits.pop();
+    }
+    let digits_len = isize::try_from(digits.len()).ok()?;
+    if dot >= digits_len {
+        let zeros = usize::try_from(dot - digits_len).ok()?;
+        return Some(format!("{sign}{digits}{}", "0".repeat(zeros)));
+    }
+    if dot < 0 {
+        let zeros = usize::try_from(-dot).ok()?;
+        digits = format!("{}{digits}", "0".repeat(zeros));
+        dot = 0;
+    }
+    let dot = usize::try_from(dot).ok()?;
+    Some(format!("{sign}{}.{}", &digits[..dot], &digits[dot..]))
 }
 
 fn minify_four_side_shorthand(tokens: &mut Vec<Token>) {

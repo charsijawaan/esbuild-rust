@@ -654,6 +654,22 @@ mod tests {
     }
 
     #[test]
+    fn minifies_css_time_dimensions() {
+        assert_eq!(
+            code(transform(
+                "a { a: .001s; b: .0012s; c: -.001s; d: .000123s; e: .001S; f: 100ms; g: 120ms; h: 123ms; i: 1000ms; j: 1200ms; k: 1230ms; l: 1234ms; m: -100ms; n: 120mS; o: 123mS; p: 1e3ms }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{a:1ms;b:1.2ms;c:-1ms;d:.123ms;e:1ms;f:.1s;g:.12s;h:123ms;i:1s;j:1.2s;k:1.23s;l:1234ms;m:-.1s;n:.12s;o:123mS;p:1e3ms}\n"
+        );
+    }
+
+    #[test]
     fn minifies_css_transforms() {
         assert_eq!(
             code(transform(
