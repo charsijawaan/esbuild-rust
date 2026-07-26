@@ -375,6 +375,31 @@ mod tests {
     }
 
     #[test]
+    fn annotates_generated_jsx_calls_as_pure() {
+        assert_eq!(
+            code(transform(
+                "const element = <div/>",
+                TransformOptions {
+                    loader: Loader::Jsx,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const element = /* @__PURE__ */ React.createElement(\"div\", null);\n"
+        );
+        assert_eq!(
+            code(transform(
+                "const element = <div/>",
+                TransformOptions {
+                    loader: Loader::Jsx,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const element=React.createElement(\"div\",null);"
+        );
+    }
+
+    #[test]
     fn transforms_type_script_enums_through_lowering() {
         assert_eq!(
             code(transform(
@@ -385,13 +410,22 @@ mod tests {
                 }
             )),
             "var Color;\n\
-             Color = ((Color) => {\n\
+             Color = /* @__PURE__ */ ((Color) => {\n\
              \x20\x20Color[Color[\"Red\"] = 0] = \"Red\";\n\
              \x20\x20Color[\"Blue\"] = \"blue\";\n\
              \x20\x20return Color;\n\
              })(Color || {});\n\
              const red = 0 /* Red */;\n"
         );
+        let impure = code(transform(
+            "enum Value { Item = sideEffect() }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(impure.contains("Value = ((Value) =>"));
+        assert!(!impure.contains("@__PURE__"));
     }
 
     #[test]

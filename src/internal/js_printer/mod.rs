@@ -1209,7 +1209,13 @@ impl Printer<'_> {
             return;
         };
         let own_level = expr_precedence(data);
-        let wrap = own_level < level;
+        let has_pure_comment = !self.options.minify_whitespace
+            && match data {
+                ExprData::Call(call) => call.can_be_unwrapped_if_unused,
+                ExprData::New(new) => new.can_be_unwrapped_if_unused,
+                _ => false,
+            };
+        let wrap = own_level < level || (has_pure_comment && level >= Precedence::Postfix);
         if wrap {
             self.output.push(b'(');
         }
@@ -1388,6 +1394,9 @@ impl Printer<'_> {
                 self.output.push(b']');
             }
             ExprData::Call(call) => {
+                if has_pure_comment {
+                    self.output.extend_from_slice(b"/* @__PURE__ */ ");
+                }
                 self.print_expr_at(&call.target, Precedence::Call);
                 if call.optional_chain == OptionalChain::Start {
                     self.output.extend_from_slice(b"?.");
@@ -1395,6 +1404,9 @@ impl Printer<'_> {
                 self.print_arguments(&call.args);
             }
             ExprData::New(new) => {
+                if has_pure_comment {
+                    self.output.extend_from_slice(b"/* @__PURE__ */ ");
+                }
                 self.output.extend_from_slice(b"new ");
                 self.print_expr_at(&new.target, Precedence::New);
                 self.print_arguments(&new.args);
@@ -2235,7 +2247,7 @@ mod tests {
             String::from_utf8(print(&ast, &renamer, Options::default()).js)
                 .expect("printer output is UTF-8"),
             "var Color;\n\
-             Color = ((Color) => {\n\
+             Color = /* @__PURE__ */ ((Color) => {\n\
              \x20\x20Color[Color[\"Red\"] = 0] = \"Red\";\n\
              \x20\x20Color[\"Blue\"] = \"blue\";\n\
              \x20\x20return Color;\n\
@@ -2286,7 +2298,7 @@ mod tests {
              \x20\x20\x20\x20Nested.Item = Item;\n\
              \x20\x20})(Nested = Tools.Nested || (Tools.Nested = {}));\n\
              \x20\x20let Mode;\n\
-             \x20\x20Mode = ((Mode) => {\n\
+             \x20\x20Mode = /* @__PURE__ */ ((Mode) => {\n\
              \x20\x20\x20\x20Mode[Mode[\"Ready\"] = 0] = \"Ready\";\n\
              \x20\x20\x20\x20return Mode;\n\
              \x20\x20})(Tools.Mode || (Tools.Mode = {}));\n\

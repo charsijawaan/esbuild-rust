@@ -7,6 +7,7 @@ use crate::internal::{
         ExprData, ExprStmt, FunctionBody, IdentifierBinding, IdentifierExpr, IndexExpr, LocalKind,
         LocalStmt, NamespaceStmt, ObjectExpr, OpCode, PrimitiveType, ReturnStmt, Stmt, StmtData,
         StringExpr, convert_binding_to_expr, for_each_identifier_binding, known_primitive_type,
+        make_helper_context,
     },
     logger::Loc,
 };
@@ -305,6 +306,18 @@ fn lower_enum(
     enclosing_namespace: Option<Ref>,
 ) {
     let name_ref = follow_symbols(core, enumeration.name.reference);
+    let all_values_are_pure = {
+        let helpers = make_helper_context(|reference| {
+            let reference = follow_symbols(core, reference);
+            core.symbols
+                .get(usize::try_from(reference.inner_index).expect("symbol index"))
+                .is_none_or(|symbol| symbol.kind == SymbolKind::Unbound)
+        });
+        enumeration
+            .values
+            .iter()
+            .all(|value| helpers.expr_can_be_removed_if_unused(&value.value_or_nil))
+    };
     if should_emit_namespace_var(core, name_ref, emitted) {
         result.push(Stmt::new(
             loc,
@@ -358,6 +371,7 @@ fn lower_enum(
                         enumeration.is_export,
                         enclosing_namespace,
                     ),
+                    all_values_are_pure,
                 ),
             ),
             ..ExprStmt::default()
@@ -450,7 +464,13 @@ fn enum_initial_value(
     }
 }
 
-fn enum_iife(loc: Loc, argument: Ref, body: Vec<Stmt>, initial_value: Expr) -> Expr {
+fn enum_iife(
+    loc: Loc,
+    argument: Ref,
+    body: Vec<Stmt>,
+    initial_value: Expr,
+    can_be_unwrapped_if_unused: bool,
+) -> Expr {
     let arrow = Expr::new(
         loc,
         ExprData::Arrow(ArrowExpr {
@@ -473,6 +493,7 @@ fn enum_iife(loc: Loc, argument: Ref, body: Vec<Stmt>, initial_value: Expr) -> E
         ExprData::Call(crate::internal::js_ast::CallExpr {
             target: arrow,
             args: vec![initial_value],
+            can_be_unwrapped_if_unused,
             ..crate::internal::js_ast::CallExpr::default()
         }),
     )
