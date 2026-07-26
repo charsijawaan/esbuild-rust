@@ -2391,6 +2391,60 @@ mod tests {
     }
 
     #[test]
+    fn tree_shakes_unused_top_level_statements_in_real_bundles() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import { used } from './dep.js'; const deadEntry = 1, liveEntry = used; console.log(liveEntry)"
+                        .into(),
+                ),
+                (
+                    "/project/dep.js".into(),
+                    "const deadDependency = 2, used = 3; console.log('dependency effect'); export { used, deadDependency }"
+                        .into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            tree_shaking: true,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert!(
+            compiled.scan_result.import_issues.is_empty(),
+            "{:?}",
+            compiled.scan_result.import_issues
+        );
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains("const used = 3;"));
+        assert!(output.contains("console.log(\"dependency effect\");"));
+        assert!(output.contains("const liveEntry = used;"));
+        assert!(output.contains("console.log(liveEntry);"));
+        assert!(!output.contains("deadEntry"));
+        assert!(!output.contains("deadDependency"));
+    }
+
+    #[test]
     fn renames_colliding_top_level_symbols_across_modules() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let file_system = mock_fs(

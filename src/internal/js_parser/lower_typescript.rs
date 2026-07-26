@@ -14,29 +14,44 @@ use crate::internal::{
 
 use super::parser_core::ParserCore;
 
+#[derive(Default)]
+pub(crate) struct LowerTypeScriptContext {
+    emitted: HashSet<Ref>,
+}
+
 pub(crate) fn lower_type_script_statements(
     core: &mut ParserCore,
     statements: Vec<Stmt>,
 ) -> Vec<Stmt> {
-    let mut emitted = HashSet::new();
-    let mut result = Vec::with_capacity(statements.len());
-    for statement in statements {
-        let loc = statement.loc;
-        let Some(data) = statement.data else {
-            result.push(statement);
-            continue;
-        };
-        match *data {
-            StmtData::Enum(enumeration) => {
-                lower_enum(core, loc, enumeration, &mut emitted, &mut result, None);
+    let mut context = LowerTypeScriptContext::default();
+    context.lower_statements(core, statements)
+}
+
+impl LowerTypeScriptContext {
+    pub(crate) fn lower_statements(
+        &mut self,
+        core: &mut ParserCore,
+        statements: Vec<Stmt>,
+    ) -> Vec<Stmt> {
+        let mut result = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let loc = statement.loc;
+            let Some(data) = statement.data else {
+                result.push(statement);
+                continue;
+            };
+            match *data {
+                StmtData::Enum(enumeration) => {
+                    lower_enum(core, loc, enumeration, &mut self.emitted, &mut result, None);
+                }
+                StmtData::Namespace(namespace) => {
+                    lower_namespace(core, loc, namespace, &mut self.emitted, &mut result, None);
+                }
+                other => result.push(Stmt::new(loc, other)),
             }
-            StmtData::Namespace(namespace) => {
-                lower_namespace(core, loc, namespace, &mut emitted, &mut result, None);
-            }
-            other => result.push(Stmt::new(loc, other)),
         }
+        result
     }
-    result
 }
 
 fn lower_namespace(

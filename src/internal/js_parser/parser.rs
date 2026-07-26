@@ -9,7 +9,8 @@ use crate::internal::{
     js_ast::{
         Ast, CallExpr, CallKind, ClauseItem, DeclaredSymbol, DotExpr, ExportsKind, Expr, ExprData,
         IdentifierExpr, ImportStmt, LazyExportStmt, LocalKind, NamedExport, NamedImport, Part,
-        Scope, ScopeKind, Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
+        Scope, ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind,
+        for_each_identifier_binding, make_helper_context,
     },
     js_lexer::{Lexer, LexerPanic, Token},
     logger::{Loc, Log, Path, Source},
@@ -17,8 +18,11 @@ use crate::internal::{
 };
 
 use super::{
-    Options, lower_typescript::lower_type_script_statements, parser_core::ParserCore,
-    parser_types::AwaitOrYield, syntax_statement::parse_statements_up_to,
+    Options,
+    lower_typescript::{LowerTypeScriptContext, lower_type_script_statements},
+    parser_core::ParserCore,
+    parser_types::AwaitOrYield,
+    syntax_statement::parse_statements_up_to,
     visit::visit_top_level_statements,
 };
 
@@ -306,26 +310,67 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 );
             }
         }
-        core.declared_symbols = declare_top_level_symbols(&mut core, &mut statements);
+        if core.options.tree_shaking {
+            statements = split_top_level_local_statements(statements);
+        }
+        let mut declared_symbols_by_statement = Vec::with_capacity(statements.len());
+        for statement in &mut statements {
+            declared_symbols_by_statement.push(declare_top_level_symbols(
+                &mut core,
+                std::slice::from_mut(statement),
+            ));
+        }
+        core.declared_symbols.clear();
         core.hoist_symbols();
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
-        visit_top_level_statements(&mut core, &mut statements);
-        statements = lower_type_script_statements(&mut core, statements);
+        let (parts, module_metadata, uses_exports_ref, uses_module_ref) =
+            if core.options.tree_shaking {
+                build_tree_shaking_parts(&mut core, statements, declared_symbols_by_statement)
+            } else {
+                core.declared_symbols = declared_symbols_by_statement.into_iter().flatten().fold(
+                    Vec::new(),
+                    |mut symbols, symbol| {
+                        record_top_level_symbol(&mut symbols, symbol.reference);
+                        symbols
+                    },
+                );
+                visit_top_level_statements(&mut core, &mut statements);
+                statements = lower_type_script_statements(&mut core, statements);
+                let uses_exports_ref = core
+                    .symbol_uses
+                    .get(&core.exports_ref)
+                    .is_some_and(|usage| usage.count_estimate > 0);
+                let uses_module_ref = core
+                    .symbol_uses
+                    .get(&core.module_ref)
+                    .is_some_and(|usage| usage.count_estimate > 0);
+                let module_metadata = scan_module_metadata(&mut core, &mut statements);
+                let mut parts = vec![Part {
+                    symbol_uses: HashMap::new(),
+                    can_be_removed_if_unused: true,
+                    ..Part::default()
+                }];
+                if !statements.is_empty() {
+                    let import_record_indices = (0..core.import_records.len())
+                        .map(|index| u32::try_from(index).expect("import record count fits in u32"))
+                        .collect();
+                    parts.push(Part {
+                        statements,
+                        scopes,
+                        import_record_indices,
+                        declared_symbols: std::mem::take(&mut core.declared_symbols),
+                        symbol_uses: std::mem::take(&mut core.symbol_uses),
+                        ..Part::default()
+                    });
+                }
+                (parts, module_metadata, uses_exports_ref, uses_module_ref)
+            };
         assert_eq!(
             core.remaining_scope_count(),
             0,
             "visit pass must consume every parse-pass scope"
         );
-        let uses_exports_ref = core
-            .symbol_uses
-            .get(&core.exports_ref)
-            .is_some_and(|usage| usage.count_estimate > 0);
-        let uses_module_ref = core
-            .symbol_uses
-            .get(&core.module_ref)
-            .is_some_and(|usage| usage.count_estimate > 0);
-        let module_metadata = scan_module_metadata(&mut core, &mut statements);
         let module_scope = core
             .module_scope
             .clone()
@@ -343,25 +388,6 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             crate::internal::ast::SlotCounts::default()
         };
 
-        let mut parts = vec![Part {
-            symbol_uses: HashMap::new(),
-            can_be_removed_if_unused: true,
-            ..Part::default()
-        }];
-        if !statements.is_empty() {
-            let import_record_indices = (0..core.import_records.len())
-                .map(|index| u32::try_from(index).expect("import record count fits in u32"))
-                .collect();
-            parts.push(Part {
-                statements,
-                scopes,
-                import_record_indices,
-                declared_symbols: std::mem::take(&mut core.declared_symbols),
-                symbol_uses: std::mem::take(&mut core.symbol_uses),
-                ..Part::default()
-            });
-        }
-
         let exports_kind = if has_esm_exports
             || has_import_statement
             || core.options.module_type_data.module_type.is_esm()
@@ -378,6 +404,16 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         };
         let mut top_level_symbol_to_parts_from_parser = HashMap::new();
         top_level_symbol_to_parts_from_parser.insert(core.exports_ref, vec![0]);
+        for (part_index, part) in parts.iter().enumerate() {
+            for declared in &part.declared_symbols {
+                if declared.is_top_level {
+                    top_level_symbol_to_parts_from_parser
+                        .entry(declared.reference)
+                        .or_insert_with(Vec::new)
+                        .push(u32::try_from(part_index).expect("part index fits in u32"));
+                }
+            }
+        }
 
         result = Ast {
             module_type_data: core.options.module_type_data,
@@ -426,9 +462,148 @@ struct ModuleMetadata {
     export_star_import_records: Vec<u32>,
 }
 
+fn split_top_level_local_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
+    let mut result = Vec::with_capacity(statements.len());
+    for statement in statements {
+        let Some(StmtData::Local(local)) = statement.data.as_deref() else {
+            result.push(statement);
+            continue;
+        };
+        if local.declarations.len() < 2 {
+            result.push(statement);
+            continue;
+        }
+        for declaration in &local.declarations {
+            let mut split = local.clone();
+            split.declarations = vec![declaration.clone()];
+            result.push(Stmt::new(statement.loc, StmtData::Local(split)));
+        }
+    }
+    result
+}
+
+fn build_tree_shaking_parts(
+    core: &mut ParserCore,
+    statements: Vec<Stmt>,
+    declared_symbols_by_statement: Vec<Vec<DeclaredSymbol>>,
+) -> (Vec<Part>, ModuleMetadata, bool, bool) {
+    let mut parts = vec![Part {
+        symbol_uses: HashMap::new(),
+        can_be_removed_if_unused: true,
+        ..Part::default()
+    }];
+    let mut metadata = ModuleMetadata::default();
+    let mut lower_context = LowerTypeScriptContext::default();
+    let mut uses_exports_ref = false;
+    let mut uses_module_ref = false;
+
+    core.scopes_for_current_part.clear();
+    for (mut statement, declared_symbols) in
+        statements.into_iter().zip(declared_symbols_by_statement)
+    {
+        core.symbol_uses.clear();
+        core.declared_symbols = declared_symbols;
+        core.scopes_for_current_part.clear();
+
+        let mut import_record_indices = top_level_import_record_indices(&statement);
+        let first_generated_import_record = core.import_records.len();
+        visit_top_level_statements(core, std::slice::from_mut(&mut statement));
+        let mut statements = lower_context.lower_statements(core, vec![statement]);
+        scan_module_metadata_into(core, &mut statements, &mut metadata);
+
+        uses_exports_ref |= core
+            .symbol_uses
+            .get(&core.exports_ref)
+            .is_some_and(|usage| usage.count_estimate > 0);
+        uses_module_ref |= core
+            .symbol_uses
+            .get(&core.module_ref)
+            .is_some_and(|usage| usage.count_estimate > 0);
+
+        import_record_indices.extend(
+            (first_generated_import_record..core.import_records.len())
+                .map(|index| u32::try_from(index).expect("import record count fits in u32")),
+        );
+        import_record_indices.sort_unstable();
+        import_record_indices.dedup();
+
+        if statements.is_empty() {
+            continue;
+        }
+
+        let can_be_removed_if_unused = {
+            let helpers = make_helper_context(|reference| {
+                core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                    == SymbolKind::Unbound
+            });
+            let flags = if core.options.mode == crate::internal::config::Mode::PassThrough {
+                StmtsCanBeRemovedIfUnusedFlags::KEEP_EXPORT_CLAUSES
+            } else {
+                StmtsCanBeRemovedIfUnusedFlags::NONE
+            };
+            helpers.stmts_can_be_removed_if_unused(&statements, flags)
+        };
+        parts.push(Part {
+            statements,
+            scopes: std::mem::take(&mut core.scopes_for_current_part),
+            import_record_indices,
+            declared_symbols: std::mem::take(&mut core.declared_symbols),
+            symbol_uses: std::mem::take(&mut core.symbol_uses),
+            can_be_removed_if_unused,
+            ..Part::default()
+        });
+    }
+
+    metadata
+        .named_imports
+        .extend(std::mem::take(&mut core.generated_named_imports));
+
+    let contains_direct_eval = core.module_scope.as_ref().is_some_and(|scope| {
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_direct_eval
+    });
+    if contains_direct_eval {
+        for part in &mut parts {
+            if part
+                .declared_symbols
+                .iter()
+                .any(|symbol| symbol.is_top_level)
+            {
+                part.can_be_removed_if_unused = false;
+            }
+        }
+    }
+
+    (parts, metadata, uses_exports_ref, uses_module_ref)
+}
+
+fn top_level_import_record_indices(statement: &Stmt) -> Vec<u32> {
+    match statement.data.as_deref() {
+        Some(StmtData::Import(import)) => vec![import.import_record_index],
+        Some(StmtData::ExportFrom(export)) => vec![export.import_record_index],
+        Some(StmtData::ExportStar(export)) => vec![export.import_record_index],
+        _ => Vec::new(),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> ModuleMetadata {
     let mut metadata = ModuleMetadata::default();
+    scan_module_metadata_into(core, statements, &mut metadata);
+    metadata
+        .named_imports
+        .extend(std::mem::take(&mut core.generated_named_imports));
+    metadata
+}
+
+#[allow(clippy::too_many_lines)]
+fn scan_module_metadata_into(
+    core: &mut ParserCore,
+    statements: &mut [Stmt],
+    metadata: &mut ModuleMetadata,
+) {
     for statement in statements {
         match statement.data.as_deref_mut() {
             Some(StmtData::Import(import)) => {
@@ -677,10 +852,6 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
             _ => {}
         }
     }
-    metadata
-        .named_imports
-        .extend(std::mem::take(&mut core.generated_named_imports));
-    metadata
 }
 
 fn record_export(
@@ -1147,6 +1318,48 @@ mod tests {
             ast.parts[1].statements[7].data.as_deref(),
             Some(StmtData::ExportDefault(_))
         ));
+    }
+
+    #[test]
+    fn builds_independent_parts_when_tree_shaking_is_enabled() {
+        let (ast, ok, log) = parse_source_with_options(
+            "import 'static';\
+             const dead = 1, live = 2;\
+             console.log(live);\
+             import('dynamic')",
+            Options {
+                tree_shaking: true,
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts.len(), 6);
+        assert_eq!(ast.import_records.len(), 2);
+        assert_eq!(ast.parts[1].import_record_indices, [0]);
+        assert!(ast.parts[2].import_record_indices.is_empty());
+        assert!(ast.parts[3].import_record_indices.is_empty());
+        assert!(ast.parts[4].import_record_indices.is_empty());
+        assert_eq!(ast.parts[5].import_record_indices, [1]);
+        assert!(ast.parts[1].can_be_removed_if_unused);
+        assert!(ast.parts[2].can_be_removed_if_unused);
+        assert!(ast.parts[3].can_be_removed_if_unused);
+        assert!(!ast.parts[4].can_be_removed_if_unused);
+        assert!(!ast.parts[5].can_be_removed_if_unused);
+
+        for part_index in [2_u32, 3] {
+            let declared = ast.parts[part_index as usize]
+                .declared_symbols
+                .iter()
+                .find(|symbol| symbol.is_top_level)
+                .expect("top-level declaration");
+            assert_eq!(
+                ast.top_level_symbol_to_parts_from_parser
+                    .get(&declared.reference)
+                    .expect("symbol-to-part mapping"),
+                &[part_index]
+            );
+        }
     }
 
     #[test]
