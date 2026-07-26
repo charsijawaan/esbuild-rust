@@ -66,6 +66,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         while lexer.token != Token::EndOfFile {
             statements.push(parse_statement(&mut core, &mut lexer));
         }
+        apply_jsx_pragmas(&mut core, &lexer);
 
         let (directives, directive_legacy_octal_locs) =
             strip_directive_prologue(&core, &mut statements);
@@ -586,6 +587,78 @@ fn record_top_level_symbol(declared: &mut Vec<DeclaredSymbol>, reference: Ref) {
             reference,
             is_top_level: true,
         });
+    }
+}
+
+fn apply_jsx_pragmas(core: &mut ParserCore, lexer: &Lexer) {
+    if !core.options.jsx.parse {
+        return;
+    }
+    let runtime = &lexer.jsx_runtime_pragma_comment;
+    if !runtime.text.is_empty() {
+        match runtime.text.as_str() {
+            "automatic" => core.options.jsx.automatic_runtime = true,
+            "classic" => core.options.jsx.automatic_runtime = false,
+            _ => core.add_warning_range(
+                runtime.range,
+                format!("Invalid JSX runtime: {:?}", runtime.text),
+            ),
+        }
+    }
+
+    let factory = &lexer.jsx_factory_pragma_comment;
+    if !factory.text.is_empty() {
+        if core.options.jsx.automatic_runtime {
+            core.add_warning_range(
+                factory.range,
+                "The JSX factory cannot be set when using React's \"automatic\" JSX transform",
+            );
+        } else {
+            let (define, _) = super::parse_define_expr(&factory.text);
+            if define.parts.is_empty() {
+                core.add_warning_range(
+                    factory.range,
+                    format!("Invalid JSX factory: {}", factory.text),
+                );
+            } else {
+                core.options.jsx.factory = define;
+            }
+        }
+    }
+
+    let fragment = &lexer.jsx_fragment_pragma_comment;
+    if !fragment.text.is_empty() {
+        if core.options.jsx.automatic_runtime {
+            core.add_warning_range(
+                fragment.range,
+                "The JSX fragment cannot be set when using React's \"automatic\" JSX transform",
+            );
+        } else {
+            let (define, _) = super::parse_define_expr(&fragment.text);
+            if define.parts.is_empty() && define.constant.data.is_none() {
+                core.add_warning_range(
+                    fragment.range,
+                    format!("Invalid JSX fragment: {}", fragment.text),
+                );
+            } else {
+                core.options.jsx.fragment = define;
+            }
+        }
+    }
+
+    let import_source = &lexer.jsx_import_source_pragma_comment;
+    if !import_source.text.is_empty() {
+        if core.options.jsx.automatic_runtime {
+            core.options
+                .jsx
+                .import_source
+                .clone_from(&import_source.text);
+        } else {
+            core.add_warning_range(
+                import_source.range,
+                "The JSX import source cannot be set without also enabling React's \"automatic\" JSX transform",
+            );
+        }
     }
 }
 
@@ -2373,6 +2446,72 @@ mod tests {
             parse_source_with_options("<div __source=\"plugin\" __self={self} />;", options);
         assert!(ok);
         assert_eq!(log.done().len(), 2);
+    }
+
+    #[test]
+    fn applies_file_level_jsx_pragmas() {
+        let mut options = Options::default();
+        options.jsx.parse = true;
+        let (ast, ok, log) = parse_source_with_options("/** @jsx h */ <div />;", options.clone());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected expression statement");
+        };
+        let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
+            panic!("expected JSX factory call");
+        };
+        let Some(ExprData::Identifier(target)) = call.target.data.as_deref() else {
+            panic!("expected custom factory identifier");
+        };
+        assert_eq!(
+            ast.symbols[usize::try_from(target.reference.inner_index).expect("symbol index")]
+                .original_name,
+            "h"
+        );
+
+        let (ast, ok, log) =
+            parse_source_with_options("/** @jsx h @jsxFrag Fragment */ <></>;", options.clone());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected expression statement");
+        };
+        let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
+            panic!("expected fragment factory call");
+        };
+        let Some(ExprData::Identifier(fragment)) = call.args[0].data.as_deref() else {
+            panic!("expected custom fragment identifier");
+        };
+        assert_eq!(
+            ast.symbols[usize::try_from(fragment.reference.inner_index).expect("symbol index")]
+                .original_name,
+            "Fragment"
+        );
+
+        let (ast, ok, log) = parse_source_with_options(
+            "/** @jsxRuntime automatic @jsxImportSource preact */ <div />;",
+            options.clone(),
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records[0].path.text, "preact/jsx-runtime");
+
+        let (_, ok, log) = parse_source_with_options(
+            "/** @jsxRuntime automatic @jsx custom */ <div />;",
+            options.clone(),
+        );
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Warning);
+
+        let (_, ok, log) =
+            parse_source_with_options("/** @jsxRuntime invalid */ <div />;", options);
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Warning);
     }
 
     #[test]
