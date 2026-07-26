@@ -1144,4 +1144,48 @@ mod tests {
         assert_eq!(ast.parts[1].symbol_uses[&outer_error].count_estimate, 1);
         assert_eq!(ast.parts[1].symbol_uses[&catch_error].count_estimate, 1);
     }
+
+    #[test]
+    fn labeled_break_and_continue_bind_to_the_label_symbol() {
+        let (ast, ok, log) = parse_source("outer: for (;;) { break outer; continue outer; }");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(
+            ast.parts[1]
+                .scopes
+                .iter()
+                .map(|scope| scope.lock().expect("scope lock").kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::internal::js_ast::ScopeKind::Entry,
+                crate::internal::js_ast::ScopeKind::Label,
+                crate::internal::js_ast::ScopeKind::Block,
+            ]
+        );
+        let Some(StmtData::Label(label)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected label statement");
+        };
+        let label_ref = label.name.reference;
+        let Some(StmtData::For(for_statement)) = label.statement.data.as_deref() else {
+            panic!("expected labeled loop");
+        };
+        let Some(StmtData::Block(body)) = for_statement.body.data.as_deref() else {
+            panic!("expected loop block");
+        };
+        assert!(matches!(
+            body.statements[0].data.as_deref(),
+            Some(StmtData::Break(statement))
+                if statement.label.is_some_and(|label| label.reference == label_ref)
+        ));
+        assert!(matches!(
+            body.statements[1].data.as_deref(),
+            Some(StmtData::Continue(statement))
+                if statement.label.is_some_and(|label| label.reference == label_ref)
+        ));
+        assert_eq!(ast.parts[1].symbol_uses[&label_ref].count_estimate, 2);
+
+        let (_, ok, log) = parse_source("block: { continue block; }");
+        assert!(ok);
+        assert!(!log.done().is_empty());
+    }
 }

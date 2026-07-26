@@ -583,9 +583,11 @@ fn parse_label_statement(
     name_loc: Loc,
     reference: crate::internal::ast::Ref,
 ) -> Stmt {
+    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Label, loc);
     lexer.expect(Token::Colon);
     let is_single_line_stmt = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
     let statement = parse_statement(core, lexer);
+    core.pop_scope();
     Stmt::new(
         loc,
         StmtData::Label(LabelStmt {

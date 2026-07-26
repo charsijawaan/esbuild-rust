@@ -89,7 +89,35 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
             }
             Some(StmtData::Label(label)) => {
+                core.push_scope_for_visit_pass(ScopeKind::Label, statement.loc);
+                let name = String::from_utf8_lossy(core.load_name_from_ref(label.name.reference))
+                    .into_owned();
+                let reference = core.new_symbol(crate::internal::ast::SymbolKind::Label, name);
+                label.name.reference = reference;
+                {
+                    let mut scope = core
+                        .current_scope
+                        .as_ref()
+                        .expect("label scope")
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    scope.label = crate::internal::ast::LocRef {
+                        loc: label.name.loc,
+                        reference,
+                    };
+                    scope.label_stmt_is_loop = matches!(
+                        label.statement.data.as_deref(),
+                        Some(
+                            StmtData::For(_)
+                                | StmtData::ForIn(_)
+                                | StmtData::ForOf(_)
+                                | StmtData::While(_)
+                                | StmtData::DoWhile(_)
+                        )
+                    );
+                }
                 visit_statement(core, &mut label.statement, resolve_identifiers);
+                core.pop_scope();
             }
             Some(StmtData::Switch(switch)) => {
                 visit_expr(core, &mut switch.test, resolve_identifiers);
@@ -121,8 +149,36 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     core.pop_scope();
                 }
             }
+            Some(StmtData::Break(break_statement)) => {
+                bind_label_reference(core, &mut break_statement.label, false);
+            }
+            Some(StmtData::Continue(continue_statement)) => {
+                bind_label_reference(core, &mut continue_statement.label, true);
+            }
             _ => {}
         }
+    }
+}
+
+fn bind_label_reference(
+    core: &mut ParserCore,
+    label: &mut Option<crate::internal::ast::LocRef>,
+    must_be_loop: bool,
+) {
+    let Some(label) = label else {
+        return;
+    };
+    if !ParserCore::is_stored_name_ref(label.reference) {
+        return;
+    }
+    let name = String::from_utf8_lossy(core.load_name_from_ref(label.reference)).into_owned();
+    let (reference, is_loop, found) = core.find_label_symbol(label.loc, &name);
+    label.reference = reference;
+    if found && must_be_loop && !is_loop {
+        core.add_error_range(
+            crate::internal::js_lexer::range_of_identifier(&core.source, label.loc),
+            format!("Cannot continue to label {name:?}"),
+        );
     }
 }
 
