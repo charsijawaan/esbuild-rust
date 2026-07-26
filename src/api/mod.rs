@@ -12,12 +12,13 @@ use crate::internal::{
     cache::CacheSet,
     config::{self, Mode},
     css_parser, css_printer,
-    fs::{RealFsOptions, real_fs},
+    fs::{Fs, RealFsOptions, real_fs},
     helpers::{encode_string_as_shortest_data_url, mime_type_by_extension, string_to_utf16},
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
     logger::{DeferLogKind, Log, Msg, MsgKind, PrettyPaths, Source},
     renamer::new_no_op_renamer,
+    resolver,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -87,6 +88,13 @@ pub enum BuildFormat {
     EsModule,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Packages {
+    #[default]
+    Bundle,
+    External,
+}
+
 #[derive(Clone, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildOptions {
@@ -102,6 +110,8 @@ pub struct BuildOptions {
     pub ascii_only: bool,
     pub banner: String,
     pub footer: String,
+    pub external: Vec<String>,
+    pub packages: Packages,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -118,7 +128,65 @@ pub struct BuildResult {
     pub output_files: Vec<BuildOutputFile>,
 }
 
+fn validate_externals(
+    file_system: &dyn Fs,
+    paths: &[String],
+) -> Result<config::ExternalSettings, Vec<Message>> {
+    let mut result = config::ExternalSettings::default();
+    let mut errors = Vec::new();
+    for path in paths {
+        if let Some(index) = path.find('*') {
+            if path[index + 1..].contains('*') {
+                errors.push(Message {
+                    text: format!(
+                        "External path {path:?} cannot have more than one \"*\" wildcard"
+                    ),
+                    kind: MessageKind::Error,
+                });
+                continue;
+            }
+            result.pre_resolve.patterns.push(config::WildcardPattern {
+                prefix: path[..index].into(),
+                suffix: path[index + 1..].into(),
+            });
+            if !resolver::is_package_path(path) {
+                let absolute = if file_system.is_abs(path) {
+                    path.clone()
+                } else {
+                    file_system.join(&[file_system.cwd(), path])
+                };
+                let absolute_index = absolute.find('*').expect("wildcard is preserved");
+                result.post_resolve.patterns.push(config::WildcardPattern {
+                    prefix: absolute[..absolute_index].into(),
+                    suffix: absolute[absolute_index + 1..].into(),
+                });
+            }
+        } else {
+            result.pre_resolve.exact.insert(path.clone(), true);
+            if resolver::is_package_path(path) {
+                result.pre_resolve.patterns.push(config::WildcardPattern {
+                    prefix: format!("{path}/"),
+                    suffix: String::new(),
+                });
+            } else {
+                let absolute = if file_system.is_abs(path) {
+                    path.clone()
+                } else {
+                    file_system.join(&[file_system.cwd(), path])
+                };
+                result.post_resolve.exact.insert(absolute, true);
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(result)
+    } else {
+        Err(errors)
+    }
+}
+
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn build(options: BuildOptions) -> BuildResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
     let file_system = match real_fs(RealFsOptions {
@@ -132,6 +200,15 @@ pub fn build(options: BuildOptions) -> BuildResult {
                     text: error.message,
                     kind: MessageKind::Error,
                 }],
+                ..BuildResult::default()
+            };
+        }
+    };
+    let external_settings = match validate_externals(file_system.as_ref(), &options.external) {
+        Ok(settings) => settings,
+        Err(errors) => {
+            return BuildResult {
+                errors,
                 ..BuildResult::default()
             };
         }
@@ -165,6 +242,8 @@ pub fn build(options: BuildOptions) -> BuildResult {
         ascii_only: options.ascii_only,
         js_banner: options.banner,
         js_footer: options.footer,
+        external_settings,
+        external_packages: options.packages == Packages::External,
         abs_output_dir: output_dir,
         abs_output_file: output_file,
         abs_output_base: file_system.cwd().to_string(),
@@ -588,7 +667,7 @@ fn add_banner_and_footer(mut code: Vec<u8>, banner: &str, footer: &str) -> Vec<u
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildFormat, BuildOptions, Loader, TransformOptions, build, transform};
+    use super::{BuildFormat, BuildOptions, Loader, Packages, TransformOptions, build, transform};
 
     fn code(result: super::TransformResult) -> String {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
@@ -621,6 +700,83 @@ mod tests {
         assert!(output.contains("console.log(\"api build\");"));
         assert!(output.starts_with("(() => {\n"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn preserves_configured_external_imports() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-external-{unique}"));
+        std::fs::create_dir_all(directory.join("src")).expect("create source directory");
+        std::fs::create_dir_all(directory.join("vendor")).expect("create vendor directory");
+        std::fs::write(
+            directory.join("src/entry.js"),
+            "import one from 'pkg/subpath'; import two from '../vendor/tool.js'; console.log(one, two)",
+        )
+        .expect("write entry file");
+        std::fs::write(
+            directory.join("vendor/tool.js"),
+            "export default 'must stay external'",
+        )
+        .expect("write vendor file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["src/entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::EsModule,
+            external: vec!["pkg".into(), "./vendor/*".into()],
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 1);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("from \"pkg/subpath\""));
+        assert!(output.contains("from \"../vendor/tool.js\""));
+        assert!(!output.contains("must stay external"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn can_externalize_all_package_imports() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-packages-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import value from 'missing-package'; console.log(value)",
+        )
+        .expect("write entry file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::EsModule,
+            packages: Packages::External,
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("from \"missing-package\""));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn rejects_external_paths_with_multiple_wildcards() {
+        let result = build(BuildOptions {
+            external: vec!["pkg/*/bad/*".into()],
+            ..BuildOptions::default()
+        });
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].text.contains("more than one"));
     }
 
     #[test]

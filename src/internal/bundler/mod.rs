@@ -551,7 +551,11 @@ pub fn resolve_import_records(
             options.platform,
             (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
             is_require,
-            ResolverContext::default(),
+            ResolverContext {
+                external_settings: Some(&options.external_settings),
+                external_packages: options.external_packages,
+                ..ResolverContext::default()
+            },
         ) else {
             if !record
                 .flags
@@ -637,7 +641,11 @@ pub fn scan_bundle(
             options.platform,
             (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
             false,
-            ResolverContext::default(),
+            ResolverContext {
+                external_settings: Some(&options.external_settings),
+                external_packages: options.external_packages,
+                ..ResolverContext::default()
+            },
         ) else {
             log.add_error(
                 None,

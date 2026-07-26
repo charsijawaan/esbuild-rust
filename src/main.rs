@@ -4,7 +4,7 @@ use std::{
 };
 
 use esbuild_rs::{
-    api::{BuildFormat, BuildOptions, Loader, TransformOptions, build, transform},
+    api::{BuildFormat, BuildOptions, Loader, Packages, TransformOptions, build, transform},
     internal::cli_helpers,
 };
 
@@ -41,6 +41,8 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut outfile = String::new();
     let mut format = BuildFormat::Iife;
     let mut splitting = false;
+    let mut external = Vec::new();
+    let mut packages = Packages::Bundle;
     for argument in arguments {
         if argument == "--help" || argument == "-h" {
             return Ok(Output::Text(help_text()));
@@ -76,6 +78,18 @@ fn run(arguments: &[String]) -> Result<Output, String> {
                 "cjs" => BuildFormat::CommonJs,
                 "esm" => BuildFormat::EsModule,
                 _ => return Err(format!("Invalid format {value:?}")),
+            };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--external:") {
+            external.push(value.into());
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--packages=") {
+            packages = match value {
+                "bundle" => Packages::Bundle,
+                "external" => Packages::External,
+                _ => return Err(format!("Invalid packages setting {value:?}")),
             };
             continue;
         }
@@ -149,6 +163,8 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             ascii_only: options.ascii_only,
             banner: options.banner,
             footer: options.footer,
+            external,
+            packages,
             ..BuildOptions::default()
         });
         if !result.errors.is_empty() {
@@ -246,6 +262,8 @@ fn help_text() -> String {
          \x20\x20--outfile=FILE\n\
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--splitting\n\
+         \x20\x20--external:PATH\n\
+         \x20\x20--packages=bundle|external\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
@@ -292,6 +310,7 @@ mod tests {
         assert!(run(&["--not-a-real-option".into()]).is_err());
         assert!(run(&["--loader=wat".into()]).is_err());
         assert!(run(&["--format=wat".into()]).is_err());
+        assert!(run(&["--packages=wat".into()]).is_err());
     }
 
     #[test]
@@ -313,6 +332,35 @@ mod tests {
         let output = String::from_utf8(output).expect("bundle output is UTF-8");
         assert!(output.contains("console.log(\"cli bundle\");"));
         assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn bundles_with_external_package_flags() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-external-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(
+            &entry,
+            "import value from 'pkg/subpath'; console.log(value)",
+        )
+        .expect("write entry file");
+
+        let Output::Code(output) = run(&[
+            "--bundle".into(),
+            "--format=esm".into(),
+            "--external:pkg".into(),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("bundle succeeds") else {
+            panic!("expected bundled code");
+        };
+        let output = String::from_utf8(output).expect("bundle output is UTF-8");
+        assert!(output.contains("from \"pkg/subpath\""));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

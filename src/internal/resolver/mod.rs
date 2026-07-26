@@ -10,8 +10,8 @@ use base64::engine::general_purpose::STANDARD;
 
 use crate::internal::{
     config::{
-        MaybeBool, Platform, TsAlwaysStrict, TsConfig, TsConfigJsx, TsImportsNotUsedAsValues,
-        TsJsx, TsTarget,
+        ExternalMatchers, ExternalSettings, MaybeBool, Platform, TsAlwaysStrict, TsConfig,
+        TsConfigJsx, TsImportsNotUsedAsValues, TsJsx, TsTarget,
     },
     fs::{DifferentCase, EntryKind, Fs},
     helpers::{is_inside_node_modules, utf16_to_string},
@@ -376,8 +376,18 @@ pub fn is_node_builtin(path: &str) -> bool {
 pub struct ResolverContext<'a> {
     pub tsconfig: Option<&'a TsConfigJson>,
     pub pnp: Option<&'a PnpData>,
+    pub external_settings: Option<&'a ExternalSettings>,
+    pub external_packages: bool,
     pub strip_node_prefix_for_import: bool,
     pub strip_node_prefix_for_require: bool,
+}
+
+fn is_external_match(matchers: &ExternalMatchers, path: &str) -> bool {
+    matchers.exact.contains_key(path)
+        || matchers
+            .patterns
+            .iter()
+            .any(|pattern| path.starts_with(&pattern.prefix) && path.ends_with(&pattern.suffix))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -443,6 +453,23 @@ fn resolve_file_or_package_core(
     context: ResolverContext<'_>,
     forbid_package_imports: bool,
 ) -> Option<LoadedPathPair> {
+    if context
+        .external_settings
+        .is_some_and(|settings| is_external_match(&settings.pre_resolve, import_path))
+        || (context.external_packages && is_package_path(import_path))
+    {
+        return Some(LoadedPathPair {
+            paths: PathPair {
+                primary: Path {
+                    text: import_path.to_string(),
+                    ..Path::default()
+                },
+                is_external: true,
+                ..PathPair::default()
+            },
+            different_case: None,
+        });
+    }
     if platform == Platform::Node
         && (is_node_builtin(import_path) || import_path.starts_with("node:"))
     {
@@ -715,6 +742,13 @@ pub fn resolve_with_metadata(
         different_case: loaded.different_case,
         ..ResolveResult::default()
     };
+    if !result.path_pair.is_external
+        && context.external_settings.is_some_and(|settings| {
+            is_external_match(&settings.post_resolve, &result.path_pair.primary.text)
+        })
+    {
+        result.path_pair.is_external = true;
+    }
     if let Some(tsconfig) = context.tsconfig {
         result.ts_config_jsx = tsconfig.jsx_settings.clone();
         result.ts_config = Some(tsconfig.settings);
