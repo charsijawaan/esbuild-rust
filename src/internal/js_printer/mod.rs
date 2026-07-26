@@ -1433,7 +1433,8 @@ impl Printer<'_> {
                 self.print_indent();
             }
             if property.kind == PropertyKind::ClassStaticBlock {
-                self.output.extend_from_slice(b"static ");
+                self.output.extend_from_slice(b"static");
+                self.print_optional_space();
                 if let Some(block) = &property.class_static_block {
                     self.print_block(&block.block, true);
                 }
@@ -3237,6 +3238,7 @@ mod tests {
                     constructor(x) { this.x = x; }\
                     move(dx) { this.x += dx; }\
                     static origin = new Point(0);\
+                    static { this.ready = true; }\
                 }"
                 .as_slice(),
             ),
@@ -3261,7 +3263,25 @@ mod tests {
              \x20\x20\x20\x20this.x += dx;\n\
              \x20\x20}\n\
              \x20\x20static origin = new Point(0);\n\
+             \x20\x20static {\n\
+             \x20\x20\x20\x20this.ready = true;\n\
+             \x20\x20}\n\
              }\n"
+        );
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "class Point extends Base{x=0;constructor(x){this.x=x}move(dx){this.x+=dx}static origin=new Point(0);static{this.ready=true}}"
         );
     }
 
