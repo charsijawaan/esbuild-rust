@@ -2602,7 +2602,16 @@ impl Printer<'_> {
 
 fn can_omit_space_after_return(expression: &Expr) -> bool {
     match expression.data.as_deref() {
-        Some(ExprData::Arrow(_)) => true,
+        Some(
+            ExprData::Array(_)
+            | ExprData::Object(_)
+            | ExprData::String(_)
+            | ExprData::Template(_)
+            | ExprData::RegExp(_)
+            | ExprData::Arrow(_)
+            | ExprData::JsxElement(_),
+        ) => true,
+        Some(ExprData::Unary(unary)) => !unary.op.table_entry().is_keyword,
         Some(ExprData::Call(call)) => {
             matches!(call.target.data.as_deref(), Some(ExprData::Arrow(_)))
         }

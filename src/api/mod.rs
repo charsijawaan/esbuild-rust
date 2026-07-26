@@ -167,7 +167,19 @@ fn transform_base_renamer(
 ) -> (Box<dyn Renamer>, KeepNameHelper) {
     if minify_identifiers {
         let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
-        let reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
+        let mut reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
+        if let Some(module_scope) = &ast.module_scope {
+            let module_scope = module_scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for member in module_scope.members.values() {
+                let reference = symbols.follow_symbols_const(member.reference);
+                let symbol = symbols.get(reference);
+                if symbol.kind != crate::internal::ast::SymbolKind::Import {
+                    reserved_names.insert(symbol.original_name.clone(), 1);
+                }
+            }
+        }
         let mut renamer = crate::internal::renamer::MinifyRenamer::new(
             symbols.clone(),
             ast.nested_scope_slot_counts,
@@ -5875,6 +5887,20 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn minifies_return_keyword_spacing_like_esbuild() {
+        assert_eq!(
+            code(transform(
+                "function a(x){return [x]}function b(x){return {x}}function c(){return \"x\"}function d(){return /x/}function e(x){return !x}function f(x){return typeof x}",
+                TransformOptions {
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function a(x){return[x]}function b(x){return{x}}function c(){return\"x\"}function d(){return/x/}function e(x){return!x}function f(x){return typeof x}\n"
+        );
     }
 
     #[test]
