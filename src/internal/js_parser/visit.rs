@@ -224,7 +224,40 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
     for decorator in &mut class.decorators {
         visit_expr(core, &mut decorator.value, resolve_identifiers);
     }
+    core.push_scope_for_visit_pass(ScopeKind::ClassName, class.class_keyword.loc);
+    if let Some(name) = &mut class.name {
+        let text = if ParserCore::is_stored_name_ref(name.reference) {
+            String::from_utf8_lossy(core.load_name_from_ref(name.reference)).into_owned()
+        } else {
+            core.symbols[usize::try_from(name.reference.inner_index).expect("symbol index")]
+                .original_name
+                .clone()
+        };
+        let inner_reference =
+            core.new_symbol(crate::internal::ast::SymbolKind::Const, format!("_{text}"));
+        core.current_scope
+            .as_ref()
+            .expect("class name scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .insert(
+                text,
+                crate::internal::js_ast::ScopeMember {
+                    reference: inner_reference,
+                    loc: name.loc,
+                },
+            );
+        if ParserCore::is_stored_name_ref(name.reference) {
+            name.reference = inner_reference;
+        }
+    }
+    crate::internal::js_ast::Scope::recursive_set_strict_mode(
+        core.current_scope.as_ref().expect("class name scope"),
+        crate::internal::js_ast::StrictModeKind::ImplicitStrictClass,
+    );
     visit_expr(core, &mut class.extends_or_nil, resolve_identifiers);
+    core.push_scope_for_visit_pass(ScopeKind::ClassBody, class.body_loc);
     for property in &mut class.properties {
         if property.flags.contains(PropertyFlags::IS_COMPUTED) {
             visit_expr(core, &mut property.key, resolve_identifiers);
@@ -235,14 +268,17 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
         visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
         visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
         if let Some(static_block) = &mut property.class_static_block {
-            visit_block(
+            core.push_scope_for_visit_pass(ScopeKind::ClassStaticInit, static_block.loc);
+            visit_statements(
                 core,
-                static_block.loc,
-                &mut static_block.block,
+                &mut static_block.block.statements,
                 resolve_identifiers,
             );
+            core.pop_scope();
         }
     }
+    core.pop_scope();
+    core.pop_scope();
 }
 
 fn visit_binding_initializers(

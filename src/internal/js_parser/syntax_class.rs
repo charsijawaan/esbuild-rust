@@ -19,7 +19,7 @@ use super::{
     syntax_literals::{
         parse_big_int_or_string_if_unsupported, parse_numeric_literal, parse_string_literal,
     },
-    syntax_statement::parse_block,
+    syntax_statement::parse_block_with_scope,
 };
 
 pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Option<Expr> {
@@ -29,6 +29,7 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
     let loc = lexer.loc();
     let class_keyword = lexer.range();
     lexer.next();
+    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::ClassName, loc);
 
     let name = if lexer.token == Token::Identifier {
         let name = LocRef {
@@ -49,6 +50,7 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
 
     let body_loc = lexer.loc();
     lexer.expect(Token::OpenBrace);
+    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::ClassBody, body_loc);
     let mut properties = Vec::new();
     while lexer.token != Token::CloseBrace {
         if lexer.token == Token::Semicolon {
@@ -63,6 +65,8 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
     }
     let close_brace_loc = lexer.loc();
     lexer.expect(Token::CloseBrace);
+    core.pop_scope();
+    core.pop_scope();
     Some(Expr::new(
         loc,
         ExprData::Class(ClassExpr {
@@ -100,7 +104,11 @@ fn parse_class_property(
                 allow_super_property: true,
                 ..FnOrArrowDataParse::default()
             };
-            let (block_loc, block) = parse_block(core, lexer);
+            let (block_loc, block) = parse_block_with_scope(
+                core,
+                lexer,
+                crate::internal::js_ast::ScopeKind::ClassStaticInit,
+            );
             core.fn_or_arrow_data_parse = old_context;
             return Property {
                 class_static_block: Some(Box::new(ClassStaticBlock {

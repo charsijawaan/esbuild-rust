@@ -1238,4 +1238,51 @@ mod tests {
             ast.parts[1].scopes[1].lock().expect("switch scope").members["item"].reference;
         assert_eq!(ast.parts[1].symbol_uses[&item_ref].count_estimate, 1);
     }
+
+    #[test]
+    fn class_name_and_body_scopes_cover_members_and_static_blocks() {
+        let (ast, ok, log) = parse_source(
+            "class Item extends Base {\
+               field = Item;\
+               method(arg) { return Item + arg; }\
+               static { Item; }\
+             }",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(
+            ast.parts[1]
+                .scopes
+                .iter()
+                .map(|scope| scope.lock().expect("scope lock").kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::internal::js_ast::ScopeKind::Entry,
+                crate::internal::js_ast::ScopeKind::ClassName,
+                crate::internal::js_ast::ScopeKind::ClassBody,
+                crate::internal::js_ast::ScopeKind::FunctionArgs,
+                crate::internal::js_ast::ScopeKind::FunctionBody,
+                crate::internal::js_ast::ScopeKind::ClassStaticInit,
+            ]
+        );
+        let outer_item =
+            ast.parts[1].scopes[0].lock().expect("entry scope").members["Item"].reference;
+        let inner_item = ast.parts[1].scopes[1]
+            .lock()
+            .expect("class name scope")
+            .members["Item"]
+            .reference;
+        assert_ne!(outer_item, inner_item);
+        assert_eq!(ast.parts[1].symbol_uses[&inner_item].count_estimate, 3);
+        for scope in &ast.parts[1].scopes[1..] {
+            assert_eq!(
+                scope.lock().expect("scope lock").strict_mode,
+                crate::internal::js_ast::StrictModeKind::ImplicitStrictClass
+            );
+        }
+        let Some(StmtData::Class(class)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected class statement");
+        };
+        assert_eq!(class.class.name.expect("class name").reference, outer_item);
+    }
 }
