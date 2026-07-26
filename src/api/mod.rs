@@ -118,9 +118,25 @@ fn transform_keep_name_renamer(
             );
         }
     }
-    let base: Box<dyn Renamer> = if minify_identifiers {
+    let base = transform_base_renamer(ast, &symbols, minify_identifiers);
+    (
+        TransformRenamer {
+            base,
+            symbols,
+            overrides,
+        },
+        helper_name,
+    )
+}
+
+fn transform_base_renamer(
+    ast: &crate::internal::js_ast::Ast,
+    symbols: &SymbolMap,
+    minify_identifiers: bool,
+) -> Box<dyn Renamer> {
+    if minify_identifiers {
         let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
-        let reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, &symbols);
+        let reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
         let mut renamer = crate::internal::renamer::MinifyRenamer::new(
             symbols.clone(),
             ast.nested_scope_slot_counts,
@@ -143,16 +159,22 @@ fn transform_keep_name_renamer(
         renamer.assign_names_by_frequency(&minifier);
         Box::new(renamer)
     } else {
-        Box::new(new_no_op_renamer(symbols.clone()))
-    };
-    (
-        TransformRenamer {
-            base,
-            symbols,
-            overrides,
-        },
-        helper_name,
-    )
+        let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
+        let reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
+        let mut renamer =
+            crate::internal::renamer::NumberRenamer::new(symbols.clone(), reserved_names);
+        let mut nested_scopes = Vec::new();
+        for part in &ast.parts {
+            for declared in &part.declared_symbols {
+                if declared.is_top_level {
+                    renamer.add_top_level_symbol(declared.reference);
+                }
+            }
+            nested_scopes.extend(part.scopes.iter().cloned());
+        }
+        renamer.assign_names_by_scope(&HashMap::from([(0, nested_scopes)]));
+        Box::new(renamer)
+    }
 }
 
 fn prepend_keep_name_helper(code: &mut Vec<u8>, helper_name: &str, minify_whitespace: bool) {
@@ -4805,7 +4827,7 @@ mod tests {
         assert!(preserved.contains("}).xyz(\"keep\")"));
         assert!(preserved.contains("console[abc][xyz](\"keep\")"));
         assert!(preserved.contains("}).bind(console)"));
-        assert!(preserved.contains("console.log(\"keep\")"));
+        assert!(preserved.contains("console2.log(\"keep\")"));
         assert!(preserved.contains("if (ok) ;"));
         assert!(!preserved.contains("\"drop\""));
 
@@ -5162,10 +5184,10 @@ mod tests {
                 }
             )),
             "var Color;\n\
-             Color = /* @__PURE__ */ ((Color) => {\n\
-             \x20\x20Color[Color[\"Red\"] = 0] = \"Red\";\n\
-             \x20\x20Color[\"Blue\"] = \"blue\";\n\
-             \x20\x20return Color;\n\
+             Color = /* @__PURE__ */ ((Color2) => {\n\
+             \x20\x20Color2[Color2[\"Red\"] = 0] = \"Red\";\n\
+             \x20\x20Color2[\"Blue\"] = \"blue\";\n\
+             \x20\x20return Color2;\n\
              })(Color || {});\n\
              const red = 0 /* Red */;\n"
         );
@@ -5176,8 +5198,26 @@ mod tests {
                 ..TransformOptions::default()
             },
         ));
-        assert!(impure.contains("Value = ((Value) =>"));
+        assert!(impure.contains("Value = ((Value2) =>"));
         assert!(!impure.contains("@__PURE__"));
+    }
+
+    #[test]
+    fn numbers_type_script_namespace_scope_collisions() {
+        assert_eq!(
+            code(transform(
+                "namespace N { export const x = 1 } console.log(N.x)",
+                TransformOptions {
+                    loader: Loader::Ts,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var N;\n\
+             ((N2) => {\n\
+             \x20\x20N2.x = 1;\n\
+             })(N || (N = {}));\n\
+             console.log(N.x);\n"
+        );
     }
 
     #[test]
