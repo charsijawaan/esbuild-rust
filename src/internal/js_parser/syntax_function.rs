@@ -170,6 +170,7 @@ fn parse_function_after_keyword(
     )
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn parse_function_tail(
     core: &mut ParserCore,
     lexer: &mut Lexer,
@@ -223,7 +224,9 @@ pub(crate) fn parse_function_tail(
             has_rest_arg = true;
         }
 
-        let mut binding = parse_binding(core, lexer);
+        let binding = parse_binding(core, lexer);
+        let (mut binding, is_typescript_ctor_field) =
+            parse_type_script_constructor_field(core, lexer, binding, body_context.is_constructor);
         if core.options.ts.parse && lexer.token == Token::Question {
             lexer.next();
         }
@@ -244,6 +247,7 @@ pub(crate) fn parse_function_tail(
         args.push(Arg {
             binding,
             default_or_nil,
+            is_typescript_ctor_field,
             ..Arg::default()
         });
 
@@ -283,6 +287,40 @@ pub(crate) fn parse_function_tail(
         has_rest_arg,
         ..Function::default()
     }
+}
+
+fn parse_type_script_constructor_field(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    mut binding: Binding,
+    is_constructor: bool,
+) -> (Binding, bool) {
+    let mut is_typescript_ctor_field = false;
+    while core.options.ts.parse
+        && is_constructor
+        && binding_is_type_script_constructor_modifier(core, &binding)
+        && matches!(
+            lexer.token,
+            Token::Identifier | Token::OpenBrace | Token::OpenBracket
+        )
+    {
+        is_typescript_ctor_field = true;
+        if lexer.token != Token::Identifier {
+            lexer.expected(Token::Identifier);
+        }
+        binding = parse_binding(core, lexer);
+    }
+    (binding, is_typescript_ctor_field)
+}
+
+fn binding_is_type_script_constructor_modifier(core: &ParserCore, binding: &Binding) -> bool {
+    let Some(BindingData::Identifier(identifier)) = binding.data.as_deref() else {
+        return false;
+    };
+    matches!(
+        core.load_name_from_ref(identifier.reference),
+        b"public" | b"private" | b"protected" | b"readonly" | b"override"
+    )
 }
 
 #[cfg(test)]

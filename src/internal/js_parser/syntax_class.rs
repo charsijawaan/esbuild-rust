@@ -389,6 +389,7 @@ fn parse_class_property(
                 },
                 allow_super_call: class_has_extends && is_constructor,
                 allow_super_property: true,
+                is_constructor,
                 ..FnOrArrowDataParse::default()
             },
         );

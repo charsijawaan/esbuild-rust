@@ -1984,6 +1984,7 @@ mod tests {
                map<U>(input: U): T { return this.value; }\
                static accessor count: number = initialize();\
                accessor #slot: number = 0;\
+               constructor(public id: string, readonly size: number = 1, readonly = 2) {}\
              }",
             options,
         );
@@ -1992,7 +1993,7 @@ mod tests {
         let Some(StmtData::Class(class)) = ast.parts[1].statements[0].data.as_deref() else {
             panic!("expected TypeScript class statement");
         };
-        assert_eq!(class.class.properties.len(), 4);
+        assert_eq!(class.class.properties.len(), 5);
         assert_eq!(
             class.class.properties[1].kind,
             crate::internal::js_ast::PropertyKind::Method
@@ -2016,6 +2017,14 @@ mod tests {
             .kind,
             crate::internal::ast::SymbolKind::PrivateGetSetPair
         );
+        let Some(ExprData::Function(constructor)) =
+            class.class.properties[4].value_or_nil.data.as_deref()
+        else {
+            panic!("expected constructor");
+        };
+        assert!(constructor.function.args[0].is_typescript_ctor_field);
+        assert!(constructor.function.args[1].is_typescript_ctor_field);
+        assert!(!constructor.function.args[2].is_typescript_ctor_field);
     }
 
     #[test]
