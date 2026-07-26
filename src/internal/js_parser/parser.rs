@@ -4,14 +4,16 @@ use std::{
 };
 
 use crate::internal::{
-    ast::{ImportRecordFlags, Ref, SymbolKind},
+    ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, LocRef, Ref, SymbolKind},
     helpers::utf16_to_string,
     js_ast::{
-        Ast, DeclaredSymbol, ExportsKind, ExprData, LocalKind, NamedExport, NamedImport, Part,
+        Ast, CallExpr, CallKind, ClauseItem, DeclaredSymbol, DotExpr, ExportsKind, Expr, ExprData,
+        IdentifierExpr, ImportStmt, LazyExportStmt, LocalKind, NamedExport, NamedImport, Part,
         Scope, ScopeKind, Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
     },
     js_lexer::{Lexer, LexerPanic, Token},
-    logger::{Loc, Log, Source},
+    logger::{Loc, Log, Path, Source},
+    runtime,
 };
 
 use super::{
@@ -21,6 +23,189 @@ use super::{
 };
 
 const MODULE_SCOPE_LOC: Loc = Loc { start: -1 };
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HelperCall {
+    pub global: Vec<String>,
+    pub runtime: String,
+}
+
+/// Construct an AST whose default export is generated lazily during linking.
+///
+/// # Panics
+///
+/// Panics if parser scope invariants are violated or generated import and
+/// symbol indexes do not fit in their upstream-compatible integer widths.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn lazy_export_ast(
+    log: Log,
+    source: &Source,
+    options: Options,
+    mut expression: Expr,
+    helper_call: Option<&HelperCall>,
+) -> Ast {
+    let approximate_line_count =
+        i32::try_from(source.contents.split(|byte| *byte == b'\n').count()).unwrap_or(i32::MAX);
+    let mut core = ParserCore::new_with_log(source.clone(), options, log);
+    core.push_scope_for_parse_pass(ScopeKind::Entry, MODULE_SCOPE_LOC);
+    core.prepare_for_visit_pass(false, false);
+
+    if let Some(helper_call) = helper_call {
+        core.symbol_uses = HashMap::new();
+        if let Some(first) = helper_call.global.first() {
+            let reference = core.new_symbol(SymbolKind::Unbound, first.clone());
+            core.record_usage(reference);
+            let mut target = Expr::new(
+                expression.loc,
+                ExprData::Identifier(IdentifierExpr {
+                    reference,
+                    ..IdentifierExpr::default()
+                }),
+            );
+            let mut kind = CallKind::Normal;
+            for name in helper_call.global.iter().skip(1) {
+                target = Expr::new(
+                    expression.loc,
+                    ExprData::Dot(DotExpr {
+                        target,
+                        name: name.clone(),
+                        ..DotExpr::default()
+                    }),
+                );
+                kind = CallKind::TargetWasOriginallyPropertyAccess;
+            }
+            expression = Expr::new(
+                expression.loc,
+                ExprData::Call(CallExpr {
+                    target,
+                    args: vec![expression],
+                    kind,
+                    ..CallExpr::default()
+                }),
+            );
+        } else if !helper_call.runtime.is_empty() {
+            expression = core.call_runtime(expression.loc, &helper_call.runtime, vec![expression]);
+        }
+    }
+
+    let namespace_export_part = Part {
+        symbol_uses: HashMap::new(),
+        can_be_removed_if_unused: true,
+        ..Part::default()
+    };
+    let lazy_export_part = Part {
+        statements: vec![Stmt::new(
+            expression.loc,
+            StmtData::LazyExport(LazyExportStmt { value: expression }),
+        )],
+        symbol_uses: std::mem::take(&mut core.symbol_uses),
+        ..Part::default()
+    };
+    let mut parts = vec![namespace_export_part];
+    let mut named_imports = HashMap::new();
+
+    if !core.runtime_imports.is_empty() && !core.options.omit_runtime_for_tests {
+        let mut imports: Vec<(String, LocRef)> = core.runtime_imports.drain().collect();
+        imports.sort_by(|left, right| left.0.cmp(&right.0));
+        let namespace_ref = core.new_symbol(SymbolKind::Other, "import_runtime");
+        core.module_scope
+            .as_ref()
+            .expect("runtime imports require a module scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(namespace_ref);
+        let import_record_index =
+            u32::try_from(core.import_records.len()).expect("import record count fits in u32");
+        core.import_records.push(ImportRecord {
+            path: Path {
+                text: "<runtime>".into(),
+                namespace: "file".into(),
+                ..Path::default()
+            },
+            source_index: Index32::new(runtime::SOURCE_INDEX),
+            kind: ImportKind::Stmt,
+            ..ImportRecord::default()
+        });
+        let mut declared_symbols = vec![DeclaredSymbol {
+            reference: namespace_ref,
+            is_top_level: true,
+        }];
+        let mut items = Vec::with_capacity(imports.len());
+        for (alias, item) in imports {
+            declared_symbols.push(DeclaredSymbol {
+                reference: item.reference,
+                is_top_level: true,
+            });
+            items.push(ClauseItem {
+                alias: alias.clone(),
+                alias_loc: item.loc,
+                name: item,
+                ..ClauseItem::default()
+            });
+            named_imports.insert(
+                item.reference,
+                NamedImport {
+                    alias,
+                    alias_loc: item.loc,
+                    namespace_ref,
+                    import_record_index,
+                    ..NamedImport::default()
+                },
+            );
+        }
+        parts.push(Part {
+            statements: vec![Stmt::new(
+                Loc::default(),
+                StmtData::Import(ImportStmt {
+                    items: Some(items),
+                    namespace_ref,
+                    import_record_index,
+                    is_single_line: true,
+                    ..ImportStmt::default()
+                }),
+            )],
+            import_record_indices: vec![import_record_index],
+            declared_symbols,
+            ..Part::default()
+        });
+    }
+    parts.push(lazy_export_part);
+
+    let wrapper_ref = core.new_symbol(
+        SymbolKind::Other,
+        format!("require_{}", source.identifier_name),
+    );
+    let mut top_level_symbol_to_parts_from_parser = HashMap::new();
+    top_level_symbol_to_parts_from_parser.insert(core.exports_ref, vec![0]);
+    let exports_kind = if core.options.module_type_data.module_type.is_esm() {
+        ExportsKind::Esm
+    } else if core.options.module_type_data.module_type.is_common_js() {
+        ExportsKind::CommonJs
+    } else {
+        ExportsKind::None
+    };
+
+    Ast {
+        module_type_data: core.options.module_type_data,
+        parts,
+        symbols: core.symbols,
+        module_scope: core.module_scope,
+        top_level_symbol_to_parts_from_parser,
+        import_records: core.import_records,
+        named_imports,
+        exports_ref: core.exports_ref,
+        module_ref: core.module_ref,
+        wrapper_ref,
+        approximate_line_count,
+        exports_kind,
+        has_lazy_export: true,
+        mangled_props: core.mangled_props,
+        reserved_props: core.reserved_props,
+        ..Ast::default()
+    }
+}
 
 /// Parse a JavaScript or TypeScript source file into esbuild's JavaScript AST.
 ///
@@ -761,11 +946,13 @@ fn strip_directive_prologue(
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use super::parse;
+    use super::{HelperCall, lazy_export_ast, parse};
     use crate::internal::{
-        js_ast::{ExprData, LocalKind, StmtData},
+        helpers::string_to_utf16,
+        js_ast::{Expr, ExprData, LocalKind, StmtData, StringExpr},
         js_parser::Options,
-        logger::{DeferLogKind, Log, MsgKind, Source},
+        logger::{DeferLogKind, Loc, Log, MsgKind, Source},
+        runtime,
     };
 
     fn parse_source(text: &str) -> (crate::internal::js_ast::Ast, bool, Log) {
@@ -3411,5 +3598,78 @@ mod tests {
         let (_, ok, log) = parse_source("export {}; return;");
         assert!(ok);
         assert_eq!(log.done().len(), 1);
+    }
+
+    #[test]
+    fn constructs_lazy_exports_with_global_and_runtime_helpers() {
+        fn string_expression(text: &str) -> Expr {
+            Expr::new(
+                Loc::default(),
+                ExprData::String(StringExpr {
+                    value: string_to_utf16(text.as_bytes()),
+                    ..StringExpr::default()
+                }),
+            )
+        }
+
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            identifier_name: "data".into(),
+            ..Source::default()
+        };
+        let global = lazy_export_ast(
+            log.clone(),
+            &source,
+            Options::default(),
+            string_expression("AA=="),
+            Some(&HelperCall {
+                global: vec!["Uint8Array".into(), "fromBase64".into()],
+                ..HelperCall::default()
+            }),
+        );
+        assert!(global.has_lazy_export);
+        assert_eq!(global.parts.len(), 2);
+        let Some(StmtData::LazyExport(export)) = global.parts[1].statements[0].data.as_deref()
+        else {
+            panic!("expected a lazy export");
+        };
+        let Some(ExprData::Call(call)) = export.value.data.as_deref() else {
+            panic!("expected a helper call");
+        };
+        assert!(matches!(
+            call.target.data.as_deref(),
+            Some(ExprData::Dot(dot)) if dot.name == "fromBase64"
+        ));
+        assert_eq!(
+            global
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.original_name == "Uint8Array")
+                .count(),
+            1
+        );
+
+        let runtime_ast = lazy_export_ast(
+            log,
+            &source,
+            Options::default(),
+            string_expression("AA=="),
+            Some(&HelperCall {
+                runtime: "__toBinary".into(),
+                ..HelperCall::default()
+            }),
+        );
+        assert_eq!(runtime_ast.parts.len(), 3);
+        assert_eq!(runtime_ast.import_records.len(), 1);
+        assert_eq!(
+            runtime_ast.import_records[0].source_index.get_index(),
+            runtime::SOURCE_INDEX
+        );
+        assert!(
+            runtime_ast
+                .named_imports
+                .values()
+                .any(|import| import.alias == "__toBinary")
+        );
     }
 }

@@ -5,6 +5,8 @@ use std::{
     sync::Arc,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
 use crate::internal::{
     ast::Index32,
     compat::{CssFeature, JsFeature},
@@ -15,7 +17,9 @@ use crate::internal::{
         CssRepr, EntryPoint as GraphEntryPoint, InputFile, InputFileRepr, JsRepr, SideEffects,
         SideEffectsKind,
     },
-    js_ast, js_parser,
+    helpers::{encode_string_as_shortest_data_url, mime_type_by_extension, string_to_utf16},
+    js_ast::{self, ExportsKind, Expr, ExprData, StringExpr},
+    js_parser::{self, HelperCall},
     logger::{self, Log, Range, Source},
     runtime,
     sourcemap::LineOffsetTable,
@@ -78,11 +82,18 @@ pub fn default_extension_to_loader_map() -> HashMap<String, Loader> {
 }
 
 #[must_use]
-pub fn parse_file(
+pub fn parse_file(log: &Log, source: Source, loader: Loader, options: &Options) -> ParseResult {
+    parse_file_with_unique_key_prefix(log, source, loader, options, "")
+}
+
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn parse_file_with_unique_key_prefix(
     log: &Log,
     mut source: Source,
     mut loader: Loader,
     options: &Options,
+    unique_key_prefix: &str,
 ) -> ParseResult {
     let (_, base, extension) =
         logger::platform_independent_path_dir_base_ext(&source.key_path.text);
@@ -157,6 +168,124 @@ pub fn parse_file(
             })));
             result.ok = true;
         }
+        Loader::Json | Loader::WithTypeJson => {
+            let (expression, ok) = js_parser::parse_json(
+                log.clone(),
+                source.clone(),
+                js_parser::JsonOptions {
+                    unsupported_js_features: options.unsupported_js_features,
+                    ..js_parser::JsonOptions::default()
+                },
+            );
+            let mut ast = js_parser::lazy_export_ast(
+                log.clone(),
+                &source,
+                js_parser::options_from_config(options),
+                expression,
+                None,
+            );
+            if loader == Loader::WithTypeJson {
+                ast.exports_kind = ExportsKind::Esm;
+            }
+            result.file.input_file.side_effects.kind = SideEffectsKind::NoSideEffectsPureData;
+            result.file.input_file.repr = Some(InputFileRepr::Js(Box::new(JsRepr {
+                ast,
+                ..JsRepr::default()
+            })));
+            result.ok = ok;
+        }
+        Loader::Text => {
+            let contents = source
+                .contents
+                .strip_prefix(&[0xef, 0xbb, 0xbf])
+                .unwrap_or(&source.contents)
+                .to_vec();
+            source.contents = Arc::from(contents.clone());
+            result.file.input_file.source.contents = source.contents.clone();
+            let encoded = STANDARD.encode(&contents);
+            let mut ast = lazy_export_string(log, &source, options, &contents, None);
+            ast.url_for_css = format!("data:text/plain;base64,{encoded}");
+            set_pure_data_result(&mut result, ast);
+        }
+        Loader::Base64 => {
+            let encoded = STANDARD.encode(&source.contents);
+            let mime_type = guess_mime_type(&extension, &source.contents);
+            let mut ast = lazy_export_string(log, &source, options, encoded.as_bytes(), None);
+            ast.url_for_css = format!("data:{mime_type};base64,{encoded}");
+            set_pure_data_result(&mut result, ast);
+        }
+        Loader::Binary => {
+            let encoded = STANDARD.encode(&source.contents);
+            let helper_call = if options
+                .unsupported_js_features
+                .contains(JsFeature::FROM_BASE64)
+            {
+                HelperCall {
+                    runtime: if options.platform == Platform::Node {
+                        "__toBinaryNode".into()
+                    } else {
+                        "__toBinary".into()
+                    },
+                    ..HelperCall::default()
+                }
+            } else {
+                HelperCall {
+                    global: vec!["Uint8Array".into(), "fromBase64".into()],
+                    ..HelperCall::default()
+                }
+            };
+            let mut ast = lazy_export_string(
+                log,
+                &source,
+                options,
+                encoded.as_bytes(),
+                Some(&helper_call),
+            );
+            ast.url_for_css = format!("data:application/octet-stream;base64,{encoded}");
+            set_pure_data_result(&mut result, ast);
+        }
+        Loader::DataUrl => {
+            let mime_type = guess_mime_type(&extension, &source.contents);
+            let mut url = encode_string_as_shortest_data_url(&mime_type, &source.contents);
+            if source.key_path.ignored_suffix.starts_with('#') {
+                url.push_str(&source.key_path.ignored_suffix);
+            }
+            let mut ast = lazy_export_string(log, &source, options, url.as_bytes(), None);
+            ast.url_for_css.clone_from(&url);
+            set_pure_data_result(&mut result, ast);
+        }
+        Loader::File => {
+            let unique_key = format!("{unique_key_prefix}A{:08}", source.index);
+            let unique_key_path = format!("{unique_key}{}", source.key_path.ignored_suffix);
+            let expression = Expr::new(
+                logger::Loc::default(),
+                ExprData::String(StringExpr {
+                    value: string_to_utf16(unique_key_path.as_bytes()),
+                    contains_unique_key: true,
+                    ..StringExpr::default()
+                }),
+            );
+            let mut ast = js_parser::lazy_export_ast(
+                log.clone(),
+                &source,
+                js_parser::options_from_config(options),
+                expression,
+                None,
+            );
+            ast.url_for_css = unique_key_path;
+            result.file.input_file.unique_key_for_additional_file = unique_key;
+            set_pure_data_result(&mut result, ast);
+        }
+        Loader::Copy => {
+            let unique_key = format!("{unique_key_prefix}A{:08}", source.index);
+            let unique_key_path = format!("{unique_key}{}", source.key_path.ignored_suffix);
+            result.file.input_file.unique_key_for_additional_file = unique_key;
+            result.file.input_file.repr =
+                Some(InputFileRepr::Copy(crate::internal::graph::CopyRepr {
+                    url_for_code: unique_key_path,
+                }));
+            result.ok = true;
+        }
         _ => {
             let display_path = if source.pretty_paths.rel.is_empty() {
                 &source.key_path.text
@@ -173,6 +302,72 @@ pub fn parse_file(
     }
 
     result
+}
+
+fn lazy_export_string(
+    log: &Log,
+    source: &Source,
+    options: &Options,
+    value: &[u8],
+    helper_call: Option<&HelperCall>,
+) -> js_ast::Ast {
+    js_parser::lazy_export_ast(
+        log.clone(),
+        source,
+        js_parser::options_from_config(options),
+        Expr::new(
+            logger::Loc::default(),
+            ExprData::String(StringExpr {
+                value: string_to_utf16(value),
+                ..StringExpr::default()
+            }),
+        ),
+        helper_call,
+    )
+}
+
+fn set_pure_data_result(result: &mut ParseResult, ast: js_ast::Ast) {
+    result.file.input_file.side_effects.kind = SideEffectsKind::NoSideEffectsPureData;
+    result.file.input_file.repr = Some(InputFileRepr::Js(Box::new(JsRepr {
+        ast,
+        ..JsRepr::default()
+    })));
+    result.ok = true;
+}
+
+#[must_use]
+pub fn guess_mime_type(extension: &str, contents: &[u8]) -> String {
+    let known = mime_type_by_extension(extension);
+    let mime_type = if known.is_empty() {
+        detect_content_type(contents)
+    } else {
+        known
+    };
+    mime_type.replace("; ", ";")
+}
+
+fn detect_content_type(contents: &[u8]) -> &'static str {
+    if contents.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if contents.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if contents.starts_with(b"GIF87a") || contents.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if contents.starts_with(b"%PDF-") {
+        "application/pdf"
+    } else if contents.starts_with(b"\0asm") {
+        "application/wasm"
+    } else if contents.starts_with(b"PK\x03\x04") {
+        "application/zip"
+    } else if std::str::from_utf8(contents).is_ok()
+        && !contents
+            .iter()
+            .any(|byte| *byte < 0x20 && !matches!(*byte, b'\t' | b'\n' | b'\r' | b'\x0c'))
+    {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 pub fn apply_option_defaults(options: &mut Options) {
@@ -460,15 +655,19 @@ pub fn sanitize_file_path_for_virtual_module_path(path: &str) -> String {
 mod tests {
     use super::{
         apply_option_defaults, default_extension_to_loader_map, find_reachable_files,
-        hash_for_file_name, is_ascii_only, parse_file, path_relative_to_outbase,
+        guess_mime_type, hash_for_file_name, is_ascii_only, parse_file,
+        parse_file_with_unique_key_prefix, path_relative_to_outbase,
         sanitize_file_path_for_virtual_module_path,
     };
     use crate::internal::{
         ast::{ImportRecord, Index32},
+        compat::JsFeature,
         config::{Loader, Options, PathPlaceholder, Platform},
         fs::{MockKind, mock_fs},
         graph::{EntryPoint, InputFile, InputFileRepr, JsRepr, SideEffectsKind},
+        js_ast::ExportsKind,
         logger::{DeferLogKind, Log, Path, Source},
+        runtime,
     };
     use std::{collections::HashMap, sync::Arc};
 
@@ -710,6 +909,166 @@ mod tests {
         assert_eq!(
             messages[0].data.text,
             "No loader is configured for \".bin\" files: /project/data.bin"
+        );
+    }
+
+    #[test]
+    fn parses_json_text_base64_and_data_url_loaders() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let options = Options::default();
+
+        let json = parse_file(
+            &log,
+            source("/project/data.json", br#"{"answer": 42}"#),
+            Loader::WithTypeJson,
+            &options,
+        );
+        assert!(json.ok);
+        assert_eq!(
+            json.file.input_file.side_effects.kind,
+            SideEffectsKind::NoSideEffectsPureData
+        );
+        let Some(InputFileRepr::Js(json_repr)) = json.file.input_file.repr else {
+            panic!("expected a JSON JavaScript representation");
+        };
+        assert!(json_repr.ast.has_lazy_export);
+        assert_eq!(json_repr.ast.exports_kind, ExportsKind::Esm);
+
+        let text = parse_file(
+            &log,
+            source("/project/message.txt", b"\xef\xbb\xbfhello"),
+            Loader::Text,
+            &options,
+        );
+        assert!(text.ok);
+        assert_eq!(&*text.file.input_file.source.contents, b"hello");
+        let Some(InputFileRepr::Js(text_repr)) = text.file.input_file.repr else {
+            panic!("expected a text JavaScript representation");
+        };
+        assert_eq!(text_repr.ast.url_for_css, "data:text/plain;base64,aGVsbG8=");
+
+        let base64 = parse_file(
+            &log,
+            source("/project/image.png", b"\x89PNG\r\n\x1a\n"),
+            Loader::Base64,
+            &options,
+        );
+        let Some(InputFileRepr::Js(base64_repr)) = base64.file.input_file.repr else {
+            panic!("expected a base64 JavaScript representation");
+        };
+        assert!(
+            base64_repr
+                .ast
+                .url_for_css
+                .starts_with("data:image/png;base64,")
+        );
+
+        let data_url = parse_file(
+            &log,
+            Source {
+                key_path: Path {
+                    text: "/project/note.txt".into(),
+                    namespace: "file".into(),
+                    ignored_suffix: "#section".into(),
+                    ..Path::default()
+                },
+                contents: Arc::from(&b"hello"[..]),
+                ..Source::default()
+            },
+            Loader::DataUrl,
+            &options,
+        );
+        let Some(InputFileRepr::Js(data_url_repr)) = data_url.file.input_file.repr else {
+            panic!("expected a data URL JavaScript representation");
+        };
+        assert!(data_url_repr.ast.url_for_css.ends_with("#section"));
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn parses_binary_file_and_copy_loaders() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let options = Options::default();
+        let binary = parse_file(
+            &log,
+            source("/project/data.bin", &[0, 1, 2]),
+            Loader::Binary,
+            &options,
+        );
+        assert!(binary.ok);
+        let Some(InputFileRepr::Js(binary_repr)) = binary.file.input_file.repr else {
+            panic!("expected a binary JavaScript representation");
+        };
+        assert!(binary_repr.ast.import_records.is_empty());
+        assert_eq!(
+            binary_repr.ast.url_for_css,
+            "data:application/octet-stream;base64,AAEC"
+        );
+
+        let legacy_options = Options {
+            unsupported_js_features: JsFeature::FROM_BASE64,
+            ..Options::default()
+        };
+        let legacy_binary = parse_file(
+            &log,
+            source("/project/legacy.bin", &[0, 1, 2]),
+            Loader::Binary,
+            &legacy_options,
+        );
+        let Some(InputFileRepr::Js(legacy_repr)) = legacy_binary.file.input_file.repr else {
+            panic!("expected a legacy binary JavaScript representation");
+        };
+        assert_eq!(
+            legacy_repr.ast.import_records[0].source_index.get_index(),
+            runtime::SOURCE_INDEX
+        );
+        assert!(
+            legacy_repr
+                .ast
+                .named_imports
+                .values()
+                .any(|import| import.alias == "__toBinary")
+        );
+
+        let mut file_source = source("/project/asset.svg", b"<svg/>");
+        file_source.index = 7;
+        file_source.key_path.ignored_suffix = "#icon".into();
+        let file = parse_file_with_unique_key_prefix(
+            &log,
+            file_source.clone(),
+            Loader::File,
+            &options,
+            "UNIQUE",
+        );
+        assert_eq!(
+            file.file.input_file.unique_key_for_additional_file,
+            "UNIQUEA00000007"
+        );
+        let Some(InputFileRepr::Js(file_repr)) = file.file.input_file.repr else {
+            panic!("expected a file JavaScript representation");
+        };
+        assert_eq!(file_repr.ast.url_for_css, "UNIQUEA00000007#icon");
+
+        let copy =
+            parse_file_with_unique_key_prefix(&log, file_source, Loader::Copy, &options, "UNIQUE");
+        let Some(InputFileRepr::Copy(copy_repr)) = copy.file.input_file.repr else {
+            panic!("expected a copy representation");
+        };
+        assert_eq!(copy_repr.url_for_code, "UNIQUEA00000007#icon");
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn guesses_mime_types_deterministically() {
+        assert_eq!(guess_mime_type(".svg", b"<svg/>"), "image/svg+xml");
+        assert_eq!(guess_mime_type("", b"\x89PNG\r\n\x1a\n"), "image/png");
+        assert_eq!(
+            guess_mime_type("", b"plain text"),
+            "text/plain;charset=utf-8"
+        );
+        assert_eq!(
+            guess_mime_type("", &[0xff, 0x00]),
+            "application/octet-stream"
         );
     }
 }
