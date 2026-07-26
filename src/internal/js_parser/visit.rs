@@ -106,7 +106,14 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     resolve_identifiers,
                 );
                 if let Some(catch) = &mut try_statement.catch {
-                    visit_block(core, catch.block_loc, &mut catch.block, false);
+                    core.push_scope_for_visit_pass(ScopeKind::CatchBinding, catch.loc);
+                    visit_binding_initializers(
+                        core,
+                        &mut catch.binding_or_nil,
+                        resolve_identifiers,
+                    );
+                    visit_block(core, catch.block_loc, &mut catch.block, resolve_identifiers);
+                    core.pop_scope();
                 }
                 if let Some(finally) = &mut try_statement.finally {
                     core.push_next_scope_for_visit_pass(ScopeKind::Block);

@@ -261,18 +261,30 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             let (block_loc, block) = parse_block(core, lexer);
             let catch = if lexer.token == Token::Catch {
                 let catch_loc = lexer.loc();
+                core.push_scope_for_parse_pass(
+                    crate::internal::js_ast::ScopeKind::CatchBinding,
+                    catch_loc,
+                );
                 lexer.next();
-                let binding_or_nil = if lexer.token == Token::OpenBrace {
+                let mut binding_or_nil = if lexer.token == Token::OpenBrace {
                     if core
                         .options
                         .unsupported_js_features
                         .contains(crate::internal::compat::JsFeature::OPTIONAL_CATCH_BINDING)
                     {
+                        let reference =
+                            core.new_symbol(crate::internal::ast::SymbolKind::Other, "e");
+                        core.current_scope
+                            .as_ref()
+                            .expect("catch binding scope")
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .generated
+                            .push(reference);
                         Binding {
                             loc: lexer.loc(),
                             data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
-                                reference: core
-                                    .new_symbol(crate::internal::ast::SymbolKind::Other, "e"),
+                                reference,
                             }))),
                         }
                     } else {
@@ -284,7 +296,16 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                     lexer.expect(Token::CloseParen);
                     binding
                 };
+                if let Some(binding) = binding_or_nil.data.as_deref() {
+                    let kind = if matches!(binding, BindingData::Identifier(_)) {
+                        crate::internal::ast::SymbolKind::CatchIdentifier
+                    } else {
+                        crate::internal::ast::SymbolKind::Other
+                    };
+                    core.declare_binding(kind, &mut binding_or_nil);
+                }
                 let (catch_block_loc, catch_block) = parse_block(core, lexer);
+                core.pop_scope();
                 Some(Catch {
                     binding_or_nil,
                     block: catch_block,

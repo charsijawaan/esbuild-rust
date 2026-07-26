@@ -1113,4 +1113,35 @@ mod tests {
         assert!(matches!(values[1], Some(ExprData::RequireResolveString(_))));
         assert!(matches!(values[2], Some(ExprData::Call(_))));
     }
+
+    #[test]
+    fn catch_bindings_shadow_outer_names_in_a_dedicated_scope() {
+        let (ast, ok, log) = parse_source(
+            "let error = outer;\
+             try { throw value; } catch (error) { use(error); }\
+             error;",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(
+            ast.parts[1]
+                .scopes
+                .iter()
+                .map(|scope| scope.lock().expect("scope lock").kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::internal::js_ast::ScopeKind::Entry,
+                crate::internal::js_ast::ScopeKind::Block,
+                crate::internal::js_ast::ScopeKind::CatchBinding,
+                crate::internal::js_ast::ScopeKind::Block,
+            ]
+        );
+        let outer_error =
+            ast.parts[1].scopes[0].lock().expect("entry scope").members["error"].reference;
+        let catch_error =
+            ast.parts[1].scopes[2].lock().expect("catch scope").members["error"].reference;
+        assert_ne!(outer_error, catch_error);
+        assert_eq!(ast.parts[1].symbol_uses[&outer_error].count_estimate, 1);
+        assert_eq!(ast.parts[1].symbol_uses[&catch_error].count_estimate, 1);
+    }
 }
