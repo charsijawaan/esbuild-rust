@@ -577,7 +577,7 @@ mod tests {
         );
         assert_eq!(
             code(transform(
-                ".a { width: calc(1px + 2px); height: calc(2 * 3px); opacity: calc(1 / 2) }",
+                ".a { width: calc(1px + 2px); height: calc(2 * 3px); opacity: calc(1 / 2); margin: calc(2px * 3 + 4px * 5); padding: calc((2px + 3px) * 4); inset: calc(100% / 8); top: calc(100% / 3) }",
                 TransformOptions {
                     loader: Loader::Css,
                     minify_syntax: true,
@@ -585,7 +585,7 @@ mod tests {
                     ..TransformOptions::default()
                 }
             )),
-            ".a{width:3px;height:6px;opacity:.5}\n"
+            ".a{width:3px;height:6px;opacity:.5;margin:26px;padding:20px;inset:12.5%;top:calc(100% / 3)}\n"
         );
     }
 

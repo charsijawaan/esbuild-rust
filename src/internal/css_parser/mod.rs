@@ -877,6 +877,15 @@ impl Parser {
     }
 
     fn convert_tokens(&mut self, start: usize, end: usize) -> Vec<Token> {
+        self.convert_tokens_with_context(start, end, false)
+    }
+
+    fn convert_tokens_with_context(
+        &mut self,
+        start: usize,
+        end: usize,
+        inside_calc: bool,
+    ) -> Vec<Token> {
         let mut result: Vec<Token> = Vec::new();
         let mut pending_whitespace = false;
         let mut index = start;
@@ -892,7 +901,13 @@ impl Parser {
                 let keep_whitespace = !self.minify_whitespace
                     || result
                         .last()
-                        .is_some_and(|previous| whitespace_is_required(previous, &converted));
+                        .is_some_and(|previous| whitespace_is_required(previous, &converted))
+                    || inside_calc
+                        && numeric_calc_division_whitespace(
+                            &result,
+                            &converted,
+                            next_non_whitespace_kind(&self.tokens, index + 1, end),
+                        );
                 if keep_whitespace {
                     if let Some(previous) = result.last_mut() {
                         previous.whitespace |= WhitespaceFlags::AFTER;
@@ -903,7 +918,14 @@ impl Parser {
             }
             if let Some(close) = matching_close(token.kind) {
                 let close_index = find_matching_close(&self.tokens, index + 1, end, close);
-                converted.children = Some(self.convert_tokens(index + 1, close_index));
+                let child_inside_calc = inside_calc
+                    || converted.kind == TokenKind::Function
+                        && converted.text.eq_ignore_ascii_case("calc");
+                converted.children = Some(self.convert_tokens_with_context(
+                    index + 1,
+                    close_index,
+                    child_inside_calc,
+                ));
                 index = close_index.saturating_add(1);
             } else {
                 index += 1;
@@ -1164,6 +1186,41 @@ fn whitespace_is_required(left: &Token, right: &Token) -> bool {
     can_end_word && can_start_word
 }
 
+fn numeric_calc_division_whitespace(
+    previous: &[Token],
+    current: &Token,
+    next_kind: TokenKind,
+) -> bool {
+    let is_numeric = |kind| {
+        matches!(
+            kind,
+            TokenKind::Number | TokenKind::Percentage | TokenKind::Dimension
+        )
+    };
+    match previous {
+        [.., left] if current.kind == TokenKind::DelimSlash => {
+            is_numeric(left.kind) && is_numeric(next_kind)
+        }
+        [.., left, slash] if slash.kind == TokenKind::DelimSlash => {
+            is_numeric(left.kind) && is_numeric(current.kind)
+        }
+        _ => false,
+    }
+}
+
+fn next_non_whitespace_kind(
+    tokens: &[css_lexer::Token],
+    mut index: usize,
+    end: usize,
+) -> TokenKind {
+    while index < end && tokens[index].kind == TokenKind::Whitespace {
+        index += 1;
+    }
+    tokens
+        .get(index)
+        .map_or(TokenKind::EndOfFile, |token| token.kind)
+}
+
 fn minify_single_color(tokens: &mut [Token]) {
     if let [token] = tokens
         && token.kind == TokenKind::Ident
@@ -1193,11 +1250,9 @@ fn reduce_calc_expressions(tokens: &mut [Token]) {
         let Some(children) = &token.children else {
             continue;
         };
-        let replacement = match children.as_slice() {
-            [value] if numeric_token(value).is_some() => Some(value.clone()),
-            [left, operator, right] => reduce_calc_binary(left, operator, right),
-            _ => None,
-        };
+        let replacement = evaluate_calc_numeric(children).and_then(|value| {
+            numeric_token_from_parts(token, value.number, value.kind, &value.unit)
+        });
         if let Some(mut replacement) = replacement {
             replacement.loc = token.loc;
             replacement.whitespace = token.whitespace;
@@ -1206,45 +1261,87 @@ fn reduce_calc_expressions(tokens: &mut [Token]) {
     }
 }
 
-fn reduce_calc_binary(left: &Token, operator: &Token, right: &Token) -> Option<Token> {
-    let left_number = numeric_token(left)?;
-    let right_number = numeric_token(right)?;
-    let (number, kind, unit) = match operator.kind {
-        TokenKind::DelimPlus | TokenKind::DelimMinus
-            if operator.whitespace.contains(WhitespaceFlags::BEFORE)
-                && operator.whitespace.contains(WhitespaceFlags::AFTER)
-                && left_number.kind == right_number.kind
-                && left_number.unit.eq_ignore_ascii_case(right_number.unit) =>
-        {
-            let number = if operator.kind == TokenKind::DelimPlus {
-                left_number.number + right_number.number
-            } else {
-                left_number.number - right_number.number
-            };
-            (number, left_number.kind, left_number.unit)
+#[derive(Clone)]
+struct CalcNumeric {
+    number: f64,
+    kind: TokenKind,
+    unit: String,
+}
+
+fn evaluate_calc_numeric(tokens: &[Token]) -> Option<CalcNumeric> {
+    let mut index = 0;
+    let result = parse_calc_sum(tokens, &mut index)?;
+    (index == tokens.len()).then_some(result)
+}
+
+fn parse_calc_sum(tokens: &[Token], index: &mut usize) -> Option<CalcNumeric> {
+    let mut left = parse_calc_product(tokens, index)?;
+    while let Some(operator) = tokens.get(*index) {
+        if !matches!(operator.kind, TokenKind::DelimPlus | TokenKind::DelimMinus) {
+            break;
         }
-        TokenKind::DelimAsterisk if left_number.kind == TokenKind::Number => (
-            left_number.number * right_number.number,
-            right_number.kind,
-            right_number.unit,
-        ),
-        TokenKind::DelimAsterisk if right_number.kind == TokenKind::Number => (
-            left_number.number * right_number.number,
-            left_number.kind,
-            left_number.unit,
-        ),
-        TokenKind::DelimSlash
-            if right_number.kind == TokenKind::Number && right_number.number != 0.0 =>
+        if !operator.whitespace.contains(WhitespaceFlags::BEFORE)
+            || !operator.whitespace.contains(WhitespaceFlags::AFTER)
         {
-            (
-                left_number.number / right_number.number,
-                left_number.kind,
-                left_number.unit,
-            )
+            return None;
         }
-        _ => return None,
-    };
-    numeric_token_from_parts(left, number, kind, unit)
+        *index += 1;
+        let right = parse_calc_product(tokens, index)?;
+        if left.kind != right.kind || !left.unit.eq_ignore_ascii_case(&right.unit) {
+            return None;
+        }
+        if operator.kind == TokenKind::DelimPlus {
+            left.number += right.number;
+        } else {
+            left.number -= right.number;
+        }
+    }
+    Some(left)
+}
+
+fn parse_calc_product(tokens: &[Token], index: &mut usize) -> Option<CalcNumeric> {
+    let mut left = parse_calc_value(tokens, index)?;
+    while let Some(operator) = tokens.get(*index) {
+        if !matches!(
+            operator.kind,
+            TokenKind::DelimAsterisk | TokenKind::DelimSlash
+        ) {
+            break;
+        }
+        *index += 1;
+        let right = parse_calc_value(tokens, index)?;
+        match operator.kind {
+            TokenKind::DelimAsterisk if left.kind == TokenKind::Number => {
+                left.number *= right.number;
+                left.kind = right.kind;
+                left.unit = right.unit;
+            }
+            TokenKind::DelimAsterisk if right.kind == TokenKind::Number => {
+                left.number *= right.number;
+            }
+            TokenKind::DelimSlash if right.kind == TokenKind::Number && right.number != 0.0 => {
+                left.number /= right.number;
+            }
+            _ => return None,
+        }
+    }
+    Some(left)
+}
+
+fn parse_calc_value(tokens: &[Token], index: &mut usize) -> Option<CalcNumeric> {
+    let token = tokens.get(*index)?;
+    *index += 1;
+    if matches!(token.kind, TokenKind::OpenParen)
+        || token.kind == TokenKind::Function && token.text.eq_ignore_ascii_case("calc")
+    {
+        return evaluate_calc_numeric(token.children.as_deref()?);
+    }
+    let numeric = numeric_token(token)?;
+    Some(CalcNumeric {
+        number: numeric.number,
+        kind: numeric.kind,
+        unit: numeric.unit.into(),
+    })
 }
 
 #[derive(Clone, Copy)]
