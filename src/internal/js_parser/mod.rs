@@ -18,6 +18,7 @@ mod syntax_import;
 mod syntax_literals;
 mod syntax_new;
 mod syntax_suffix;
+mod syntax_yield_await;
 
 pub use define::parse_define_expr;
 pub use global_name::parse_global_name;

@@ -15,6 +15,7 @@ use super::{
     },
     syntax_new::parse_new_prefix,
     syntax_suffix::{binary_operator, parse_high_precedence_suffix_chain},
+    syntax_yield_await::parse_await_or_yield_prefix,
 };
 
 pub(crate) fn parse_expression(
@@ -23,7 +24,7 @@ pub(crate) fn parse_expression(
     minimum_precedence: Precedence,
     allow_in: bool,
 ) -> Expr {
-    let mut left = parse_prefix(core, lexer, allow_in);
+    let mut left = parse_prefix(core, lexer, minimum_precedence, allow_in);
     left = parse_high_precedence_suffix_chain(
         core,
         lexer,
@@ -100,7 +101,20 @@ pub(crate) fn parse_expression(
     }
 }
 
-fn parse_prefix(core: &mut ParserCore, lexer: &mut Lexer, allow_in: bool) -> Expr {
+fn parse_prefix(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    minimum_precedence: Precedence,
+    allow_in: bool,
+) -> Expr {
+    if let Some(expr) = parse_await_or_yield_prefix(
+        core,
+        lexer,
+        minimum_precedence,
+        |core, lexer, precedence| parse_expression(core, lexer, precedence, allow_in),
+    ) {
+        return expr;
+    }
     if let Some(expr) = parse_simple_prefix(core, lexer) {
         return expr;
     }
@@ -145,7 +159,7 @@ fn parse_prefix(core: &mut ParserCore, lexer: &mut Lexer, allow_in: bool) -> Exp
 }
 
 fn parse_new_target(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
-    let mut target = parse_prefix(core, lexer, true);
+    let mut target = parse_prefix(core, lexer, Precedence::Member, true);
     target = parse_high_precedence_suffix_chain(
         core,
         lexer,
@@ -166,7 +180,7 @@ mod tests {
         config::TsOptions,
         js_ast::{ExprData, OpCode, Precedence},
         js_lexer::{Lexer, Token},
-        js_parser::Options,
+        js_parser::{Options, parser_types::AwaitOrYield},
         logger::{DeferLogKind, Log, Source},
     };
 
@@ -248,6 +262,61 @@ mod tests {
         assert!(matches!(expression.data.as_deref(), Some(ExprData::New(_))));
         assert_eq!(log.peek().len(), 1);
         assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn integrates_await_and_yield_precedence() {
+        for (text, policy, expected_outer, expected_inner) in [
+            (
+                "await 1 + 2",
+                AwaitOrYield::AllowExpression,
+                OpCode::BinaryAdd,
+                "await",
+            ),
+            (
+                "yield 1 + 2",
+                AwaitOrYield::AllowExpression,
+                OpCode::BinaryAdd,
+                "yield",
+            ),
+        ] {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let source = Source {
+                contents: Arc::from(text.as_bytes()),
+                ..Source::default()
+            };
+            let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+            let mut core = super::ParserCore::new(source, Options::default());
+            if expected_inner == "await" {
+                core.await_policy = policy;
+            } else {
+                core.yield_policy = policy;
+            }
+            let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+            match expected_inner {
+                "await" => {
+                    let Some(ExprData::Binary(binary)) = expression.data.as_deref() else {
+                        panic!("expected outer addition");
+                    };
+                    assert_eq!(binary.op, expected_outer);
+                    assert!(matches!(
+                        binary.left.data.as_deref(),
+                        Some(ExprData::Await(_))
+                    ));
+                }
+                "yield" => {
+                    let Some(ExprData::Yield(yield_expr)) = expression.data.as_deref() else {
+                        panic!("expected outer yield");
+                    };
+                    assert!(matches!(
+                        yield_expr.value_or_nil.data.as_deref(),
+                        Some(ExprData::Binary(binary)) if binary.op == expected_outer
+                    ));
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(lexer.token, Token::EndOfFile);
+        }
     }
 
     #[test]
