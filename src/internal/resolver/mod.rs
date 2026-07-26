@@ -13,12 +13,14 @@ use crate::internal::{
         MaybeBool, Platform, TsAlwaysStrict, TsConfig, TsConfigJsx, TsImportsNotUsedAsValues,
         TsJsx, TsTarget,
     },
-    fs::{DifferentCase, Fs},
+    fs::{DifferentCase, EntryKind, Fs},
     helpers::{is_inside_node_modules, utf16_to_string},
     js_ast::{Expr, ExprData, ModuleType, ModuleTypeData},
     js_lexer::{JsonFlavor, range_of_identifier},
     js_parser::{JsonOptions, parse_json},
-    logger::{LineColumnTracker, Loc, Log, Msg, MsgData, MsgId, MsgKind, Path, Range, Source},
+    logger::{
+        LineColumnTracker, Loc, Log, Msg, MsgData, MsgId, MsgKind, Path, PathFlags, Range, Source,
+    },
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -39,6 +41,251 @@ impl PathPair {
     #[must_use]
     pub fn has_secondary(&self) -> bool {
         !self.secondary.text.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadedPath {
+    pub path: String,
+    pub different_case: Option<DifferentCase>,
+    pub disabled: bool,
+}
+
+#[must_use]
+pub fn load_as_file(
+    file_system: &dyn Fs,
+    path: &str,
+    extension_order: &[String],
+) -> Option<LoadedPath> {
+    let directory = file_system.dir(path);
+    let (entries, error, _) = file_system.read_directory(&directory);
+    if error.is_some() {
+        return None;
+    }
+    let base = file_system.base(path);
+    let try_file = |candidate: &str| {
+        let (entry, different_case) = entries.get(candidate);
+        entry
+            .filter(|entry| entry.kind(file_system) == EntryKind::File)
+            .map(|_| LoadedPath {
+                path: file_system.join(&[&directory, candidate]),
+                different_case,
+                disabled: false,
+            })
+    };
+
+    if let Some(result) = try_file(&base) {
+        return Some(result);
+    }
+    for extension in extension_order {
+        if let Some(result) = try_file(&format!("{base}{extension}")) {
+            return Some(result);
+        }
+    }
+    for (old_extension, rewritten_extensions) in [
+        (".js", &[".ts", ".tsx"][..]),
+        (".jsx", &[".ts", ".tsx"][..]),
+        (".mjs", &[".mts"][..]),
+        (".cjs", &[".cts"][..]),
+    ] {
+        let Some(without_extension) = base.strip_suffix(old_extension) else {
+            continue;
+        };
+        for extension in rewritten_extensions {
+            if let Some(result) = try_file(&format!("{without_extension}{extension}")) {
+                return Some(result);
+            }
+        }
+        break;
+    }
+    None
+}
+
+#[must_use]
+pub fn load_as_index(
+    file_system: &dyn Fs,
+    path: &str,
+    extension_order: &[String],
+) -> Option<LoadedPath> {
+    let (entries, error, _) = file_system.read_directory(path);
+    if error.is_some() {
+        return None;
+    }
+    for extension in extension_order {
+        let candidate = format!("index{extension}");
+        let (entry, different_case) = entries.get(&candidate);
+        if entry.is_some_and(|entry| entry.kind(file_system) == EntryKind::File) {
+            return Some(LoadedPath {
+                path: file_system.join(&[path, &candidate]),
+                different_case,
+                disabled: false,
+            });
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug)]
+pub struct LoadedPathPair {
+    pub paths: PathPair,
+    pub different_case: Option<DifferentCase>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn load_as_directory(
+    log: &Log,
+    file_system: &dyn Fs,
+    path: &str,
+    extension_order: &[String],
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+    is_require: bool,
+) -> Option<LoadedPathPair> {
+    let (entries, error, _) = file_system.read_directory(path);
+    if error.is_some() {
+        return None;
+    }
+    let package = entries
+        .get("package.json")
+        .0
+        .filter(|entry| entry.kind(file_system) == EntryKind::File)
+        .and_then(|_| {
+            let package_path = file_system.join(&[path, "package.json"]);
+            let (contents, error, _) = file_system.read_file(&package_path);
+            if error.is_some() {
+                return None;
+            }
+            let source = Source {
+                key_path: Path {
+                    text: package_path,
+                    namespace: "file".into(),
+                    ..Path::default()
+                },
+                contents: Arc::from(contents.into_bytes()),
+                ..Source::default()
+            };
+            parse_package_json(
+                log,
+                &source,
+                path,
+                file_system,
+                platform,
+                configured_main_fields,
+            )
+        });
+
+    if let Some(package) = &package {
+        let defaults: &[&str] = match platform {
+            Platform::Browser => &["browser", "module", "main"],
+            Platform::Node => &["main", "module"],
+            Platform::Neutral => &[],
+        };
+        let keys: Vec<&str> = configured_main_fields.map_or_else(
+            || defaults.to_vec(),
+            |fields| fields.iter().map(String::as_str).collect(),
+        );
+        let automatic = configured_main_fields.is_none();
+        for key in keys {
+            let Some(main) = package.main_fields.get(key) else {
+                continue;
+            };
+            let Some(primary) = load_package_main_candidate(
+                file_system,
+                path,
+                package,
+                &main.relative_path,
+                extension_order,
+            ) else {
+                continue;
+            };
+            if automatic && key == "module" {
+                let secondary = package
+                    .main_fields
+                    .get("main")
+                    .and_then(|main| {
+                        load_package_main_candidate(
+                            file_system,
+                            path,
+                            package,
+                            &main.relative_path,
+                            extension_order,
+                        )
+                    })
+                    .or_else(|| load_as_index(file_system, path, extension_order));
+                if let Some(secondary) = secondary {
+                    if is_require {
+                        return Some(LoadedPathPair {
+                            paths: file_path_pair(&secondary.path, secondary.disabled),
+                            different_case: secondary.different_case,
+                        });
+                    }
+                    return Some(LoadedPathPair {
+                        paths: PathPair {
+                            primary: file_path(&primary.path, primary.disabled),
+                            secondary: file_path(&secondary.path, secondary.disabled),
+                            ..PathPair::default()
+                        },
+                        different_case: primary.different_case,
+                    });
+                }
+            }
+            return Some(LoadedPathPair {
+                paths: file_path_pair(&primary.path, primary.disabled),
+                different_case: primary.different_case,
+            });
+        }
+    }
+
+    load_as_index(file_system, path, extension_order).map(|loaded| LoadedPathPair {
+        paths: file_path_pair(&loaded.path, loaded.disabled),
+        different_case: loaded.different_case,
+    })
+}
+
+fn load_package_main_candidate(
+    file_system: &dyn Fs,
+    package_dir: &str,
+    package: &PackageJson,
+    relative_path: &str,
+    extension_order: &[String],
+) -> Option<LoadedPath> {
+    let mut mapped_path = relative_path.to_string();
+    if let Some(remapped) = package.browser_map.get(relative_path).or_else(|| {
+        relative_path
+            .strip_prefix("./")
+            .and_then(|path| package.browser_map.get(path))
+    }) {
+        let Some(remapped) = remapped else {
+            return Some(LoadedPath {
+                path: file_system.join(&[package_dir, relative_path]),
+                different_case: None,
+                disabled: true,
+            });
+        };
+        mapped_path.clone_from(remapped);
+    }
+    let absolute = file_system.join(&[package_dir, &mapped_path]);
+    load_as_file(file_system, &absolute, extension_order)
+        .or_else(|| load_as_index(file_system, &absolute, extension_order))
+}
+
+fn file_path(text: &str, disabled: bool) -> Path {
+    Path {
+        text: text.to_string(),
+        namespace: "file".into(),
+        flags: if disabled {
+            PathFlags::DISABLED
+        } else {
+            PathFlags::default()
+        },
+        ..Path::default()
+    }
+}
+
+fn file_path_pair(text: &str, disabled: bool) -> PathPair {
+    PathPair {
+        primary: file_path(text, disabled),
+        ..PathPair::default()
     }
 }
 
@@ -2387,10 +2634,10 @@ mod tests {
         TsConfigJson, TsConfigPath, TsConfigPaths, compile_yarn_pnp_data,
         find_invalid_package_segment, globstar_to_escaped_regexp,
         handle_package_map_post_conditions, is_valid_tsconfig_path_no_base_url_pattern,
-        match_tsconfig_path_candidates, parse_bare_identifier, parse_esm_package_name,
-        parse_imports_exports_map, parse_package_json, parse_tsconfig_json,
-        resolve_package_exports, resolve_package_imports, reverse_resolve_package_exports,
-        sort_package_expansion_keys,
+        load_as_directory, load_as_file, load_as_index, match_tsconfig_path_candidates,
+        parse_bare_identifier, parse_esm_package_name, parse_imports_exports_map,
+        parse_package_json, parse_tsconfig_json, resolve_package_exports, resolve_package_imports,
+        reverse_resolve_package_exports, sort_package_expansion_keys,
     };
     use crate::internal::{
         config::{MaybeBool, Platform, TsJsx, TsTarget},
@@ -3090,5 +3337,131 @@ mod tests {
         assert!(package.imports_map.is_some());
         assert!(package.exports_map.is_some());
         assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn loads_files_extensions_rewrites_and_directory_indexes() {
+        let file_system = mock_fs(
+            &HashMap::from([
+                ("/project/exact.js".into(), String::new()),
+                ("/project/component.js.ts".into(), String::new()),
+                ("/project/component.ts".into(), String::new()),
+                ("/project/module.mts".into(), String::new()),
+                ("/project/pkg/index.ts".into(), String::new()),
+                ("/project/pkg/index.js".into(), String::new()),
+                ("/project/Case.JS".into(), String::new()),
+            ]),
+            MockKind::Unix,
+            "/",
+        );
+        let extensions = vec![".js".into(), ".ts".into()];
+
+        assert_eq!(
+            load_as_file(&file_system, "/project/exact.js", &extensions)
+                .expect("exact file")
+                .path,
+            "/project/exact.js"
+        );
+        assert_eq!(
+            load_as_file(&file_system, "/project/component.js", &extensions)
+                .expect("extension before rewrite")
+                .path,
+            "/project/component.js.ts"
+        );
+        assert_eq!(
+            load_as_file(&file_system, "/project/module.mjs", &extensions)
+                .expect("TypeScript rewrite")
+                .path,
+            "/project/module.mts"
+        );
+        assert_eq!(
+            load_as_index(&file_system, "/project/pkg", &extensions)
+                .expect("ordered index")
+                .path,
+            "/project/pkg/index.js"
+        );
+        let different_case = load_as_file(&file_system, "/project/case.js", &extensions)
+            .expect("case-insensitive mock lookup")
+            .different_case
+            .expect("different case");
+        assert_eq!(different_case.actual, "Case.JS");
+        assert!(load_as_file(&file_system, "/project/missing", &extensions).is_none());
+    }
+
+    #[test]
+    fn loads_directory_main_module_browser_and_require_fallbacks() {
+        let package_json = r#"{
+          "main": "./index.cjs",
+          "module": "./index.js",
+          "browser": {
+            "./index.js": "./browser.js",
+            "./index.cjs": false
+          }
+        }"#;
+        let file_system = mock_fs(
+            &HashMap::from([
+                ("/project/pkg/package.json".into(), package_json.into()),
+                ("/project/pkg/index.cjs".into(), String::new()),
+                ("/project/pkg/index.js".into(), String::new()),
+                ("/project/pkg/browser.js".into(), String::new()),
+                ("/project/fallback/index.ts".into(), String::new()),
+            ]),
+            MockKind::Unix,
+            "/",
+        );
+        let extensions = vec![".js".into(), ".cjs".into(), ".ts".into()];
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+
+        let imported = load_as_directory(
+            &log,
+            &file_system,
+            "/project/pkg",
+            &extensions,
+            Platform::Browser,
+            None,
+            false,
+        )
+        .expect("imported package");
+        assert_eq!(imported.paths.primary.text, "/project/pkg/browser.js");
+        assert_eq!(imported.paths.secondary.text, "/project/pkg/index.cjs");
+        assert!(imported.paths.secondary.is_disabled());
+
+        let required = load_as_directory(
+            &log,
+            &file_system,
+            "/project/pkg",
+            &extensions,
+            Platform::Browser,
+            None,
+            true,
+        )
+        .expect("required package");
+        assert_eq!(required.paths.primary.text, "/project/pkg/index.cjs");
+        assert!(required.paths.primary.is_disabled());
+
+        let configured = vec!["main".into()];
+        let disabled = load_as_directory(
+            &log,
+            &file_system,
+            "/project/pkg",
+            &extensions,
+            Platform::Browser,
+            Some(&configured),
+            false,
+        )
+        .expect("disabled browser main");
+        assert!(disabled.paths.primary.is_disabled());
+
+        let fallback = load_as_directory(
+            &log,
+            &file_system,
+            "/project/fallback",
+            &extensions,
+            Platform::Neutral,
+            None,
+            false,
+        )
+        .expect("index fallback");
+        assert_eq!(fallback.paths.primary.text, "/project/fallback/index.ts");
     }
 }
