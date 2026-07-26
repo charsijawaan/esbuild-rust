@@ -260,6 +260,10 @@ impl PropertyFlags {
     pub const fn contains(self, flag: Self) -> bool {
         self.0 & flag.0 != 0
     }
+
+    pub fn remove(&mut self, flag: Self) {
+        self.0 &= !flag.0;
+    }
 }
 
 impl BitOr for PropertyFlags {

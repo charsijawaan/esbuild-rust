@@ -3354,6 +3354,34 @@ fn visit_expr_with_target(
                 }
                 if property.flags.contains(PropertyFlags::IS_COMPUTED) {
                     visit_expr(core, &mut property.key, resolve_identifiers);
+                    if core.options.minify_syntax {
+                        let inlined_key = if let Some(ExprData::InlinedEnum(inlined)) =
+                            property.key.data.as_deref()
+                            && matches!(
+                                inlined.value.data.as_deref(),
+                                Some(ExprData::String(_) | ExprData::Number(_))
+                            ) {
+                            inlined.value.data.clone()
+                        } else {
+                            None
+                        };
+                        if let Some(inlined_key) = inlined_key {
+                            property.key.data = Some(inlined_key);
+                        }
+                        let can_remove_computed = match property.key.data.as_deref() {
+                            Some(ExprData::Number(_) | ExprData::NameOfSymbol(_)) => true,
+                            Some(ExprData::String(key)) => {
+                                !crate::internal::helpers::utf16_equals_wtf8(
+                                    &key.value,
+                                    b"__proto__",
+                                )
+                            }
+                            _ => false,
+                        };
+                        if can_remove_computed {
+                            property.flags.remove(PropertyFlags::IS_COMPUTED);
+                        }
+                    }
                 }
                 visit_expr_with_target(
                     core,

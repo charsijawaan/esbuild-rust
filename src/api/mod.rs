@@ -3936,6 +3936,32 @@ mod tests {
     }
 
     #[test]
+    fn minifies_computed_primitive_object_keys() {
+        assert_eq!(
+            code(transform(
+                r#"const f=(a,b,c)=>({["a"]:a,[1]:b,["__proto__"]:c})"#,
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const f = (a, b, c) => ({ a, 1: b, [\"__proto__\"]: c });\n"
+        );
+        let enum_code = code(transform(
+            "enum E { X = \"x\", N = 1 }\nconst f=(a,b)=>({[E.X]:a,[E.N]:b})",
+            TransformOptions {
+                loader: Loader::Ts,
+                minify_syntax: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            enum_code.ends_with("const f = (a, b) => ({ x: a, 1: b });\n"),
+            "{enum_code}"
+        );
+    }
+
+    #[test]
     fn defaults_node_env_for_browser_transforms() {
         let development = code(transform(
             "console.log(process.env.NODE_ENV)",
