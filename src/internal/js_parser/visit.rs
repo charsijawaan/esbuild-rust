@@ -46,6 +46,13 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     visit_expr(core, &mut value.value_or_nil, resolve_identifiers);
                 }
             }
+            Some(StmtData::Namespace(namespace)) => {
+                core.record_declared_symbol(namespace.name.reference);
+                core.record_declared_symbol(namespace.argument);
+                core.push_scope_for_visit_pass(ScopeKind::Entry, statement.loc);
+                visit_statements(core, &mut namespace.statements, resolve_identifiers);
+                core.pop_scope();
+            }
             Some(StmtData::ExportDefault(export)) => match export.value.data.as_deref_mut() {
                 Some(StmtData::Expr(expression)) => {
                     visit_expr(core, &mut expression.value, resolve_identifiers);

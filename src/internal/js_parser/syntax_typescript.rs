@@ -3,7 +3,7 @@ use crate::internal::{
     helpers::string_to_utf16,
     js_ast::{
         EnumStmt, EnumValue, Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, Stmt, StmtData,
-        TypeScriptStmt,
+        TsNamespaceScope, TypeScriptStmt,
     },
     js_lexer::{Lexer, Token},
 };
@@ -235,6 +235,37 @@ pub(crate) fn parse_type_script_statement(
     if lexer.is_contextual_keyword(b"declare") {
         return Some(parse_declare_statement(core, lexer, loc, is_export));
     }
+    if lexer.is_contextual_keyword(b"namespace") || lexer.is_contextual_keyword(b"module") {
+        let reference = core.store_name_in_ref(lexer.identifier.clone());
+        lexer.next();
+        if lexer.token == Token::Identifier {
+            return Some(parse_namespace_statement(core, lexer, loc, is_export));
+        }
+        if !is_export {
+            let value = parse_expression_suffix(
+                core,
+                lexer,
+                Expr::new(
+                    loc,
+                    ExprData::Identifier(IdentifierExpr {
+                        reference,
+                        ..IdentifierExpr::default()
+                    }),
+                ),
+                Precedence::Lowest,
+                true,
+            );
+            lexer.expect_or_insert_semicolon();
+            return Some(Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value,
+                    ..ExprStmt::default()
+                }),
+            ));
+        }
+        lexer.expected(Token::Identifier);
+    }
     if lexer.is_contextual_keyword(b"type") {
         let reference = core.store_name_in_ref(lexer.identifier.clone());
         lexer.next();
@@ -305,6 +336,61 @@ pub(crate) fn parse_type_script_statement(
         ));
     }
     None
+}
+
+fn parse_namespace_statement(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    loc: crate::internal::logger::Loc,
+    is_export: bool,
+) -> Stmt {
+    let name_loc = lexer.loc();
+    let name_text = String::from_utf8_lossy(lexer.raw()).into_owned();
+    let name = LocRef {
+        loc: name_loc,
+        reference: core.declare_symbol(SymbolKind::TsNamespace, name_loc, &name_text),
+    };
+    lexer.expect(Token::Identifier);
+    let argument = core.new_symbol(SymbolKind::Hoisted, format!("_{name_text}"));
+
+    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Entry, loc);
+    core.current_scope
+        .as_ref()
+        .expect("namespace scope")
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .ts_namespace = Some(TsNamespaceScope {
+        argument_ref: argument,
+        ..TsNamespaceScope::default()
+    });
+    let old_context = core.fn_or_arrow_data_parse;
+    core.fn_or_arrow_data_parse.is_this_disallowed = true;
+    core.fn_or_arrow_data_parse.is_return_disallowed = true;
+    let statements = if lexer.token == Token::Dot {
+        let dot_loc = lexer.loc();
+        lexer.next();
+        vec![parse_namespace_statement(core, lexer, dot_loc, true)]
+    } else {
+        lexer.expect(Token::OpenBrace);
+        let mut statements = Vec::new();
+        while lexer.token != Token::CloseBrace {
+            statements.push(super::syntax_statement::parse_statement(core, lexer));
+        }
+        lexer.expect(Token::CloseBrace);
+        statements
+    };
+    core.fn_or_arrow_data_parse = old_context;
+    core.pop_scope();
+
+    Stmt::new(
+        loc,
+        StmtData::Namespace(crate::internal::js_ast::NamespaceStmt {
+            statements,
+            name,
+            argument,
+            is_export,
+        }),
+    )
 }
 
 fn parse_declare_statement(

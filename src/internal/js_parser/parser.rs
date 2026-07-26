@@ -106,6 +106,9 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 ) || matches!(
                     statement.data.as_deref(),
                     Some(StmtData::Enum(enumeration)) if enumeration.is_export
+                ) || matches!(
+                    statement.data.as_deref(),
+                    Some(StmtData::Namespace(namespace)) if namespace.is_export
                 )
             });
         if has_esm_exports
@@ -466,6 +469,19 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
                     enumeration.name.reference,
                 );
             }
+            Some(StmtData::Namespace(namespace)) if namespace.is_export => {
+                let alias = core.symbols
+                    [usize::try_from(namespace.name.reference.inner_index).expect("symbol index")]
+                .original_name
+                .clone();
+                record_export(
+                    core,
+                    &mut metadata.named_exports,
+                    namespace.name.loc,
+                    &alias,
+                    namespace.name.reference,
+                );
+            }
             _ => {}
         }
     }
@@ -550,6 +566,15 @@ fn declare_top_level_symbols(
                     &mut declared,
                 );
                 record_top_level_symbol(&mut declared, enumeration.argument);
+            }
+            Some(StmtData::Namespace(namespace)) => {
+                bind_loc_ref(
+                    core,
+                    &mut namespace.name,
+                    SymbolKind::TsNamespace,
+                    &mut declared,
+                );
+                record_top_level_symbol(&mut declared, namespace.argument);
             }
             Some(StmtData::Import(import)) => {
                 if let Some(name) = &mut import.default_name {
@@ -2103,6 +2128,56 @@ mod tests {
             class.class.properties[0].kind,
             crate::internal::js_ast::PropertyKind::Method
         );
+    }
+
+    #[test]
+    fn parses_type_script_namespaces_and_nested_exports() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "namespace Tools {\
+               export const version = 1;\
+               export function run() { return version; }\
+               interface Hidden { value: string }\
+             }\
+             export namespace Public { export class Item {} }\
+             namespace Outer.Inner { export const value = 1; }\
+             namespace.value;\
+             module.exports;",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Namespace(tools)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected namespace");
+        };
+        assert_eq!(tools.statements.len(), 3);
+        assert!(!tools.is_export);
+        assert_eq!(
+            ast.symbols[usize::try_from(tools.name.reference.inner_index).expect("symbol index")]
+                .kind,
+            crate::internal::ast::SymbolKind::TsNamespace
+        );
+        let Some(StmtData::Namespace(public)) = ast.parts[1].statements[1].data.as_deref() else {
+            panic!("expected exported namespace");
+        };
+        assert!(public.is_export);
+        assert!(ast.named_exports.contains_key("Public"));
+        let Some(StmtData::Namespace(outer)) = ast.parts[1].statements[2].data.as_deref() else {
+            panic!("expected dotted namespace");
+        };
+        assert!(matches!(
+            outer.statements[0].data.as_deref(),
+            Some(StmtData::Namespace(inner)) if inner.is_export
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[3].data.as_deref(),
+            Some(StmtData::Expr(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[4].data.as_deref(),
+            Some(StmtData::Expr(_))
+        ));
     }
 
     #[test]

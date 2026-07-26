@@ -146,10 +146,18 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
     Stmt::new(loc, StmtData::Import(statement))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
     lexer.expect(Token::Export);
-    if !core.is_current_scope_module_scope() {
+    let is_namespace_scope = core.current_scope.as_ref().is_some_and(|scope| {
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ts_namespace
+            .is_some()
+    });
+    if !core.is_current_scope_module_scope() && !is_namespace_scope {
         core.add_error_range(
             crate::internal::logger::Range { loc, len: 6 },
             "An export declaration can only be used at the top level of a module",
