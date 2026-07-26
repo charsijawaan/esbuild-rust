@@ -6,12 +6,12 @@ use crate::internal::{
     ast::{CharFreq, ImportKind, ImportRecord, LocRef, Ref, Symbol, SymbolKind},
     css_ast::{
         Ast, AtCharsetRule, AtImportRule, AtKeyframesRule, AtLayerRule, AtMediaRule,
-        BadDeclarationRule, ClassSelector, Combinator, ComplexSelector, Composes, CompoundSelector,
-        DeclarationRule, HashSelector, ImportConditions, ImportedComposesName, KeyframeBlock,
-        KnownAtRule, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, NameToken,
-        NamespacedName, PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule,
-        SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags, rules_equal,
-        tokens_are_comma_separated,
+        BadDeclarationRule, ClassSelector, Combinator, CommentRule, ComplexSelector, Composes,
+        CompoundSelector, DeclarationRule, HashSelector, ImportConditions, ImportedComposesName,
+        KeyframeBlock, KnownAtRule, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData,
+        NameToken, NamespacedName, PseudoClassSelector, QualifiedRule, Rule, RuleData,
+        SelectorRule, SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags,
+        rules_equal, tokens_are_comma_separated,
     },
     css_lexer::{self, TokenKind},
     logger::{Loc, Log, Path, Range, Source},
@@ -45,6 +45,8 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
     let mut parser = Parser {
         source,
         tokens: result.tokens,
+        legal_comments: result.legal_comments,
+        legal_comment_index: 0,
         minify_syntax: options.minify_syntax,
         minify_whitespace: options.minify_whitespace,
         index: 0,
@@ -57,7 +59,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
         composes: HashMap::new(),
         composes_target: None,
     };
-    let rules = parser.parse_rule_list(false);
+    let rules = parser.parse_rule_list(false, true);
     let char_freq = if options.minify_identifiers {
         let mut frequency = CharFreq::default();
         frequency.scan(&parser.source.contents, 1);
@@ -97,6 +99,8 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
 struct Parser {
     source: Source,
     tokens: Vec<css_lexer::Token>,
+    legal_comments: Vec<css_lexer::Comment>,
+    legal_comment_index: usize,
     minify_syntax: bool,
     minify_whitespace: bool,
     index: usize,
@@ -111,9 +115,14 @@ struct Parser {
 }
 
 impl Parser {
-    fn parse_rule_list(&mut self, stop_at_close_brace: bool) -> Vec<Rule> {
+    fn parse_rule_list(
+        &mut self,
+        stop_at_close_brace: bool,
+        preserve_legal_comments: bool,
+    ) -> Vec<Rule> {
         let mut rules = Vec::new();
         loop {
+            self.append_legal_comments(&mut rules, preserve_legal_comments);
             self.skip_whitespace();
             match self.current_kind() {
                 TokenKind::EndOfFile => break,
@@ -122,7 +131,9 @@ impl Parser {
                     break;
                 }
                 TokenKind::Semicolon => self.index += 1,
-                TokenKind::AtKeyword => rules.push(self.parse_at_rule()),
+                TokenKind::AtKeyword => {
+                    rules.push(self.parse_at_rule(preserve_legal_comments));
+                }
                 _ if stop_at_close_brace && self.starts_declaration() => {
                     if let Some(rule) = self.parse_declaration() {
                         rules.push(rule);
@@ -143,7 +154,26 @@ impl Parser {
         rules
     }
 
-    fn parse_at_rule(&mut self) -> Rule {
+    fn append_legal_comments(&mut self, rules: &mut Vec<Rule>, preserve: bool) {
+        while let Some(comment) = self.legal_comments.get(self.legal_comment_index) {
+            let token_index_after =
+                usize::try_from(comment.token_index_after).unwrap_or(usize::MAX);
+            if token_index_after > self.index {
+                break;
+            }
+            if preserve && token_index_after == self.index {
+                rules.push(Rule {
+                    loc: comment.loc,
+                    data: RuleData::Comment(CommentRule {
+                        text: String::from_utf8_lossy(&comment.text).into_owned(),
+                    }),
+                });
+            }
+            self.legal_comment_index += 1;
+        }
+    }
+
+    fn parse_at_rule(&mut self, preserve_legal_comments: bool) -> Rule {
         let token = self.current();
         let loc = token.range.loc;
         let name = self.decoded(token);
@@ -185,7 +215,7 @@ impl Parser {
             if name.eq_ignore_ascii_case("media") {
                 let queries = split_media_queries(prelude, loc);
                 self.index += 1;
-                let rules = self.parse_rule_list(true);
+                let rules = self.parse_rule_list(true, preserve_legal_comments);
                 return Rule {
                     loc,
                     data: RuleData::AtMedia(AtMediaRule {
@@ -198,7 +228,7 @@ impl Parser {
             if name.eq_ignore_ascii_case("layer") {
                 let names = parse_layer_names(&prelude);
                 self.index += 1;
-                let rules = self.parse_rule_list(true);
+                let rules = self.parse_rule_list(true, preserve_legal_comments);
                 return Rule {
                     loc,
                     data: RuleData::AtLayer(AtLayerRule {
@@ -210,7 +240,9 @@ impl Parser {
             }
             if is_known_block_at_rule(&name) {
                 self.index += 1;
-                let rules = self.parse_rule_list(true);
+                let preserve_legal_comments =
+                    preserve_legal_comments && known_at_rule_preserves_legal_comments(&name);
+                let rules = self.parse_rule_list(true, preserve_legal_comments);
                 return Rule {
                     loc,
                     data: RuleData::KnownAt(KnownAtRule {
@@ -273,7 +305,7 @@ impl Parser {
                 continue;
             }
             self.index += 1;
-            let rules = self.parse_rule_list(true);
+            let rules = self.parse_rule_list(true, false);
             let mut selectors = keyframe_selectors(&selector_tokens);
             if self.minify_syntax {
                 for selector in &mut selectors {
@@ -402,7 +434,7 @@ impl Parser {
         let selectors = self.parse_complex_selectors(&prelude);
         let old_composes_target = self.composes_target;
         self.composes_target = selectors.as_deref().and_then(single_class_selector);
-        let rules = self.parse_rule_list(true);
+        let rules = self.parse_rule_list(true, false);
         self.composes_target = old_composes_target;
         if let Some(selectors) = selectors {
             Rule {
@@ -2609,6 +2641,13 @@ fn is_known_block_at_rule(name: &str) -> bool {
             | "starting-style"
             | "supports"
             | "view-transition"
+    )
+}
+
+fn known_at_rule_preserves_legal_comments(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "container" | "document" | "starting-style" | "supports"
     )
 }
 

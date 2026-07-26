@@ -686,6 +686,22 @@ mod tests {
     }
 
     #[test]
+    fn preserves_legal_css_comments() {
+        assert_eq!(
+            code(transform(
+                "/*! first */ .a { color: red } /*! middle */ .b { color: red } a { /*! dropped */ color: blue } @media print { /*! kept */ c { color: black } } /* @license last */",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "/*! first */.a,.b{color:red}/*! middle */a{color:#00f}@media print{/*! kept */c{color:#000}}/* @license last */\n"
+        );
+    }
+
+    #[test]
     fn scopes_and_minifies_local_css_names() {
         let input = ".card { color: red } #root .card { color: blue }";
         assert_eq!(
