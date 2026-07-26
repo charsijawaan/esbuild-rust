@@ -652,4 +652,41 @@ mod tests {
             .expect("unbound use symbol");
         assert_eq!(ast.parts[1].symbol_uses[&use_ref].count_estimate, 1);
     }
+
+    #[test]
+    fn arrow_parameters_bind_without_creating_an_arguments_symbol() {
+        let (ast, ok, log) =
+            parse_source("let outer = 1; const fn = (outer, {x}) => outer + x + arguments;");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].scopes.len(), 3);
+        let entry = ast.parts[1].scopes[0].lock().expect("entry scope");
+        let args = ast.parts[1].scopes[1].lock().expect("arrow args scope");
+        let body = ast.parts[1].scopes[2].lock().expect("arrow body scope");
+        let entry_outer = entry.members["outer"].reference;
+        let argument_outer = args.members["outer"].reference;
+        let argument_x = args.members["x"].reference;
+        assert_ne!(entry_outer, argument_outer);
+        assert!(!args.members.contains_key("arguments"));
+        assert_eq!(body.members["outer"].reference, argument_outer);
+        assert_eq!(body.members["x"].reference, argument_x);
+        drop(body);
+        drop(args);
+        drop(entry);
+        assert_eq!(ast.parts[1].symbol_uses[&argument_outer].count_estimate, 1);
+        assert_eq!(ast.parts[1].symbol_uses[&argument_x].count_estimate, 1);
+        let arguments_ref = ast
+            .symbols
+            .iter()
+            .position(|symbol| {
+                symbol.original_name == "arguments"
+                    && symbol.kind == crate::internal::ast::SymbolKind::Unbound
+            })
+            .map(|index| crate::internal::ast::Ref {
+                source_index: 0,
+                inner_index: u32::try_from(index).expect("symbol index"),
+            })
+            .expect("inherited arguments reference");
+        assert_eq!(ast.parts[1].symbol_uses[&arguments_ref].count_estimate, 1);
+    }
 }

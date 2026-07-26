@@ -13,7 +13,7 @@ use super::{
     parser_core::ParserCore,
     parser_types::{AwaitOrYield, FnOrArrowDataParse},
     syntax_expression::parse_expression,
-    syntax_statement::parse_block,
+    syntax_statement::parse_block_with_scope,
 };
 
 pub(crate) fn parse_identifier_or_arrow_prefix(
@@ -274,6 +274,14 @@ pub(crate) fn parse_arrow_body(
     }
     let arrow_loc = lexer.loc();
     lexer.expect(Token::EqualsGreaterThan);
+    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::FunctionArgs, arrow_loc);
+    let mut args = args;
+    for argument in &mut args {
+        core.declare_binding(
+            crate::internal::ast::SymbolKind::Hoisted,
+            &mut argument.binding,
+        );
+    }
 
     let old_context = core.fn_or_arrow_data_parse;
     core.fn_or_arrow_data_parse = FnOrArrowDataParse {
@@ -289,7 +297,11 @@ pub(crate) fn parse_arrow_body(
     };
 
     let (body, prefer_expr) = if lexer.token == Token::OpenBrace {
-        let (body_loc, block) = parse_block(core, lexer);
+        let (body_loc, block) = parse_block_with_scope(
+            core,
+            lexer,
+            crate::internal::js_ast::ScopeKind::FunctionBody,
+        );
         (
             FunctionBody {
                 block,
@@ -298,7 +310,10 @@ pub(crate) fn parse_arrow_body(
             false,
         )
     } else {
+        let body_loc = lexer.loc();
+        core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::FunctionBody, body_loc);
         let value = parse_expression(core, lexer, Precedence::Comma, true);
+        core.pop_scope();
         (
             FunctionBody {
                 block: crate::internal::js_ast::BlockStmt {
@@ -310,12 +325,13 @@ pub(crate) fn parse_arrow_body(
                     )],
                     ..crate::internal::js_ast::BlockStmt::default()
                 },
-                loc: arrow_loc,
+                loc: body_loc,
             },
             true,
         )
     };
     core.fn_or_arrow_data_parse = old_context;
+    core.pop_scope();
 
     Expr::new(
         loc,

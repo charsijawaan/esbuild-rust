@@ -308,11 +308,11 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
                 visit_binding_initializers(core, &mut argument.binding, false);
                 visit_expr(core, &mut argument.default_or_nil, false);
             }
-            if arrow.prefer_expr {
-                visit_statements(core, &mut arrow.body.block.statements, false);
-            } else {
-                visit_block(core, arrow.body.loc, &mut arrow.body.block, false);
-            }
+            core.push_next_scope_for_visit_pass(ScopeKind::FunctionArgs);
+            core.push_scope_for_visit_pass(ScopeKind::FunctionBody, arrow.body.loc);
+            visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
+            core.pop_scope();
+            core.pop_scope();
         }
         ExprData::Boolean(_)
         | ExprData::Super
