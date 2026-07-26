@@ -5253,6 +5253,30 @@ mod tests {
     }
 
     #[test]
+    fn preserves_empty_statements_after_type_script_interfaces() {
+        assert_eq!(
+            code(transform(
+                "interface X { x: number }; const x: X = { x: 1 }",
+                TransformOptions {
+                    loader: Loader::Ts,
+                    ..TransformOptions::default()
+                }
+            )),
+            ";\nconst x = { x: 1 };\n"
+        );
+        assert_eq!(
+            code(transform(
+                "interface X { x: number } const x: X = { x: 1 }",
+                TransformOptions {
+                    loader: Loader::Ts,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const x = { x: 1 };\n"
+        );
+    }
+
+    #[test]
     fn numbers_type_script_namespace_scope_collisions() {
         assert_eq!(
             code(transform(

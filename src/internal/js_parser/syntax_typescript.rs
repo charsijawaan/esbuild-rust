@@ -303,9 +303,6 @@ pub(crate) fn parse_type_script_statement(
             lexer.next();
         }
         skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
-        if lexer.token == Token::Semicolon {
-            lexer.next();
-        }
         return Some(Stmt::new(
             loc,
             StmtData::TypeScript(TypeScriptStmt::default()),
