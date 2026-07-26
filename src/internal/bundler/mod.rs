@@ -64,6 +64,12 @@ pub struct ScannedBundle {
     pub entry_points: Vec<GraphEntryPoint>,
 }
 
+#[derive(Debug, Default)]
+pub struct CompiledBundle {
+    pub output_files: Vec<OutputFile>,
+    pub scan_result: linker::ScanImportsAndExportsResult,
+}
+
 /// Convert scanner output directly into the prepared linker graph and chunks.
 ///
 /// # Panics
@@ -98,6 +104,76 @@ pub fn prepare_linker_graph<S: BuildHasher>(
         unique_key_prefix,
         local_names,
     )
+}
+
+/// Compile a scanned JavaScript-only bundle into concrete output files.
+///
+/// # Panics
+///
+/// Panics when CSS chunks are present or scanner/linker output violates an
+/// internal invariant.
+#[must_use]
+pub fn compile_javascript_bundle(
+    file_system: &dyn Fs,
+    bundle: &ScannedBundle,
+    options: &Options,
+    unique_key_prefix: &str,
+) -> CompiledBundle {
+    let mut prepared = prepare_linker_graph(bundle, options, unique_key_prefix, &HashMap::new());
+    let runtime_refs = linker::chunk_runtime_refs_from_graph(
+        &prepared.graph,
+        (prepared.unbound_module_ref != crate::internal::ast::INVALID_REF)
+            .then_some(prepared.unbound_module_ref),
+    );
+    let renamer = crate::internal::renamer::new_no_op_renamer(prepared.graph.symbols.clone());
+    let chunk_paths: Vec<_> = prepared
+        .chunks
+        .iter()
+        .map(|chunk| linker::ChunkPath {
+            unique_key: chunk.unique_key.clone(),
+            final_rel_path: chunk.final_rel_path.clone(),
+        })
+        .collect();
+    let assets: Vec<_> = prepared
+        .graph
+        .files
+        .iter()
+        .map(|file| {
+            let [additional_file] = file.input_file.additional_files.as_slice() else {
+                return None;
+            };
+            Some(linker::AssetPath {
+                unique_key: file.input_file.unique_key_for_additional_file.clone(),
+                rel_path: file_system
+                    .rel(&options.abs_output_dir, &additional_file.abs_path)
+                    .unwrap_or_else(|| additional_file.abs_path.clone()),
+            })
+        })
+        .collect();
+    let output_paths = linker::OutputPathContext::new(unique_key_prefix, &assets, &chunk_paths);
+    let _ = linker::generate_javascript_chunks(
+        &prepared.graph,
+        &mut prepared.chunks,
+        options,
+        runtime_refs,
+        linker::EntryPointTailRefs {
+            to_common_js_ref: runtime_refs.to_common_js_ref,
+            unbound_module_ref: prepared.unbound_module_ref,
+        },
+        &renamer,
+        &output_paths,
+    );
+    let output_files = linker::finalize_generated_javascript_chunks(
+        file_system,
+        &prepared.graph,
+        &mut prepared.chunks,
+        &assets,
+        options,
+    );
+    CompiledBundle {
+        output_files,
+        scan_result: prepared.scan_result,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
