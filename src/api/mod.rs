@@ -1256,6 +1256,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     parser_options.drop_labels.clone_from(&options.drop_labels);
     parser_options.ignore_dce_annotations = options.ignore_annotations;
     parser_options.keep_names = options.keep_names;
+    parser_options.omit_runtime_for_tests = true;
     let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
     if !ok {
         return Vec::new();
@@ -2948,6 +2949,53 @@ mod tests {
         assert!(output.contains("\"LongArrowName\""));
         assert!(!output.contains("DeadFunction"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn keeps_inferred_names_across_expression_contexts() {
+        let transformed = code(transform(
+            "let assigned; assigned = function() {}; assigned ||= () => {};\
+             const object = { 'field name': function() {}, method() {} };\
+             class Fields { item = () => {}; static other = function() {}; static name = 'custom' }\
+             function defaults(param = function() {}, [nested = () => {}] = []) {}\
+             const [bound = function() {}] = [];\
+             export default () => {};",
+            TransformOptions {
+                keep_names: true,
+                ..TransformOptions::default()
+            },
+        ));
+        for name in [
+            "assigned",
+            "field name",
+            "item",
+            "other",
+            "param",
+            "nested",
+            "bound",
+            "default",
+        ] {
+            assert!(
+                transformed.contains(&format!("\"{name}\"")),
+                "missing inferred name {name:?} in {transformed}"
+            );
+        }
+        assert!(!transformed.contains("\"method\""));
+        assert!(!transformed.contains("__name(Fields"));
+        assert!(!transformed.contains("from \"<runtime>\""));
+
+        for source in ["export default function() {}", "export default class {}"] {
+            let transformed = code(transform(
+                source,
+                TransformOptions {
+                    keep_names: true,
+                    ..TransformOptions::default()
+                },
+            ));
+            assert!(transformed.contains("stdin_default"));
+            assert!(transformed.contains("stdin_default, \"default\""));
+            assert!(!transformed.contains("__name(default"));
+        }
     }
 
     #[test]

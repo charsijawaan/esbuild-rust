@@ -859,10 +859,12 @@ fn keep_name_expression(core: &mut ParserCore, value: Expr, name: &str) -> Expr 
     call
 }
 
-fn keep_declaration_name_statement(core: &mut ParserCore, loc: Loc, reference: Ref) -> Stmt {
-    let name = core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
-        .original_name
-        .clone();
+fn keep_declaration_name_statement(
+    core: &mut ParserCore,
+    loc: Loc,
+    reference: Ref,
+    name: &str,
+) -> Stmt {
     core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].flags |=
         crate::internal::ast::SymbolFlags::DID_KEEP_NAME;
     Stmt::new(
@@ -922,10 +924,57 @@ fn keep_inferred_declaration_name(core: &mut ParserCore, value: &mut Expr, refer
     }
 }
 
+type NameToKeep = (Ref, String, bool);
+
+fn existing_name_to_keep(core: &ParserCore, name: Option<LocRef>) -> Option<NameToKeep> {
+    name.map(|name| {
+        let original_name = core.symbols
+            [usize::try_from(name.reference.inner_index).expect("symbol index")]
+        .original_name
+        .clone();
+        (name.reference, original_name, false)
+    })
+}
+
+fn visit_keep_name_class_blocks(core: &mut ParserCore, class: &mut crate::internal::js_ast::Class) {
+    for property in &mut class.properties {
+        if let Some(block) = &mut property.class_static_block {
+            apply_keep_names_to_statements(core, &mut block.block.statements);
+        }
+    }
+}
+
+fn default_export_name_to_keep(
+    core: &mut ParserCore,
+    export: &mut crate::internal::js_ast::ExportDefaultStmt,
+) -> Option<NameToKeep> {
+    match export.value.data.as_deref_mut() {
+        Some(StmtData::Function(function)) => {
+            apply_keep_names_to_statements(core, &mut function.function.body.block.statements);
+            existing_name_to_keep(core, function.function.name).or_else(|| {
+                function.function.name = Some(export.default_name);
+                Some((export.default_name.reference, "default".into(), true))
+            })
+        }
+        Some(StmtData::Class(class)) => {
+            visit_keep_name_class_blocks(core, &mut class.class);
+            if class_has_static_name(&class.class) {
+                None
+            } else {
+                existing_name_to_keep(core, class.class.name).or_else(|| {
+                    class.class.name = Some(export.default_name);
+                    Some((export.default_name.reference, "default".into(), true))
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
 fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>) {
     let mut result = Vec::with_capacity(statements.len());
     for mut statement in std::mem::take(statements) {
-        let mut name_to_keep = None;
+        let mut name_to_keep: Option<NameToKeep> = None;
         if let Some(data) = statement.data.as_deref_mut() {
             match data {
                 StmtData::Block(block) => {
@@ -936,16 +985,12 @@ fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<St
                         core,
                         &mut function.function.body.block.statements,
                     );
-                    name_to_keep = function.function.name.map(|name| name.reference);
+                    name_to_keep = existing_name_to_keep(core, function.function.name);
                 }
                 StmtData::Class(class) => {
-                    for property in &mut class.class.properties {
-                        if let Some(block) = &mut property.class_static_block {
-                            apply_keep_names_to_statements(core, &mut block.block.statements);
-                        }
-                    }
+                    visit_keep_name_class_blocks(core, &mut class.class);
                     if !class_has_static_name(&class.class) {
-                        name_to_keep = class.class.name.map(|name| name.reference);
+                        name_to_keep = existing_name_to_keep(core, class.class.name);
                     }
                 }
                 StmtData::Local(local) => {
@@ -961,6 +1006,9 @@ fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<St
                             binding.reference,
                         );
                     }
+                }
+                StmtData::ExportDefault(export) => {
+                    name_to_keep = default_export_name_to_keep(core, export);
                 }
                 StmtData::Namespace(namespace) => {
                     apply_keep_names_to_statements(core, &mut namespace.statements);
@@ -984,8 +1032,12 @@ fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<St
         }
         let loc = statement.loc;
         result.push(statement);
-        if let Some(reference) = name_to_keep {
-            result.push(keep_declaration_name_statement(core, loc, reference));
+        if let Some((reference, name, rename_default)) = name_to_keep {
+            result.push(keep_declaration_name_statement(core, loc, reference, &name));
+            if rename_default {
+                core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                    .original_name = format!("{}_default", core.source.identifier_name);
+            }
         }
     }
     *statements = result;

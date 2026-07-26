@@ -16,6 +16,83 @@ use crate::internal::{
 use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properties};
 use super::{parser_core::ParserCore, standalone_helpers::is_simple_parameter_list};
 
+fn symbol_name(core: &ParserCore, reference: crate::internal::ast::Ref) -> String {
+    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+        .original_name
+        .clone()
+}
+
+fn inferred_name_from_expression(core: &ParserCore, expression: &Expr) -> Option<String> {
+    match expression.data.as_deref() {
+        Some(ExprData::Identifier(identifier)) => Some(symbol_name(core, identifier.reference)),
+        Some(ExprData::PrivateIdentifier(private)) => Some(symbol_name(core, private.reference)),
+        Some(ExprData::Dot(dot)) => Some(dot.name.clone()),
+        Some(ExprData::String(string)) => {
+            Some(String::from_utf8_lossy(&utf16_to_string(&string.value)).into_owned())
+        }
+        Some(ExprData::Index(index)) => match index.index.data.as_deref() {
+            Some(ExprData::String(string)) => {
+                Some(String::from_utf8_lossy(&utf16_to_string(&string.value)).into_owned())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn inferred_name_from_binding(core: &ParserCore, binding: &Binding) -> Option<String> {
+    match binding.data.as_deref() {
+        Some(BindingData::Identifier(identifier)) => Some(symbol_name(core, identifier.reference)),
+        _ => None,
+    }
+}
+
+fn class_has_static_name(class: &Class) -> bool {
+    class.properties.iter().any(|property| {
+        property.flags.contains(PropertyFlags::IS_STATIC)
+            && matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::String(value)) if utf16_to_string(&value.value) == b"name"
+            )
+    })
+}
+
+fn keep_inferred_name(core: &mut ParserCore, expression: &mut Expr, name: Option<String>) {
+    let Some(name) = name else {
+        return;
+    };
+    let can_keep_name = match expression.data.as_deref() {
+        Some(ExprData::Function(function)) => function.function.name.is_none(),
+        Some(ExprData::Class(class)) => {
+            class.class.name.is_none() && !class_has_static_name(&class.class)
+        }
+        Some(ExprData::Arrow(_)) => true,
+        _ => false,
+    };
+    if !core.options.keep_names || !can_keep_name {
+        return;
+    }
+    let loc = expression.loc;
+    let mut call = core.call_runtime(
+        loc,
+        "__name",
+        vec![
+            std::mem::take(expression),
+            Expr::new(
+                loc,
+                ExprData::String(StringExpr {
+                    value: crate::internal::helpers::string_to_utf16(name.as_bytes()),
+                    ..StringExpr::default()
+                }),
+            ),
+        ],
+    );
+    if let Some(ExprData::Call(call)) = call.data.as_deref_mut() {
+        call.can_be_unwrapped_if_unused = true;
+    }
+    *expression = call;
+}
+
 pub(crate) fn visit_top_level_statements(core: &mut ParserCore, statements: &mut [Stmt]) {
     visit_statements(core, statements, true);
 }
@@ -129,6 +206,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             Some(StmtData::ExportDefault(export)) => match export.value.data.as_deref_mut() {
                 Some(StmtData::Expr(expression)) => {
                     visit_expr(core, &mut expression.value, resolve_identifiers);
+                    keep_inferred_name(core, &mut expression.value, Some("default".into()));
                 }
                 Some(StmtData::Function(function)) => {
                     visit_function(core, &mut function.function, resolve_identifiers);
@@ -526,6 +604,8 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         );
         visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
         visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
+        let name = inferred_name_from_binding(core, &argument.binding);
+        keep_inferred_name(core, &mut argument.default_or_nil, name);
     }
     core.push_scope_for_visit_pass(ScopeKind::FunctionBody, function.body.loc);
     visit_statements(
@@ -620,6 +700,13 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
         let old_new_target_allowed = std::mem::replace(&mut core.visit_new_target_allowed, true);
         visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
         visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
+        if matches!(
+            property.kind,
+            PropertyKind::Field | PropertyKind::AutoAccessor
+        ) {
+            let name = inferred_name_from_expression(core, &property.key);
+            keep_inferred_name(core, &mut property.initializer_or_nil, name);
+        }
         core.visit_new_target_allowed = old_new_target_allowed;
         core.current_scope
             .as_ref()
@@ -664,6 +751,8 @@ fn visit_binding_initializers(
             for item in &mut array.items {
                 visit_binding_initializers(core, &mut item.binding, resolve_identifiers);
                 visit_expr(core, &mut item.default_value_or_nil, resolve_identifiers);
+                let name = inferred_name_from_binding(core, &item.binding);
+                keep_inferred_name(core, &mut item.default_value_or_nil, name);
             }
         }
         Some(BindingData::Object(object)) => {
@@ -677,6 +766,8 @@ fn visit_binding_initializers(
                     &mut property.default_value_or_nil,
                     resolve_identifiers,
                 );
+                let name = inferred_name_from_binding(core, &property.value);
+                keep_inferred_name(core, &mut property.default_value_or_nil, name);
             }
         }
         Some(BindingData::Missing | BindingData::Identifier(_)) | None => {}
@@ -1078,7 +1169,19 @@ fn visit_expr_with_target(
                     binary.op.binary_assign_target()
                 };
             visit_expr_with_target(core, &mut binary.left, resolve_identifiers, left_target);
+            let inferred_name = if matches!(
+                binary.op,
+                OpCode::BinaryAssign
+                    | OpCode::BinaryNullishCoalescingAssign
+                    | OpCode::BinaryLogicalOrAssign
+                    | OpCode::BinaryLogicalAndAssign
+            ) {
+                inferred_name_from_expression(core, &binary.left)
+            } else {
+                None
+            };
             visit_expr(core, &mut binary.right, resolve_identifiers);
+            keep_inferred_name(core, &mut binary.right, inferred_name);
             if core.should_fold_type_script_constant_expressions
                 && let Some(folded) =
                     crate::internal::js_ast::fold_binary_operator(expression.loc, binary)
@@ -1328,6 +1431,11 @@ fn visit_expr_with_target(
                     },
                 );
                 visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
+                if property.kind == PropertyKind::Field {
+                    let name = inferred_name_from_expression(core, &property.key);
+                    keep_inferred_name(core, &mut property.value_or_nil, name.clone());
+                    keep_inferred_name(core, &mut property.initializer_or_nil, name);
+                }
                 for decorator in &mut property.decorators {
                     visit_expr(core, &mut decorator.value, resolve_identifiers);
                 }
@@ -1465,6 +1573,8 @@ fn visit_expr_with_target(
                 );
                 visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
                 visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
+                let name = inferred_name_from_binding(core, &argument.binding);
+                keep_inferred_name(core, &mut argument.default_or_nil, name);
             }
             core.push_scope_for_visit_pass(ScopeKind::FunctionBody, arrow.body.loc);
             visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
