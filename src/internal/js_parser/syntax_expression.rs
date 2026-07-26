@@ -16,6 +16,7 @@ use super::{
     syntax_new::parse_new_prefix,
     syntax_private::parse_private_brand_check_prefix,
     syntax_suffix::{binary_operator, parse_high_precedence_suffix_chain},
+    syntax_super::parse_super_prefix,
     syntax_yield_await::parse_await_or_yield_prefix,
 };
 
@@ -108,6 +109,9 @@ fn parse_prefix(
     minimum_precedence: Precedence,
     allow_in: bool,
 ) -> Expr {
+    if let Some(expr) = parse_super_prefix(core, lexer, minimum_precedence) {
+        return expr;
+    }
     if let Some(expr) = parse_private_brand_check_prefix(core, lexer, minimum_precedence, allow_in)
     {
         return expr;
@@ -293,9 +297,9 @@ mod tests {
             let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
             let mut core = super::ParserCore::new(source, Options::default());
             if expected_inner == "await" {
-                core.await_policy = policy;
+                core.fn_or_arrow_data_parse.await_policy = policy;
             } else {
-                core.yield_policy = policy;
+                core.fn_or_arrow_data_parse.yield_policy = policy;
             }
             let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
             match expected_inner {
@@ -343,6 +347,29 @@ mod tests {
                         Some(ExprData::PrivateIdentifier(_))
                     )
         ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn integrates_super_property_call_suffixes() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"super.method(1)"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log.clone(), source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new_with_log(source, Options::default(), log.clone());
+        core.fn_or_arrow_data_parse.allow_super_property = true;
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        let Some(ExprData::Call(call)) = expression.data.as_deref() else {
+            panic!("expected call");
+        };
+        assert!(matches!(
+            call.target.data.as_deref(),
+            Some(ExprData::Dot(dot))
+                if matches!(dot.target.data.as_deref(), Some(ExprData::Super))
+        ));
+        assert!(log.peek().is_empty());
         assert_eq!(lexer.token, Token::EndOfFile);
     }
 

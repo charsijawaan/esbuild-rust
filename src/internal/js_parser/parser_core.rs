@@ -20,7 +20,7 @@ use crate::internal::{
 
 use super::{
     Options,
-    parser_types::AwaitOrYield,
+    parser_types::FnOrArrowDataParse,
     symbols::{MergeResult, can_merge_symbols},
 };
 
@@ -54,8 +54,7 @@ pub(crate) struct ParserCore {
     pub(crate) big_int_ref: Ref,
     pub(crate) legacy_octal_literals: HashMap<Loc, Range>,
     pub(crate) esm_import_meta: Range,
-    pub(crate) await_policy: AwaitOrYield,
-    pub(crate) yield_policy: AwaitOrYield,
+    pub(crate) fn_or_arrow_data_parse: FnOrArrowDataParse,
     pub(crate) lower_all_of_these_private_names: HashMap<String, bool>,
 }
 
@@ -86,8 +85,7 @@ impl ParserCore {
             big_int_ref: INVALID_REF,
             legacy_octal_literals: HashMap::new(),
             esm_import_meta: Range::default(),
-            await_policy: AwaitOrYield::AllowIdentifier,
-            yield_policy: AwaitOrYield::AllowIdentifier,
+            fn_or_arrow_data_parse: FnOrArrowDataParse::default(),
             lower_all_of_these_private_names: HashMap::new(),
         }
     }

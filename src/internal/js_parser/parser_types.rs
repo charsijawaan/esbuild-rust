@@ -10,6 +10,14 @@ pub(crate) enum AwaitOrYield {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FnOrArrowDataParse {
+    pub(crate) await_policy: AwaitOrYield,
+    pub(crate) yield_policy: AwaitOrYield,
+    pub(crate) allow_super_call: bool,
+    pub(crate) allow_super_property: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ExprFlags(u8);
 
 impl ExprFlags {

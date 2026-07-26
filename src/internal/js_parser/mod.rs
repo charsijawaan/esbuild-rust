@@ -19,6 +19,7 @@ mod syntax_literals;
 mod syntax_new;
 mod syntax_private;
 mod syntax_suffix;
+mod syntax_super;
 mod syntax_yield_await;
 
 pub use define::parse_define_expr;

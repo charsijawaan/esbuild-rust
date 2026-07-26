@@ -30,9 +30,9 @@ pub(crate) fn parse_await_or_yield_prefix(
     lexer.next();
 
     let policy = if is_await {
-        core.await_policy
+        core.fn_or_arrow_data_parse.await_policy
     } else {
-        core.yield_policy
+        core.fn_or_arrow_data_parse.yield_policy
     };
     match policy {
         AwaitOrYield::ForbidAll => {
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn parses_await_expression_when_allowed() {
         let (_, mut lexer, mut core) = setup(b"await 1");
-        core.await_policy = AwaitOrYield::AllowExpression;
+        core.fn_or_arrow_data_parse.await_policy = AwaitOrYield::AllowExpression;
         let expr =
             parse_await_or_yield_prefix(&mut core, &mut lexer, Precedence::Lowest, parse_number)
                 .expect("expected await");
@@ -188,7 +188,7 @@ mod tests {
             (&b"yield;"[..], false, false),
         ] {
             let (_, mut lexer, mut core) = setup(text);
-            core.yield_policy = AwaitOrYield::AllowExpression;
+            core.fn_or_arrow_data_parse.yield_policy = AwaitOrYield::AllowExpression;
             let expr = parse_await_or_yield_prefix(
                 &mut core,
                 &mut lexer,
