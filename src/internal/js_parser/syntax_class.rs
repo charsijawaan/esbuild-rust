@@ -376,6 +376,7 @@ fn parse_class_property(
             lexer,
             None,
             false,
+            true,
             FnOrArrowDataParse {
                 await_policy: if is_async {
                     AwaitOrYield::AllowExpression
@@ -393,6 +394,9 @@ fn parse_class_property(
                 ..FnOrArrowDataParse::default()
             },
         );
+        if !function.has_body {
+            return None;
+        }
         function.is_unique_formal_parameters = true;
         if kind == PropertyKind::Getter && !function.args.is_empty() {
             core.add_error_range(

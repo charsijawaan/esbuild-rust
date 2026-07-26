@@ -700,6 +700,12 @@ fn function_declaration_from_expression(core: &mut ParserCore, loc: Loc, express
     let ExprData::Function(mut function) = *data else {
         unreachable!("function declaration requires a function expression");
     };
+    if !function.function.has_body {
+        return Stmt::new(
+            loc,
+            StmtData::TypeScript(crate::internal::js_ast::TypeScriptStmt::default()),
+        );
+    }
     if function.function.name.is_none() {
         core.add_error_range(
             Range { loc, len: 8 },

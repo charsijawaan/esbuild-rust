@@ -2068,6 +2068,44 @@ mod tests {
     }
 
     #[test]
+    fn erases_type_script_overload_signatures() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "function format(value: string): string;\
+             function format(value: number): string;\
+             function format(value) { return value + ''; }\
+             class Service {\
+               run(value: string): void;\
+               run(value) { consume(value); }\
+             }",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert!(matches!(
+            ast.parts[1].statements[0].data.as_deref(),
+            Some(StmtData::TypeScript(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[1].data.as_deref(),
+            Some(StmtData::TypeScript(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[2].data.as_deref(),
+            Some(StmtData::Function(function)) if function.function.has_body
+        ));
+        let Some(StmtData::Class(class)) = ast.parts[1].statements[3].data.as_deref() else {
+            panic!("expected class with overloaded method");
+        };
+        assert_eq!(class.class.properties.len(), 1);
+        assert_eq!(
+            class.class.properties[0].kind,
+            crate::internal::js_ast::PropertyKind::Method
+        );
+    }
+
+    #[test]
     fn validates_class_constructor_and_prototype_names() {
         let (_, ok, log) = parse_source(
             "class Getter { get constructor() {} }\

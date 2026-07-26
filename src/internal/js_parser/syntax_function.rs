@@ -146,6 +146,7 @@ fn parse_function_after_keyword(
         lexer,
         name,
         !is_declaration,
+        is_declaration,
         FnOrArrowDataParse {
             await_policy: if is_async {
                 AwaitOrYield::AllowExpression
@@ -176,11 +177,13 @@ pub(crate) fn parse_function_tail(
     lexer: &mut Lexer,
     mut name: Option<LocRef>,
     name_is_function_expression: bool,
+    allow_missing_body_for_typescript: bool,
     body_context: FnOrArrowDataParse,
 ) -> Function {
     let is_async = body_context.await_policy == AwaitOrYield::AllowExpression;
     let is_generator = body_context.yield_policy == AwaitOrYield::AllowExpression;
     let open_paren_loc = lexer.loc();
+    let scope_index = core.scopes_in_order.len();
     core.push_scope_for_parse_pass(
         crate::internal::js_ast::ScopeKind::FunctionArgs,
         open_paren_loc,
@@ -261,16 +264,35 @@ pub(crate) fn parse_function_tail(
     }
     lexer.expect(Token::CloseParen);
     if core.options.ts.parse {
-        super::syntax_typescript::skip_type_annotation(lexer, &[Token::OpenBrace]);
+        let stop_tokens = if allow_missing_body_for_typescript {
+            &[Token::OpenBrace, Token::Semicolon][..]
+        } else {
+            &[Token::OpenBrace][..]
+        };
+        super::syntax_typescript::skip_type_annotation(lexer, stop_tokens);
     }
 
-    core.fn_or_arrow_data_parse = body_context;
-    let (body_loc, block) = parse_block_with_scope(
-        core,
-        lexer,
-        crate::internal::js_ast::ScopeKind::FunctionBody,
-    );
-    core.pop_scope();
+    let (body_loc, block, has_body) = if allow_missing_body_for_typescript
+        && core.options.ts.parse
+        && lexer.token != Token::OpenBrace
+    {
+        lexer.expect_or_insert_semicolon();
+        core.pop_and_discard_scope(scope_index);
+        (
+            crate::internal::logger::Loc::default(),
+            crate::internal::js_ast::BlockStmt::default(),
+            false,
+        )
+    } else {
+        core.fn_or_arrow_data_parse = body_context;
+        let (body_loc, block) = parse_block_with_scope(
+            core,
+            lexer,
+            crate::internal::js_ast::ScopeKind::FunctionBody,
+        );
+        core.pop_scope();
+        (body_loc, block, true)
+    };
     core.fn_or_arrow_data_parse = old_context;
 
     Function {
@@ -285,6 +307,7 @@ pub(crate) fn parse_function_tail(
         is_async,
         is_generator,
         has_rest_arg,
+        has_body,
         ..Function::default()
     }
 }

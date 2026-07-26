@@ -481,6 +481,7 @@ pub struct Function {
     pub is_async: bool,
     pub is_generator: bool,
     pub has_rest_arg: bool,
+    pub has_body: bool,
     pub has_if_scope: bool,
     pub has_no_side_effects_comment: bool,
     pub is_unique_formal_parameters: bool,
