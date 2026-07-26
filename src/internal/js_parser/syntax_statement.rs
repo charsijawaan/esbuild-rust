@@ -302,6 +302,10 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             let expression = parse_class_prefix(core, lexer).expect("class token was checked");
             class_declaration_from_expression(core, loc, expression)
         }
+        Token::At => {
+            let expression = parse_class_prefix(core, lexer).expect("decorator token was checked");
+            class_declaration_from_expression(core, loc, expression)
+        }
         Token::Import => parse_import_statement(core, lexer),
         Token::Export => parse_export_statement(core, lexer),
         Token::If => {

@@ -4,8 +4,9 @@ use crate::internal::{
     ast::{LocRef, SymbolKind},
     helpers::string_to_utf16,
     js_ast::{
-        Class, ClassExpr, ClassStaticBlock, Expr, ExprData, FunctionExpr, NameOfSymbolExpr,
-        Precedence, PrivateIdentifierExpr, Property, PropertyFlags, PropertyKind, StringExpr,
+        Class, ClassExpr, ClassStaticBlock, Decorator, Expr, ExprData, FunctionExpr,
+        NameOfSymbolExpr, Precedence, PrivateIdentifierExpr, Property, PropertyFlags, PropertyKind,
+        StringExpr,
     },
     js_lexer::{Lexer, MaybeSubstring, Token},
     logger::Loc,
@@ -23,7 +24,11 @@ use super::{
 };
 
 pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Option<Expr> {
+    let decorators = parse_decorators(core, lexer);
     if lexer.token != Token::Class {
+        if !decorators.is_empty() {
+            lexer.expected(Token::Class);
+        }
         return None;
     }
     let loc = lexer.loc();
@@ -67,7 +72,10 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
             lexer.next();
             continue;
         }
-        if let Some(property) = parse_class_property(core, lexer, extends_or_nil.data.is_some()) {
+        let decorators = parse_decorators(core, lexer);
+        if let Some(mut property) = parse_class_property(core, lexer, extends_or_nil.data.is_some())
+        {
+            property.decorators = decorators;
             properties.push(property);
         }
     }
@@ -97,6 +105,7 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
         loc,
         ExprData::Class(ClassExpr {
             class: Class {
+                decorators,
                 name,
                 extends_or_nil,
                 properties,
@@ -107,6 +116,21 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
             },
         }),
     ))
+}
+
+pub(crate) fn parse_decorators(core: &mut ParserCore, lexer: &mut Lexer) -> Vec<Decorator> {
+    let mut decorators = Vec::new();
+    while lexer.token == Token::At {
+        let at_loc = lexer.loc();
+        lexer.next();
+        let value = parse_expression(core, lexer, Precedence::New, true);
+        decorators.push(Decorator {
+            value,
+            at_loc,
+            omit_newline_after: !lexer.has_newline_before,
+        });
+    }
+    decorators
 }
 
 #[allow(clippy::too_many_lines)]
@@ -157,20 +181,20 @@ fn parse_class_property(
     let mut is_type_only = false;
     let mut preconsumed_ts_key = preconsumed_static;
     while preconsumed_ts_key.is_none()
-        && core.options.ts.parse
         && lexer.token == Token::Identifier
-        && matches!(
-            lexer.raw(),
-            b"public"
-                | b"private"
-                | b"protected"
-                | b"readonly"
-                | b"abstract"
-                | b"declare"
-                | b"override"
-                | b"accessor"
-                | b"static"
-        )
+        && (lexer.raw() == b"accessor"
+            || (core.options.ts.parse
+                && matches!(
+                    lexer.raw(),
+                    b"public"
+                        | b"private"
+                        | b"protected"
+                        | b"readonly"
+                        | b"abstract"
+                        | b"declare"
+                        | b"override"
+                        | b"static"
+                )))
     {
         let name = lexer.identifier.clone();
         let name_loc = lexer.loc();

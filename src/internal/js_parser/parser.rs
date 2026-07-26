@@ -2273,6 +2273,57 @@ mod tests {
     }
 
     #[test]
+    fn parses_class_member_and_parameter_decorators() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        options.ts.config.experimental_decorators = crate::internal::config::MaybeBool::True;
+        let (ast, ok, log) = parse_source_with_options(
+            "@sealed class Example {\
+               @field accessor value = 1;\
+               @logged method(@inject dependency) { return dependency; }\
+             }\
+             const Decorated = @sealed class {};\
+             export @sealed class Public {}",
+            options,
+        );
+        let messages = log.done();
+        assert!(
+            ok,
+            "{:?}",
+            messages
+                .iter()
+                .map(|message| &message.data.text)
+                .collect::<Vec<_>>()
+        );
+        assert!(messages.is_empty());
+        let Some(StmtData::Class(example)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected decorated class");
+        };
+        assert_eq!(example.class.decorators.len(), 1);
+        assert_eq!(example.class.properties[0].decorators.len(), 1);
+        assert_eq!(example.class.properties[1].decorators.len(), 1);
+        let Some(ExprData::Function(method)) =
+            example.class.properties[1].value_or_nil.data.as_deref()
+        else {
+            panic!("expected decorated method");
+        };
+        assert_eq!(method.function.args[0].decorators.len(), 1);
+        assert!(matches!(
+            ast.parts[1].statements[1].data.as_deref(),
+            Some(StmtData::Local(local))
+                if matches!(
+                    local.declarations[0].value_or_nil.data.as_deref(),
+                    Some(ExprData::Class(class)) if class.class.decorators.len() == 1
+                )
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[2].data.as_deref(),
+            Some(StmtData::Class(class)) if class.is_export && class.class.decorators.len() == 1
+        ));
+        assert!(ast.named_exports.contains_key("Public"));
+    }
+
+    #[test]
     fn validates_class_constructor_and_prototype_names() {
         let (_, ok, log) = parse_source(
             "class Getter { get constructor() {} }\

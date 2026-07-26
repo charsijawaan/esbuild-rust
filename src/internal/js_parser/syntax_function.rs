@@ -222,6 +222,7 @@ pub(crate) fn parse_function_tail(
     let mut args = Vec::new();
     let mut has_rest_arg = false;
     while lexer.token != Token::CloseParen {
+        let decorators = super::syntax_class::parse_decorators(core, lexer);
         if core.options.ts.parse && lexer.token == Token::This {
             lexer.next();
             super::syntax_typescript::skip_type_annotation(
@@ -262,8 +263,8 @@ pub(crate) fn parse_function_tail(
         args.push(Arg {
             binding,
             default_or_nil,
+            decorators,
             is_typescript_ctor_field,
-            ..Arg::default()
         });
 
         if lexer.token != Token::Comma {

@@ -259,7 +259,8 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
         | Token::Function
         | Token::Class
         | Token::Enum
-        | Token::Import => {
+        | Token::Import
+        | Token::At => {
             let mut statement = super::syntax_statement::parse_statement(core, lexer);
             mark_declaration_exported(&mut statement);
             statement

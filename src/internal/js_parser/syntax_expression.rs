@@ -183,6 +183,9 @@ fn parse_prefix(
     if let Some(expr) = parse_simple_prefix(core, lexer) {
         return expr;
     }
+    if lexer.token == Token::At {
+        return parse_class_prefix(core, lexer).expect("decorator must be followed by a class");
+    }
     match lexer.token {
         Token::LessThan if core.options.ts.parse => {
             super::syntax_typescript::skip_type_parameters(lexer);
