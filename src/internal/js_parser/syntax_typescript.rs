@@ -1,5 +1,5 @@
 use crate::internal::{
-    ast::{INVALID_REF, LocRef, SymbolKind},
+    ast::{INVALID_REF, LocRef, Ref, SymbolKind},
     helpers::string_to_utf16,
     js_ast::{
         EnumStmt, EnumValue, Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, Stmt, StmtData,
@@ -593,16 +593,20 @@ pub(crate) fn parse_enum_statement(
     lexer.expect(Token::Identifier);
     let argument = core.new_symbol(SymbolKind::Hoisted, name_text.clone());
     core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Entry, loc);
-    core.current_scope
-        .as_ref()
-        .expect("enum scope")
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .ts_namespace = Some(TsNamespaceScope {
-        argument_ref: argument,
-        is_enum_scope: true,
-        ..TsNamespaceScope::default()
-    });
+    {
+        let mut scope = core
+            .current_scope
+            .as_ref()
+            .expect("enum scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        scope.generated.push(argument);
+        scope.ts_namespace = Some(TsNamespaceScope {
+            argument_ref: argument,
+            is_enum_scope: true,
+            ..TsNamespaceScope::default()
+        });
+    }
     let old_context = core.fn_or_arrow_data_parse;
     core.fn_or_arrow_data_parse.is_this_disallowed = true;
     lexer.expect(Token::OpenBrace);
@@ -664,6 +668,7 @@ pub(crate) fn parse_enum_statement(
     }
     lexer.expect(Token::CloseBrace);
     core.fn_or_arrow_data_parse = old_context;
+    rename_enum_argument_if_collides(core, argument, &name_text);
     core.pop_scope();
     Stmt::new(
         loc,
@@ -674,6 +679,21 @@ pub(crate) fn parse_enum_statement(
             is_export,
         }),
     )
+}
+
+fn rename_enum_argument_if_collides(core: &mut ParserCore, argument: Ref, name: &str) {
+    let argument_collides = core
+        .current_scope
+        .as_ref()
+        .expect("enum scope")
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .members
+        .contains_key(name);
+    if argument_collides {
+        core.symbols[usize::try_from(argument.inner_index).expect("symbol index fits usize")]
+            .original_name = format!("_{name}");
+    }
 }
 
 fn skip_balanced_group(lexer: &mut Lexer, open: Token, close: Token) {

@@ -3985,6 +3985,19 @@ mod tests {
         );
         assert_eq!(
             code(transform(
+                "enum E { X = \"x\", N = 1 }\nconst f=(a,b)=>({[E.X]:a,[E.N]:b})",
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var E=(n=>(n.X=\"x\",n[n.N=1]=\"N\",n))(E||{});const f=(N,X)=>({x:N,1:X});\n"
+        );
+        assert_eq!(
+            code(transform(
                 "enum E { X = \"x\" };const value=E.X",
                 TransformOptions {
                     loader: Loader::Ts,
@@ -3992,6 +4005,71 @@ mod tests {
                 }
             )),
             "var E = /* @__PURE__ */ ((E2) => {\n  E2[\"X\"] = \"x\";\n  return E2;\n})(E || {});\n;\nconst value = \"x\" /* X */;\n"
+        );
+    }
+
+    #[test]
+    fn renames_and_merges_typescript_enums_like_esbuild() {
+        let collision = "enum foo{foo=123,bar=foo};console.log(foo)";
+        assert_eq!(
+            code(transform(
+                collision,
+                TransformOptions {
+                    loader: Loader::Ts,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var foo = /* @__PURE__ */ ((_foo) => {\n  _foo[_foo[\"foo\"] = 123] = \"foo\";\n  _foo[_foo[\"bar\"] = 123 /* foo */] = \"bar\";\n  return _foo;\n})(foo || {});\n;\nconsole.log(foo);\n"
+        );
+        assert_eq!(
+            code(transform(
+                collision,
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var foo = /* @__PURE__ */ ((_foo) => (_foo[_foo.foo = 123] = \"foo\", _foo[_foo.bar = 123 /* foo */] = \"bar\", _foo))(foo || {});\nconsole.log(foo);\n"
+        );
+        assert_eq!(
+            code(transform(
+                collision,
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var foo=(o=>(o[o.foo=123]=\"foo\",o[o.bar=123]=\"bar\",o))(foo||{});console.log(foo);\n"
+        );
+
+        let adjacent = "enum E{A};enum F{B};console.log(E,F)";
+        assert_eq!(
+            code(transform(
+                adjacent,
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var E = /* @__PURE__ */ ((E2) => (E2[E2.A = 0] = \"A\", E2))(E || {}), F = /* @__PURE__ */ ((F2) => (F2[F2.B = 0] = \"B\", F2))(F || {});\nconsole.log(E, F);\n"
+        );
+        assert_eq!(
+            code(transform(
+                adjacent,
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var E=(e=>(e[e.A=0]=\"A\",e))(E||{}),F=(e=>(e[e.B=0]=\"B\",e))(F||{});console.log(E,F);\n"
         );
     }
 

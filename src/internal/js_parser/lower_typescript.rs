@@ -37,7 +37,9 @@ impl LowerTypeScriptContext {
         for statement in statements {
             let loc = statement.loc;
             let Some(data) = statement.data else {
-                result.push(statement);
+                if !core.options.minify_syntax {
+                    result.push(statement);
+                }
                 continue;
             };
             match *data {
@@ -112,7 +114,9 @@ fn lower_namespace_body(
     for statement in statements {
         let loc = statement.loc;
         let Some(data) = statement.data else {
-            result.push(statement);
+            if !core.options.minify_syntax {
+                result.push(statement);
+            }
             continue;
         };
         match *data {
