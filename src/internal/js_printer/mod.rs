@@ -539,6 +539,15 @@ impl Printer<'_> {
                 self.output.push(b')');
                 self.print_body(&while_statement.body);
             }
+            StmtData::With(with_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"with");
+                self.print_optional_space();
+                self.output.push(b'(');
+                self.print_expr_at(&with_statement.value, Precedence::Lowest);
+                self.output.push(b')');
+                self.print_body(&with_statement.body);
+            }
             StmtData::DoWhile(do_while) => {
                 self.print_indent();
                 self.output.extend_from_slice(b"do");
@@ -610,6 +619,63 @@ impl Printer<'_> {
                     self.indent -= 1;
                 }
             }
+            StmtData::Try(try_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"try");
+                self.print_optional_space();
+                self.print_block(&try_statement.block, false);
+                if let Some(catch) = &try_statement.catch {
+                    self.print_optional_space();
+                    self.output.extend_from_slice(b"catch");
+                    if catch.binding_or_nil.data.is_some() {
+                        self.print_optional_space();
+                        self.output.push(b'(');
+                        self.print_binding(&catch.binding_or_nil);
+                        self.output.push(b')');
+                    }
+                    self.print_optional_space();
+                    self.print_block(&catch.block, false);
+                }
+                if let Some(finally) = &try_statement.finally {
+                    self.print_optional_space();
+                    self.output.extend_from_slice(b"finally");
+                    self.print_optional_space();
+                    self.print_block(&finally.block, false);
+                }
+                self.print_newline();
+            }
+            StmtData::Switch(switch_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"switch");
+                self.print_optional_space();
+                self.output.push(b'(');
+                self.print_expr_at(&switch_statement.test, Precedence::Lowest);
+                self.output.push(b')');
+                self.print_optional_space();
+                self.output.push(b'{');
+                self.print_newline();
+                self.indent += 1;
+                for case in &switch_statement.cases {
+                    self.print_indent();
+                    if case.value_or_nil.data.is_some() {
+                        self.output.extend_from_slice(b"case ");
+                        self.print_expr_at(&case.value_or_nil, Precedence::Lowest);
+                        self.output.push(b':');
+                    } else {
+                        self.output.extend_from_slice(b"default:");
+                    }
+                    self.print_newline();
+                    self.indent += 1;
+                    for statement in &case.body {
+                        self.print_stmt(statement);
+                    }
+                    self.indent -= 1;
+                }
+                self.indent -= 1;
+                self.print_indent();
+                self.output.push(b'}');
+                self.print_newline();
+            }
             StmtData::Break(break_statement) => {
                 self.print_indent();
                 self.output.extend_from_slice(b"break");
@@ -653,9 +719,6 @@ impl Printer<'_> {
             | StmtData::Enum(_)
             | StmtData::Namespace(_)
             | StmtData::Class(_)
-            | StmtData::With(_)
-            | StmtData::Try(_)
-            | StmtData::Switch(_)
             | StmtData::Import(_) => {
                 panic!("Internal error: statement printer case has not been ported yet")
             }
@@ -1487,6 +1550,43 @@ mod tests {
              \x20\x20use(key);\n\
              for (const value of list)\n\
              \x20\x20use(value);\n"
+        );
+    }
+
+    #[test]
+    fn prints_try_and_switch_statements() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"try { work(); } catch (error) { fail(error); } finally { done(); }\
+                  switch (kind) { case 1: break; default: fallback(); }"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "try {\n\
+             \x20\x20work();\n\
+             } catch (error) {\n\
+             \x20\x20fail(error);\n\
+             } finally {\n\
+             \x20\x20done();\n\
+             }\n\
+             switch (kind) {\n\
+             \x20\x20case 1:\n\
+             \x20\x20\x20\x20break;\n\
+             \x20\x20default:\n\
+             \x20\x20\x20\x20fallback();\n\
+             }\n"
         );
     }
 }
