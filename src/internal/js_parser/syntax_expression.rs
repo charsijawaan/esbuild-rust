@@ -14,6 +14,7 @@ use super::{
         parse_unary_prefix, parse_untagged_template_prefix,
     },
     syntax_new::parse_new_prefix,
+    syntax_object::parse_object_literal_prefix,
     syntax_private::parse_private_brand_check_prefix,
     syntax_suffix::{binary_operator, parse_high_precedence_suffix_chain},
     syntax_super::parse_super_prefix,
@@ -154,6 +155,10 @@ fn parse_prefix(
             parse_expression(core, lexer, Precedence::Comma, true)
         })
         .expect("array token was checked"),
+        Token::OpenBrace => parse_object_literal_prefix(core, lexer, |core, lexer, precedence| {
+            parse_expression(core, lexer, precedence, true)
+        })
+        .expect("object token was checked"),
         Token::OpenParen => {
             lexer.next();
             let expr = parse_expression(core, lexer, Precedence::Lowest, true);
@@ -370,6 +375,31 @@ mod tests {
                 if matches!(dot.target.data.as_deref(), Some(ExprData::Super))
         ));
         assert!(log.peek().is_empty());
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn integrates_object_literal_property_expressions() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"{a: 1 + 2, [key]: value, shorthand, ...rest}"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        let Some(ExprData::Object(object)) = expression.data.as_deref() else {
+            panic!("expected object");
+        };
+        assert_eq!(object.properties.len(), 4);
+        assert!(matches!(
+            object.properties[0].value_or_nil.data.as_deref(),
+            Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryAdd
+        ));
+        assert_eq!(
+            object.properties[3].kind,
+            crate::internal::js_ast::PropertyKind::Spread
+        );
         assert_eq!(lexer.token, Token::EndOfFile);
     }
 

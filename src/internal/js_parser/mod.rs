@@ -17,6 +17,7 @@ mod syntax_expression;
 mod syntax_import;
 mod syntax_literals;
 mod syntax_new;
+mod syntax_object;
 mod syntax_private;
 mod syntax_suffix;
 mod syntax_super;
