@@ -206,9 +206,6 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 let old_should_fold = core.should_fold_type_script_constant_expressions;
                 core.should_fold_type_script_constant_expressions = true;
                 for value in &mut enumeration.values {
-                    if value.reference != crate::internal::ast::INVALID_REF {
-                        core.record_declared_symbol(value.reference);
-                    }
                     visit_expr(core, &mut value.value_or_nil, resolve_identifiers);
                     let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
                         &value.name,
@@ -3314,6 +3311,9 @@ fn visit_expr_with_target(
                 None
             };
             if let Some(replacement) = replacement {
+                if let Some(ExprData::Identifier(identifier)) = dot.target.data.as_deref() {
+                    core.ignore_usage(identifier.reference);
+                }
                 *data = replacement;
             }
         }
@@ -3399,6 +3399,9 @@ fn visit_expr_with_target(
                 None
             };
             if let Some(replacement) = replacement {
+                if let Some(ExprData::Identifier(identifier)) = index.target.data.as_deref() {
+                    core.ignore_usage(identifier.reference);
+                }
                 *data = replacement;
             } else if core.options.minify_syntax
                 && let Some(ExprData::String(string)) = index.index.data.as_deref()

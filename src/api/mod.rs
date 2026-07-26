@@ -5872,6 +5872,18 @@ mod tests {
                 "namespace N{export const x=1;export function f(){return x}console.log(x,f())}",
                 "var N;(e=>{e.x=1;function o(){return 1}e.f=o,console.log(1,o())})(N||={});\n",
             ),
+            (
+                "namespace N{enum E{A};enum F{B}}",
+                "var N;(a=>{let m;(e=>e[e.A=0]=\"A\")(m||={});let n;(e=>e[e.B=0]=\"B\")(n||={})})(N||={});\n",
+            ),
+            (
+                "namespace N{enum E{A};enum F{B};console.log(E,F)}",
+                "var N;(o=>{let n;(e=>e[e.A=0]=\"A\")(n||={});let m;(e=>e[e.B=0]=\"B\")(m||={}),console.log(n,m)})(N||={});\n",
+            ),
+            (
+                "namespace N{export enum E{A};console.log(E.A)}",
+                "var N;(n=>{let o;(e=>e[e.A=0]=\"A\")(o=n.E||={}),console.log(0)})(N||={});\n",
+            ),
         ] {
             assert_eq!(
                 code(transform(
