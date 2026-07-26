@@ -62,6 +62,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut jsx_fragment = String::new();
     let mut jsx_import_source = String::new();
     let mut jsx_development = false;
+    let mut jsx_side_effects = false;
     let mut external = Vec::new();
     let mut aliases = HashMap::new();
     let mut packages = Packages::Bundle;
@@ -163,6 +164,18 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         }
         if argument == "--jsx-dev" {
             jsx_development = true;
+            continue;
+        }
+        if argument == "--jsx-side-effects" {
+            jsx_side_effects = true;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--jsx-side-effects=") {
+            jsx_side_effects = match value {
+                "true" => true,
+                "false" => false,
+                _ => return Err(format!("Invalid JSX side effects setting {value:?}")),
+            };
             continue;
         }
         if let Some(value) = argument.strip_prefix("--outdir=") {
@@ -381,6 +394,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             jsx_fragment,
             jsx_import_source,
             jsx_development,
+            jsx_side_effects,
             splitting,
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
@@ -455,6 +469,12 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     if input_paths.len() > 1 {
         return Err("Only one input file can be transformed at a time".into());
     }
+    options.jsx = jsx;
+    options.jsx_factory = jsx_factory;
+    options.jsx_fragment = jsx_fragment;
+    options.jsx_import_source = jsx_import_source;
+    options.jsx_development = jsx_development;
+    options.jsx_side_effects = jsx_side_effects;
     let input = if let Some(path) = input_paths.pop() {
         if options.sourcefile.is_empty() {
             options.sourcefile.clone_from(&path);
@@ -535,6 +555,7 @@ fn help_text() -> String {
          \x20\x20--jsx-fragment=EXPRESSION\n\
          \x20\x20--jsx-import-source=PATH\n\
          \x20\x20--jsx-dev\n\
+         \x20\x20--jsx-side-effects[=true|false]\n\
          \x20\x20--external:PATH\n\
          \x20\x20--alias:OLD=NEW\n\
          \x20\x20--packages=bundle|external\n\
@@ -598,6 +619,7 @@ mod tests {
         assert!(run(&["--sourcemap=wat".into()]).is_err());
         assert!(run(&["--tree-shaking=wat".into()]).is_err());
         assert!(run(&["--jsx=wat".into()]).is_err());
+        assert!(run(&["--jsx-side-effects=wat".into()]).is_err());
         assert!(run(&["--alias:missing-value".into()]).is_err());
         assert!(run(&["--out-extension:.js".into()]).is_err());
         assert!(run(&["--drop-labels=".into()]).is_err());
@@ -682,6 +704,42 @@ mod tests {
         assert!(!output.contains("DEV:"));
         assert!(output.contains("PROD:"));
         assert!(output.contains("console.log(\"production\")"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn configures_jsx_side_effects_for_transforms() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("esbuild-rs-cli-jsx-side-effects-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.jsx");
+        std::fs::write(&entry, "<Widget />").expect("write entry file");
+
+        let Output::Code(output) = run(&[
+            "--jsx-side-effects".into(),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("transform succeeds") else {
+            panic!("expected transformed code");
+        };
+        let output = String::from_utf8(output).expect("transform output is UTF-8");
+        assert_eq!(output, "React.createElement(Widget, null);\n");
+
+        let Output::Code(output) = run(&[
+            "--jsx=preserve".into(),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("transform succeeds") else {
+            panic!("expected transformed code");
+        };
+        assert_eq!(
+            String::from_utf8(output).expect("transform output is UTF-8"),
+            "<Widget />;\n"
+        );
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

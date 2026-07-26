@@ -50,6 +50,12 @@ pub enum Loader {
 pub struct TransformOptions {
     pub sourcefile: String,
     pub loader: Loader,
+    pub jsx: BuildJsx,
+    pub jsx_factory: String,
+    pub jsx_fragment: String,
+    pub jsx_import_source: String,
+    pub jsx_development: bool,
+    pub jsx_side_effects: bool,
     pub banner: String,
     pub footer: String,
     pub line_limit: usize,
@@ -168,6 +174,7 @@ pub struct BuildOptions {
     pub jsx_fragment: String,
     pub jsx_import_source: String,
     pub jsx_development: bool,
+    pub jsx_side_effects: bool,
     pub splitting: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
@@ -706,6 +713,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             automatic_runtime: options.jsx == BuildJsx::Automatic,
             import_source: options.jsx_import_source,
             development: options.jsx_development,
+            side_effects: options.jsx_side_effects,
             ..config::JsxOptions::default()
         },
         minify_whitespace: options.minify_whitespace,
@@ -998,6 +1006,18 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     let mut parser_options = js_parser::Options::default();
     parser_options.ts.parse = matches!(options.loader, Loader::Ts | Loader::Tsx);
     parser_options.jsx.parse = matches!(options.loader, Loader::Jsx | Loader::Tsx);
+    parser_options.jsx.preserve = options.jsx == BuildJsx::Preserve;
+    parser_options.jsx.automatic_runtime = options.jsx == BuildJsx::Automatic;
+    parser_options.jsx.factory =
+        validate_jsx_define(log, &options.jsx_factory, "jsx factory", false);
+    parser_options.jsx.fragment =
+        validate_jsx_define(log, &options.jsx_fragment, "jsx fragment", true);
+    parser_options
+        .jsx
+        .import_source
+        .clone_from(&options.jsx_import_source);
+    parser_options.jsx.development = options.jsx_development;
+    parser_options.jsx.side_effects = options.jsx_side_effects;
     parser_options.minify_syntax = options.minify_syntax;
     parser_options.minify_identifiers = options.minify_identifiers;
     parser_options.minify_whitespace = options.minify_whitespace;
@@ -2376,6 +2396,66 @@ mod tests {
             )),
             "const element=React.createElement(\"div\",null);"
         );
+    }
+
+    #[test]
+    fn configures_jsx_transforms_and_side_effects() {
+        let side_effectful = code(transform(
+            "<Widget />",
+            TransformOptions {
+                loader: Loader::Jsx,
+                jsx_factory: "h".into(),
+                jsx_side_effects: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(side_effectful, "h(Widget, null);\n");
+
+        let preserved = code(transform(
+            "<Widget />",
+            TransformOptions {
+                loader: Loader::Jsx,
+                jsx: BuildJsx::Preserve,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(preserved, "<Widget />;\n");
+
+        let automatic = code(transform(
+            "<Widget />",
+            TransformOptions {
+                loader: Loader::Jsx,
+                jsx: BuildJsx::Automatic,
+                jsx_import_source: "custom".into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(automatic.contains("from \"custom/jsx-runtime\""));
+        assert!(automatic.contains("jsx(Widget, {})"));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-jsx-side-effects-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.jsx"),
+            "const dead = <Widget />; console.log('live')",
+        )
+        .expect("write entry file");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.jsx".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            jsx_side_effects: true,
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("React.createElement(Widget, null)"));
+        assert!(output.contains("console.log(\"live\")"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
