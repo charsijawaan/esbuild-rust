@@ -207,8 +207,8 @@ fn transform_base_renamer(
         crate::internal::renamer::sort_stable_symbol_counts(&mut imported_symbols);
         renamer.allocate_top_level_symbol_slots(&imported_symbols);
         let keep_name_slots = keep_name_use_count.map(|use_count| {
+            renamer.accumulate_synthetic_default_nested_slot(0, 2);
             renamer.accumulate_synthetic_default_nested_slot(1, 2);
-            renamer.accumulate_synthetic_default_nested_slot(2, 2);
             let def_prop = renamer.allocate_synthetic_default_top_level_slot(2);
             let name = renamer.allocate_synthetic_default_top_level_slot(use_count.wrapping_add(2));
             (def_prop, name)
@@ -220,8 +220,8 @@ fn transform_base_renamer(
             .map(|(def_prop, name)| KeepNameHelper {
                 def_prop: renamer.name_for_synthetic_default_slot(def_prop),
                 name: renamer.name_for_synthetic_default_slot(name),
-                target: renamer.name_for_synthetic_default_slot(1),
-                value: renamer.name_for_synthetic_default_slot(2),
+                target: renamer.name_for_synthetic_default_slot(0),
+                value: renamer.name_for_synthetic_default_slot(1),
             })
             .unwrap_or_default();
         (Box::new(renamer), helper)
@@ -5900,6 +5900,35 @@ mod tests {
                 }
             )),
             "function a(x){return[x]}function b(x){return{x}}function c(){return\"x\"}function d(){return/x/}function e(x){return!x}function f(x){return typeof x}\n"
+        );
+    }
+
+    #[test]
+    fn minifies_function_arguments_and_enum_slots_like_esbuild() {
+        assert_eq!(
+            code(transform(
+                "enum LongName{LongName=0,Other=LongName};function f(x,y){return [LongName,x,y]}",
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var LongName=(n=>(n[n.LongName=0]=\"LongName\",n[n.Other=0]=\"Other\",n))(LongName||{});function f(e,r){return[LongName,e,r]}\n"
+        );
+        assert_eq!(
+            code(transform(
+                "function f(arguments){return arguments}function g(){return arguments}",
+                TransformOptions {
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function f(n){return n}function g(){return arguments}\n"
         );
     }
 

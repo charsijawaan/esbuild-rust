@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
-    ast::{LocRef, SymbolKind},
+    ast::{INVALID_REF, LocRef, SymbolFlags, SymbolKind},
     js_ast::{
         Arg, Binding, BindingData, Expr, ExprData, Function, FunctionExpr, IdentifierBinding,
         Precedence,
@@ -199,7 +199,6 @@ pub(crate) fn parse_function_tail(
             core.declare_symbol(SymbolKind::HoistedFunction, name.loc, &text)
         };
     }
-    let arguments_ref = core.declare_symbol(SymbolKind::Arguments, open_paren_loc, "arguments");
     lexer.expect(Token::OpenParen);
 
     let old_context = core.fn_or_arrow_data_parse;
@@ -275,6 +274,22 @@ pub(crate) fn parse_function_tail(
         }
         lexer.next();
     }
+    let has_arguments_parameter = core
+        .current_scope
+        .as_ref()
+        .expect("function arguments scope")
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .members
+        .contains_key("arguments");
+    let arguments_ref = if has_arguments_parameter {
+        INVALID_REF
+    } else {
+        let reference = core.declare_symbol(SymbolKind::Arguments, open_paren_loc, "arguments");
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index fits usize")]
+            .flags |= SymbolFlags::MUST_NOT_BE_RENAMED;
+        reference
+    };
     lexer.expect(Token::CloseParen);
     if core.options.ts.parse {
         let stop_tokens = if allow_missing_body_for_typescript {

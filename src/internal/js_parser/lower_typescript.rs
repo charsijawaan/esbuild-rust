@@ -177,11 +177,6 @@ fn lower_namespace(
             ..ExprStmt::default()
         }),
     ));
-    let argument_index =
-        usize::try_from(namespace.argument.inner_index).expect("symbol index fits usize");
-    if core.symbols[argument_index].use_count_estimate == 0 {
-        core.record_usage(namespace.argument);
-    }
 }
 
 fn join_adjacent_expression_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
@@ -516,6 +511,12 @@ fn lower_enum(
     };
     let mut body = Vec::with_capacity(enumeration.values.len() + 1);
     for value in enumeration.values {
+        let argument_use_count =
+            if known_primitive_type(value.value_or_nil.data.as_deref()) == PrimitiveType::String {
+                1
+            } else {
+                2
+            };
         body.push(lower_enum_value(
             enumeration.argument,
             value.loc,
@@ -523,7 +524,9 @@ fn lower_enum(
             value.value_or_nil,
             core.options.minify_syntax,
         ));
-        core.record_usage(enumeration.argument);
+        for _ in 0..argument_use_count {
+            core.record_usage(enumeration.argument);
+        }
     }
     body.push(Stmt::new(
         loc,
@@ -601,6 +604,12 @@ fn lower_nested_enum(
 
     let mut body = Vec::with_capacity(enumeration.values.len());
     for value in enumeration.values {
+        let argument_use_count =
+            if known_primitive_type(value.value_or_nil.data.as_deref()) == PrimitiveType::String {
+                1
+            } else {
+                2
+            };
         body.push(lower_enum_value(
             enumeration.argument,
             value.loc,
@@ -608,7 +617,9 @@ fn lower_nested_enum(
             value.value_or_nil,
             core.options.minify_syntax,
         ));
-        core.record_usage(enumeration.argument);
+        for _ in 0..argument_use_count {
+            core.record_usage(enumeration.argument);
+        }
     }
     if core.options.minify_syntax && body.len() > 1 {
         let joined = body
@@ -653,7 +664,6 @@ fn lower_nested_enum(
             ..ExprStmt::default()
         }),
     ));
-    core.record_usage(enumeration.argument);
 }
 
 fn lower_enum_value(
