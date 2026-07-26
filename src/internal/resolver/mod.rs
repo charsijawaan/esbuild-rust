@@ -270,6 +270,120 @@ fn has_case_insensitive_suffix(text: &str, suffix: &str) -> bool {
         .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
 }
 
+#[must_use]
+pub fn parse_bare_identifier(specifier: &str) -> Option<(&str, &str)> {
+    let first_slash = specifier.find('/');
+    let identifier = if specifier.starts_with('@') {
+        let first_slash = first_slash?;
+        specifier[first_slash + 1..]
+            .find('/')
+            .map_or(specifier, |second_slash| {
+                &specifier[..first_slash + 1 + second_slash]
+            })
+    } else {
+        first_slash.map_or(specifier, |slash| &specifier[..slash])
+    };
+    Some((identifier, &specifier[identifier.len()..]))
+}
+
+#[must_use]
+pub fn parse_esm_package_name(specifier: &str) -> Option<(&str, String)> {
+    if specifier.is_empty() {
+        return None;
+    }
+    let first_slash = specifier.find('/');
+    let package_name = if specifier.starts_with('@') {
+        let first_slash = first_slash?;
+        specifier[first_slash + 1..]
+            .find('/')
+            .map_or(specifier, |second_slash| {
+                &specifier[..first_slash + 1 + second_slash]
+            })
+    } else {
+        first_slash.map_or(specifier, |slash| &specifier[..slash])
+    };
+    if package_name.starts_with('.') || package_name.contains(['\\', '%']) {
+        return None;
+    }
+    Some((
+        package_name,
+        format!(".{}", &specifier[package_name.len()..]),
+    ))
+}
+
+#[must_use]
+pub fn find_invalid_package_segment(path: &str) -> Option<&str> {
+    path.split(['/', '\\'])
+        .skip(1)
+        .find(|segment| matches!(*segment, "." | ".." | "node_modules"))
+}
+
+#[must_use]
+pub fn globstar_to_escaped_regexp(glob: &str) -> (String, bool) {
+    let bytes = glob.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len() + 2);
+    result.push(b'^');
+    let mut had_wildcard = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'\\' | b'^' | b'$' | b'.' | b'+' | b'|' | b'(' | b')' | b'[' | b']' | b'{' | b'}' => {
+                result.push(b'\\');
+                result.push(byte);
+            }
+            b'?' => {
+                result.push(b'.');
+                had_wildcard = true;
+            }
+            b'*' => {
+                let previous = index.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+                let mut star_count = 1;
+                while bytes.get(index + 1) == Some(&b'*') {
+                    star_count += 1;
+                    index += 1;
+                }
+                let next = bytes.get(index + 1).copied();
+                let is_globstar = star_count > 1
+                    && previous.is_none_or(|byte| byte == b'/')
+                    && next.is_none_or(|byte| byte == b'/');
+                if is_globstar {
+                    result.extend_from_slice(b"(?:[^/]*(?:/|$))*");
+                    if next == Some(b'/') {
+                        index += 1;
+                    }
+                } else {
+                    result.extend_from_slice(b"[^/]*");
+                }
+                had_wildcard = true;
+            }
+            _ => result.push(byte),
+        }
+        index += 1;
+    }
+    result.push(b'$');
+    (String::from_utf8_lossy(&result).into_owned(), had_wildcard)
+}
+
+#[must_use]
+pub fn sort_package_expansion_keys<'a>(keys: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut keys: Vec<_> = keys.into_iter().collect();
+    keys.sort_by(|left, right| {
+        let left_star = left.find('*');
+        let right_star = right.find('*');
+        let left_base_length = left_star.unwrap_or(left.len());
+        let right_base_length = right_star.unwrap_or(right.len());
+        right_base_length
+            .cmp(&left_base_length)
+            .then_with(|| match (left_star, right_star) {
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                _ => right.len().cmp(&left.len()),
+            })
+    });
+    keys
+}
+
 type ExtendsCallback<'a> = dyn FnMut(&str, Range) -> Option<TsConfigJson> + 'a;
 
 #[allow(clippy::too_many_lines)]
@@ -802,8 +916,10 @@ mod tests {
 
     use super::{
         DataUrl, DebugMeta, MimeType, PathPair, TsConfigJson, TsConfigPath, TsConfigPaths,
+        find_invalid_package_segment, globstar_to_escaped_regexp,
         is_valid_tsconfig_path_no_base_url_pattern, match_tsconfig_path_candidates,
-        parse_tsconfig_json,
+        parse_bare_identifier, parse_esm_package_name, parse_tsconfig_json,
+        sort_package_expansion_keys,
     };
     use crate::internal::{
         config::{MaybeBool, TsJsx, TsTarget},
@@ -1092,5 +1208,57 @@ mod tests {
             vec!["/absolute/HELLO"]
         );
         assert!(match_tsconfig_path_candidates(&config, "missing", &file_system).is_none());
+    }
+
+    #[test]
+    fn parses_yarn_and_node_package_specifiers() {
+        assert_eq!(
+            parse_bare_identifier("@scope/pkg/subpath"),
+            Some(("@scope/pkg", "/subpath"))
+        );
+        assert_eq!(parse_bare_identifier("@scope"), None);
+        assert_eq!(
+            parse_bare_identifier("package/subpath"),
+            Some(("package", "/subpath"))
+        );
+        assert_eq!(
+            parse_esm_package_name("@scope/pkg/subpath"),
+            Some(("@scope/pkg", "./subpath".into()))
+        );
+        assert_eq!(
+            parse_esm_package_name("package"),
+            Some(("package", ".".into()))
+        );
+        assert_eq!(parse_esm_package_name("../package"), None);
+        assert_eq!(parse_esm_package_name("bad%name"), None);
+    }
+
+    #[test]
+    fn validates_package_segments_and_converts_globstars() {
+        assert_eq!(
+            find_invalid_package_segment("./ok/node_modules/pkg"),
+            Some("node_modules")
+        );
+        assert_eq!(find_invalid_package_segment("./ok/../pkg"), Some(".."));
+        assert_eq!(find_invalid_package_segment("node_modules/pkg"), None);
+
+        let (pattern, wildcard) = globstar_to_escaped_regexp("src/**/test?.[jt]s");
+        assert!(wildcard);
+        let regexp = regex::Regex::new(&pattern).expect("generated regular expression");
+        assert!(regexp.is_match("src/unit/test1.[jt]s"));
+        assert!(regexp.is_match("src/testx.[jt]s"));
+        assert!(!regexp.is_match("src/unit/deep/testing.[jt]s"));
+        assert_eq!(
+            globstar_to_escaped_regexp("file.js"),
+            ("^file\\.js$".into(), false)
+        );
+    }
+
+    #[test]
+    fn sorts_package_expansion_keys_deterministically() {
+        assert_eq!(
+            sort_package_expansion_keys(["./foo/", "./foo*", "./foo*bar", "./*"]),
+            vec!["./foo/", "./foo*bar", "./foo*", "./*"]
+        );
     }
 }
