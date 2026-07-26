@@ -25,10 +25,13 @@ use crate::internal::{
     graph::{
         ExportData, ImportData, InputFileRepr, LinkerGraph, OutputFile, SideEffectsKind, WrapKind,
     },
-    helpers::{BitSet, Joiner, escape_closing_tag},
+    helpers::{BitSet, Joiner, escape_closing_tag, quote_for_json, utf16_to_string},
     js_ast::{self, ExportsKind},
     logger::{Log, Range},
-    sourcemap::{LineColumnOffset, SourceMapPieces, SourceMapShift},
+    sourcemap::{
+        Chunk as SourceMapChunk, LineColumnOffset, MappingsBuffer, SourceMapPieces, SourceMapShift,
+        SourceMapState, append_source_map_chunk,
+    },
     xxhash,
 };
 
@@ -3972,6 +3975,227 @@ fn global_name_accessor(name: &str, options: &Options) -> String {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompileResultForSourceMap {
+    pub source_map_chunk: SourceMapChunk,
+    pub generated_offset: LineColumnOffset,
+    pub source_index: u32,
+    pub is_null_entry: bool,
+}
+
+#[derive(Clone, Debug)]
+struct SourceMapItem {
+    source: String,
+    quoted_contents: Vec<u8>,
+}
+
+fn quoted_source_content(
+    content: Option<&crate::internal::sourcemap::SourceContent>,
+    ascii_only: bool,
+) -> Vec<u8> {
+    let Some(content) = content else {
+        return b"null".to_vec();
+    };
+    if !content.quoted.is_empty() {
+        return content.quoted.as_bytes().to_vec();
+    }
+    if content.value.is_empty() {
+        b"null".to_vec()
+    } else {
+        quote_for_json(&utf16_to_string(&content.value), ascii_only)
+    }
+}
+
+/// Compose per-file source-map chunks into one source map for an output chunk.
+///
+/// The returned map may be split around its mappings array so generated-column
+/// offsets can be adjusted later when temporary output paths are substituted.
+///
+/// # Panics
+///
+/// Panics when source indexes or source-map chunks violate linker invariants,
+/// or when source-map indexes exceed their signed 32-bit representation.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn generate_source_map_for_chunk(
+    file_system: &dyn Fs,
+    graph: &LinkerGraph,
+    results: &[CompileResultForSourceMap],
+    chunk_abs_dir: &str,
+    options: &Options,
+    can_have_shifts: bool,
+) -> SourceMapPieces {
+    let mut joiner = Joiner::default();
+    joiner.add_string("{\n  \"version\": 3");
+
+    let mut source_index_to_sources_index = HashMap::<u32, usize>::new();
+    let mut items = Vec::<SourceMapItem>::new();
+    let mut next_sources_index = 0;
+    for result in results {
+        if result.is_null_entry || source_index_to_sources_index.contains_key(&result.source_index)
+        {
+            continue;
+        }
+        source_index_to_sources_index.insert(result.source_index, next_sources_index);
+        let file = &graph.files[result.source_index as usize].input_file;
+        if let Some(source_map) = &file.input_source_map {
+            for (index, source) in source_map.sources.iter().enumerate() {
+                items.push(SourceMapItem {
+                    source: source.clone(),
+                    quoted_contents: if options.exclude_sources_content {
+                        Vec::new()
+                    } else {
+                        quoted_source_content(
+                            source_map.sources_content.get(index),
+                            options.ascii_only,
+                        )
+                    },
+                });
+            }
+            next_sources_index += source_map.sources.len();
+        } else {
+            let source = if file.source.key_path.namespace == "file" {
+                file_system
+                    .rel(chunk_abs_dir, &file.source.key_path.text)
+                    .unwrap_or_else(|| file.source.key_path.text.clone())
+                    .replace('\\', "/")
+            } else if file.source.key_path.namespace.is_empty() {
+                file.source.key_path.text.clone()
+            } else {
+                format!(
+                    "{}:{}",
+                    file.source.key_path.namespace, file.source.key_path.text
+                )
+            };
+            items.push(SourceMapItem {
+                source,
+                quoted_contents: if options.exclude_sources_content {
+                    Vec::new()
+                } else {
+                    quote_for_json(&file.source.contents, options.ascii_only)
+                },
+            });
+            next_sources_index += 1;
+        }
+    }
+
+    joiner.add_string(",\n  \"sources\": [");
+    for (index, item) in items.iter().enumerate() {
+        if index != 0 {
+            joiner.add_string(", ");
+        }
+        joiner.add_bytes(quote_for_json(item.source.as_bytes(), options.ascii_only));
+    }
+    joiner.add_string("]");
+    if !options.source_root.is_empty() {
+        joiner.add_string(",\n  \"sourceRoot\": ");
+        joiner.add_bytes(quote_for_json(
+            options.source_root.as_bytes(),
+            options.ascii_only,
+        ));
+    }
+    if !options.exclude_sources_content {
+        joiner.add_string(",\n  \"sourcesContent\": [");
+        for (index, item) in items.iter().enumerate() {
+            if index != 0 {
+                joiner.add_string(", ");
+            }
+            joiner.add_bytes(item.quoted_contents.clone());
+        }
+        joiner.add_string("]");
+    }
+
+    joiner.add_string(",\n  \"mappings\": \"");
+    let mappings_start = joiner.len() as usize;
+    let mut previous_end_state = SourceMapState::default();
+    let mut previous_column_offset = 0;
+    let mut total_quoted_name_len = 0;
+    for result in results {
+        let mut chunk = result.source_map_chunk.clone();
+        let offset = result.generated_offset;
+        let sources_index = source_index_to_sources_index
+            .get(&result.source_index)
+            .copied()
+            .unwrap_or_else(|| {
+                assert!(
+                    result.is_null_entry,
+                    "missing source index for mapped chunk"
+                );
+                0
+            });
+        assert!(
+            !chunk.should_ignore,
+            "ignored source-map chunks must be filtered before composition"
+        );
+        let mut start_state = SourceMapState {
+            source_index: i32::try_from(sources_index).expect("source index fits in i32"),
+            generated_line: offset.lines,
+            generated_column: offset.columns,
+            original_name: total_quoted_name_len,
+            ..SourceMapState::default()
+        };
+        if offset.lines == 0 {
+            start_state.generated_column += previous_column_offset;
+        }
+
+        if result.is_null_entry {
+            chunk.buffer = MappingsBuffer {
+                data: b"A".to_vec(),
+                ..MappingsBuffer::default()
+            };
+            append_source_map_chunk(&mut joiner, previous_end_state, start_state, &chunk.buffer);
+            previous_end_state.generated_line = start_state.generated_line;
+            previous_end_state.generated_column = start_state.generated_column;
+        } else {
+            append_source_map_chunk(&mut joiner, previous_end_state, start_state, &chunk.buffer);
+            let previous_original_name = previous_end_state.original_name;
+            previous_end_state = chunk.end_state;
+            previous_end_state.source_index +=
+                i32::try_from(sources_index).expect("source index fits in i32");
+            if chunk.buffer.first_name_offset.is_valid() {
+                previous_end_state.original_name += total_quoted_name_len;
+            } else {
+                previous_end_state.original_name = previous_original_name;
+            }
+            previous_column_offset = chunk.final_generated_column;
+            total_quoted_name_len +=
+                i32::try_from(chunk.quoted_names.len()).expect("name count fits in i32");
+        }
+        if previous_end_state.generated_line == 0 {
+            previous_end_state.generated_column += start_state.generated_column;
+            previous_column_offset += start_state.generated_column;
+        }
+    }
+    let mappings_end = joiner.len() as usize;
+
+    joiner.add_string("\",\n  \"names\": [");
+    let mut is_first_name = true;
+    for result in results {
+        for quoted_name in &result.source_map_chunk.quoted_names {
+            if is_first_name {
+                is_first_name = false;
+            } else {
+                joiner.add_string(", ");
+            }
+            joiner.add_bytes(quoted_name.clone());
+        }
+    }
+    joiner.add_string("]\n}\n");
+    let bytes = joiner.done();
+    if can_have_shifts {
+        SourceMapPieces {
+            prefix: bytes[..mappings_start].to_vec(),
+            mappings: bytes[mappings_start..mappings_end].to_vec(),
+            suffix: bytes[mappings_end..].to_vec(),
+        }
+    } else {
+        SourceMapPieces {
+            prefix: bytes,
+            ..SourceMapPieces::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LegalCommentEntry {
     source_index: u32,
@@ -4746,15 +4970,16 @@ mod tests {
 
     use super::{
         AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, ChunkRuntimeRefs,
-        CrossChunkImport, CrossChunkImportItem, EntryPointTailRefs, ImportStatus, ImportTracker,
-        MatchImportKind, OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange,
-        RuntimeReExportContext, StableRef, add_exports_for_export_star, advance_import_tracker,
-        append_or_extend_part_range, assemble_javascript_chunk, assign_chunk_path_templates,
-        bind_imports_to_exports_for_file, classify_module_wrappers, compile_part_range_for_chunk,
-        compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
-        convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
-        finalize_chunk_paths, finalize_javascript_chunk_outputs, generate_cross_chunk_stmts,
-        generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
+        CompileResultForSourceMap, CrossChunkImport, CrossChunkImportItem, EntryPointTailRefs,
+        ImportStatus, ImportTracker, MatchImportKind, OutputPathContext, OutputPiece,
+        OutputPieceIndexKind, PartRange, RuntimeReExportContext, StableRef,
+        add_exports_for_export_star, advance_import_tracker, append_or_extend_part_range,
+        assemble_javascript_chunk, assign_chunk_path_templates, bind_imports_to_exports_for_file,
+        classify_module_wrappers, compile_part_range_for_chunk, compute_cross_chunk_dependencies,
+        compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
+        create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
+        finalize_javascript_chunk_outputs, generate_cross_chunk_stmts, generate_entry_point_tail,
+        generate_global_name_prefix, generate_isolated_hash, generate_source_map_for_chunk,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
         match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
@@ -4782,7 +5007,10 @@ mod tests {
         helpers::Joiner,
         js_ast::{self, ExportsKind, NamedExport, NamedImport},
         logger::{DeferLogKind, Loc, Log, Path, PrettyPaths, Range, Source},
-        sourcemap::{LineColumnOffset, SourceMapPieces, SourceMapShift},
+        sourcemap::{
+            LineColumnOffset, SourceMapPieces, SourceMapShift, generate_line_offset_tables,
+            make_chunk_builder,
+        },
     };
 
     const PREFIX: &str = "UNIQUE";
@@ -6130,6 +6358,72 @@ mod tests {
         ));
         assert!(output.contains("  // src/entry.js\n  work();\n  return 1;\n"));
         assert!(output.ends_with("})();\n/* footer */\n"));
+    }
+
+    #[test]
+    fn composes_per_file_source_map_chunks() {
+        let mut input = js_file(js_ast::Ast::default());
+        input.source = Source {
+            contents: std::sync::Arc::from(b"let alpha = 1;\n".as_slice()),
+            key_path: Path {
+                text: "/project/src/input.js".into(),
+                namespace: "file".into(),
+                ..Path::default()
+            },
+            ..Source::default()
+        };
+        let graph = clone_linker_graph(&[input], &[0], &[], false);
+        let mut builder = make_chunk_builder(
+            None,
+            generate_line_offset_tables(&graph.files[0].input_file.source.contents, 2),
+            false,
+        );
+        builder.add_source_mapping(Loc::default(), "alpha", b"");
+        let source_map_chunk = builder.generate_chunk(b"alpha");
+        assert!(!source_map_chunk.should_ignore);
+        let results = [
+            CompileResultForSourceMap {
+                source_map_chunk,
+                generated_offset: LineColumnOffset {
+                    lines: 1,
+                    columns: 0,
+                },
+                source_index: 0,
+                is_null_entry: false,
+            },
+            CompileResultForSourceMap {
+                generated_offset: LineColumnOffset {
+                    lines: 0,
+                    columns: 2,
+                },
+                source_index: 0,
+                is_null_entry: true,
+                ..CompileResultForSourceMap::default()
+            },
+        ];
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let pieces = generate_source_map_for_chunk(
+            &file_system,
+            &graph,
+            &results,
+            "/project/dist",
+            &Options {
+                source_root: "/root".into(),
+                ..Options::default()
+            },
+            true,
+        );
+        assert!(!pieces.prefix.is_empty());
+        assert!(!pieces.mappings.is_empty());
+        assert!(!pieces.suffix.is_empty());
+        let map = String::from_utf8(pieces.finalize(&[SourceMapShift::default()]))
+            .expect("source map is UTF-8");
+        assert!(map.contains("\"version\": 3"));
+        assert!(map.contains("\"sources\": [\"../src/input.js\"]"));
+        assert!(map.contains("\"sourceRoot\": \"/root\""));
+        assert!(map.contains("\"sourcesContent\": [\"let alpha = 1;\\n\"]"));
+        assert!(map.contains("\"names\": [\"alpha\"]"));
+        assert!(map.ends_with("]\n}\n"));
     }
 
     #[test]
