@@ -12,7 +12,11 @@ use crate::internal::{
         INVALID_REF, ImportItemStatus, ImportKind, ImportRecordFlags, Index32, NamespaceAlias, Ref,
         SymbolKind,
     },
-    config::{Format, Loader, Options},
+    bundler::hash_for_file_name,
+    config::{
+        Format, Loader, Options, PathPlaceholder, PathPlaceholders, PathTemplate, has_placeholder,
+        substitute_template, template_to_string,
+    },
     css_ast::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
     },
@@ -21,7 +25,8 @@ use crate::internal::{
     helpers::{BitSet, Joiner},
     js_ast::ExportsKind,
     logger::{Log, Range},
-    sourcemap::{LineColumnOffset, SourceMapShift},
+    sourcemap::{LineColumnOffset, SourceMapPieces, SourceMapShift},
+    xxhash,
 };
 
 const CIRCULAR_CHUNK_IMPORT_ERROR: &str =
@@ -51,8 +56,11 @@ pub struct ChunkInfo {
     pub sorted_cross_chunk_imports: Vec<CrossChunkImport>,
     pub files_in_chunk_in_order: Vec<u32>,
     pub parts_in_chunk_in_order: Vec<PartRange>,
+    pub final_template: Vec<PathTemplate>,
     pub final_rel_path: String,
     pub intermediate_output: IntermediateOutput,
+    pub output_source_map: SourceMapPieces,
+    pub isolated_hash: Vec<u8>,
     pub entry_point_bit: usize,
     pub source_index: u32,
     pub is_entry_point: bool,
@@ -2318,6 +2326,158 @@ pub fn compute_cross_chunk_dependencies(
     }
 }
 
+fn hash_write_u32(hash: &mut xxhash::Digest, value: u32) {
+    hash.write(&value.to_le_bytes());
+}
+
+fn hash_write_length_prefixed(hash: &mut xxhash::Digest, bytes: &[u8]) {
+    hash_write_u32(
+        hash,
+        u32::try_from(bytes.len()).expect("hash input must fit in 32 bits"),
+    );
+    hash.write(bytes);
+}
+
+/// Generate the content hash for this chunk without incorporating the hashes
+/// of chunks imported by it.
+///
+/// # Panics
+///
+/// Panics when generated data or a source path is too large for esbuild's
+/// 32-bit length encoding.
+pub fn generate_isolated_hash(graph: &LinkerGraph, chunk: &mut ChunkInfo, options: &Options) {
+    let mut hash = xxhash::Digest::new();
+
+    for part_range in &chunk.parts_in_chunk_in_order {
+        let source = &graph.files[part_range.source_index as usize]
+            .input_file
+            .source;
+        let file_path = if source.key_path.namespace == "file" {
+            &source.pretty_paths.rel
+        } else {
+            &source.key_path.text
+        };
+        hash_write_length_prefixed(&mut hash, source.key_path.namespace.as_bytes());
+        hash_write_length_prefixed(&mut hash, file_path.as_bytes());
+        hash_write_u32(&mut hash, part_range.part_index_begin);
+        hash_write_u32(&mut hash, part_range.part_index_end);
+    }
+
+    for part in &chunk.final_template {
+        hash_write_length_prefixed(&mut hash, part.data.as_bytes());
+    }
+
+    if !options.public_path.is_empty() {
+        hash_write_length_prefixed(&mut hash, options.public_path.as_bytes());
+    }
+
+    if let Some(pieces) = &chunk.intermediate_output.pieces {
+        for piece in pieces {
+            hash_write_length_prefixed(&mut hash, &piece.data);
+        }
+    } else {
+        let output = std::mem::take(&mut chunk.intermediate_output.joiner).done();
+        hash_write_length_prefixed(&mut hash, &output);
+        chunk.intermediate_output.joiner.add_bytes(output);
+    }
+
+    hash_write_length_prefixed(&mut hash, &chunk.output_source_map.prefix);
+    hash_write_length_prefixed(&mut hash, &chunk.output_source_map.mappings);
+    hash_write_length_prefixed(&mut hash, &chunk.output_source_map.suffix);
+    chunk.isolated_hash = hash.sum(&[]);
+}
+
+struct FinalHashTraversal<'a> {
+    file_system: &'a dyn Fs,
+    graph: &'a LinkerGraph,
+    chunks: &'a [ChunkInfo],
+    options: &'a Options,
+    visited: &'a mut [u32],
+    visited_key: u32,
+}
+
+impl FinalHashTraversal<'_> {
+    fn append(&mut self, hash: &mut xxhash::Digest, chunk_index: u32) {
+        if self.visited[chunk_index as usize] == self.visited_key {
+            return;
+        }
+        self.visited[chunk_index as usize] = self.visited_key;
+        let chunk = &self.chunks[chunk_index as usize];
+
+        for chunk_import in &chunk.cross_chunk_imports {
+            self.append(hash, chunk_import.chunk_index);
+        }
+
+        if let Some(pieces) = &chunk.intermediate_output.pieces {
+            for piece in pieces {
+                if piece.kind != OutputPieceIndexKind::AssetIndex {
+                    continue;
+                }
+                let file = &self.graph.files[piece.index as usize].input_file;
+                assert_eq!(
+                    file.additional_files.len(),
+                    1,
+                    "Internal error: asset marker must reference one output file"
+                );
+                let relative_path = self
+                    .file_system
+                    .rel(
+                        &self.options.abs_output_dir,
+                        &file.additional_files[0].abs_path,
+                    )
+                    .unwrap_or_default()
+                    .replace('\\', "/");
+                hash_write_length_prefixed(hash, relative_path.as_bytes());
+            }
+        }
+
+        hash.write(&chunk.isolated_hash);
+    }
+}
+
+/// Compute dependency-aware hashes and substitute the final `[hash]`
+/// placeholder in each chunk path.
+///
+/// # Panics
+///
+/// Panics when a chunk or asset index is invalid, an asset marker does not
+/// reference exactly one output file, or a generated path exceeds 32 bits.
+pub fn finalize_chunk_paths(
+    file_system: &dyn Fs,
+    graph: &LinkerGraph,
+    chunks: &mut [ChunkInfo],
+    options: &Options,
+) {
+    let mut visited = vec![0_u32; chunks.len()];
+    for chunk_index in 0..chunks.len() {
+        let hash = if has_placeholder(&chunks[chunk_index].final_template, PathPlaceholder::Hash) {
+            let mut digest = xxhash::Digest::new();
+            FinalHashTraversal {
+                file_system,
+                graph,
+                chunks,
+                options,
+                visited: &mut visited,
+                visited_key: !u32::try_from(chunk_index).expect("chunk index fits in u32"),
+            }
+            .append(
+                &mut digest,
+                u32::try_from(chunk_index).expect("chunk index fits in u32"),
+            );
+            Some(hash_for_file_name(&digest.sum(&[])))
+        } else {
+            None
+        };
+        chunks[chunk_index].final_rel_path = template_to_string(&substitute_template(
+            &chunks[chunk_index].final_template,
+            &PathPlaceholders {
+                hash,
+                ..PathPlaceholders::default()
+            },
+        ));
+    }
+}
+
 #[must_use]
 pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
     left.len() == right.len()
@@ -2487,17 +2647,17 @@ mod tests {
         OutputPiece, OutputPieceIndexKind, PartRange, StableRef, add_exports_for_export_star,
         advance_import_tracker, append_or_extend_part_range, bind_imports_to_exports_for_file,
         classify_module_wrappers, compute_cross_chunk_dependencies, compute_js_chunks,
-        create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
-        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
-        match_import_with_export, path_between_chunks, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
-        tree_shaking_and_code_splitting,
+        create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
+        generate_isolated_hash, has_dynamic_exports_due_to_export_star,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
+        path_between_chunks, propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, tree_shaking_and_code_splitting,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
-        config::{Format, Loader, Options},
+        config::{Format, Loader, Options, PathPlaceholder, PathTemplate},
         css_ast::{
             ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
             WhitespaceFlags,
@@ -2510,8 +2670,8 @@ mod tests {
         },
         helpers::Joiner,
         js_ast::{self, ExportsKind, NamedExport, NamedImport},
-        logger::{DeferLogKind, Loc, Log, Range},
-        sourcemap::{LineColumnOffset, SourceMapShift},
+        logger::{DeferLogKind, Loc, Log, Path, PrettyPaths, Range, Source},
+        sourcemap::{LineColumnOffset, SourceMapPieces, SourceMapShift},
     };
 
     const PREFIX: &str = "UNIQUE";
@@ -2562,6 +2722,189 @@ mod tests {
                 .as_slice()
             )
         );
+    }
+
+    #[test]
+    fn isolated_hash_includes_identity_and_excludes_temporary_paths() {
+        let mut input = js_file(js_ast::Ast::default());
+        input.source = Source {
+            pretty_paths: PrettyPaths {
+                rel: "src/input.js".into(),
+                ..PrettyPaths::default()
+            },
+            key_path: Path {
+                text: "/machine-specific/input.js".into(),
+                namespace: "file".into(),
+                ..Path::default()
+            },
+            ..Source::default()
+        };
+        let graph = clone_linker_graph(&[input], &[0], &[], false);
+        let chunks = [ChunkPath::default(), ChunkPath::default()];
+        let options = Options {
+            public_path: "/assets/".into(),
+            ..Options::default()
+        };
+        let make_chunk = |marker: &[u8]| {
+            let mut output = b"before".to_vec();
+            output.extend_from_slice(marker);
+            output.extend_from_slice(b"after");
+            ChunkInfo {
+                parts_in_chunk_in_order: vec![PartRange {
+                    source_index: 0,
+                    part_index_begin: 2,
+                    part_index_end: 5,
+                }],
+                final_template: vec![PathTemplate {
+                    data: "chunks/".into(),
+                    placeholder: PathPlaceholder::Hash,
+                }],
+                intermediate_output: context(&[], &chunks).break_output_into_pieces(output),
+                output_source_map: SourceMapPieces {
+                    prefix: b"{\"mappings\":\"".to_vec(),
+                    mappings: b"AAAA".to_vec(),
+                    suffix: b"\"}".to_vec(),
+                },
+                ..ChunkInfo::default()
+            }
+        };
+
+        let mut first = make_chunk(b"UNIQUEC00000000");
+        let mut second = make_chunk(b"UNIQUEC00000001");
+        generate_isolated_hash(&graph, &mut first, &options);
+        generate_isolated_hash(&graph, &mut second, &options);
+        assert_eq!(first.isolated_hash, second.isolated_hash);
+        assert_eq!(first.isolated_hash.len(), 8);
+
+        second.output_source_map.mappings.push(b';');
+        generate_isolated_hash(&graph, &mut second, &options);
+        assert_ne!(first.isolated_hash, second.isolated_hash);
+
+        let mut second = make_chunk(b"UNIQUEC00000001");
+        generate_isolated_hash(&graph, &mut second, &Options::default());
+        assert_ne!(first.isolated_hash, second.isolated_hash);
+    }
+
+    #[test]
+    fn isolated_hash_length_prefixes_generated_spans() {
+        let graph = clone_linker_graph(&[], &[], &[], false);
+        let chunks = [ChunkPath::default()];
+        let mut left = ChunkInfo {
+            intermediate_output: context(&[], &chunks)
+                .break_output_into_pieces(b"aUNIQUEC00000000bc".to_vec()),
+            ..ChunkInfo::default()
+        };
+        let mut right = ChunkInfo {
+            intermediate_output: context(&[], &chunks)
+                .break_output_into_pieces(b"abUNIQUEC00000000c".to_vec()),
+            ..ChunkInfo::default()
+        };
+        generate_isolated_hash(&graph, &mut left, &Options::default());
+        generate_isolated_hash(&graph, &mut right, &Options::default());
+        assert_ne!(left.isolated_hash, right.isolated_hash);
+    }
+
+    #[test]
+    fn isolated_hash_preserves_unsplit_joiner_output() {
+        let graph = clone_linker_graph(&[], &[], &[], false);
+        let mut joiner = Joiner::default();
+        joiner.add_string("console.log(1)");
+        let mut chunk = ChunkInfo {
+            intermediate_output: super::IntermediateOutput::without_substitutions(joiner),
+            ..ChunkInfo::default()
+        };
+        generate_isolated_hash(&graph, &mut chunk, &Options::default());
+        let first_hash = chunk.isolated_hash.clone();
+        generate_isolated_hash(&graph, &mut chunk, &Options::default());
+        assert_eq!(chunk.isolated_hash, first_hash);
+        let (joiner, _) =
+            context(&[], &[]).substitute_final_paths(chunk.intermediate_output, str::to_owned);
+        assert_eq!(joiner.done(), b"console.log(1)");
+    }
+
+    #[test]
+    fn final_chunk_hash_includes_transitive_dependencies() {
+        let graph = clone_linker_graph(&[], &[], &[], false);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let make_chunks = |dependency_hash: &[u8]| {
+            vec![
+                ChunkInfo {
+                    cross_chunk_imports: vec![ChunkImport {
+                        chunk_index: 1,
+                        import_kind: ImportKind::Stmt,
+                    }],
+                    final_template: vec![
+                        PathTemplate {
+                            data: "entry-".into(),
+                            placeholder: PathPlaceholder::Hash,
+                        },
+                        PathTemplate {
+                            data: ".js".into(),
+                            ..PathTemplate::default()
+                        },
+                    ],
+                    isolated_hash: b"entry".to_vec(),
+                    ..ChunkInfo::default()
+                },
+                ChunkInfo {
+                    final_template: vec![
+                        PathTemplate {
+                            data: "dependency-".into(),
+                            placeholder: PathPlaceholder::Hash,
+                        },
+                        PathTemplate {
+                            data: ".js".into(),
+                            ..PathTemplate::default()
+                        },
+                    ],
+                    isolated_hash: dependency_hash.to_vec(),
+                    ..ChunkInfo::default()
+                },
+            ]
+        };
+
+        let mut first = make_chunks(b"dependency-a");
+        finalize_chunk_paths(&file_system, &graph, &mut first, &Options::default());
+        assert_eq!(first[0].final_rel_path.len(), "entry-.js".len() + 8);
+        assert_eq!(first[1].final_rel_path.len(), "dependency-.js".len() + 8);
+
+        let mut second = make_chunks(b"dependency-b");
+        finalize_chunk_paths(&file_system, &graph, &mut second, &Options::default());
+        assert_ne!(first[0].final_rel_path, second[0].final_rel_path);
+        assert_ne!(first[1].final_rel_path, second[1].final_rel_path);
+    }
+
+    #[test]
+    fn final_chunk_hash_handles_dynamic_import_cycles() {
+        let graph = clone_linker_graph(&[], &[], &[], false);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let template = vec![PathTemplate {
+            data: "chunk-".into(),
+            placeholder: PathPlaceholder::Hash,
+        }];
+        let mut chunks = vec![
+            ChunkInfo {
+                cross_chunk_imports: vec![ChunkImport {
+                    chunk_index: 1,
+                    import_kind: ImportKind::Dynamic,
+                }],
+                final_template: template.clone(),
+                isolated_hash: b"a".to_vec(),
+                ..ChunkInfo::default()
+            },
+            ChunkInfo {
+                cross_chunk_imports: vec![ChunkImport {
+                    chunk_index: 0,
+                    import_kind: ImportKind::Dynamic,
+                }],
+                final_template: template,
+                isolated_hash: b"b".to_vec(),
+                ..ChunkInfo::default()
+            },
+        ];
+        finalize_chunk_paths(&file_system, &graph, &mut chunks, &Options::default());
+        assert_eq!(chunks[0].final_rel_path.len(), "chunk-".len() + 8);
+        assert_eq!(chunks[1].final_rel_path.len(), "chunk-".len() + 8);
     }
 
     #[test]
