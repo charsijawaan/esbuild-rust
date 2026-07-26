@@ -60,18 +60,23 @@ impl Renamer for TransformRenamer {
     }
 }
 
+#[derive(Default)]
+struct KeepNameHelper {
+    def_prop: String,
+    name: String,
+    target: String,
+    value: String,
+}
+
 fn transform_keep_name_renamer(
     ast: &crate::internal::js_ast::Ast,
     symbols: SymbolMap,
     keep_names: bool,
     minify_identifiers: bool,
-) -> (TransformRenamer, String, String) {
+) -> (TransformRenamer, KeepNameHelper) {
     let mut overrides = HashMap::new();
-    let mut helper_name = String::new();
-    let mut def_prop_name = String::new();
-    if keep_names {
-        let helper_refs = ast
-            .named_imports
+    let helper_refs = if keep_names {
+        ast.named_imports
             .iter()
             .filter_map(|(reference, import)| (import.alias == "__name").then_some(*reference))
             .chain(
@@ -91,8 +96,25 @@ fn transform_keep_name_renamer(
                             == "__name"
                     }),
             )
-            .collect::<Vec<_>>();
-        if !helper_refs.is_empty() {
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
+    let helper_use_count = helper_refs
+        .iter()
+        .map(|reference| {
+            ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                .use_count_estimate
+        })
+        .sum::<u32>();
+    let (base, mut helper) = transform_base_renamer(
+        ast,
+        &symbols,
+        minify_identifiers,
+        (!helper_refs.is_empty()).then_some(helper_use_count),
+    );
+    if !helper_refs.is_empty() {
+        if !minify_identifiers {
             let helper_indices = helper_refs
                 .iter()
                 .map(|reference| reference.inner_index)
@@ -106,34 +128,34 @@ fn transform_keep_name_renamer(
                 })
                 .map(|(_, symbol)| symbol.original_name.as_str())
                 .collect::<HashSet<_>>();
-            helper_name = "__name".into();
+            helper.name = "__name".into();
             let mut suffix = 2;
-            while used_names.contains(helper_name.as_str()) {
-                helper_name = format!("__name{suffix}");
+            while used_names.contains(helper.name.as_str()) {
+                helper.name = format!("__name{suffix}");
                 suffix += 1;
             }
-            def_prop_name = "__defProp".into();
+            helper.def_prop = "__defProp".into();
             suffix = 2;
-            while used_names.contains(def_prop_name.as_str()) || def_prop_name == helper_name {
-                def_prop_name = format!("__defProp{suffix}");
+            while used_names.contains(helper.def_prop.as_str()) || helper.def_prop == helper.name {
+                helper.def_prop = format!("__defProp{suffix}");
                 suffix += 1;
             }
-            overrides.extend(
-                helper_refs
-                    .into_iter()
-                    .map(|reference| (reference, helper_name.clone())),
-            );
+            helper.target = "target".into();
+            helper.value = "value".into();
         }
+        overrides.extend(
+            helper_refs
+                .into_iter()
+                .map(|reference| (reference, helper.name.clone())),
+        );
     }
-    let base = transform_base_renamer(ast, &symbols, minify_identifiers);
     (
         TransformRenamer {
             base,
             symbols,
             overrides,
         },
-        helper_name,
-        def_prop_name,
+        helper,
     )
 }
 
@@ -141,7 +163,8 @@ fn transform_base_renamer(
     ast: &crate::internal::js_ast::Ast,
     symbols: &SymbolMap,
     minify_identifiers: bool,
-) -> Box<dyn Renamer> {
+    keep_name_use_count: Option<u32>,
+) -> (Box<dyn Renamer>, KeepNameHelper) {
     if minify_identifiers {
         let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
         let reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
@@ -162,10 +185,25 @@ fn transform_base_renamer(
                 );
             }
         }
+        let keep_name_slots = keep_name_use_count.map(|use_count| {
+            renamer.accumulate_synthetic_default_nested_slot(1, 2);
+            renamer.accumulate_synthetic_default_nested_slot(2, 2);
+            let def_prop = renamer.allocate_synthetic_default_top_level_slot(2);
+            let name = renamer.allocate_synthetic_default_top_level_slot(use_count.wrapping_add(2));
+            (def_prop, name)
+        });
         let minifier =
             DEFAULT_NAME_MINIFIER_JS.shuffle_by_char_freq(ast.char_freq.unwrap_or_default());
         renamer.assign_names_by_frequency(&minifier);
-        Box::new(renamer)
+        let helper = keep_name_slots
+            .map(|(def_prop, name)| KeepNameHelper {
+                def_prop: renamer.name_for_synthetic_default_slot(def_prop),
+                name: renamer.name_for_synthetic_default_slot(name),
+                target: renamer.name_for_synthetic_default_slot(1),
+                value: renamer.name_for_synthetic_default_slot(2),
+            })
+            .unwrap_or_default();
+        (Box::new(renamer), helper)
     } else {
         let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
         let reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
@@ -181,26 +219,33 @@ fn transform_base_renamer(
             nested_scopes.extend(part.scopes.iter().cloned());
         }
         renamer.assign_names_by_scope(&HashMap::from([(0, nested_scopes)]));
-        Box::new(renamer)
+        (Box::new(renamer), KeepNameHelper::default())
     }
 }
 
-fn prepend_keep_name_helper(
-    code: &mut Vec<u8>,
-    helper_name: &str,
-    def_prop_name: &str,
-    minify_whitespace: bool,
-) {
-    if helper_name.is_empty() {
+fn prepend_keep_name_helper(code: &mut Vec<u8>, helper: &KeepNameHelper, minify_whitespace: bool) {
+    if helper.name.is_empty() {
         return;
     }
+    let KeepNameHelper {
+        def_prop,
+        name,
+        target,
+        value,
+    } = helper;
+    let value_property = if value == "value" {
+        "value".into()
+    } else {
+        format!("value: {value}")
+    };
     let helper = if minify_whitespace {
+        let value_property = value_property.replace(' ', "");
         format!(
-            "var {def_prop_name}=Object.defineProperty;var {helper_name}=(target,value)=>{def_prop_name}(target,\"name\",{{value,configurable:true}});"
+            "var {def_prop}=Object.defineProperty;var {name}=({target},{value})=>{def_prop}({target},\"name\",{{{value_property},configurable:true}});"
         )
     } else {
         format!(
-            "var {def_prop_name} = Object.defineProperty;\nvar {helper_name} = (target, value) => {def_prop_name}(target, \"name\", {{ value, configurable: true }});\n"
+            "var {def_prop} = Object.defineProperty;\nvar {name} = ({target}, {value}) => {def_prop}({target}, \"name\", {{ {value_property}, configurable: true }});\n"
         )
     };
     let insertion = if code.starts_with(b"#!") {
@@ -2248,7 +2293,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     }
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&ast.symbols);
-    let (renamer, helper_name, def_prop_name) = transform_keep_name_renamer(
+    let (renamer, helper) = transform_keep_name_renamer(
         &ast,
         symbols,
         options.keep_names,
@@ -2267,12 +2312,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     };
     let mut code = printed.js;
     let printed_len = code.len();
-    prepend_keep_name_helper(
-        &mut code,
-        &helper_name,
-        &def_prop_name,
-        options.minify_whitespace,
-    );
+    prepend_keep_name_helper(&mut code, &helper, options.minify_whitespace);
     let source_map_prefix_len = code.len() - printed_len;
     if options.minify_whitespace && !code.is_empty() && code.last() != Some(&b'\n') {
         code.push(b'\n');
@@ -5167,6 +5207,52 @@ mod tests {
         let class_name = &output[class_start..class_end];
         assert!(output.contains(&format!("static observed = {class_name}.name;")));
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn minifies_keep_name_helper_identifiers() {
+        let basic = code(transform(
+            "const Foo = function() {}; class Bar {}",
+            TransformOptions {
+                keep_names: true,
+                minify_identifiers: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(
+            basic,
+            concat!(
+                "var s = Object.defineProperty;\n",
+                "var o = (c, n) => s(c, \"name\", { value: n, configurable: true });\n",
+                "const Foo = /* @__PURE__ */ o(function() {\n",
+                "}, \"Foo\");\n",
+                "class Bar {\n",
+                "  static {\n",
+                "    o(this, \"Bar\");\n",
+                "  }\n",
+                "}\n",
+            )
+        );
+
+        let competing_locals = code(transform(
+            "function x(a,b,c,d){console.log(a,b,c,d)}",
+            TransformOptions {
+                keep_names: true,
+                minify_identifiers: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(
+            competing_locals,
+            concat!(
+                "var f = Object.defineProperty;\n",
+                "var c = (o, n) => f(o, \"name\", { value: n, configurable: true });\n",
+                "function x(o, n, l, e) {\n",
+                "  console.log(o, n, l, e);\n",
+                "}\n",
+                "c(x, \"x\");\n",
+            )
+        );
     }
 
     #[test]

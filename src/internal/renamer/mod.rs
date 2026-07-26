@@ -213,6 +213,32 @@ impl MinifyRenamer {
         }
     }
 
+    pub fn accumulate_synthetic_default_nested_slot(&mut self, slot: usize, count: u32) {
+        let slots = &mut self.slots[SlotNamespace::Default as usize];
+        if slots.len() <= slot {
+            slots.resize_with(slot + 1, SymbolSlot::default);
+        }
+        slots[slot].count = slots[slot].count.wrapping_add(count);
+    }
+
+    #[must_use]
+    pub fn allocate_synthetic_default_top_level_slot(&mut self, count: u32) -> usize {
+        let slots = &mut self.slots[SlotNamespace::Default as usize];
+        let slot = slots.len();
+        slots.push(SymbolSlot {
+            count,
+            ..SymbolSlot::default()
+        });
+        slot
+    }
+
+    #[must_use]
+    pub fn name_for_synthetic_default_slot(&self, slot: usize) -> String {
+        self.slots[SlotNamespace::Default as usize][slot]
+            .name
+            .clone()
+    }
+
     pub fn assign_names_by_frequency(&mut self, minifier: &NameMinifier) {
         for (namespace_index, slots) in self.slots.iter_mut().enumerate() {
             let mut sorted: Vec<_> = slots
