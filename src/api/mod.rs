@@ -6191,6 +6191,37 @@ mod tests {
     }
 
     #[test]
+    fn removes_overwritten_function_declarations_when_minifying_syntax() {
+        assert_eq!(
+            code(transform(
+                "function f(){x()}function f(){y()}\
+                 function g(){x()}function*g(){y()}\
+                 async function h(){x()}function h(){y()}\
+                 var i;function i(){x()}function i(){y()}",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "function f() {\n",
+                "  y();\n",
+                "}\n",
+                "function* g() {\n",
+                "  y();\n",
+                "}\n",
+                "function h() {\n",
+                "  y();\n",
+                "}\n",
+                "var i;\n",
+                "function i() {\n",
+                "  y();\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

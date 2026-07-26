@@ -167,6 +167,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
     for statement in statements.iter_mut() {
         let was_control_flow_dead = core.is_control_flow_dead;
         let mut has_if_scope = false;
+        let mut remove_overwritten_function = false;
         match statement.data.as_deref_mut() {
             Some(StmtData::Block(block)) => {
                 visit_block(core, statement.loc, block, resolve_identifiers);
@@ -205,6 +206,13 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     core.push_next_scope_for_visit_pass(ScopeKind::Block);
                 }
                 visit_function(core, &mut function.function, resolve_identifiers);
+                remove_overwritten_function = !function.is_export
+                    && function.function.name.is_some_and(|name| {
+                        core.symbols
+                            [usize::try_from(name.reference.inner_index).expect("symbol index")]
+                        .flags
+                        .contains(SymbolFlags::REMOVE_OVERWRITTEN_FUNCTION_DECLARATION)
+                    });
             }
             Some(StmtData::Class(class)) => {
                 visit_class(core, &mut class.class, resolve_identifiers);
@@ -604,6 +612,13 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 bind_label_reference(core, &mut continue_statement.label, true);
             }
             _ => {}
+        }
+        if remove_overwritten_function {
+            statement.data = None;
+            if has_if_scope {
+                core.pop_scope();
+            }
+            continue;
         }
         if has_if_scope {
             let loc = statement.loc;
