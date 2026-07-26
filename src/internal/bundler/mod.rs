@@ -29,7 +29,7 @@ use crate::internal::{
     js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
     js_parser::{self, HelperCall},
     linker,
-    logger::{self, LineColumnTracker, Log, Range, Source},
+    logger::{self, LineColumnTracker, Log, Path, Range, Source},
     resolver::{self, ResolveResult, ResolverContext},
     runtime,
     sourcemap::LineOffsetTable,
@@ -509,6 +509,7 @@ pub fn resolve_import_records(
     file_system: &dyn Fs,
     source_index_cache: &SourceIndexCache,
     options: &Options,
+    tsconfig: Option<&resolver::TsConfigJson>,
     result: &mut ParseResult,
 ) {
     if options.mode != Mode::Bundle || !result.ok {
@@ -569,6 +570,7 @@ pub fn resolve_import_records(
             (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
             is_require,
             ResolverContext {
+                tsconfig,
                 external_settings: Some(&options.external_settings),
                 external_packages: options.external_packages,
                 conditions: Some(&options.conditions),
@@ -605,6 +607,42 @@ pub fn resolve_import_records(
             ));
         }
         result.resolve_results[record_index] = Some(resolve_result);
+    }
+}
+
+fn find_nearest_tsconfig(
+    log: &Log,
+    file_system: &dyn Fs,
+    start_directory: &str,
+) -> Option<resolver::TsConfigJson> {
+    let mut directory = start_directory.to_string();
+    loop {
+        let path = file_system.join(&[&directory, "tsconfig.json"]);
+        let (contents, error, _) = file_system.read_file(&path);
+        if error.is_none() {
+            let source = Source {
+                key_path: Path {
+                    text: path,
+                    namespace: "file".into(),
+                    ..Path::default()
+                },
+                contents: Arc::from(contents.into_bytes()),
+                ..Source::default()
+            };
+            return resolver::parse_tsconfig_json(
+                log,
+                &source,
+                file_system,
+                &directory,
+                &directory,
+                None,
+            );
+        }
+        let parent = file_system.dir(&directory);
+        if parent.is_empty() || parent == directory {
+            return None;
+        }
+        directory = parent;
     }
 }
 
@@ -736,6 +774,14 @@ pub fn scan_bundle(
             ..Source::default()
         };
         let mut file_options = options.clone();
+        let tsconfig =
+            find_nearest_tsconfig(log, file_system, &file_system.dir(&source.key_path.text));
+        if let Some(tsconfig) = &tsconfig {
+            tsconfig.jsx_settings.apply_to(&mut file_options.jsx);
+            file_options.ts.config = tsconfig.settings;
+            file_options.ts_always_strict =
+                tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
+        }
         resolve_metadata
             .ts_config_jsx
             .apply_to(&mut file_options.jsx);
@@ -781,6 +827,7 @@ pub fn scan_bundle(
             file_system,
             &caches.source_index_cache,
             &file_options,
+            tsconfig.as_ref(),
             &mut result,
         );
 
@@ -2114,7 +2161,7 @@ mod tests {
             &options,
         );
         let cache = SourceIndexCache::new();
-        resolve_import_records(&log, &file_system, &cache, &options, &mut result);
+        resolve_import_records(&log, &file_system, &cache, &options, None, &mut result);
 
         assert_eq!(result.resolve_results.len(), 2);
         assert!(result.resolve_results.iter().all(Option::is_some));
@@ -2173,7 +2220,7 @@ mod tests {
             records[1].flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
         }
         let cache = SourceIndexCache::new();
-        resolve_import_records(&log, &file_system, &cache, &options, &mut result);
+        resolve_import_records(&log, &file_system, &cache, &options, None, &mut result);
 
         let records = result
             .file
@@ -2214,6 +2261,7 @@ mod tests {
             &file_system,
             &SourceIndexCache::new(),
             &options,
+            None,
             &mut result,
         );
         let messages = log.done();
@@ -2943,6 +2991,61 @@ mod tests {
             }
         }
         assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn scan_applies_nearest_tsconfig_paths() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/tsconfig.json".into(),
+                    r#"{"compilerOptions":{"baseUrl":".","paths":{"@lib/*":["src/lib/*"]}}}"#
+                        .into(),
+                ),
+                (
+                    "/project/src/entry.ts".into(),
+                    "import { value } from '@lib/value'; const result: number = value; console.log(result)"
+                        .into(),
+                ),
+                (
+                    "/project/src/lib/value.ts".into(),
+                    "export const value: number = 42".into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            tree_shaking: true,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "src/entry.ts".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert!(
+            compiled.scan_result.import_issues.is_empty(),
+            "{:?}",
+            compiled.scan_result.import_issues
+        );
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains("const value = 42;"), "{output}");
+        assert!(output.contains("const result = value;"), "{output}");
+        assert!(output.contains("console.log(result);"), "{output}");
     }
 
     #[test]
