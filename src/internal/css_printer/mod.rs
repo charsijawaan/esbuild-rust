@@ -40,6 +40,38 @@ pub fn print(tree: &Ast, symbols: &SymbolMap, options: Options) -> PrintResult {
     PrintResult { css: printer.css }
 }
 
+fn best_quote_char(text: &str, for_url: bool) -> Option<char> {
+    let mut url_cost = 0;
+    let mut single_cost = 2;
+    let mut double_cost = 2;
+    for character in text.chars() {
+        match character {
+            '\'' => {
+                url_cost += 1;
+                single_cost += 1;
+            }
+            '"' => {
+                url_cost += 1;
+                double_cost += 1;
+            }
+            '(' | ')' | ' ' | '\t' => url_cost += 1,
+            '\\' | '\n' | '\r' | '\u{000C}' => {
+                url_cost += 1;
+                single_cost += 1;
+                double_cost += 1;
+            }
+            _ => {}
+        }
+    }
+    if for_url && url_cost < single_cost && url_cost < double_cost {
+        None
+    } else if single_cost < double_cost {
+        Some('\'')
+    } else {
+        Some('"')
+    }
+}
+
 struct Printer<'a> {
     css: Vec<u8>,
     import_records: &'a [crate::internal::ast::ImportRecord],
@@ -202,7 +234,7 @@ impl Printer<'_> {
                 if !rule.end.is_empty() {
                     self.css
                         .extend_from_slice(if self.options.minify_whitespace {
-                            b"to("
+                            b"to ("
                         } else {
                             b" to ("
                         });
@@ -300,7 +332,7 @@ impl Printer<'_> {
             TokenKind::Url => {
                 let record = &self.import_records[token.payload_index as usize];
                 self.css.extend_from_slice(b"url(");
-                self.print_quoted(&record.path.text, None);
+                self.print_url_value(&record.path.text);
                 self.css.push(b')');
             }
             _ => self.css.extend_from_slice(token.text.as_bytes()),
@@ -416,11 +448,17 @@ impl Printer<'_> {
                     });
             }
             for (compound_index, compound) in complex.selectors.iter().enumerate() {
-                if compound_index > 0 {
-                    if compound.combinator.byte == 0 {
+                if compound.combinator.byte == 0 {
+                    if compound_index > 0 {
                         self.css.push(b' ');
-                    } else {
-                        self.css.push(compound.combinator.byte);
+                    }
+                } else {
+                    if compound_index > 0 && !self.options.minify_whitespace {
+                        self.css.push(b' ');
+                    }
+                    self.css.push(compound.combinator.byte);
+                    if !self.options.minify_whitespace {
+                        self.css.push(b' ');
                     }
                 }
                 if let Some(name) = &compound.type_selector {
@@ -438,10 +476,17 @@ impl Printer<'_> {
 
     fn print_namespaced_name(&mut self, name: &NamespacedName) {
         if let Some(prefix) = &name.namespace_prefix {
-            self.css.extend_from_slice(prefix.text.as_bytes());
+            self.print_ident(&prefix.text);
             self.css.push(b'|');
         }
-        self.css.extend_from_slice(name.name.text.as_bytes());
+        if matches!(
+            name.name.kind,
+            TokenKind::DelimAsterisk | TokenKind::DelimAmpersand
+        ) {
+            self.css.extend_from_slice(name.name.text.as_bytes());
+        } else {
+            self.print_ident(&name.name.text);
+        }
     }
 
     fn print_subclass(&mut self, subclass: &SubclassData) {
@@ -459,7 +504,16 @@ impl Printer<'_> {
                 self.print_namespaced_name(&selector.namespaced_name);
                 if !selector.matcher_op.is_empty() {
                     self.css.extend_from_slice(selector.matcher_op.as_bytes());
-                    self.print_quoted(&selector.matcher_value, None);
+                    if would_start_identifier_without_escapes(selector.matcher_value.as_bytes())
+                        && selector
+                            .matcher_value
+                            .chars()
+                            .all(|character| is_name_continue(character as i32))
+                    {
+                        self.print_ident(&selector.matcher_value);
+                    } else {
+                        self.print_quoted(&selector.matcher_value, None);
+                    }
                 }
                 if selector.matcher_modifier != 0 {
                     self.css.push(b' ');
@@ -546,31 +600,60 @@ impl Printer<'_> {
     }
 
     fn print_quoted(&mut self, text: &str, forced_quote: Option<char>) {
-        let quote = forced_quote.unwrap_or_else(|| {
-            if text.matches('\'').count() < text.matches('"').count() {
-                '\''
-            } else {
-                '"'
-            }
-        });
-        self.css.push(quote as u8);
-        for character in text.chars() {
+        let quote = forced_quote.unwrap_or_else(|| best_quote_char(text, false).unwrap_or('"'));
+        self.print_quoted_with_quote(text, Some(quote));
+    }
+
+    fn print_url_value(&mut self, text: &str) {
+        self.print_quoted_with_quote(text, best_quote_char(text, true));
+    }
+
+    fn print_quoted_with_quote(&mut self, text: &str, quote: Option<char>) {
+        if let Some(quote) = quote {
+            self.css.push(quote as u8);
+        }
+        let characters = text.chars().collect::<Vec<_>>();
+        for (index, &character) in characters.iter().enumerate() {
+            let next = characters.get(index + 1).copied();
             match character {
                 '\\' => self.css.extend_from_slice(b"\\\\"),
-                character if character == quote => {
+                character if quote == Some(character) => {
                     self.css.push(b'\\');
                     self.css.push(character as u8);
                 }
-                '\n' | '\r' | '\u{000C}' | '\0' => self
-                    .css
-                    .extend_from_slice(format!("\\{:x} ", character as u32).as_bytes()),
-                character if self.options.ascii_only && !character.is_ascii() => self
-                    .css
-                    .extend_from_slice(format!("\\{:x} ", character as u32).as_bytes()),
+                '(' | ')' | ' ' | '\t' | '"' | '\'' if quote.is_none() => {
+                    self.css.push(b'\\');
+                    self.css.extend_from_slice(character.to_string().as_bytes());
+                }
+                '\n' | '\r' | '\u{000C}' | '\0' => self.print_hex_escape(character, next),
+                '/' if index > 0
+                    && characters[index - 1] == '<'
+                    && characters
+                        .iter()
+                        .skip(index + 1)
+                        .take(5)
+                        .collect::<String>()
+                        .eq_ignore_ascii_case("style") =>
+                {
+                    self.css.extend_from_slice(b"\\/");
+                }
+                character if self.options.ascii_only && !character.is_ascii() => {
+                    self.print_hex_escape(character, next);
+                }
                 character => self.css.extend_from_slice(character.to_string().as_bytes()),
             }
         }
-        self.css.push(quote as u8);
+        if let Some(quote) = quote {
+            self.css.push(quote as u8);
+        }
+    }
+
+    fn print_hex_escape(&mut self, character: char, next: Option<char>) {
+        self.css
+            .extend_from_slice(format!("\\{:x}", character as u32).as_bytes());
+        if next.is_some_and(|next| next.is_ascii_hexdigit() || matches!(next, ' ' | '\t')) {
+            self.css.push(b' ');
+        }
     }
 
     fn print_space(&mut self) {
@@ -594,10 +677,13 @@ impl Printer<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Options, print};
+    use super::{Options, Printer, best_quote_char, print};
     use crate::internal::{
         ast::SymbolMap,
-        css_ast::{Ast, DeclarationRule, QualifiedRule, Rule, RuleData, Token, WhitespaceFlags},
+        css_ast::{
+            Ast, Combinator, ComplexSelector, CompoundSelector, DeclarationRule, NameToken,
+            NamespacedName, QualifiedRule, Rule, RuleData, SelectorRule, Token, WhitespaceFlags,
+        },
         css_lexer::TokenKind,
         logger::Loc,
     };
@@ -669,6 +755,91 @@ mod tests {
         assert_eq!(
             String::from_utf8(result.css).expect("CSS output is UTF-8"),
             ".card{background:linear-gradient(red, blue)!important}"
+        );
+    }
+
+    fn quoted(text: &str, ascii_only: bool) -> String {
+        let symbols = SymbolMap::default();
+        let mut printer = Printer {
+            css: Vec::new(),
+            import_records: &[],
+            symbols: &symbols,
+            options: Options {
+                ascii_only,
+                ..Options::default()
+            },
+            indent: 0,
+        };
+        printer.print_quoted(text, None);
+        String::from_utf8(printer.css).expect("CSS output is UTF-8")
+    }
+
+    fn url_value(text: &str) -> String {
+        let symbols = SymbolMap::default();
+        let mut printer = Printer {
+            css: Vec::new(),
+            import_records: &[],
+            symbols: &symbols,
+            options: Options::default(),
+            indent: 0,
+        };
+        printer.print_url_value(text);
+        String::from_utf8(printer.css).expect("CSS output is UTF-8")
+    }
+
+    #[test]
+    fn chooses_and_escapes_css_strings_like_upstream() {
+        assert_eq!(best_quote_char("f\"o", false), Some('\''));
+        assert_eq!(quoted("", false), "\"\"");
+        assert_eq!(quoted("f\"o", false), "'f\"o'");
+        assert_eq!(quoted("f'\"'o", false), "\"f'\\\"'o\"");
+        assert_eq!(quoted("f\ro", false), "\"f\\do\"");
+        assert_eq!(quoted("f\n0", false), "\"f\\a 0\"");
+        assert_eq!(quoted("</StYlE", false), "\"<\\/StYlE\"");
+        assert_eq!(quoted("π", true), "\"\\3c0\"");
+    }
+
+    #[test]
+    fn omits_url_quotes_when_the_unquoted_form_is_shorter() {
+        assert_eq!(url_value("foo"), "foo");
+        assert_eq!(url_value("f o"), "f\\ o");
+        assert_eq!(url_value("f  o"), "\"f  o\"");
+        assert_eq!(url_value("(foo)"), "\"(foo)\"");
+        assert_eq!(url_value("\"foo\""), "'\"foo\"'");
+    }
+
+    #[test]
+    fn prints_a_leading_relative_selector_combinator() {
+        let tree = Ast {
+            rules: vec![Rule {
+                loc: Loc::default(),
+                data: RuleData::Selector(SelectorRule {
+                    selectors: vec![ComplexSelector {
+                        selectors: vec![CompoundSelector {
+                            type_selector: Some(NamespacedName {
+                                name: NameToken {
+                                    text: "item".into(),
+                                    kind: TokenKind::Ident,
+                                    ..NameToken::default()
+                                },
+                                ..NamespacedName::default()
+                            }),
+                            combinator: Combinator {
+                                byte: b'>',
+                                ..Combinator::default()
+                            },
+                            ..CompoundSelector::default()
+                        }],
+                    }],
+                    ..SelectorRule::default()
+                }),
+            }],
+            ..Ast::default()
+        };
+        assert_eq!(
+            String::from_utf8(print(&tree, &SymbolMap::default(), Options::default()).css)
+                .expect("CSS output is UTF-8"),
+            "> item {\n}\n"
         );
     }
 }
