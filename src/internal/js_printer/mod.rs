@@ -484,29 +484,7 @@ impl Printer<'_> {
             }
             StmtData::Local(local) => {
                 self.print_indent();
-                if local.is_export {
-                    self.output.extend_from_slice(b"export ");
-                }
-                self.output.extend_from_slice(match local.kind {
-                    LocalKind::Var => b"var ",
-                    LocalKind::Let => b"let ",
-                    LocalKind::Const => b"const ",
-                    LocalKind::Using => b"using ",
-                    LocalKind::AwaitUsing => b"await using ",
-                });
-                for (index, declaration) in local.declarations.iter().enumerate() {
-                    if index > 0 {
-                        self.output.push(b',');
-                        self.print_optional_space();
-                    }
-                    self.print_binding(&declaration.binding);
-                    if declaration.value_or_nil.data.is_some() {
-                        self.print_optional_space();
-                        self.output.push(b'=');
-                        self.print_optional_space();
-                        self.print_expr_at(&declaration.value_or_nil, Precedence::Comma);
-                    }
-                }
+                self.print_local(local, true);
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -572,6 +550,66 @@ impl Printer<'_> {
                 self.output.extend_from_slice(b");");
                 self.print_newline();
             }
+            StmtData::For(for_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"for");
+                self.print_optional_space();
+                self.output.push(b'(');
+                self.print_for_init(&for_statement.init_or_nil);
+                self.output.push(b';');
+                if for_statement.test_or_nil.data.is_some() {
+                    self.print_optional_space();
+                    self.print_expr_at(&for_statement.test_or_nil, Precedence::Lowest);
+                }
+                self.output.push(b';');
+                if for_statement.update_or_nil.data.is_some() {
+                    self.print_optional_space();
+                    self.print_expr_at(&for_statement.update_or_nil, Precedence::Lowest);
+                }
+                self.output.push(b')');
+                self.print_body(&for_statement.body);
+            }
+            StmtData::ForIn(for_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"for");
+                self.print_optional_space();
+                self.output.push(b'(');
+                self.print_for_init(&for_statement.init);
+                self.output.extend_from_slice(b" in ");
+                self.print_expr_at(&for_statement.value, Precedence::Lowest);
+                self.output.push(b')');
+                self.print_body(&for_statement.body);
+            }
+            StmtData::ForOf(for_statement) => {
+                self.print_indent();
+                self.output
+                    .extend_from_slice(if for_statement.await_range.len > 0 {
+                        b"for await"
+                    } else {
+                        b"for"
+                    });
+                self.print_optional_space();
+                self.output.push(b'(');
+                self.print_for_init(&for_statement.init);
+                self.output.extend_from_slice(b" of ");
+                self.print_expr_at(&for_statement.value, Precedence::Comma);
+                self.output.push(b')');
+                self.print_body(&for_statement.body);
+            }
+            StmtData::Label(label) => {
+                self.print_indent();
+                self.print_identifier(&self.renamer.name_for_symbol(label.name.reference));
+                self.output.push(b':');
+                if matches!(label.statement.data.as_deref(), Some(StmtData::Block(_))) {
+                    self.print_optional_space();
+                    self.print_stmt(&label.statement);
+                } else {
+                    self.print_newline();
+                    self.indent += 1;
+                    self.print_stmt(&label.statement);
+                    self.indent -= 1;
+                }
+            }
             StmtData::Break(break_statement) => {
                 self.print_indent();
                 self.output.extend_from_slice(b"break");
@@ -615,10 +653,6 @@ impl Printer<'_> {
             | StmtData::Enum(_)
             | StmtData::Namespace(_)
             | StmtData::Class(_)
-            | StmtData::Label(_)
-            | StmtData::For(_)
-            | StmtData::ForIn(_)
-            | StmtData::ForOf(_)
             | StmtData::With(_)
             | StmtData::Try(_)
             | StmtData::Switch(_)
@@ -712,6 +746,43 @@ impl Printer<'_> {
                 }
                 self.output.push(b'}');
             }
+        }
+    }
+
+    fn print_local(&mut self, local: &crate::internal::js_ast::LocalStmt, include_export: bool) {
+        if include_export && local.is_export {
+            self.output.extend_from_slice(b"export ");
+        }
+        self.output.extend_from_slice(match local.kind {
+            LocalKind::Var => b"var ",
+            LocalKind::Let => b"let ",
+            LocalKind::Const => b"const ",
+            LocalKind::Using => b"using ",
+            LocalKind::AwaitUsing => b"await using ",
+        });
+        for (index, declaration) in local.declarations.iter().enumerate() {
+            if index > 0 {
+                self.output.push(b',');
+                self.print_optional_space();
+            }
+            self.print_binding(&declaration.binding);
+            if declaration.value_or_nil.data.is_some() {
+                self.print_optional_space();
+                self.output.push(b'=');
+                self.print_optional_space();
+                self.print_expr_at(&declaration.value_or_nil, Precedence::Comma);
+            }
+        }
+    }
+
+    fn print_for_init(&mut self, statement: &Stmt) {
+        match statement.data.as_deref() {
+            None | Some(StmtData::Empty) => {}
+            Some(StmtData::Local(local)) => self.print_local(local, false),
+            Some(StmtData::Expr(expression)) => {
+                self.print_expr_at(&expression.value, Precedence::Lowest);
+            }
+            _ => panic!("Internal error: invalid for-loop initializer"),
         }
     }
 
@@ -1384,6 +1455,38 @@ mod tests {
                 .expect("printer output is UTF-8"),
             "const value = 1, rest = {};\n\
              const config = { name: \"demo\", [\"x\"]: value, value, ...rest };\n"
+        );
+    }
+
+    #[test]
+    fn prints_loop_statements() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"for (let i = 0; i < 2; i++) { sum += i; }\
+                  for (const key in object) use(key);\
+                  for (const value of list) use(value);"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "for (let i = 0; i < 2; i++) {\n\
+             \x20\x20sum += i;\n\
+             }\n\
+             for (const key in object)\n\
+             \x20\x20use(key);\n\
+             for (const value of list)\n\
+             \x20\x20use(value);\n"
         );
     }
 }
