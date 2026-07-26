@@ -2593,6 +2593,140 @@ pub fn strip_exports_from_stmts(statements: &[js_ast::Stmt]) -> Vec<js_ast::Stmt
     result
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ImportConversion {
+    pub keep_original: bool,
+    pub prefix_statement: Option<js_ast::Stmt>,
+}
+
+/// Convert one import/export-from statement for its target module's wrapper
+/// state.
+///
+/// # Panics
+///
+/// Panics when the source or target file is not JavaScript or an import record
+/// index is invalid.
+#[must_use]
+pub fn convert_import_for_chunk(
+    graph: &LinkerGraph,
+    source_index: u32,
+    statement_loc: crate::internal::logger::Loc,
+    namespace_ref: Ref,
+    import_record_index: u32,
+    output_format: Format,
+) -> ImportConversion {
+    let Some(InputFileRepr::Js(repr)) = graph.files[source_index as usize].input_file.repr.as_ref()
+    else {
+        panic!("import source must be JavaScript");
+    };
+    let record = &repr.ast.import_records[import_record_index as usize];
+    if !record.source_index.is_valid() {
+        if output_format.keep_esm_import_export_syntax() {
+            return ImportConversion {
+                keep_original: true,
+                ..ImportConversion::default()
+            };
+        }
+        return ImportConversion {
+            prefix_statement: Some(require_namespace_statement(
+                statement_loc,
+                record.range.loc,
+                namespace_ref,
+                import_record_index,
+            )),
+            ..ImportConversion::default()
+        };
+    }
+
+    if repr.ast.exports_kind == ExportsKind::CommonJs
+        && graph.symbols.follow_symbols_const(namespace_ref) == repr.ast.exports_ref
+    {
+        return ImportConversion::default();
+    }
+
+    let target_file = &graph.files[record.source_index.get_index() as usize];
+    let Some(InputFileRepr::Js(target)) = target_file.input_file.repr.as_ref() else {
+        panic!("import target must be JavaScript");
+    };
+    match target.meta.wrap {
+        WrapKind::None => ImportConversion::default(),
+        WrapKind::Cjs => ImportConversion {
+            prefix_statement: Some(require_namespace_statement(
+                statement_loc,
+                record.range.loc,
+                namespace_ref,
+                import_record_index,
+            )),
+            ..ImportConversion::default()
+        },
+        WrapKind::Esm if !target_file.is_live => ImportConversion::default(),
+        WrapKind::Esm => {
+            let call = js_ast::Expr::new(
+                statement_loc,
+                js_ast::ExprData::Call(js_ast::CallExpr {
+                    target: js_ast::Expr::new(
+                        statement_loc,
+                        js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                            reference: target.ast.wrapper_ref,
+                            ..js_ast::IdentifierExpr::default()
+                        }),
+                    ),
+                    ..js_ast::CallExpr::default()
+                }),
+            );
+            let value = if target.meta.is_async_or_has_async_dependency {
+                js_ast::Expr::new(
+                    statement_loc,
+                    js_ast::ExprData::Await(js_ast::AwaitExpr { value: call }),
+                )
+            } else {
+                call
+            };
+            ImportConversion {
+                prefix_statement: Some(js_ast::Stmt::new(
+                    statement_loc,
+                    js_ast::StmtData::Expr(js_ast::ExprStmt {
+                        value,
+                        ..js_ast::ExprStmt::default()
+                    }),
+                )),
+                ..ImportConversion::default()
+            }
+        }
+    }
+}
+
+fn require_namespace_statement(
+    statement_loc: crate::internal::logger::Loc,
+    value_loc: crate::internal::logger::Loc,
+    namespace_ref: Ref,
+    import_record_index: u32,
+) -> js_ast::Stmt {
+    js_ast::Stmt::new(
+        statement_loc,
+        js_ast::StmtData::Local(js_ast::LocalStmt {
+            declarations: vec![js_ast::Decl {
+                binding: js_ast::Binding {
+                    data: Some(Box::new(js_ast::BindingData::Identifier(
+                        js_ast::IdentifierBinding {
+                            reference: namespace_ref,
+                        },
+                    ))),
+                    loc: statement_loc,
+                },
+                value_or_nil: js_ast::Expr::new(
+                    value_loc,
+                    js_ast::ExprData::RequireString(js_ast::RequireStringExpr {
+                        import_record_index,
+                        ..js_ast::RequireStringExpr::default()
+                    }),
+                ),
+            }],
+            ..js_ast::LocalStmt::default()
+        }),
+    )
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -2990,9 +3124,9 @@ mod tests {
         OutputPiece, OutputPieceIndexKind, PartRange, StableRef, add_exports_for_export_star,
         advance_import_tracker, append_or_extend_part_range, assign_chunk_path_templates,
         bind_imports_to_exports_for_file, classify_module_wrappers,
-        compute_cross_chunk_dependencies, compute_js_chunks, create_wrapper_for_file,
-        enforce_no_cyclic_chunk_imports, finalize_chunk_paths, generate_cross_chunk_stmts,
-        generate_isolated_hash, has_dynamic_exports_due_to_export_star,
+        compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
+        create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
+        generate_cross_chunk_stmts, generate_isolated_hash, has_dynamic_exports_due_to_export_star,
         import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
         join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
         merge_adjacent_local_stmts, path_between_chunks, print_cross_chunk_bindings,
@@ -3563,6 +3697,127 @@ mod tests {
             panic!("default binding must be an identifier");
         };
         assert_eq!(binding.reference, default_ref);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn imports_convert_according_to_target_wrapper_kind() {
+        let namespace_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                import_records: vec![
+                    ImportRecord::default(),
+                    ImportRecord {
+                        source_index: Index32::new(1),
+                        ..ImportRecord::default()
+                    },
+                    ImportRecord {
+                        source_index: Index32::new(2),
+                        ..ImportRecord::default()
+                    },
+                    ImportRecord {
+                        source_index: Index32::new(3),
+                        ..ImportRecord::default()
+                    },
+                ],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast {
+                wrapper_ref: Ref {
+                    source_index: 3,
+                    inner_index: 0,
+                },
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2, 3], &[], false);
+        let Some(InputFileRepr::Js(common_js)) = graph.files[2].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        common_js.meta.wrap = WrapKind::Cjs;
+        let Some(InputFileRepr::Js(esm)) = graph.files[3].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        esm.meta.wrap = WrapKind::Esm;
+        esm.meta.is_async_or_has_async_dependency = true;
+        graph.files[3].is_live = true;
+
+        assert!(
+            convert_import_for_chunk(
+                &graph,
+                0,
+                Loc::default(),
+                namespace_ref,
+                0,
+                Format::EsModule,
+            )
+            .keep_original
+        );
+        let external_require = convert_import_for_chunk(
+            &graph,
+            0,
+            Loc::default(),
+            namespace_ref,
+            0,
+            Format::CommonJs,
+        );
+        assert!(matches!(
+            external_require
+                .prefix_statement
+                .as_ref()
+                .and_then(|statement| statement.data.as_deref()),
+            Some(js_ast::StmtData::Local(_))
+        ));
+        assert!(
+            convert_import_for_chunk(
+                &graph,
+                0,
+                Loc::default(),
+                namespace_ref,
+                1,
+                Format::EsModule,
+            )
+            .prefix_statement
+            .is_none()
+        );
+        assert!(matches!(
+            convert_import_for_chunk(
+                &graph,
+                0,
+                Loc::default(),
+                namespace_ref,
+                2,
+                Format::EsModule,
+            )
+            .prefix_statement
+            .as_ref()
+            .and_then(|statement| statement.data.as_deref()),
+            Some(js_ast::StmtData::Local(_))
+        ));
+        let esm_init = convert_import_for_chunk(
+            &graph,
+            0,
+            Loc::default(),
+            namespace_ref,
+            3,
+            Format::EsModule,
+        );
+        let Some(js_ast::StmtData::Expr(expression)) = esm_init
+            .prefix_statement
+            .as_ref()
+            .and_then(|statement| statement.data.as_deref())
+        else {
+            panic!("ESM wrapper initializer");
+        };
+        assert!(matches!(
+            expression.value.data.as_deref(),
+            Some(js_ast::ExprData::Await(_))
+        ));
     }
 
     #[test]
