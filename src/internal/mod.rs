@@ -13,6 +13,7 @@ pub mod helpers;
 pub mod js_ast;
 pub mod js_lexer;
 pub mod js_parser;
+pub mod js_printer;
 pub mod logger;
 pub mod renamer;
 pub mod runtime;
