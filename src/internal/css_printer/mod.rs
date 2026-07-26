@@ -364,6 +364,7 @@ impl Printer<'_> {
                 if !self.options.minify_whitespace
                     && !multiline
                     && !multiline_function
+                    && !rule.key_text.starts_with("--")
                     && !rule.value.is_empty()
                     && !rule.value[0].whitespace.contains(WhitespaceFlags::BEFORE)
                 {

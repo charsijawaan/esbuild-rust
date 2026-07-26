@@ -5835,7 +5835,7 @@ mod tests {
                     ..TransformOptions::default()
                 }
             )),
-            "div{container-name:NONE initial}div{container-name:i n}div{container:none}div{container:NONE/size}div{container:i n}div{container:i n/size}div{container:local1/size extra}div{container-name:local1/size}\n"
+            "div{container-name:NONE initial}div{container-name:i n}div{container:none}div{container:NONE / size}div{container:i n}div{container:i n / size}div{container:local1 / size extra}div{container-name:local1 / size}\n"
         );
     }
 

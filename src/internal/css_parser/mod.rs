@@ -784,9 +784,13 @@ impl Parser {
         }
         let value_start = self.index;
         let value_end = self.scan_declaration_end();
-        let mut value = self.convert_tokens(value_start, value_end);
+        let mut value = if key_text.starts_with("--") {
+            self.convert_custom_property_tokens(value_start, value_end)
+        } else {
+            self.convert_tokens(value_start, value_end)
+        };
         if self.minify_syntax {
-            reduce_calc_expressions(&mut value);
+            reduce_calc_expressions(&mut value, key_text.starts_with("--"));
         }
         if self.make_local_symbols && key_text.eq_ignore_ascii_case("composes") {
             self.process_composes(&value);
@@ -813,7 +817,10 @@ impl Parser {
             minify_declaration(&key_text, &mut value, self.minify_whitespace);
         }
         let important = take_important(&mut value);
-        if !important && let Some(last) = value.last_mut() {
+        if !important
+            && !key_text.starts_with("--")
+            && let Some(last) = value.last_mut()
+        {
             last.whitespace = if last.whitespace.contains(WhitespaceFlags::BEFORE) {
                 WhitespaceFlags::BEFORE
             } else {
@@ -1216,6 +1223,10 @@ impl Parser {
                     || result
                         .last()
                         .is_some_and(|previous| whitespace_is_required(previous, &converted))
+                    || result
+                        .last()
+                        .is_some_and(|previous| previous.kind == TokenKind::DelimSlash)
+                    || converted.kind == TokenKind::DelimSlash
                     || inside_calc
                         && numeric_calc_division_whitespace(
                             &result,
@@ -1256,6 +1267,20 @@ impl Parser {
         self.minify_whitespace = false;
         let result = self.convert_tokens(start, end);
         self.minify_whitespace = minify_whitespace;
+        result
+    }
+
+    fn convert_custom_property_tokens(&mut self, start: usize, end: usize) -> Vec<Token> {
+        let has_leading_whitespace = self.kind_at(start) == TokenKind::Whitespace;
+        let has_trailing_whitespace =
+            end > start && self.kind_at(end.saturating_sub(1)) == TokenKind::Whitespace;
+        let mut result = self.convert_tokens_preserving_whitespace(start, end);
+        if has_leading_whitespace && let Some(first) = result.first_mut() {
+            first.whitespace |= WhitespaceFlags::BEFORE;
+        }
+        if has_trailing_whitespace && let Some(last) = result.last_mut() {
+            last.whitespace |= WhitespaceFlags::AFTER;
+        }
         result
     }
 
@@ -3992,10 +4017,10 @@ fn percent_to_number_if_shorter(token: &mut Token) {
     }
 }
 
-fn reduce_calc_expressions(tokens: &mut [Token]) {
+fn reduce_calc_expressions(tokens: &mut [Token], preserve_replacement_whitespace: bool) {
     for token in tokens.iter_mut() {
         if let Some(children) = &mut token.children {
-            reduce_calc_expressions(children);
+            reduce_calc_expressions(children, preserve_replacement_whitespace);
         }
         if token.kind != TokenKind::Function || !token.text.eq_ignore_ascii_case("calc") {
             continue;
@@ -4025,6 +4050,9 @@ fn reduce_calc_expressions(tokens: &mut [Token]) {
         if let Some(mut replacement) = replacement {
             replacement.loc = token.loc;
             replacement.whitespace = token.whitespace;
+            if preserve_replacement_whitespace {
+                replacement.whitespace |= WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER;
+            }
             *token = replacement;
         }
     }
@@ -4704,6 +4732,25 @@ mod tests {
                 true,
             ),
             ".parent{>.child{color:red}background:#00f}"
+        );
+    }
+
+    #[test]
+    fn preserves_custom_property_and_slash_whitespace() {
+        assert_eq!(
+            parse_and_print(
+                ":root { --gap: 10px; } .x { border-radius: 10px / 5px; }",
+                true,
+            ),
+            ":root{--gap: 10px}.x{border-radius:10px / 5px}"
+        );
+        assert_eq!(
+            parse_and_print_with_options(":root { --value:calc(1 + 2) }", true, false),
+            ":root {\n  --value: 3 ;\n}\n"
+        );
+        assert_eq!(
+            parse_and_print_with_options(":root { --value:calc(1 + 2) }", true, true),
+            ":root{--value: 3 }"
         );
     }
 
