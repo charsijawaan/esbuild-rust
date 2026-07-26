@@ -646,6 +646,7 @@ pub fn scan_bundle(
         }
     }
     finalize_scan_import_records(log, caches, options, &mut bundle.files, &resolution_slots);
+    validate_top_level_await(log, options, &mut bundle.files);
     generate_additional_files(
         file_system,
         options,
@@ -653,6 +654,140 @@ pub fn scan_bundle(
         &mut bundle.files,
     );
     bundle
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_top_level_await(log: &Log, options: &Options, files: &mut [ScannerFile]) {
+    #[allow(clippy::too_many_lines)]
+    fn visit(
+        source_index: u32,
+        log: &Log,
+        options: &Options,
+        files: &[ScannerFile],
+        checks: &mut [TlaCheck],
+    ) -> TlaCheck {
+        let index = usize::try_from(source_index).expect("source index fits usize");
+        if checks[index].depth != 0 {
+            return checks[index];
+        }
+        checks[index].depth = 1;
+        let Some(InputFileRepr::Js(repr)) = files[index].input_file.repr.as_ref() else {
+            return checks[index];
+        };
+        if repr.ast.live_top_level_await_keyword.len > 0 {
+            checks[index].parent = Index32::new(source_index);
+        }
+        let records = repr.ast.import_records.clone();
+        for (record_index, record) in records.iter().enumerate() {
+            if !record.source_index.is_valid()
+                || !matches!(record.kind, ImportKind::Stmt | ImportKind::Require)
+            {
+                continue;
+            }
+            let parent = visit(record.source_index.get_index(), log, options, files, checks);
+            if !parent.parent.is_valid() {
+                continue;
+            }
+            if record.kind == ImportKind::Stmt
+                && (!checks[index].parent.is_valid() || parent.depth < checks[index].depth)
+            {
+                checks[index] = TlaCheck {
+                    parent: record.source_index,
+                    depth: parent.depth + 1,
+                    import_record_index: u32::try_from(record_index)
+                        .expect("import record index fits u32"),
+                };
+                continue;
+            }
+            if record.kind == ImportKind::Require {
+                let mut notes = Vec::new();
+                let mut other_source_index = record.source_index.get_index();
+                let tla_path = loop {
+                    let other_index =
+                        usize::try_from(other_source_index).expect("source index fits usize");
+                    let other_file = &files[other_index];
+                    let Some(InputFileRepr::Js(other_repr)) = &other_file.input_file.repr else {
+                        break String::new();
+                    };
+                    if other_repr.ast.live_top_level_await_keyword.len > 0 {
+                        let path = other_file
+                            .input_file
+                            .source
+                            .pretty_paths
+                            .select(options.log_path_style)
+                            .to_string();
+                        let mut tracker =
+                            LineColumnTracker::new(Some(&other_file.input_file.source));
+                        notes.push(tracker.msg_data(
+                            other_repr.ast.live_top_level_await_keyword,
+                            format!("The top-level await in {path:?} is here:"),
+                        ));
+                        break path;
+                    }
+                    let check = checks[other_index];
+                    if !check.parent.is_valid() {
+                        break String::new();
+                    }
+                    let next_source_index = check.parent.get_index();
+                    let next_path = files
+                        [usize::try_from(next_source_index).expect("source index fits usize")]
+                    .input_file
+                    .source
+                    .pretty_paths
+                    .select(options.log_path_style)
+                    .to_string();
+                    let current_path = other_file
+                        .input_file
+                        .source
+                        .pretty_paths
+                        .select(options.log_path_style)
+                        .to_string();
+                    let mut tracker = LineColumnTracker::new(Some(&other_file.input_file.source));
+                    notes.push(tracker.msg_data(
+                        other_repr.ast.import_records[check.import_record_index as usize].range,
+                        format!("The file {current_path:?} imports the file {next_path:?} here:"),
+                    ));
+                    other_source_index = next_source_index;
+                };
+                let imported_path = files[usize::try_from(record.source_index.get_index())
+                    .expect("source index fits usize")]
+                .input_file
+                .source
+                .pretty_paths
+                .select(options.log_path_style);
+                let text = if imported_path == tla_path {
+                    format!(
+                        "This require call is not allowed because the imported file {imported_path:?} contains a top-level await"
+                    )
+                } else {
+                    format!(
+                        "This require call is not allowed because the transitive dependency {tla_path:?} contains a top-level await"
+                    )
+                };
+                let mut tracker = LineColumnTracker::new(Some(&files[index].input_file.source));
+                log.add_error_with_notes(Some(&mut tracker), record.range, text, notes);
+            }
+        }
+        checks[index]
+    }
+
+    let mut checks = vec![TlaCheck::default(); files.len()];
+    for source_index in 0..files.len() {
+        visit(
+            u32::try_from(source_index).expect("source index fits u32"),
+            log,
+            options,
+            files,
+            &mut checks,
+        );
+    }
+    for (file, check) in files.iter_mut().zip(checks) {
+        if check.parent.is_valid()
+            && let Some(InputFileRepr::Js(repr)) = file.input_file.repr.as_mut()
+        {
+            repr.meta.is_async_or_has_async_dependency = true;
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2473,5 +2608,92 @@ mod tests {
             messages[0].data.text,
             "The file \"code.js\" was loaded with the \"js\" loader"
         );
+    }
+
+    #[test]
+    fn scan_marks_static_top_level_await_chains_async() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                ("/project/entry.js".into(), "import './middle.js'".into()),
+                ("/project/middle.js".into(), "import './async.js'".into()),
+                ("/project/async.js".into(), "await Promise.resolve()".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into()],
+            ..Options::default()
+        };
+        let bundle = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        for path in ["entry.js", "middle.js", "async.js"] {
+            let file = bundle
+                .files
+                .iter()
+                .find(|file| file.input_file.source.key_path.text.ends_with(path))
+                .expect("JavaScript input");
+            let Some(InputFileRepr::Js(repr)) = &file.input_file.repr else {
+                panic!("expected JavaScript representation");
+            };
+            assert!(repr.meta.is_async_or_has_async_dependency, "{path}");
+        }
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn scan_rejects_direct_and_transitive_require_of_top_level_await() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "require('./async.js'); require('./middle.js')".into(),
+                ),
+                ("/project/middle.js".into(), "import './async.js'".into()),
+                ("/project/async.js".into(), "await Promise.resolve()".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into()],
+            ..Options::default()
+        };
+        scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        let messages = log.done();
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().any(|message| {
+            message.data.text
+                == "This require call is not allowed because the imported file \"async.js\" contains a top-level await"
+                && message.notes.len() == 1
+        }));
+        assert!(messages.iter().any(|message| {
+            message.data.text
+                == "This require call is not allowed because the transitive dependency \"async.js\" contains a top-level await"
+                && message.notes.len() == 2
+        }));
     }
 }
