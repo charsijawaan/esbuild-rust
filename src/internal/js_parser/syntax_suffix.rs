@@ -255,7 +255,15 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                     report_optional_chain_in_new_target = false;
                 }
                 lexer.next();
-                let optional_start = OptionalChain::Start;
+                let mut optional_start = OptionalChain::Start;
+                if core.options.minify_syntax
+                    && crate::internal::js_ast::to_null_or_undefined_with_side_effects(
+                        left.data.as_deref(),
+                    )
+                    .is_some_and(|(is_null_or_undefined, _)| !is_null_or_undefined)
+                {
+                    optional_start = OptionalChain::None;
+                }
                 match lexer.token {
                     Token::OpenBracket => {
                         lexer.next();
@@ -318,7 +326,9 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                         );
                     }
                 }
-                optional_chain = OptionalChain::Continue;
+                if optional_start == OptionalChain::Start {
+                    optional_chain = OptionalChain::Continue;
+                }
             }
             Token::OpenBracket => {
                 lexer.next();

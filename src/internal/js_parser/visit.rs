@@ -4347,12 +4347,73 @@ fn dot_chain_parts(core: &ParserCore, expression: &Expr, tail: &str) -> Option<V
     }
 }
 
-#[allow(clippy::too_many_lines)]
+fn maybe_fold_object_property_access(
+    core: &ParserCore,
+    target: &Expr,
+    name: &str,
+) -> Option<ExprData> {
+    let ExprData::Object(object) = target.data.as_deref()? else {
+        return None;
+    };
+    let mut replacement = None;
+    let mut has_proto_null = false;
+    for property in &object.properties {
+        if property.kind == PropertyKind::Spread
+            || property.flags.contains(PropertyFlags::IS_COMPUTED)
+            || property.kind.is_method_definition()
+        {
+            return None;
+        }
+        let Some(ExprData::String(key)) = property.key.data.as_deref() else {
+            return None;
+        };
+        let is_proto = crate::internal::helpers::utf16_equals_wtf8(&key.value, b"__proto__");
+        if is_proto && matches!(property.value_or_nil.data.as_deref(), Some(ExprData::Null)) {
+            has_proto_null = true;
+        }
+        if !expression_can_be_removed_if_unused(core, &property.value_or_nil) {
+            return None;
+        }
+        if crate::internal::helpers::utf16_equals_wtf8(&key.value, name.as_bytes()) {
+            replacement = property.value_or_nil.data.as_deref().cloned();
+        }
+    }
+    if name != "__proto__"
+        && let Some(replacement) = replacement
+    {
+        return Some(replacement);
+    }
+    has_proto_null.then_some(ExprData::Undefined)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ExprVisitContext {
+    is_call_target: bool,
+    is_template_tag: bool,
+}
+
 fn visit_expr_with_target(
     core: &mut ParserCore,
     expression: &mut Expr,
     resolve_identifiers: bool,
     assign_target: AssignTarget,
+) {
+    visit_expr_with_target_and_context(
+        core,
+        expression,
+        resolve_identifiers,
+        assign_target,
+        ExprVisitContext::default(),
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+fn visit_expr_with_target_and_context(
+    core: &mut ParserCore,
+    expression: &mut Expr,
+    resolve_identifiers: bool,
+    assign_target: AssignTarget,
+    context: ExprVisitContext,
 ) {
     if assign_target != AssignTarget::None {
         let is_pattern = match expression.data.as_deref() {
@@ -4636,10 +4697,34 @@ fn visit_expr_with_target(
                 && let Some(folded) = folded.data
             {
                 *data = *folded;
+                return;
+            }
+            if core.options.minify_syntax && binary.op == OpCode::BinaryComma {
+                let helpers = make_helper_context(|reference| {
+                    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                        == SymbolKind::Unbound
+                });
+                binary.left = helpers
+                    .simplify_unused_expr(&binary.left, core.options.unsupported_js_features);
+                if binary.left.data.is_none()
+                    && let Some(right) = binary.right.data.as_deref().cloned()
+                {
+                    *data = right;
+                    return;
+                }
             }
         }
         ExprData::New(new) => {
-            visit_expr(core, &mut new.target, resolve_identifiers);
+            visit_expr_with_target_and_context(
+                core,
+                &mut new.target,
+                resolve_identifiers,
+                AssignTarget::None,
+                ExprVisitContext {
+                    is_call_target: true,
+                    ..ExprVisitContext::default()
+                },
+            );
             let mut has_spread = false;
             for argument in &mut new.args {
                 has_spread |= matches!(argument.data.as_deref(), Some(ExprData::Spread(_)));
@@ -4652,7 +4737,16 @@ fn visit_expr_with_target(
         ExprData::Call(call) => {
             let target_was_identifier =
                 matches!(call.target.data.as_deref(), Some(ExprData::Identifier(_)));
-            visit_expr(core, &mut call.target, resolve_identifiers);
+            visit_expr_with_target_and_context(
+                core,
+                &mut call.target,
+                resolve_identifiers,
+                AssignTarget::None,
+                ExprVisitContext {
+                    is_call_target: true,
+                    ..ExprVisitContext::default()
+                },
+            );
             if core.options.minify_syntax {
                 let collapse_indirect_identifier = match call.target.data.as_deref() {
                     Some(ExprData::Binary(binary))
@@ -4860,6 +4954,18 @@ fn visit_expr_with_target(
                     core.ignore_usage(identifier.reference);
                 }
                 *data = replacement;
+                return;
+            }
+            if core.options.minify_syntax
+                && assign_target == AssignTarget::None
+                && dot.optional_chain == OptionalChain::None
+                && !context.is_call_target
+                && !context.is_template_tag
+                && let Some(replacement) =
+                    maybe_fold_object_property_access(core, &dot.target, &dot.name)
+            {
+                *data = replacement;
+                return;
             }
         }
         ExprData::Index(index) => {
@@ -4948,7 +5054,27 @@ fn visit_expr_with_target(
                     core.ignore_usage(identifier.reference);
                 }
                 *data = replacement;
-            } else if core.options.minify_syntax
+                return;
+            }
+            if core.options.minify_syntax
+                && assign_target == AssignTarget::None
+                && index.optional_chain == OptionalChain::None
+                && !context.is_call_target
+                && !context.is_template_tag
+                && let Some(ExprData::String(string)) = index.index.data.as_deref()
+            {
+                let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                    &string.value,
+                ))
+                .into_owned();
+                if let Some(replacement) =
+                    maybe_fold_object_property_access(core, &index.target, &name)
+                {
+                    *data = replacement;
+                    return;
+                }
+            }
+            if core.options.minify_syntax
                 && let Some(ExprData::String(string)) = index.index.data.as_deref()
             {
                 let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
@@ -5059,7 +5185,17 @@ fn visit_expr_with_target(
                     "Legacy octal escape sequences cannot be used in template literals",
                 );
             }
-            visit_expr(core, &mut template.tag_or_nil, resolve_identifiers);
+            let is_template_tag = template.tag_or_nil.data.is_some();
+            visit_expr_with_target_and_context(
+                core,
+                &mut template.tag_or_nil,
+                resolve_identifiers,
+                AssignTarget::None,
+                ExprVisitContext {
+                    is_template_tag,
+                    ..ExprVisitContext::default()
+                },
+            );
             for part in &mut template.parts {
                 visit_expr(core, &mut part.value, resolve_identifiers);
             }

@@ -6313,6 +6313,28 @@ mod tests {
     }
 
     #[test]
+    fn folds_object_properties_and_optional_chains_like_esbuild() {
+        assert_eq!(
+            code(transform(
+                "var z;a={y:z}.y;b={foo:/* @__PURE__ */foo(),y:1}.y;\
+                 c={__proto__:null}.y;d={y:{z:1}}?.y.z;e={y:{z:1}}?.y?.z;\
+                 call={a:fn}.a();construct=new ({a:fn}.a)();\
+                 removed=delete ({a:1}.a);tagged={a:tag}.a``",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "var z;\n",
+                "a = z, b = 1, c = void 0, d = 1, e = { z: 1 }?.z, ",
+                "call = { a: fn }.a(), construct = new { a: fn }.a(), ",
+                "removed = delete 1, tagged = { a: tag }.a``;\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(
