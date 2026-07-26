@@ -775,7 +775,10 @@ impl Printer<'_> {
                 self.output.push(b';');
                 self.print_newline();
             }
-            StmtData::Block(block) => self.print_block(block, true),
+            StmtData::Block(block) => {
+                self.print_indent();
+                self.print_block(block, true);
+            }
             StmtData::Function(function) => {
                 self.print_indent();
                 if function.is_export {

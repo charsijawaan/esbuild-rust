@@ -6222,6 +6222,32 @@ mod tests {
     }
 
     #[test]
+    fn folds_constant_logical_branches_and_indents_nested_blocks() {
+        assert_eq!(
+            code(transform(
+                "(function foo(){{var arguments}});\
+                 var x=(true&&function(){y()})();\
+                 a=false||g;b=null??h;c=1??i;d=(side(),true)&&j",
+                TransformOptions::default()
+            )),
+            concat!(
+                "(function foo() {\n",
+                "  {\n",
+                "    var arguments;\n",
+                "  }\n",
+                "});\n",
+                "var x = (function() {\n",
+                "  y();\n",
+                "})();\n",
+                "a = g;\n",
+                "b = h;\n",
+                "c = 1;\n",
+                "d = (side(), true) && j;\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

@@ -4476,11 +4476,37 @@ fn visit_expr_with_target(
             } else {
                 None
             };
+            let right_is_dead = match binary.op {
+                OpCode::BinaryLogicalOr => crate::internal::js_ast::to_boolean_with_side_effects(
+                    binary.left.data.as_deref(),
+                )
+                .is_some_and(|(value, _)| value),
+                OpCode::BinaryLogicalAnd => crate::internal::js_ast::to_boolean_with_side_effects(
+                    binary.left.data.as_deref(),
+                )
+                .is_some_and(|(value, _)| !value),
+                OpCode::BinaryNullishCoalescing => {
+                    crate::internal::js_ast::to_null_or_undefined_with_side_effects(
+                        binary.left.data.as_deref(),
+                    )
+                    .is_some_and(|(value, _)| !value)
+                }
+                _ => false,
+            };
+            let old_control_flow_dead = core.is_control_flow_dead;
+            core.is_control_flow_dead |= right_is_dead;
             visit_expr(core, &mut binary.right, resolve_identifiers);
+            core.is_control_flow_dead = old_control_flow_dead;
             keep_inferred_name(core, &mut binary.right, inferred_name);
             if (core.should_fold_type_script_constant_expressions
                 || (core.options.minify_syntax
-                    && crate::internal::js_ast::should_fold_binary_operator_when_minifying(binary)))
+                    && crate::internal::js_ast::should_fold_binary_operator_when_minifying(binary))
+                || matches!(
+                    binary.op,
+                    OpCode::BinaryLogicalOr
+                        | OpCode::BinaryLogicalAnd
+                        | OpCode::BinaryNullishCoalescing
+                ))
                 && let Some(folded) =
                     crate::internal::js_ast::fold_binary_operator(expression.loc, binary)
                 && let Some(folded) = folded.data
