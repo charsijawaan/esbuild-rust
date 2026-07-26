@@ -34,7 +34,7 @@ use crate::internal::{
     },
     helpers::{
         BitSet, Joiner, encode_string_as_shortest_data_url, escape_closing_tag, quote_for_json,
-        string_array_arrays_equal, utf16_to_string,
+        string_array_arrays_equal, string_to_utf16, utf16_to_string,
     },
     js_ast::{self, ExportsKind},
     logger::{Log, Path, Range},
@@ -2429,6 +2429,171 @@ pub fn mangle_local_css<S: BuildHasher>(
         }
     }
     result
+}
+
+/// Build the JavaScript object exported by a local-CSS JavaScript stub.
+///
+/// # Panics
+///
+/// Panics if the CSS graph, compose records, symbol table, or local scopes are
+/// internally inconsistent.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn generate_css_module_exports<S: BuildHasher>(
+    graph: &LinkerGraph,
+    css_source_index: u32,
+    local_names: &HashMap<Ref, String, S>,
+) -> js_ast::Expr {
+    fn final_name<S: BuildHasher>(
+        graph: &LinkerGraph,
+        local_names: &HashMap<Ref, String, S>,
+        reference: Ref,
+    ) -> String {
+        let reference = graph.symbols.follow_symbols_const(reference);
+        local_names
+            .get(&reference)
+            .cloned()
+            .unwrap_or_else(|| graph.symbols.get(reference).original_name.clone())
+    }
+
+    fn visit_name<S: BuildHasher>(
+        graph: &LinkerGraph,
+        local_names: &HashMap<Ref, String, S>,
+        repr: &crate::internal::graph::CssRepr,
+        reference: Ref,
+        visited: &mut HashSet<Ref>,
+        names: &mut Vec<String>,
+    ) {
+        if visited.insert(reference) {
+            visit_composes(graph, local_names, repr, reference, visited, names);
+            names.push(final_name(graph, local_names, reference));
+        }
+    }
+
+    fn visit_composes<S: BuildHasher>(
+        graph: &LinkerGraph,
+        local_names: &HashMap<Ref, String, S>,
+        repr: &crate::internal::graph::CssRepr,
+        reference: Ref,
+        visited: &mut HashSet<Ref>,
+        names: &mut Vec<String>,
+    ) {
+        let Some(composes) = repr.ast.composes.get(&reference) else {
+            return;
+        };
+        for imported in &composes.imported_names {
+            let record = &repr.ast.import_records[imported.import_record_index as usize];
+            if record.source_index.is_valid() {
+                let Some(InputFileRepr::Css(other_repr)) = graph.files
+                    [record.source_index.get_index() as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                else {
+                    continue;
+                };
+                if let Some(other_name) = other_repr.ast.local_scope.get(&imported.alias) {
+                    visit_name(
+                        graph,
+                        local_names,
+                        other_repr,
+                        other_name.reference,
+                        visited,
+                        names,
+                    );
+                }
+            }
+        }
+        for local in &composes.names {
+            visit_name(graph, local_names, repr, local.reference, visited, names);
+        }
+    }
+
+    let Some(InputFileRepr::Css(repr)) = graph.files[css_source_index as usize]
+        .input_file
+        .repr
+        .as_ref()
+    else {
+        panic!("CSS module export generation requires a CSS file");
+    };
+    let mut properties = Vec::with_capacity(repr.ast.local_symbols.len());
+    for local in &repr.ast.local_symbols {
+        let mut visited = HashSet::from([local.reference]);
+        let mut names = Vec::new();
+        visit_composes(
+            graph,
+            local_names,
+            repr,
+            local.reference,
+            &mut visited,
+            &mut names,
+        );
+        names.push(final_name(graph, local_names, local.reference));
+        let original_name = graph.symbols.get(local.reference).original_name.clone();
+        properties.push(js_ast::Property {
+            key: js_ast::Expr::new(
+                local.loc,
+                js_ast::ExprData::String(js_ast::StringExpr {
+                    value: string_to_utf16(original_name.as_bytes()),
+                    ..js_ast::StringExpr::default()
+                }),
+            ),
+            value_or_nil: js_ast::Expr::new(
+                local.loc,
+                js_ast::ExprData::String(js_ast::StringExpr {
+                    value: string_to_utf16(names.join(" ").as_bytes()),
+                    ..js_ast::StringExpr::default()
+                }),
+            ),
+            ..js_ast::Property::default()
+        });
+    }
+    js_ast::Expr::new(
+        crate::internal::logger::Loc::default(),
+        js_ast::ExprData::Object(js_ast::ObjectExpr {
+            properties,
+            ..js_ast::ObjectExpr::default()
+        }),
+    )
+}
+
+/// Replace a CSS JavaScript stub's lazy value with its final CSS-module object.
+///
+/// # Panics
+///
+/// Panics if the source is not a CSS JavaScript stub with the expected lazy
+/// export statement shape.
+pub fn populate_css_stub_lazy_export<S: BuildHasher>(
+    graph: &mut LinkerGraph,
+    stub_source_index: u32,
+    local_names: &HashMap<Ref, String, S>,
+) {
+    let css_source_index = match graph.files[stub_source_index as usize]
+        .input_file
+        .repr
+        .as_ref()
+    {
+        Some(InputFileRepr::Js(repr)) if repr.css_source_index.is_valid() => {
+            repr.css_source_index.get_index()
+        }
+        _ => panic!("CSS JavaScript stub is missing its CSS source"),
+    };
+    let value = generate_css_module_exports(graph, css_source_index, local_names);
+    let Some(InputFileRepr::Js(repr)) = graph.files[stub_source_index as usize]
+        .input_file
+        .repr
+        .as_mut()
+    else {
+        unreachable!("CSS JavaScript stub representation was checked above");
+    };
+    let part = repr.ast.parts.last_mut().expect("CSS stub has a lazy part");
+    let [statement] = part.statements.as_mut_slice() else {
+        panic!("CSS stub lazy part must contain one statement");
+    };
+    let Some(js_ast::StmtData::LazyExport(export)) = statement.data.as_deref_mut() else {
+        panic!("CSS stub must end in a lazy export");
+    };
+    export.value = value;
 }
 
 /// Find CSS companion files reachable from a JavaScript entry point.
@@ -6587,12 +6752,13 @@ mod tests {
         convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
         finalize_chunk_paths, finalize_javascript_chunk_outputs,
         find_imported_css_files_in_js_order, find_imported_files_in_css_order,
-        generate_cross_chunk_stmts, generate_css_chunk, generate_entry_point_tail,
-        generate_global_name_prefix, generate_isolated_hash, generate_source_map_for_chunk,
-        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, mangle_local_css,
-        mark_file_live_for_tree_shaking, match_import_with_export, merge_adjacent_local_stmts,
-        path_between_chunks, prepare_css_asts, print_cross_chunk_bindings,
+        generate_cross_chunk_stmts, generate_css_chunk, generate_css_module_exports,
+        generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
+        generate_source_map_for_chunk, has_dynamic_exports_due_to_export_star,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, mangle_local_css, mark_file_live_for_tree_shaking,
+        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
+        populate_css_stub_lazy_export, prepare_css_asts, print_cross_chunk_bindings,
         propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
         resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
         sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
@@ -9271,6 +9437,115 @@ mod tests {
         );
         assert_eq!(names[&first], "c");
         assert_eq!(names[&second], "d");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn populates_css_module_stub_exports_with_composed_names() {
+        let button = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let base = Ref {
+            source_index: 1,
+            inner_index: 1,
+        };
+        let button_loc = crate::internal::ast::LocRef {
+            reference: button,
+            ..crate::internal::ast::LocRef::default()
+        };
+        let base_loc = crate::internal::ast::LocRef {
+            reference: base,
+            ..crate::internal::ast::LocRef::default()
+        };
+        let stylesheet = InputFile {
+            repr: Some(InputFileRepr::Css(Box::new(CssRepr {
+                ast: crate::internal::css_ast::Ast {
+                    symbols: vec![
+                        Symbol::new(SymbolKind::LocalCss, "button"),
+                        Symbol::new(SymbolKind::LocalCss, "base"),
+                    ],
+                    local_symbols: vec![button_loc, base_loc],
+                    composes: HashMap::from([(
+                        button,
+                        crate::internal::css_ast::Composes {
+                            names: vec![base_loc],
+                            ..crate::internal::css_ast::Composes::default()
+                        },
+                    )]),
+                    ..crate::internal::css_ast::Ast::default()
+                },
+                js_source_index: Index32::new(2),
+            }))),
+            source: Source {
+                identifier_name: "module".into(),
+                ..Source::default()
+            },
+            loader: Loader::LocalCss,
+            ..InputFile::default()
+        };
+        let stub = js_file(js_ast::Ast {
+            parts: vec![js_ast::Part {
+                statements: vec![js_ast::Stmt::new(
+                    Loc::default(),
+                    js_ast::StmtData::LazyExport(js_ast::LazyExportStmt {
+                        value: js_ast::Expr::new(Loc::default(), js_ast::ExprData::Null),
+                    }),
+                )],
+                ..js_ast::Part::default()
+            }],
+            ..js_ast::Ast::default()
+        });
+        let input_files = [js_file(js_ast::Ast::default()), stylesheet, stub];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2], &[], false);
+        let Some(InputFileRepr::Js(stub_repr)) = graph.files[2].input_file.repr.as_mut() else {
+            panic!("expected stub");
+        };
+        stub_repr.css_source_index = Index32::new(1);
+
+        let local_names = mangle_local_css(&graph, &Options::default(), &mut HashSet::new());
+        let value = generate_css_module_exports(&graph, 1, &local_names);
+        let Some(js_ast::ExprData::Object(object)) = value.data.as_deref() else {
+            panic!("expected CSS module object");
+        };
+        let strings = object
+            .properties
+            .iter()
+            .map(|property| {
+                let Some(js_ast::ExprData::String(key)) = property.key.data.as_deref() else {
+                    panic!("expected string key");
+                };
+                let Some(js_ast::ExprData::String(value)) = property.value_or_nil.data.as_deref()
+                else {
+                    panic!("expected string value");
+                };
+                (
+                    crate::internal::helpers::utf16_to_string(&key.value),
+                    crate::internal::helpers::utf16_to_string(&value.value),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            strings,
+            [
+                (b"button".to_vec(), b"module_base module_button".to_vec()),
+                (b"base".to_vec(), b"module_base".to_vec()),
+            ]
+        );
+
+        populate_css_stub_lazy_export(&mut graph, 2, &local_names);
+        let Some(InputFileRepr::Js(stub_repr)) = graph.files[2].input_file.repr.as_ref() else {
+            panic!("expected stub");
+        };
+        let Some(js_ast::StmtData::LazyExport(export)) =
+            stub_repr.ast.parts[0].statements[0].data.as_deref()
+        else {
+            panic!("expected lazy export");
+        };
+        assert!(matches!(
+            export.value.data.as_deref(),
+            Some(js_ast::ExprData::Object(_))
+        ));
     }
 
     #[test]
