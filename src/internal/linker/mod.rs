@@ -12,8 +12,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
     ast::{
-        INVALID_REF, ImportItemStatus, ImportKind, ImportRecord, ImportRecordFlags, Index32,
-        LocRef, NamespaceAlias, Ref, SymbolKind,
+        CharFreq, DEFAULT_NAME_MINIFIER_CSS, INVALID_REF, ImportItemStatus, ImportKind,
+        ImportRecord, ImportRecordFlags, Index32, LocRef, NamespaceAlias, Ref, SymbolKind,
     },
     bundler::{hash_for_file_name, path_relative_to_outbase},
     config::{
@@ -2341,6 +2341,96 @@ pub fn compute_chunks(
     chunks
 }
 
+/// Assign globally collision-free names to all local CSS symbols.
+///
+/// # Panics
+///
+/// Panics if graph source, symbol, or stable-index tables are inconsistent or
+/// contain more than `u32::MAX` symbols for one source.
+#[must_use]
+pub fn mangle_local_css<S: BuildHasher>(
+    graph: &LinkerGraph,
+    options: &Options,
+    used_local_names: &mut HashSet<String, S>,
+) -> HashMap<Ref, String> {
+    let mut global_names = HashSet::<String>::new();
+    let mut local_names = HashSet::<Ref>::new();
+    let mut frequency = CharFreq::default();
+
+    for &source_index in &graph.reachable_files {
+        let Some(InputFileRepr::Css(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            continue;
+        };
+        for (inner_index, symbol) in graph.symbols.symbols_for_source[source_index as usize]
+            .iter()
+            .enumerate()
+        {
+            if symbol.kind == SymbolKind::GlobalCss {
+                global_names.insert(symbol.original_name.clone());
+            } else {
+                local_names.insert(graph.symbols.follow_symbols_const(Ref {
+                    source_index,
+                    inner_index: u32::try_from(inner_index).expect("symbol index fits in u32"),
+                }));
+            }
+        }
+        if let Some(char_freq) = repr.ast.char_freq {
+            frequency.include(&char_freq);
+        }
+    }
+
+    let mut sorted = local_names
+        .into_iter()
+        .map(|reference| crate::internal::renamer::StableSymbolCount {
+            stable_source_index: graph.stable_source_indices[reference.source_index as usize],
+            count: graph.symbols.get(reference).use_count_estimate,
+            reference,
+        })
+        .collect::<Vec<_>>();
+    crate::internal::renamer::sort_stable_symbol_counts(&mut sorted);
+
+    let mut result = HashMap::new();
+    if options.minify_identifiers {
+        let minifier = DEFAULT_NAME_MINIFIER_CSS.shuffle_by_char_freq(frequency);
+        let mut next_name = 0;
+        for symbol in sorted {
+            let mut name = minifier.number_to_minified_name(next_name);
+            while global_names.contains(&name) || used_local_names.contains(&name) {
+                next_name += 1;
+                name = minifier.number_to_minified_name(next_name);
+            }
+            used_local_names.insert(name.clone());
+            result.insert(symbol.reference, name);
+        }
+    } else {
+        let mut name_counts = HashMap::<String, u32>::new();
+        for symbol in sorted {
+            let original_name = &graph.symbols.get(symbol.reference).original_name;
+            let identifier_name = &graph.files[symbol.reference.source_index as usize]
+                .input_file
+                .source
+                .identifier_name;
+            let mut name = format!("{identifier_name}_{original_name}");
+            if global_names.contains(&name) || used_local_names.contains(&name) {
+                let prefix = name.clone();
+                let counter = name_counts.entry(prefix.clone()).or_insert(1);
+                loop {
+                    *counter += 1;
+                    name = format!("{prefix}{counter}");
+                    if !global_names.contains(&name) && !used_local_names.contains(&name) {
+                        break;
+                    }
+                }
+            }
+            used_local_names.insert(name.clone());
+            result.insert(symbol.reference, name);
+        }
+    }
+    result
+}
+
 /// Find CSS companion files reachable from a JavaScript entry point.
 ///
 /// JavaScript dependencies are traversed once in depth-first postorder, which
@@ -3012,6 +3102,7 @@ pub fn compile_prepared_css_asts(
     prepared: &[PreparedCssAst],
     options: &Options,
 ) -> Vec<CompiledCssAst> {
+    let local_names = mangle_local_css(graph, options, &mut HashSet::new());
     prepared
         .iter()
         .map(|item| {
@@ -3043,6 +3134,7 @@ pub fn compile_prepared_css_asts(
                 css_printer::Options {
                     input_source_map,
                     line_offset_tables,
+                    local_names: local_names.clone(),
                     line_limit: options.line_limit,
                     input_source_index,
                     minify_whitespace: options.minify_whitespace,
@@ -3052,7 +3144,6 @@ pub fn compile_prepared_css_asts(
                     metafile_format: options.metafile_format,
                     source_map: options.source_map,
                     add_source_mappings,
-                    ..css_printer::Options::default()
                 },
             );
             CompiledCssAst {
@@ -6499,13 +6590,13 @@ mod tests {
         generate_cross_chunk_stmts, generate_css_chunk, generate_entry_point_tail,
         generate_global_name_prefix, generate_isolated_hash, generate_source_map_for_chunk,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
-        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
-        prepare_css_asts, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
-        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
-        wrap_rules_with_conditions,
+        is_conditional_import_redundant, join_with_public_path, mangle_local_css,
+        mark_file_live_for_tree_shaking, match_import_with_export, merge_adjacent_local_stmts,
+        path_between_chunks, prepare_css_asts, print_cross_chunk_bindings,
+        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
+        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -9093,6 +9184,93 @@ mod tests {
         assert_eq!(outputs[0].contents, b"image");
         assert_eq!(outputs[1].abs_path, "/out/app.css");
         assert_eq!(outputs[1].contents, b".app{color:red}\n");
+    }
+
+    #[test]
+    fn mangles_local_css_names_globally_without_collisions() {
+        let css_with_symbols = |symbols: Vec<Symbol>| InputFile {
+            repr: Some(InputFileRepr::Css(Box::new(CssRepr {
+                ast: crate::internal::css_ast::Ast {
+                    symbols,
+                    ..crate::internal::css_ast::Ast::default()
+                },
+                ..CssRepr::default()
+            }))),
+            source: Source {
+                identifier_name: "entry".into(),
+                ..Source::default()
+            },
+            loader: Loader::LocalCss,
+            ..InputFile::default()
+        };
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            css_with_symbols(vec![
+                Symbol::new(SymbolKind::GlobalCss, "a"),
+                Symbol::new(SymbolKind::LocalCss, "button"),
+            ]),
+            css_with_symbols(vec![Symbol::new(SymbolKind::LocalCss, "button")]),
+        ];
+        let graph = clone_linker_graph(&input_files, &[0, 1, 2], &[], false);
+        let first = Ref {
+            source_index: 1,
+            inner_index: 1,
+        };
+        let second = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+
+        let names = mangle_local_css(&graph, &Options::default(), &mut HashSet::new());
+        assert_eq!(names[&first], "entry_button");
+        assert_eq!(names[&second], "entry_button2");
+        let compiled = compile_prepared_css_asts(
+            &graph,
+            &[PreparedCssAst {
+                ast: crate::internal::css_ast::Ast {
+                    rules: vec![Rule {
+                        data: RuleData::Selector(crate::internal::css_ast::SelectorRule {
+                            selectors: vec![crate::internal::css_ast::ComplexSelector {
+                                selectors: vec![crate::internal::css_ast::CompoundSelector {
+                                    subclass_selectors: vec![
+                                        crate::internal::css_ast::SubclassSelector {
+                                            data: crate::internal::css_ast::SubclassData::Class(
+                                                crate::internal::css_ast::ClassSelector {
+                                                    name: crate::internal::ast::LocRef {
+                                                        reference: first,
+                                                        ..crate::internal::ast::LocRef::default()
+                                                    },
+                                                },
+                                            ),
+                                            range: Range::default(),
+                                        },
+                                    ],
+                                    ..crate::internal::css_ast::CompoundSelector::default()
+                                }],
+                            }],
+                            ..crate::internal::css_ast::SelectorRule::default()
+                        }),
+                        loc: Loc::default(),
+                    }],
+                    ..crate::internal::css_ast::Ast::default()
+                },
+                source_index: Index32::new(1),
+                ..PreparedCssAst::default()
+            }],
+            &Options::default(),
+        );
+        assert_eq!(compiled[0].css, b".entry_button {\n}\n");
+
+        let names = mangle_local_css(
+            &graph,
+            &Options {
+                minify_identifiers: true,
+                ..Options::default()
+            },
+            &mut HashSet::from(["b".into()]),
+        );
+        assert_eq!(names[&first], "c");
+        assert_eq!(names[&second], "d");
     }
 
     #[test]
