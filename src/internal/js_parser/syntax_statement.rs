@@ -244,8 +244,10 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             let value = parse_expression(core, lexer, Precedence::Lowest, true);
             let body_loc = lexer.loc();
             lexer.expect(Token::CloseParen);
+            core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::With, body_loc);
             let is_single_line_body = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
             let body = parse_statement(core, lexer);
+            core.pop_scope();
             Stmt::new(
                 loc,
                 StmtData::With(WithStmt {
@@ -342,6 +344,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             let test = parse_expression(core, lexer, Precedence::Lowest, true);
             lexer.expect(Token::CloseParen);
             let body_loc = lexer.loc();
+            core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Block, body_loc);
             lexer.expect(Token::OpenBrace);
             let mut cases = Vec::new();
             let mut found_default = false;
@@ -379,6 +382,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             }
             let close_brace_loc = lexer.loc();
             lexer.expect(Token::CloseBrace);
+            core.pop_scope();
             Stmt::new(
                 loc,
                 StmtData::Switch(SwitchStmt {

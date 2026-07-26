@@ -1188,4 +1188,54 @@ mod tests {
         assert!(ok);
         assert!(!log.done().is_empty());
     }
+
+    #[test]
+    fn with_and_switch_statements_replay_their_owned_scopes() {
+        let (ast, ok, log) = parse_source("let name; with (object) { name; }");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(
+            ast.parts[1]
+                .scopes
+                .iter()
+                .map(|scope| scope.lock().expect("scope lock").kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::internal::js_ast::ScopeKind::Entry,
+                crate::internal::js_ast::ScopeKind::With,
+                crate::internal::js_ast::ScopeKind::Block,
+            ]
+        );
+        let name_ref =
+            ast.parts[1].scopes[0].lock().expect("entry scope").members["name"].reference;
+        assert!(
+            ast.symbols[usize::try_from(name_ref.inner_index).expect("symbol index")]
+                .flags
+                .contains(crate::internal::ast::SymbolFlags::MUST_NOT_BE_RENAMED)
+        );
+        let Some(StmtData::With(with_statement)) = ast.parts[1].statements[1].data.as_deref()
+        else {
+            panic!("expected with statement");
+        };
+        let Some(StmtData::Block(block)) = with_statement.body.data.as_deref() else {
+            panic!("expected with block");
+        };
+        let Some(StmtData::Expr(expression)) = block.statements[0].data.as_deref() else {
+            panic!("expected expression");
+        };
+        assert!(matches!(
+            expression.value.data.as_deref(),
+            Some(ExprData::Identifier(identifier))
+                if identifier.reference == name_ref && identifier.must_keep_due_to_with_stmt
+        ));
+
+        let (ast, ok, log) =
+            parse_source("switch (key) { case 0: let item = 1; break; default: item; }");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].scopes.len(), 2);
+        let item_ref =
+            ast.parts[1].scopes[1].lock().expect("switch scope").members["item"].reference;
+        assert_eq!(ast.parts[1].symbol_uses[&item_ref].count_estimate, 1);
+    }
 }

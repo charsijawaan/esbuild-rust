@@ -60,7 +60,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             Some(StmtData::With(with_statement)) => {
                 visit_expr(core, &mut with_statement.value, resolve_identifiers);
+                core.push_scope_for_visit_pass(ScopeKind::With, with_statement.body_loc);
                 visit_statement(core, &mut with_statement.body, resolve_identifiers);
+                core.pop_scope();
             }
             Some(StmtData::Throw(throw_statement)) => {
                 visit_expr(core, &mut throw_statement.value, resolve_identifiers);
@@ -121,10 +123,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             Some(StmtData::Switch(switch)) => {
                 visit_expr(core, &mut switch.test, resolve_identifiers);
+                core.push_scope_for_visit_pass(ScopeKind::Block, switch.body_loc);
                 for case in &mut switch.cases {
                     visit_expr(core, &mut case.value_or_nil, resolve_identifiers);
                     visit_statements(core, &mut case.body, resolve_identifiers);
                 }
+                core.pop_scope();
             }
             Some(StmtData::Try(try_statement)) => {
                 visit_block(
