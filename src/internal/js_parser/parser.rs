@@ -1807,6 +1807,53 @@ mod tests {
     }
 
     #[test]
+    fn binds_private_class_names_and_merges_accessors() {
+        let (ast, ok, log) = parse_source(
+            "class Box {\
+               #value;\
+               get #item() { return this.#value; }\
+               set #item(value) { this.#value = value; }\
+               has(other) { return #value in other; }\
+             }",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let class_body = ast.parts[1].scopes[2].lock().expect("class body scope");
+        let value_ref = class_body.members["#value"].reference;
+        let item_ref = class_body.members["#item"].reference;
+        drop(class_body);
+        assert_eq!(
+            ast.symbols[usize::try_from(value_ref.inner_index).expect("symbol index")].kind,
+            crate::internal::ast::SymbolKind::PrivateField
+        );
+        assert_eq!(
+            ast.symbols[usize::try_from(item_ref.inner_index).expect("symbol index")].kind,
+            crate::internal::ast::SymbolKind::PrivateGetSetPair
+        );
+        assert_eq!(ast.parts[1].symbol_uses[&value_ref].count_estimate, 3);
+        assert!(
+            ast.parts[1]
+                .declared_symbols
+                .iter()
+                .any(|symbol| symbol.reference == value_ref && !symbol.is_top_level)
+        );
+        assert!(
+            ast.parts[1]
+                .declared_symbols
+                .iter()
+                .any(|symbol| symbol.reference == item_ref && !symbol.is_top_level)
+        );
+
+        let (_, ok, log) = parse_source("class Duplicate { #field; #field; }");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+
+        let (_, ok, log) = parse_source("class Missing { method() { return this.#field; } }");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+    }
+
+    #[test]
     fn validates_unlabeled_break_and_continue_contexts() {
         let (_, ok, log) = parse_source("break; continue;");
         assert!(ok);

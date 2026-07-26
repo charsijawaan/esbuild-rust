@@ -317,6 +317,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     core.visit_new_target_allowed = old_new_target_allowed;
 }
 
+#[allow(clippy::too_many_lines)]
 fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bool) {
     if let Some(name) = class.name
         && !ParserCore::is_stored_name_ref(name.reference)
@@ -365,6 +366,21 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
     visit_expr(core, &mut class.extends_or_nil, resolve_identifiers);
     core.push_scope_for_visit_pass(ScopeKind::ClassBody, class.body_loc);
     for property in &mut class.properties {
+        if let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref_mut() {
+            core.record_declared_symbol(private.reference);
+            let symbol_index =
+                usize::try_from(private.reference.inner_index).expect("symbol index");
+            let name = core.symbols[symbol_index].original_name.clone();
+            if core
+                .lower_all_of_these_private_names
+                .get(&name)
+                .copied()
+                .unwrap_or(false)
+            {
+                core.symbols[symbol_index].flags |=
+                    crate::internal::ast::SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED;
+            }
+        }
         if property.flags.contains(PropertyFlags::IS_COMPUTED) {
             visit_expr(core, &mut property.key, resolve_identifiers);
         }
@@ -600,6 +616,27 @@ fn visit_expr_with_target(
             }
         }
         ExprData::ImportIdentifier(identifier) => core.record_usage(identifier.reference),
+        ExprData::PrivateIdentifier(private) => {
+            if ParserCore::is_stored_name_ref(private.reference) {
+                let name = String::from_utf8_lossy(core.load_name_from_ref(private.reference))
+                    .into_owned();
+                let result = core.find_symbol(expression.loc, &name);
+                private.reference = result.reference;
+                let symbol_index =
+                    usize::try_from(result.reference.inner_index).expect("symbol index");
+                if core.symbols[symbol_index].kind == crate::internal::ast::SymbolKind::Unbound {
+                    core.add_error_range(
+                        crate::internal::js_lexer::range_of_identifier(
+                            &core.source,
+                            expression.loc,
+                        ),
+                        format!("Private name {name:?} must be declared in an enclosing class"),
+                    );
+                }
+            } else {
+                core.record_usage(private.reference);
+            }
+        }
         ExprData::Array(array) => {
             for item in &mut array.items {
                 visit_expr_with_target(
@@ -845,7 +882,6 @@ fn visit_expr_with_target(
         | ExprData::Undefined
         | ExprData::This
         | ExprData::ImportMeta(_)
-        | ExprData::PrivateIdentifier(_)
         | ExprData::NameOfSymbol(_)
         | ExprData::JsxElement(_)
         | ExprData::JsxText(_)

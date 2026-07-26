@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
-    ast::LocRef,
+    ast::{LocRef, SymbolKind},
     helpers::string_to_utf16,
     js_ast::{
         Class, ClassExpr, ClassStaticBlock, Expr, ExprData, FunctionExpr, NameOfSymbolExpr,
@@ -176,7 +176,7 @@ fn parse_class_property(
         PropertyFlags::NONE
     };
     let mut close_bracket_loc = Loc::default();
-    let key = if let Some((name, loc, _)) = preconsumed_key {
+    let mut key = if let Some((name, loc, _)) = preconsumed_key {
         class_property_name(core, loc, name)
     } else {
         match lexer.token {
@@ -214,6 +214,22 @@ fn parse_class_property(
             }
         }
     };
+
+    if let Some(ExprData::PrivateIdentifier(private)) = key.data.as_deref_mut() {
+        let name = String::from_utf8_lossy(core.load_name_from_ref(private.reference)).into_owned();
+        let is_method = lexer.token == Token::OpenParen || kind.is_method_definition();
+        let symbol_kind = match (is_static, kind, is_method) {
+            (false, PropertyKind::Getter, _) => SymbolKind::PrivateGet,
+            (false, PropertyKind::Setter, _) => SymbolKind::PrivateSet,
+            (false, _, true) => SymbolKind::PrivateMethod,
+            (false, _, false) => SymbolKind::PrivateField,
+            (true, PropertyKind::Getter, _) => SymbolKind::PrivateStaticGet,
+            (true, PropertyKind::Setter, _) => SymbolKind::PrivateStaticSet,
+            (true, _, true) => SymbolKind::PrivateStaticMethod,
+            (true, _, false) => SymbolKind::PrivateStaticField,
+        };
+        private.reference = core.declare_symbol(symbol_kind, key.loc, &name);
+    }
 
     if lexer.token == Token::OpenParen || kind.is_method_definition() {
         let is_constructor = !is_static && key_is_named(&key, "constructor");
