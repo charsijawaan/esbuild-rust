@@ -2,6 +2,7 @@
 
 use crate::internal::{
     ast::{LocRef, SymbolKind},
+    config::{MaybeBool, TsTarget},
     helpers::string_to_utf16,
     js_ast::{
         Class, ClassExpr, ClassStaticBlock, Decorator, Expr, ExprData, FunctionExpr,
@@ -101,6 +102,10 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
     lexer.expect(Token::CloseBrace);
     core.pop_scope();
     core.pop_scope();
+    let use_define_for_class_fields = !core.options.ts.parse
+        || core.options.ts.config.use_define_for_class_fields == MaybeBool::True
+        || (core.options.ts.config.use_define_for_class_fields == MaybeBool::Unspecified
+            && core.options.ts.config.target != TsTarget::BelowEs2022);
     Some(Expr::new(
         loc,
         ExprData::Class(ClassExpr {
@@ -112,6 +117,7 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
                 class_keyword,
                 body_loc,
                 close_brace_loc,
+                use_define_for_class_fields,
                 ..Class::default()
             },
         }),
@@ -566,7 +572,7 @@ mod tests {
 
     use super::parse_class_prefix;
     use crate::internal::{
-        config::TsOptions,
+        config::{MaybeBool, TsOptions},
         js_ast::{ExprData, PropertyFlags, PropertyKind},
         js_lexer::{Lexer, Token},
         js_parser::Options,
@@ -691,5 +697,35 @@ mod tests {
         );
         assert_eq!(class.class.properties[4].kind, PropertyKind::Method);
         assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn records_type_script_class_field_semantics() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"class Foo { field }"[..]),
+            ..Source::default()
+        };
+        let ts_options = TsOptions {
+            parse: true,
+            config: crate::internal::config::TsConfig {
+                use_define_for_class_fields: MaybeBool::False,
+                ..crate::internal::config::TsConfig::default()
+            },
+            ..TsOptions::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), ts_options.clone());
+        let mut core = super::ParserCore::new(
+            source,
+            Options {
+                ts: ts_options,
+                ..Options::default()
+            },
+        );
+        let expr = parse_class_prefix(&mut core, &mut lexer).expect("class");
+        let Some(ExprData::Class(class)) = expr.data.as_deref() else {
+            panic!("expected class");
+        };
+        assert!(!class.class.use_define_for_class_fields);
     }
 }

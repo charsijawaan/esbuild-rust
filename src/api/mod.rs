@@ -3340,6 +3340,42 @@ mod tests {
     }
 
     #[test]
+    fn applies_raw_tsconfig_class_field_semantics() {
+        let assignment_fields = code(transform(
+            "class Foo { foo; static bar; #private; [sideEffect()]; initialized = 1 }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(!assignment_fields.contains("foo;"), "{assignment_fields}");
+        assert!(!assignment_fields.contains("bar;"), "{assignment_fields}");
+        assert!(
+            assignment_fields.contains("#private;"),
+            "{assignment_fields}"
+        );
+        assert!(
+            assignment_fields.contains("[sideEffect()];"),
+            "{assignment_fields}"
+        );
+        assert!(
+            assignment_fields.contains("initialized = 1;"),
+            "{assignment_fields}"
+        );
+
+        let define_fields = code(transform(
+            "class Foo { foo }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":true}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(define_fields.contains("foo;"), "{define_fields}");
+    }
+
+    #[test]
     fn rejects_invalid_build_loader_extensions() {
         let result = build(BuildOptions {
             loader: HashMap::from([("custom".into(), Loader::Text)]),

@@ -730,6 +730,19 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
     visit_expr(core, &mut class.extends_or_nil, resolve_identifiers);
     core.push_scope_for_visit_pass(ScopeKind::ClassBody, class.body_loc);
     report_duplicate_properties(core, &class.properties, DuplicatePropertiesIn::Class);
+    if core.options.ts.parse && !class.use_define_for_class_fields {
+        class.properties.retain(|property| {
+            property.kind != PropertyKind::Field
+                || property.initializer_or_nil.data.is_some()
+                || property.value_or_nil.data.is_some()
+                || !property.decorators.is_empty()
+                || property.flags.contains(PropertyFlags::IS_COMPUTED)
+                || matches!(
+                    property.key.data.as_deref(),
+                    Some(ExprData::PrivateIdentifier(_))
+                )
+        });
+    }
     for property in &mut class.properties {
         if let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref_mut() {
             core.record_declared_symbol(private.reference);
