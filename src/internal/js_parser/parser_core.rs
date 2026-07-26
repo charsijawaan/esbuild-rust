@@ -14,7 +14,7 @@ use crate::internal::{
     helpers::contains_non_bmp_code_point,
     js_ast::{
         CallExpr, DotExpr, Expr, ExprData, IdentifierExpr, IndexExpr, NameOfSymbolExpr,
-        OptionalChain, Scope, ScopeKind, ScopeMember, ScopeRef, SymbolUse,
+        OptionalChain, Scope, ScopeKind, ScopeMember, ScopeRef, StrictModeKind, SymbolUse,
     },
     js_lexer::{MaybeSubstring, range_of_identifier},
     logger::{LineColumnTracker, Loc, Log, Range, Source},
@@ -55,6 +55,9 @@ pub(crate) struct ParserCore {
     pub(crate) promise_ref: Ref,
     pub(crate) reg_exp_ref: Ref,
     pub(crate) big_int_ref: Ref,
+    pub(crate) require_ref: Ref,
+    pub(crate) exports_ref: Ref,
+    pub(crate) module_ref: Ref,
     pub(crate) legacy_octal_literals: HashMap<Loc, Range>,
     pub(crate) esm_import_meta: Range,
     pub(crate) fn_or_arrow_data_parse: FnOrArrowDataParse,
@@ -87,6 +90,9 @@ impl ParserCore {
             promise_ref: INVALID_REF,
             reg_exp_ref: INVALID_REF,
             big_int_ref: INVALID_REF,
+            require_ref: INVALID_REF,
+            exports_ref: INVALID_REF,
+            module_ref: INVALID_REF,
             legacy_octal_literals: HashMap::new(),
             esm_import_meta: Range::default(),
             fn_or_arrow_data_parse: FnOrArrowDataParse::default(),
@@ -223,6 +229,96 @@ impl ParserCore {
         let order = self.scopes_in_order.remove(0);
         self.current_scope = Some(order.scope.clone());
         self.scopes_for_current_part.push(order.scope);
+    }
+
+    pub(crate) fn prepare_for_visit_pass(
+        &mut self,
+        has_esm_exports: bool,
+        has_import_statement: bool,
+    ) {
+        self.push_scope_for_visit_pass(ScopeKind::Entry, Loc { start: -1 });
+        self.module_scope.clone_from(&self.current_scope);
+
+        if self
+            .options
+            .ts_always_strict
+            .as_deref()
+            .is_some_and(|value| value.value)
+            && let Some(scope) = &self.current_scope
+        {
+            scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .strict_mode = StrictModeKind::ImplicitStrictTsAlwaysStrict;
+        }
+
+        let is_file_considered_to_have_esm_exports =
+            has_esm_exports || self.options.module_type_data.module_type.is_esm();
+        self.is_file_considered_esm =
+            is_file_considered_to_have_esm_exports || has_import_statement;
+        if self.is_file_considered_esm {
+            Scope::recursive_set_strict_mode(
+                self.module_scope
+                    .as_ref()
+                    .expect("visit pass requires a module scope"),
+                StrictModeKind::ImplicitStrictEsm,
+            );
+        }
+
+        self.require_ref = if self.options.mode == Mode::PassThrough {
+            self.new_symbol(SymbolKind::Unbound, "require")
+        } else {
+            self.declare_common_js_symbol(SymbolKind::Unbound, "require")
+        };
+        if self.options.mode != Mode::PassThrough && !is_file_considered_to_have_esm_exports {
+            self.exports_ref = self.declare_common_js_symbol(SymbolKind::Hoisted, "exports");
+            self.module_ref = self.declare_common_js_symbol(SymbolKind::Hoisted, "module");
+        } else {
+            self.exports_ref = self.new_symbol(SymbolKind::Hoisted, "exports");
+            self.module_ref = self.new_symbol(SymbolKind::Hoisted, "module");
+        }
+    }
+
+    fn declare_common_js_symbol(&mut self, kind: SymbolKind, name: &str) -> Ref {
+        let module_scope = self
+            .module_scope
+            .as_ref()
+            .expect("CommonJS symbols require a module scope")
+            .clone();
+        let existing = module_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .get(name)
+            .copied();
+        if let Some(existing) = existing {
+            let existing_kind = self.symbols
+                [usize::try_from(existing.reference.inner_index).expect("symbol index fits usize")]
+            .kind;
+            if existing_kind == SymbolKind::Hoisted
+                && kind == SymbolKind::Hoisted
+                && !self.is_file_considered_esm
+            {
+                return existing.reference;
+            }
+        }
+
+        let reference = self.new_symbol(kind, name);
+        let mut module_scope = module_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if existing.is_none() {
+            module_scope.members.insert(
+                name.into(),
+                ScopeMember {
+                    reference,
+                    loc: Loc { start: -1 },
+                },
+            );
+        } else {
+            module_scope.generated.push(reference);
+        }
+        reference
     }
 
     pub(crate) fn pop_and_discard_scope(&mut self, scope_index: usize) {

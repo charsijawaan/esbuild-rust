@@ -6,7 +6,7 @@ use std::{
 use crate::internal::{
     ast::SymbolKind,
     helpers::utf16_to_string,
-    js_ast::{Ast, ExportsKind, ExprData, Part, ScopeKind, Stmt, StmtData},
+    js_ast::{Ast, ExportsKind, ExprData, Part, Scope, ScopeKind, Stmt, StmtData, StrictModeKind},
     js_lexer::{Lexer, LexerPanic, Token},
     logger::{Loc, Log, Source},
 };
@@ -54,12 +54,22 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         }
 
         let directives = strip_directive_prologue(&core, &mut statements);
-        let has_esm_syntax = statements.iter().any(|statement| {
+        if directives.iter().any(|directive| directive == "use strict") {
+            Scope::recursive_set_strict_mode(
+                core.current_scope
+                    .as_ref()
+                    .expect("directive prologue requires an entry scope"),
+                StrictModeKind::ExplicitStrict,
+            );
+        }
+        let has_import_statement = statements
+            .iter()
+            .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))));
+        let has_esm_exports = statements.iter().any(|statement| {
             matches!(
                 statement.data.as_deref(),
                 Some(
-                    StmtData::Import(_)
-                        | StmtData::ExportClause(_)
+                    StmtData::ExportClause(_)
                         | StmtData::ExportFrom(_)
                         | StmtData::ExportDefault(_)
                         | StmtData::ExportStar(_)
@@ -75,20 +85,18 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 Some(StmtData::Class(class)) if class.is_export
             )
         });
+        core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
         let module_scope = core
             .module_scope
             .clone()
             .expect("the parser must have an entry scope");
-        core.pop_scope();
 
-        // These symbols are always present in upstream's parser result. Their
-        // declarations and use counts are filled in by the visit pass.
-        let exports_ref = core.new_symbol(SymbolKind::Hoisted, "exports");
-        let module_ref = core.new_symbol(SymbolKind::Hoisted, "module");
+        // This symbol is always present so the linker can wrap this file later.
         let wrapper_ref = core.new_symbol(
             SymbolKind::Other,
             format!("require_{}", core.source.identifier_name),
         );
+        core.pop_scope();
 
         let mut parts = vec![Part {
             symbol_uses: HashMap::new(),
@@ -108,7 +116,10 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             });
         }
 
-        let exports_kind = if has_esm_syntax || core.options.module_type_data.module_type.is_esm() {
+        let exports_kind = if has_esm_exports
+            || has_import_statement
+            || core.options.module_type_data.module_type.is_esm()
+        {
             ExportsKind::Esm
         } else if core.options.module_type_data.module_type.is_common_js() {
             ExportsKind::CommonJs
@@ -116,7 +127,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             ExportsKind::None
         };
         let mut top_level_symbol_to_parts_from_parser = HashMap::new();
-        top_level_symbol_to_parts_from_parser.insert(exports_ref, vec![0]);
+        top_level_symbol_to_parts_from_parser.insert(core.exports_ref, vec![0]);
 
         result = Ast {
             module_type_data: core.options.module_type_data,
@@ -130,8 +141,8 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             reserved_props: core.reserved_props,
             import_records: core.import_records,
             source_map_comment: lexer.source_mapping_url.clone(),
-            exports_ref,
-            module_ref,
+            exports_ref: core.exports_ref,
+            module_ref: core.module_ref,
             wrapper_ref,
             approximate_line_count: i32::try_from(lexer.approximate_newline_count)
                 .unwrap_or(i32::MAX)
@@ -219,7 +230,16 @@ mod tests {
         assert_eq!(ast.parts[1].statements.len(), 2);
         assert_eq!(ast.parts[1].scopes.len(), 1);
         assert!(ast.module_scope.is_some());
-        assert_eq!(ast.symbols.len(), 3);
+        assert_eq!(ast.symbols.len(), 4);
+        assert_eq!(
+            ast.module_scope
+                .as_ref()
+                .expect("module scope")
+                .lock()
+                .expect("module scope lock")
+                .strict_mode,
+            crate::internal::js_ast::StrictModeKind::ExplicitStrict
+        );
         assert!(matches!(
             ast.parts[1].statements[0].data.as_deref(),
             Some(StmtData::Local(_))
@@ -268,6 +288,15 @@ mod tests {
         assert!(log.done().is_empty());
         assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
         assert_eq!(ast.parts[1].statements.len(), 8);
+        assert_eq!(
+            ast.module_scope
+                .as_ref()
+                .expect("module scope")
+                .lock()
+                .expect("module scope lock")
+                .strict_mode,
+            crate::internal::js_ast::StrictModeKind::ImplicitStrictEsm
+        );
         assert_eq!(ast.import_records.len(), 5);
         assert_eq!(
             ast.import_records
