@@ -115,6 +115,15 @@ pub struct ImportMatchIssue {
     pub result: MatchImportResult,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AmbiguousReExport {
+    pub alias: String,
+    pub source_index: u32,
+    pub name_loc: crate::internal::logger::Loc,
+    pub other_source_index: u32,
+    pub other_name_loc: crate::internal::logger::Loc,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
 pub enum OutputPieceIndexKind {
@@ -1368,6 +1377,222 @@ pub fn bind_imports_to_exports_for_file(
     issues
 }
 
+/// Sort resolved export aliases and remove ambiguous or type-only re-exports.
+///
+/// # Panics
+///
+/// Panics when resolved exports point to non-JavaScript representations,
+/// matching linker graph invariants.
+#[must_use]
+pub fn sort_and_filter_export_aliases(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+) -> Vec<AmbiguousReExport> {
+    let resolved_exports = {
+        let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+            .expect("export source must have a representation")
+        else {
+            panic!("export source must be JavaScript");
+        };
+        repr.meta.resolved_exports.clone()
+    };
+
+    let mut aliases = Vec::with_capacity(resolved_exports.len());
+    let mut ambiguous = Vec::new();
+    for (alias, export) in resolved_exports {
+        if !export.potentially_ambiguous_export_star_refs.is_empty() {
+            let InputFileRepr::Js(main_repr) = graph.files[export.source_index as usize]
+                .input_file
+                .repr
+                .as_ref()
+                .expect("export target must have a representation")
+            else {
+                panic!("export target must be JavaScript");
+            };
+            let (main_ref, main_loc) = main_repr
+                .meta
+                .imports_to_bind
+                .get(&export.reference)
+                .map_or((export.reference, export.name_loc), |import| {
+                    (import.reference, import.name_loc)
+                });
+
+            let mut is_ambiguous = false;
+            for candidate in &export.potentially_ambiguous_export_star_refs {
+                let InputFileRepr::Js(candidate_repr) = graph.files
+                    [candidate.source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                    .expect("ambiguous export target must have a representation")
+                else {
+                    panic!("ambiguous export target must be JavaScript");
+                };
+                let (candidate_ref, candidate_loc) = candidate_repr
+                    .meta
+                    .imports_to_bind
+                    .get(&candidate.reference)
+                    .map_or((candidate.reference, candidate.name_loc), |import| {
+                        (import.reference, import.name_loc)
+                    });
+                if main_ref != candidate_ref {
+                    ambiguous.push(AmbiguousReExport {
+                        alias: alias.clone(),
+                        source_index: export.source_index,
+                        name_loc: main_loc,
+                        other_source_index: candidate.source_index,
+                        other_name_loc: candidate_loc,
+                    });
+                    is_ambiguous = true;
+                    break;
+                }
+            }
+            if is_ambiguous {
+                continue;
+            }
+        }
+
+        let InputFileRepr::Js(other) = graph.files[export.source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+            .expect("export target must have a representation")
+        else {
+            panic!("export target must be JavaScript");
+        };
+        if other
+            .meta
+            .is_probably_type_script_type
+            .get(&export.reference)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        aliases.push(alias);
+    }
+    aliases.sort_unstable();
+
+    let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+        .input_file
+        .repr
+        .as_mut()
+        .expect("export source must have a representation")
+    else {
+        unreachable!();
+    };
+    repr.meta.sorted_and_filtered_export_aliases = aliases;
+    ambiguous
+}
+
+/// Create the synthetic wrapper part used by wrapped `CommonJS` and ESM files.
+///
+/// # Panics
+///
+/// Panics when the source, runtime, symbols, or runtime part maps violate
+/// linker graph invariants.
+pub fn create_wrapper_for_file(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    cjs_runtime_ref: Ref,
+    esm_runtime_ref: Ref,
+) {
+    let (wrap, exports_ref, module_ref, wrapper_ref) = {
+        let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+            .expect("wrapper source must have a representation")
+        else {
+            panic!("wrapper source must be JavaScript");
+        };
+        (
+            repr.meta.wrap,
+            repr.ast.exports_ref,
+            repr.ast.module_ref,
+            repr.ast.wrapper_ref,
+        )
+    };
+    let runtime_ref = match wrap {
+        WrapKind::Cjs => cjs_runtime_ref,
+        WrapKind::Esm => esm_runtime_ref,
+        WrapKind::None => return,
+    };
+    let runtime_parts = {
+        let InputFileRepr::Js(runtime) = graph.files
+            [crate::internal::runtime::SOURCE_INDEX as usize]
+            .input_file
+            .repr
+            .as_ref()
+            .expect("runtime must have a representation")
+        else {
+            panic!("runtime must be JavaScript");
+        };
+        runtime
+            .top_level_symbol_to_parts(runtime_ref)
+            .unwrap_or_default()
+            .to_vec()
+    };
+    let declared_symbols = match wrap {
+        WrapKind::Cjs => vec![
+            crate::internal::js_ast::DeclaredSymbol {
+                reference: exports_ref,
+                is_top_level: true,
+            },
+            crate::internal::js_ast::DeclaredSymbol {
+                reference: module_ref,
+                is_top_level: true,
+            },
+            crate::internal::js_ast::DeclaredSymbol {
+                reference: wrapper_ref,
+                is_top_level: true,
+            },
+        ],
+        WrapKind::Esm => vec![crate::internal::js_ast::DeclaredSymbol {
+            reference: wrapper_ref,
+            is_top_level: true,
+        }],
+        WrapKind::None => unreachable!(),
+    };
+    let part_index = graph.add_part_to_file(
+        source_index,
+        crate::internal::js_ast::Part {
+            symbol_uses: HashMap::from([(
+                wrapper_ref,
+                crate::internal::js_ast::SymbolUse { count_estimate: 1 },
+            )]),
+            declared_symbols,
+            dependencies: runtime_parts
+                .iter()
+                .map(|&part_index| crate::internal::js_ast::Dependency {
+                    source_index: crate::internal::runtime::SOURCE_INDEX,
+                    part_index,
+                })
+                .collect(),
+            ..crate::internal::js_ast::Part::default()
+        },
+    );
+    let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+        .input_file
+        .repr
+        .as_mut()
+        .expect("wrapper source must have a representation")
+    else {
+        unreachable!();
+    };
+    repr.meta.wrapper_part_index = Index32::new(part_index);
+    graph.generate_symbol_import_and_use(
+        source_index,
+        part_index,
+        runtime_ref,
+        1,
+        crate::internal::runtime::SOURCE_INDEX,
+    );
+}
+
 #[must_use]
 pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
     left.len() == right.len()
@@ -1532,15 +1757,16 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::{
-        AssetPath, ChunkImport, ChunkInfo, ChunkPath, CrossChunkImport, CrossChunkImportItem,
-        ImportStatus, ImportTracker, MatchImportKind, OutputPathContext, OutputPiece,
-        OutputPieceIndexKind, PartRange, StableRef, add_exports_for_export_star,
+        AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, CrossChunkImport,
+        CrossChunkImportItem, ImportStatus, ImportTracker, MatchImportKind, OutputPathContext,
+        OutputPiece, OutputPieceIndexKind, PartRange, StableRef, add_exports_for_export_star,
         advance_import_tracker, append_or_extend_part_range, bind_imports_to_exports_for_file,
-        classify_module_wrappers, enforce_no_cyclic_chunk_imports,
+        classify_module_wrappers, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, match_import_with_export,
         path_between_chunks, propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -3431,5 +3657,261 @@ mod tests {
         );
         assert!(bind_imports_to_exports_for_file(&mut graph, 0, Format::EsModule).is_empty());
         assert!(js_repr(&graph, 0).meta.is_probably_type_script_type[&tracker.import_ref]);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn phase_five_sorts_and_filters_resolved_exports() {
+        let good_ref = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let type_ref = Ref {
+            source_index: 2,
+            inner_index: 1,
+        };
+        let bad_ref = Ref {
+            source_index: 3,
+            inner_index: 0,
+        };
+        let proxy_a = Ref {
+            source_index: 2,
+            inner_index: 2,
+        };
+        let proxy_b = Ref {
+            source_index: 3,
+            inner_index: 2,
+        };
+        let shared_ref = Ref {
+            source_index: 4,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast::default()),
+        ];
+        let mut graph = clone_linker_graph(
+            &input_files,
+            &[0, 1, 2, 3, 4],
+            &[EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            }],
+            false,
+        );
+        let InputFileRepr::Js(source) = graph.files[1]
+            .input_file
+            .repr
+            .as_mut()
+            .expect("JavaScript representation")
+        else {
+            panic!("JavaScript representation");
+        };
+        source.meta.resolved_exports = HashMap::from([
+            (
+                "good".into(),
+                crate::internal::graph::ExportData {
+                    source_index: 2,
+                    reference: good_ref,
+                    ..crate::internal::graph::ExportData::default()
+                },
+            ),
+            (
+                "typeOnly".into(),
+                crate::internal::graph::ExportData {
+                    source_index: 2,
+                    reference: type_ref,
+                    ..crate::internal::graph::ExportData::default()
+                },
+            ),
+            (
+                "ambiguous".into(),
+                crate::internal::graph::ExportData {
+                    source_index: 2,
+                    reference: good_ref,
+                    name_loc: Loc { start: 10 },
+                    potentially_ambiguous_export_star_refs: vec![
+                        crate::internal::graph::ImportData {
+                            source_index: 3,
+                            reference: bad_ref,
+                            name_loc: Loc { start: 20 },
+                            ..crate::internal::graph::ImportData::default()
+                        },
+                    ],
+                },
+            ),
+            (
+                "same".into(),
+                crate::internal::graph::ExportData {
+                    source_index: 2,
+                    reference: proxy_a,
+                    potentially_ambiguous_export_star_refs: vec![
+                        crate::internal::graph::ImportData {
+                            source_index: 3,
+                            reference: proxy_b,
+                            ..crate::internal::graph::ImportData::default()
+                        },
+                    ],
+                    ..crate::internal::graph::ExportData::default()
+                },
+            ),
+        ]);
+        let InputFileRepr::Js(first) = graph.files[2]
+            .input_file
+            .repr
+            .as_mut()
+            .expect("JavaScript representation")
+        else {
+            panic!("JavaScript representation");
+        };
+        first
+            .meta
+            .is_probably_type_script_type
+            .insert(type_ref, true);
+        first.meta.imports_to_bind.insert(
+            proxy_a,
+            crate::internal::graph::ImportData {
+                source_index: 4,
+                reference: shared_ref,
+                ..crate::internal::graph::ImportData::default()
+            },
+        );
+        let InputFileRepr::Js(second) = graph.files[3]
+            .input_file
+            .repr
+            .as_mut()
+            .expect("JavaScript representation")
+        else {
+            panic!("JavaScript representation");
+        };
+        second.meta.imports_to_bind.insert(
+            proxy_b,
+            crate::internal::graph::ImportData {
+                source_index: 4,
+                reference: shared_ref,
+                ..crate::internal::graph::ImportData::default()
+            },
+        );
+
+        assert_eq!(
+            sort_and_filter_export_aliases(&mut graph, 1),
+            vec![AmbiguousReExport {
+                alias: "ambiguous".into(),
+                source_index: 2,
+                name_loc: Loc { start: 10 },
+                other_source_index: 3,
+                other_name_loc: Loc { start: 20 },
+            }]
+        );
+        assert_eq!(
+            js_repr(&graph, 1).meta.sorted_and_filtered_export_aliases,
+            ["good", "same"]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn wrapper_parts_encode_runtime_dependencies() {
+        let cjs_runtime_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let esm_runtime_ref = Ref {
+            source_index: 0,
+            inner_index: 1,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                symbols: vec![
+                    Symbol::new(SymbolKind::Other, "__commonJS"),
+                    Symbol::new(SymbolKind::Other, "__esm"),
+                ],
+                parts: vec![js_ast::Part::default(), js_ast::Part::default()],
+                top_level_symbol_to_parts_from_parser: HashMap::from([
+                    (cjs_runtime_ref, vec![0]),
+                    (esm_runtime_ref, vec![1]),
+                ]),
+                ..js_ast::Ast::default()
+            }),
+            InputFile {
+                repr: Some(InputFileRepr::Js(Box::new(JsRepr {
+                    meta: crate::internal::graph::JsReprMeta {
+                        wrap: WrapKind::Cjs,
+                        ..crate::internal::graph::JsReprMeta::default()
+                    },
+                    ast: js_ast::Ast {
+                        symbols: vec![
+                            Symbol::new(SymbolKind::Other, "exports"),
+                            Symbol::new(SymbolKind::Other, "module"),
+                            Symbol::new(SymbolKind::Other, "require_file"),
+                        ],
+                        exports_ref: Ref {
+                            source_index: 1,
+                            inner_index: 0,
+                        },
+                        module_ref: Ref {
+                            source_index: 1,
+                            inner_index: 1,
+                        },
+                        wrapper_ref: Ref {
+                            source_index: 1,
+                            inner_index: 2,
+                        },
+                        ..js_ast::Ast::default()
+                    },
+                    ..JsRepr::default()
+                }))),
+                loader: Loader::Js,
+                ..InputFile::default()
+            },
+            InputFile {
+                repr: Some(InputFileRepr::Js(Box::new(JsRepr {
+                    meta: crate::internal::graph::JsReprMeta {
+                        wrap: WrapKind::Esm,
+                        ..crate::internal::graph::JsReprMeta::default()
+                    },
+                    ast: js_ast::Ast {
+                        symbols: vec![
+                            Symbol::new(SymbolKind::Other, "exports"),
+                            Symbol::new(SymbolKind::Other, "module"),
+                            Symbol::new(SymbolKind::Other, "init_file"),
+                        ],
+                        wrapper_ref: Ref {
+                            source_index: 2,
+                            inner_index: 2,
+                        },
+                        ..js_ast::Ast::default()
+                    },
+                    ..JsRepr::default()
+                }))),
+                loader: Loader::Js,
+                ..InputFile::default()
+            },
+        ];
+        let mut graph = clone_linker_graph(
+            &input_files,
+            &[0, 1, 2],
+            &[EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            }],
+            false,
+        );
+        create_wrapper_for_file(&mut graph, 1, cjs_runtime_ref, esm_runtime_ref);
+        create_wrapper_for_file(&mut graph, 2, cjs_runtime_ref, esm_runtime_ref);
+
+        let cjs = js_repr(&graph, 1);
+        assert_eq!(cjs.meta.wrapper_part_index.get_index(), 0);
+        assert_eq!(cjs.ast.parts[0].declared_symbols.len(), 3);
+        assert_eq!(cjs.ast.parts[0].dependencies.len(), 2);
+        assert_eq!(cjs.meta.imports_to_bind[&cjs_runtime_ref].source_index, 0);
+        let esm = js_repr(&graph, 2);
+        assert_eq!(esm.meta.wrapper_part_index.get_index(), 0);
+        assert_eq!(esm.ast.parts[0].declared_symbols.len(), 1);
+        assert_eq!(esm.ast.parts[0].dependencies.len(), 2);
+        assert_eq!(esm.meta.imports_to_bind[&esm_runtime_ref].source_index, 0);
     }
 }
