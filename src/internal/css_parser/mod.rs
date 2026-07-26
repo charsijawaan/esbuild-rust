@@ -1250,15 +1250,233 @@ fn reduce_calc_expressions(tokens: &mut [Token]) {
         let Some(children) = &token.children else {
             continue;
         };
-        let replacement = evaluate_calc_numeric(children).and_then(|value| {
+        let mut replacement = evaluate_calc_numeric(children).and_then(|value| {
             numeric_token_from_parts(token, value.number, value.kind, &value.unit)
         });
+        if replacement.is_none()
+            && !contains_var_function(children)
+            && let Some(children) = &mut token.children
+        {
+            simplify_mixed_calc(children);
+            replacement = evaluate_calc_numeric(children).and_then(|value| {
+                numeric_token_from_parts(token, value.number, value.kind, &value.unit)
+            });
+        }
         if let Some(mut replacement) = replacement {
             replacement.loc = token.loc;
             replacement.whitespace = token.whitespace;
             *token = replacement;
         }
     }
+}
+
+fn contains_var_function(tokens: &[Token]) -> bool {
+    tokens.iter().any(|token| {
+        token.kind == TokenKind::Function && token.text.eq_ignore_ascii_case("var")
+            || token.children.as_deref().is_some_and(contains_var_function)
+    })
+}
+
+fn simplify_mixed_calc(tokens: &mut Vec<Token>) {
+    flatten_calc_sums(tokens);
+    reduce_numeric_calc_products(tokens);
+    rewrite_shorter_calc_reciprocals(tokens);
+    combine_calc_sum_terms(tokens);
+    trim_token_boundary_whitespace(tokens);
+}
+
+fn flatten_calc_sums(tokens: &mut Vec<Token>) {
+    let mut index = 0;
+    while index < tokens.len() {
+        let can_flatten_after = index == 0 || tokens[index - 1].kind == TokenKind::DelimPlus;
+        let can_flatten_before = index + 1 == tokens.len()
+            || matches!(
+                tokens[index + 1].kind,
+                TokenKind::DelimPlus | TokenKind::DelimMinus
+            );
+        let is_group = tokens[index].kind == TokenKind::OpenParen
+            || tokens[index].kind == TokenKind::Function
+                && tokens[index].text.eq_ignore_ascii_case("calc");
+        if can_flatten_after
+            && can_flatten_before
+            && is_group
+            && tokens[index].children.as_ref().is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|token| matches!(token.kind, TokenKind::DelimPlus | TokenKind::DelimMinus))
+            })
+        {
+            let outer_whitespace = tokens[index].whitespace;
+            let mut children = tokens[index].children.take().unwrap_or_default();
+            if let Some(first) = children.first_mut()
+                && outer_whitespace.contains(WhitespaceFlags::BEFORE)
+            {
+                first.whitespace |= WhitespaceFlags::BEFORE;
+            }
+            if let Some(last) = children.last_mut()
+                && outer_whitespace.contains(WhitespaceFlags::AFTER)
+            {
+                last.whitespace |= WhitespaceFlags::AFTER;
+            }
+            tokens.splice(index..=index, children);
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn reduce_numeric_calc_products(tokens: &mut Vec<Token>) {
+    let mut index = 0;
+    while index + 2 < tokens.len() {
+        if matches!(
+            tokens[index + 1].kind,
+            TokenKind::DelimAsterisk | TokenKind::DelimSlash
+        ) && let Some(value) = evaluate_calc_numeric(&tokens[index..index + 3])
+            && let Some(mut replacement) =
+                numeric_token_from_parts(&tokens[index], value.number, value.kind, &value.unit)
+        {
+            replacement.whitespace = boundary_whitespace(&tokens[index], &tokens[index + 2]);
+            tokens.splice(index..index + 3, [replacement]);
+            index = index.saturating_sub(2);
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn rewrite_shorter_calc_reciprocals(tokens: &mut [Token]) {
+    for index in 0..tokens.len().saturating_sub(2) {
+        let operator_kind = tokens[index + 1].kind;
+        if !matches!(
+            operator_kind,
+            TokenKind::DelimAsterisk | TokenKind::DelimSlash
+        ) || numeric_token(&tokens[index]).is_some()
+        {
+            continue;
+        }
+        let Some(right) = numeric_token(&tokens[index + 2]) else {
+            continue;
+        };
+        if right.kind != TokenKind::Number || right.number == 0.0 {
+            continue;
+        }
+        let Some(original) = float_to_string_for_calc(right.number) else {
+            continue;
+        };
+        let Some(reciprocal) = float_to_string_for_calc(1.0 / right.number) else {
+            continue;
+        };
+        if reciprocal.len() >= original.len() {
+            continue;
+        }
+        let Some(replacement) = numeric_token_from_parts(
+            &tokens[index + 2],
+            1.0 / right.number,
+            TokenKind::Number,
+            "",
+        ) else {
+            continue;
+        };
+        tokens[index + 1].kind = if operator_kind == TokenKind::DelimAsterisk {
+            TokenKind::DelimSlash
+        } else {
+            TokenKind::DelimAsterisk
+        };
+        tokens[index + 1].text = if operator_kind == TokenKind::DelimAsterisk {
+            "/".into()
+        } else {
+            "*".into()
+        };
+        tokens[index + 2] = replacement;
+    }
+}
+
+fn combine_calc_sum_terms(tokens: &mut Vec<Token>) {
+    let mut processed_units: Vec<(TokenKind, String)> = Vec::new();
+    loop {
+        let candidates: Vec<_> = (0..tokens.len())
+            .filter_map(|index| {
+                let numeric = numeric_token(&tokens[index])?;
+                let has_left_boundary = index == 0
+                    || matches!(
+                        tokens[index - 1].kind,
+                        TokenKind::DelimPlus | TokenKind::DelimMinus
+                    );
+                let has_right_boundary = index + 1 == tokens.len()
+                    || matches!(
+                        tokens[index + 1].kind,
+                        TokenKind::DelimPlus | TokenKind::DelimMinus
+                    );
+                (has_left_boundary && has_right_boundary).then_some((
+                    index,
+                    numeric.kind,
+                    numeric.unit.to_ascii_lowercase(),
+                    numeric.number,
+                ))
+            })
+            .collect();
+        let Some((_, kind, unit, _)) = candidates.iter().find(|(_, kind, unit, _)| {
+            !processed_units
+                .iter()
+                .any(|(seen_kind, seen_unit)| seen_kind == kind && seen_unit == unit)
+        }) else {
+            break;
+        };
+        let kind = *kind;
+        let unit = unit.clone();
+        processed_units.push((kind, unit.clone()));
+        let matching: Vec<_> = candidates
+            .into_iter()
+            .filter(|(_, candidate_kind, candidate_unit, _)| {
+                *candidate_kind == kind && *candidate_unit == unit
+            })
+            .collect();
+        let Some(&(base_index, _, _, _)) = matching.first() else {
+            continue;
+        };
+        let total = matching.iter().fold(0.0, |sum, (index, _, _, number)| {
+            let sign = if *index > 0 && tokens[*index - 1].kind == TokenKind::DelimMinus {
+                -1.0
+            } else {
+                1.0
+            };
+            sum + sign * number
+        });
+        let output_number = if base_index == 0 { total } else { total.abs() };
+        let Some(mut replacement) = numeric_token_from_parts(
+            &tokens[base_index],
+            output_number,
+            kind,
+            numeric_token(&tokens[base_index]).map_or("", |numeric| numeric.unit),
+        ) else {
+            continue;
+        };
+        replacement.whitespace = tokens[base_index].whitespace;
+        tokens[base_index] = replacement;
+        if base_index > 0 {
+            let operator = &mut tokens[base_index - 1];
+            operator.kind = if total < 0.0 {
+                TokenKind::DelimMinus
+            } else {
+                TokenKind::DelimPlus
+            };
+            operator.text = if total < 0.0 { "-".into() } else { "+".into() };
+        }
+        for &(index, _, _, _) in matching.iter().skip(1).rev() {
+            tokens.drain(index - 1..=index);
+        }
+    }
+}
+
+fn boundary_whitespace(left: &Token, right: &Token) -> WhitespaceFlags {
+    let mut whitespace = WhitespaceFlags::default();
+    if left.whitespace.contains(WhitespaceFlags::BEFORE) {
+        whitespace |= WhitespaceFlags::BEFORE;
+    }
+    if right.whitespace.contains(WhitespaceFlags::AFTER) {
+        whitespace |= WhitespaceFlags::AFTER;
+    }
+    whitespace
 }
 
 #[derive(Clone)]
