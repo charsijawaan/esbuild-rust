@@ -195,6 +195,7 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
     for statement in statements {
         match statement.data.as_deref_mut() {
             Some(StmtData::Import(import)) => {
+                core.record_declared_symbol(import.namespace_ref);
                 let record = &mut core.import_records
                     [usize::try_from(import.import_record_index).expect("import record index")];
                 if import.star_name_loc.is_some() {
@@ -259,12 +260,27 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
                 );
             }
             Some(StmtData::ExportClause(export)) => {
-                for item in &mut export.items {
+                let mut valid_items = Vec::with_capacity(export.items.len());
+                for mut item in std::mem::take(&mut export.items) {
                     if ParserCore::is_stored_name_ref(item.name.reference) {
                         let name =
                             String::from_utf8_lossy(core.load_name_from_ref(item.name.reference))
                                 .into_owned();
                         item.name.reference = core.find_symbol(item.name.loc, &name).reference;
+                    }
+                    let symbol_index =
+                        usize::try_from(item.name.reference.inner_index).expect("symbol index");
+                    if core.symbols[symbol_index].kind == SymbolKind::Unbound {
+                        if !core.options.ts.parse {
+                            core.add_error_range(
+                                crate::internal::js_lexer::range_of_identifier(
+                                    &core.source,
+                                    item.name.loc,
+                                ),
+                                format!("{:?} is not declared in this file", item.original_name),
+                            );
+                        }
+                        continue;
                     }
                     record_export(
                         core,
@@ -273,9 +289,12 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
                         &item.alias,
                         item.name.reference,
                     );
+                    valid_items.push(item);
                 }
+                export.items = valid_items;
             }
             Some(StmtData::ExportStar(export)) => {
+                core.record_declared_symbol(export.namespace_ref);
                 let record = &mut core.import_records
                     [usize::try_from(export.import_record_index).expect("import record index")];
                 if let Some(alias) = &export.alias {
@@ -305,12 +324,14 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
                 }
             }
             Some(StmtData::ExportFrom(export)) => {
+                core.record_declared_symbol(export.namespace_ref);
                 let mut flags = ImportRecordFlags::default();
                 for item in &mut export.items {
                     if ParserCore::is_stored_name_ref(item.name.reference) {
                         item.name.reference =
                             core.new_symbol(SymbolKind::Import, item.original_name.clone());
                     }
+                    core.record_declared_symbol(item.name.reference);
                     metadata.named_imports.insert(
                         item.name.reference,
                         NamedImport {
@@ -719,6 +740,54 @@ mod tests {
             ast.parts[1].statements[7].data.as_deref(),
             Some(StmtData::ExportDefault(_))
         ));
+    }
+
+    #[test]
+    fn validates_local_exports_and_records_reexport_symbols() {
+        let (ast, ok, log) = parse_source("const present = 1; export {present, missing};");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+        let Some(StmtData::ExportClause(export)) = ast.parts[1].statements[1].data.as_deref()
+        else {
+            panic!("expected export clause");
+        };
+        assert_eq!(export.items.len(), 1);
+        assert_eq!(export.items[0].alias, "present");
+        assert!(!ast.named_exports.contains_key("missing"));
+
+        let (ast, ok, log) = parse_source(
+            "import {x} from 'pkg';\
+             export {y as z} from 'other';\
+             export * from 'star';",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let declared = ast.parts[1]
+            .declared_symbols
+            .iter()
+            .map(|symbol| symbol.reference)
+            .collect::<std::collections::HashSet<_>>();
+        let Some(StmtData::Import(import)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected import");
+        };
+        assert!(declared.contains(&import.namespace_ref));
+        assert!(
+            declared.contains(
+                &import.items.as_ref().expect("import items")[0]
+                    .name
+                    .reference
+            )
+        );
+        let Some(StmtData::ExportFrom(export)) = ast.parts[1].statements[1].data.as_deref() else {
+            panic!("expected re-export");
+        };
+        assert!(declared.contains(&export.namespace_ref));
+        assert!(declared.contains(&export.items[0].name.reference));
+        let Some(StmtData::ExportStar(export)) = ast.parts[1].statements[2].data.as_deref() else {
+            panic!("expected export star");
+        };
+        assert!(declared.contains(&export.namespace_ref));
+        assert_eq!(declared.len(), 5);
     }
 
     #[test]
