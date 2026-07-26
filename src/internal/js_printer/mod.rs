@@ -737,13 +737,23 @@ impl Printer<'_> {
                 self.output.push(b'(');
                 self.print_expr_at(&if_statement.test, Precedence::Lowest);
                 self.output.push(b')');
-                self.print_body(&if_statement.yes);
+                let yes_is_block = self.print_if_body(
+                    &if_statement.yes,
+                    if_statement.is_single_line_yes,
+                    if_statement.no_or_nil.data.is_some(),
+                );
                 if if_statement.no_or_nil.data.is_some() {
-                    if !self.options.minify_whitespace {
+                    if yes_is_block {
+                        self.print_optional_space();
+                    } else if !self.options.minify_whitespace {
                         self.print_indent();
                     }
                     self.output.extend_from_slice(b"else");
-                    self.print_body(&if_statement.no_or_nil);
+                    self.print_if_body(
+                        &if_statement.no_or_nil,
+                        if_statement.is_single_line_no,
+                        false,
+                    );
                 }
             }
             StmtData::While(while_statement) => {
@@ -1056,6 +1066,36 @@ impl Printer<'_> {
             self.print_stmt(body);
             self.indent -= 1;
         }
+    }
+
+    fn print_if_body(&mut self, body: &Stmt, is_single_line: bool, has_else: bool) -> bool {
+        if let Some(StmtData::Block(block)) = body.data.as_deref() {
+            self.print_optional_space();
+            self.print_block(block, !has_else);
+            return true;
+        }
+        if is_single_line
+            && matches!(
+                body.data.as_deref(),
+                Some(
+                    StmtData::Empty
+                        | StmtData::Debugger
+                        | StmtData::Expr(_)
+                        | StmtData::Return(_)
+                        | StmtData::Throw(_)
+                        | StmtData::Break(_)
+                        | StmtData::Continue(_)
+                )
+            )
+        {
+            self.output.push(b' ');
+            let indent = std::mem::take(&mut self.indent);
+            self.print_stmt(body);
+            self.indent = indent;
+            return false;
+        }
+        self.print_body(body);
+        false
     }
 
     fn print_binding(&mut self, binding: &Binding) {

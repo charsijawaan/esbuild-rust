@@ -3688,6 +3688,38 @@ mod tests {
     }
 
     #[test]
+    fn preserves_single_line_if_body_formatting() {
+        assert_eq!(
+            code(transform("if (a) b()", TransformOptions::default())),
+            "if (a) b();\n"
+        );
+        assert_eq!(
+            code(transform(
+                "if (a) b(); else c()",
+                TransformOptions::default()
+            )),
+            "if (a) b();\nelse c();\n"
+        );
+        assert_eq!(
+            code(transform(
+                "if (a) { b() } else c()",
+                TransformOptions::default()
+            )),
+            "if (a) {\n  b();\n} else c();\n"
+        );
+        assert_eq!(
+            code(transform(
+                "if (DEBUG) console.log('x')",
+                TransformOptions {
+                    define: HashMap::from([("DEBUG".into(), "false".into())]),
+                    ..TransformOptions::default()
+                }
+            )),
+            "if (false) console.log(\"x\");\n"
+        );
+    }
+
+    #[test]
     fn defaults_node_env_for_browser_transforms() {
         let development = code(transform(
             "console.log(process.env.NODE_ENV)",
