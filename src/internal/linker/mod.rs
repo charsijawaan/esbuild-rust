@@ -5702,7 +5702,7 @@ pub struct ConvertedStmts {
     pub arbitrary_namespace_issues: Vec<ArbitraryNamespaceIssue>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeReExportContext {
     pub re_export_ref: Ref,
     pub unbound_module_ref: Option<Ref>,
@@ -6402,6 +6402,64 @@ pub struct ChunkRuntimeRefs {
     pub to_esm_ref: Ref,
     pub runtime_require_ref: Ref,
     pub re_export: Option<RuntimeReExportContext>,
+}
+
+/// Look up an exported helper in the parsed runtime module.
+///
+/// # Panics
+///
+/// Panics when the runtime file is missing, is not JavaScript, or does not
+/// export `name`.
+#[must_use]
+pub fn runtime_symbol_ref(graph: &LinkerGraph, name: &str) -> Ref {
+    let Some(InputFileRepr::Js(runtime)) = graph.files
+        [crate::internal::runtime::SOURCE_INDEX as usize]
+        .input_file
+        .repr
+        .as_ref()
+    else {
+        panic!("runtime must be JavaScript");
+    };
+    runtime
+        .ast
+        .named_exports
+        .get(name)
+        .unwrap_or_else(|| panic!("missing runtime export {name:?}"))
+        .reference
+}
+
+/// Build the runtime reference bundle used by the linker scan stages.
+#[must_use]
+pub fn scan_runtime_refs_from_graph(
+    graph: &LinkerGraph,
+    unbound_module_ref: Ref,
+) -> ScanRuntimeRefs {
+    ScanRuntimeRefs {
+        export_ref: runtime_symbol_ref(graph, "__export"),
+        common_js_ref: runtime_symbol_ref(graph, "__commonJS"),
+        esm_ref: runtime_symbol_ref(graph, "__esm"),
+        to_common_js_ref: runtime_symbol_ref(graph, "__toCommonJS"),
+        unbound_module_ref,
+    }
+}
+
+/// Build the runtime reference bundle used while compiling JavaScript chunks.
+#[must_use]
+pub fn chunk_runtime_refs_from_graph(
+    graph: &LinkerGraph,
+    unbound_module_ref: Option<Ref>,
+) -> ChunkRuntimeRefs {
+    ChunkRuntimeRefs {
+        common_js_ref: runtime_symbol_ref(graph, "__commonJS"),
+        esm_ref: runtime_symbol_ref(graph, "__esm"),
+        to_common_js_ref: runtime_symbol_ref(graph, "__toCommonJS"),
+        to_esm_ref: runtime_symbol_ref(graph, "__toESM"),
+        runtime_require_ref: runtime_symbol_ref(graph, "__require"),
+        re_export: Some(RuntimeReExportContext {
+            re_export_ref: runtime_symbol_ref(graph, "__reExport"),
+            unbound_module_ref,
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -8467,11 +8525,12 @@ mod tests {
         PreparedCssAst, RuntimeReExportContext, StableRef, add_exports_for_export_star,
         advance_import_tracker, append_or_extend_part_range, arbitrary_namespace_export_issues,
         assemble_css_chunk, assemble_javascript_chunk, assign_chunk_path_templates,
-        bind_imports_to_exports_for_file, bind_imports_to_parts_for_file, classify_module_wrappers,
-        compile_part_range_for_chunk, compile_prepared_css_asts, compute_chunks,
-        compute_cross_chunk_dependencies, compute_js_chunks, configure_entry_point_exports,
-        convert_import_for_chunk, convert_stmts_for_chunk, create_entry_point_part,
-        create_exports_for_file, create_wrapper_for_file, encode_import_constraints_for_file,
+        bind_imports_to_exports_for_file, bind_imports_to_parts_for_file,
+        chunk_runtime_refs_from_graph, classify_module_wrappers, compile_part_range_for_chunk,
+        compile_prepared_css_asts, compute_chunks, compute_cross_chunk_dependencies,
+        compute_js_chunks, configure_entry_point_exports, convert_import_for_chunk,
+        convert_stmts_for_chunk, create_entry_point_part, create_exports_for_file,
+        create_wrapper_for_file, encode_import_constraints_for_file,
         enforce_no_cyclic_chunk_imports, finalize_chunk_paths, finalize_javascript_chunk_outputs,
         finalize_part_dependencies_for_file, find_imported_css_files_in_js_order,
         find_imported_files_in_css_order, generate_code_for_lazy_exports,
@@ -8485,7 +8544,8 @@ mod tests {
         path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts,
         prevent_exports_from_being_renamed, print_cross_chunk_bindings,
         propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        require_or_import_meta_for_source, resolve_export_stars, sort_and_filter_export_aliases,
+        require_or_import_meta_for_source, resolve_export_stars, runtime_symbol_ref,
+        scan_runtime_refs_from_graph, sort_and_filter_export_aliases,
         sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
         tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
         wrap_rules_with_conditions,
@@ -10993,6 +11053,74 @@ mod tests {
                 exports_ref: esm_exports,
                 is_wrapper_async: true,
             }
+        );
+    }
+
+    #[test]
+    fn runtime_reference_bundles_come_from_runtime_exports() {
+        let names = [
+            "__export",
+            "__commonJS",
+            "__esm",
+            "__toCommonJS",
+            "__toESM",
+            "__require",
+            "__reExport",
+        ];
+        let references: Vec<_> = (0..names.len())
+            .map(|inner_index| Ref {
+                source_index: crate::internal::runtime::SOURCE_INDEX,
+                inner_index: u32::try_from(inner_index).expect("small symbol index"),
+            })
+            .collect();
+        let runtime_ast = js_ast::Ast {
+            symbols: names
+                .iter()
+                .map(|name| Symbol::new(SymbolKind::Other, *name))
+                .collect(),
+            named_exports: names
+                .iter()
+                .zip(&references)
+                .map(|(name, &reference)| {
+                    (
+                        (*name).to_string(),
+                        NamedExport {
+                            reference,
+                            ..NamedExport::default()
+                        },
+                    )
+                })
+                .collect(),
+            ..js_ast::Ast::default()
+        };
+        let graph = clone_linker_graph(&[js_file(runtime_ast)], &[0], &[], false);
+        let unbound_module_ref = Ref {
+            source_index: 1,
+            inner_index: 9,
+        };
+
+        for (name, &reference) in names.iter().zip(&references) {
+            assert_eq!(runtime_symbol_ref(&graph, name), reference);
+        }
+        let scan_refs = scan_runtime_refs_from_graph(&graph, unbound_module_ref);
+        assert_eq!(scan_refs.export_ref, references[0]);
+        assert_eq!(scan_refs.common_js_ref, references[1]);
+        assert_eq!(scan_refs.esm_ref, references[2]);
+        assert_eq!(scan_refs.to_common_js_ref, references[3]);
+        assert_eq!(scan_refs.unbound_module_ref, unbound_module_ref);
+
+        let chunk_refs = chunk_runtime_refs_from_graph(&graph, Some(unbound_module_ref));
+        assert_eq!(chunk_refs.common_js_ref, references[1]);
+        assert_eq!(chunk_refs.esm_ref, references[2]);
+        assert_eq!(chunk_refs.to_common_js_ref, references[3]);
+        assert_eq!(chunk_refs.to_esm_ref, references[4]);
+        assert_eq!(chunk_refs.runtime_require_ref, references[5]);
+        assert_eq!(
+            chunk_refs.re_export,
+            Some(RuntimeReExportContext {
+                re_export_ref: references[6],
+                unbound_module_ref: Some(unbound_module_ref),
+            })
         );
     }
 
