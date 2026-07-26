@@ -1,11 +1,12 @@
 //! Port of upstream `internal/css_parser`.
 
 use crate::internal::{
-    ast::{ImportKind, ImportRecord},
+    ast::{ImportKind, ImportRecord, LocRef, Ref, Symbol, SymbolKind},
     css_ast::{
-        Ast, AtCharsetRule, AtImportRule, AtLayerRule, AtMediaRule, BadDeclarationRule,
-        DeclarationRule, ImportConditions, KnownAtRule, MediaArbitraryTokensQuery, MediaQuery,
-        MediaQueryData, QualifiedRule, Rule, RuleData, Token, UnknownAtRule, WhitespaceFlags,
+        Ast, AtCharsetRule, AtImportRule, AtKeyframesRule, AtLayerRule, AtMediaRule,
+        BadDeclarationRule, DeclarationRule, ImportConditions, KeyframeBlock, KnownAtRule,
+        MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, QualifiedRule, Rule, RuleData,
+        Token, UnknownAtRule, WhitespaceFlags,
     },
     css_lexer::{self, TokenKind},
     logger::{Loc, Log, Path, Range, Source},
@@ -33,10 +34,12 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
         minify_whitespace: options.minify_whitespace,
         index: 0,
         import_records: Vec::new(),
+        symbols: Vec::new(),
     };
     let rules = parser.parse_rule_list(false);
     Ast {
         rules,
+        symbols: parser.symbols,
         import_records: parser.import_records,
         source_map_comment: result.source_map_comment,
         approximate_line_count: result.approximate_line_count,
@@ -50,6 +53,7 @@ struct Parser {
     minify_whitespace: bool,
     index: usize,
     import_records: Vec<ImportRecord>,
+    symbols: Vec<Symbol>,
 }
 
 impl Parser {
@@ -107,6 +111,12 @@ impl Parser {
         trim_token_boundary_whitespace(&mut prelude);
         self.index = end;
         if self.current_kind() == TokenKind::OpenBrace {
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "keyframes" | "-webkit-keyframes"
+            ) {
+                return self.parse_keyframes(loc, name, &prelude);
+            }
             if name.eq_ignore_ascii_case("media") {
                 let queries = split_media_queries(prelude, loc);
                 self.index += 1;
@@ -168,6 +178,65 @@ impl Parser {
                 block,
             }),
         }
+    }
+
+    fn parse_keyframes(&mut self, loc: Loc, at_token: String, prelude: &[Token]) -> Rule {
+        let name_token = prelude.first();
+        let name = name_token.map_or_else(String::new, |token| token.text.clone());
+        let name_loc = name_token.map_or(loc, |token| token.loc);
+        let name_ref = self.new_css_symbol(&name);
+        self.index += 1;
+        let mut blocks = Vec::new();
+        loop {
+            self.skip_whitespace();
+            if self.current_kind() == TokenKind::CloseBrace {
+                self.index += 1;
+                break;
+            }
+            if self.current_kind() == TokenKind::EndOfFile {
+                break;
+            }
+            let selector_loc = self.current().range.loc;
+            let selector_start = self.index;
+            let selector_end = self.scan_to_rule_delimiter();
+            let selector_tokens = self.convert_tokens(selector_start, selector_end);
+            self.index = selector_end;
+            if self.current_kind() != TokenKind::OpenBrace {
+                if self.current_kind() == TokenKind::Semicolon {
+                    self.index += 1;
+                }
+                continue;
+            }
+            self.index += 1;
+            let rules = self.parse_rule_list(true);
+            blocks.push(KeyframeBlock {
+                selectors: keyframe_selectors(&selector_tokens),
+                rules,
+                loc: selector_loc,
+                ..KeyframeBlock::default()
+            });
+        }
+        Rule {
+            loc,
+            data: RuleData::AtKeyframes(AtKeyframesRule {
+                at_token,
+                name: LocRef {
+                    loc: name_loc,
+                    reference: name_ref,
+                },
+                blocks,
+                ..AtKeyframesRule::default()
+            }),
+        }
+    }
+
+    fn new_css_symbol(&mut self, name: &str) -> Ref {
+        let reference = Ref {
+            source_index: self.source.index,
+            inner_index: u32::try_from(self.symbols.len()).expect("CSS symbol count fits in u32"),
+        };
+        self.symbols.push(Symbol::new(SymbolKind::GlobalCss, name));
+        reference
     }
 
     fn parse_at_import(&mut self, loc: Loc) -> Rule {
@@ -569,6 +638,24 @@ fn parse_layer_names(tokens: &[Token]) -> Vec<Vec<String>> {
     names
 }
 
+fn keyframe_selectors(tokens: &[Token]) -> Vec<String> {
+    let mut selectors = Vec::new();
+    let mut current = String::new();
+    for token in tokens {
+        if token.kind == TokenKind::Comma {
+            if !current.is_empty() {
+                selectors.push(std::mem::take(&mut current));
+            }
+        } else if token.kind != TokenKind::Whitespace {
+            current.push_str(&token.text);
+        }
+    }
+    if !current.is_empty() {
+        selectors.push(current);
+    }
+    selectors
+}
+
 fn is_known_block_at_rule(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -577,8 +664,6 @@ fn is_known_block_at_rule(name: &str) -> bool {
             | "font-face"
             | "font-feature-values"
             | "font-palette-values"
-            | "keyframes"
-            | "-webkit-keyframes"
             | "page"
             | "position-try"
             | "property"
@@ -697,6 +782,34 @@ mod tests {
                 true
             ),
             "@media screen{@supports (display:grid){a{display:grid}}}"
+        );
+    }
+
+    #[test]
+    fn parses_keyframes_with_css_symbols_and_declaration_blocks() {
+        assert_eq!(
+            parse_and_print(
+                "@keyframes fade {\
+                   from, 50% { opacity: 0 }\
+                   to { opacity: 1 }\
+                 }",
+                false
+            ),
+            "@keyframes fade {\n\
+             \x20\x20from, 50% {\n\
+             \x20\x20\x20\x20opacity: 0;\n\
+             \x20\x20}\n\
+             \x20\x20to {\n\
+             \x20\x20\x20\x20opacity: 1;\n\
+             \x20\x20}\n\
+             }\n"
+        );
+        assert_eq!(
+            parse_and_print(
+                "@keyframes fade { from { opacity: 0 } to { opacity: 1 } }",
+                true
+            ),
+            "@keyframes fade{from{opacity:0}to{opacity:1}}"
         );
     }
 }
