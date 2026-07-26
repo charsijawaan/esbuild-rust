@@ -2,11 +2,11 @@
 
 use crate::internal::{
     js_ast::{
-        Binding, BindingData, BlockStmt, BreakStmt, Catch, ContinueStmt, Decl, DoWhileStmt, Expr,
-        ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt, ForStmt, FunctionStmt,
-        IdentifierBinding, IdentifierExpr, IfStmt, LabelStmt, LocalKind, LocalStmt, Precedence,
-        ReturnStmt, Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt, TryStmt, WhileStmt,
-        WithStmt,
+        Binding, BindingData, BlockStmt, BreakStmt, Catch, ClassStmt, ContinueStmt, Decl,
+        DoWhileStmt, Expr, ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt, ForStmt,
+        FunctionStmt, IdentifierBinding, IdentifierExpr, IfStmt, LabelStmt, LocalKind, LocalStmt,
+        Precedence, ReturnStmt, Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt, TryStmt,
+        WhileStmt, WithStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
@@ -14,6 +14,7 @@ use crate::internal::{
 
 use super::{
     parser_core::ParserCore,
+    syntax_class::parse_class_prefix,
     syntax_expression::{parse_expression, parse_expression_suffix},
     syntax_function::{parse_async_prefix, parse_function_prefix},
 };
@@ -138,6 +139,10 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             let expression =
                 parse_function_prefix(core, lexer).expect("function token was checked");
             function_declaration_from_expression(core, loc, expression)
+        }
+        Token::Class => {
+            let expression = parse_class_prefix(core, lexer).expect("class token was checked");
+            class_declaration_from_expression(core, loc, expression)
         }
         Token::If => {
             lexer.next();
@@ -489,6 +494,28 @@ fn function_declaration_from_expression(core: &mut ParserCore, loc: Loc, express
         loc,
         StmtData::Function(FunctionStmt {
             function: function.function,
+            is_export: false,
+        }),
+    )
+}
+
+fn class_declaration_from_expression(core: &mut ParserCore, loc: Loc, expression: Expr) -> Stmt {
+    let Some(data) = expression.data else {
+        unreachable!("class parser always returns expression data");
+    };
+    let ExprData::Class(class) = *data else {
+        unreachable!("class declaration requires a class expression");
+    };
+    if class.class.name.is_none() {
+        core.add_error_range(
+            Range { loc, len: 5 },
+            "A class declaration must have a name",
+        );
+    }
+    Stmt::new(
+        loc,
+        StmtData::Class(ClassStmt {
+            class: class.class,
             is_export: false,
         }),
     )
@@ -1002,6 +1029,27 @@ mod tests {
         assert!(matches!(
             label.statement.data.as_deref(),
             Some(StmtData::While(_))
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_class_declarations() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"{class Child extends Parent { constructor() { super() } field = 1 }}"[..],
+            ),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        assert!(matches!(
+            block.statements[0].data.as_deref(),
+            Some(StmtData::Class(class))
+                if class.class.name.is_some()
+                    && class.class.extends_or_nil.data.is_some()
         ));
         assert_eq!(lexer.token, Token::EndOfFile);
     }

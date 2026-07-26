@@ -12,6 +12,7 @@ use super::{
         parse_async_arrow_from_call, parse_empty_parenthesized_arrow,
         parse_identifier_or_arrow_prefix,
     },
+    syntax_class::parse_class_prefix,
     syntax_function::{parse_async_prefix, parse_function_prefix},
     syntax_import::parse_import_prefix,
     syntax_literals::{
@@ -155,6 +156,7 @@ fn parse_prefix(
         return expr;
     }
     match lexer.token {
+        Token::Class => parse_class_prefix(core, lexer).expect("class token was checked"),
         Token::Function => parse_function_prefix(core, lexer).expect("function token was checked"),
         Token::New => parse_new_prefix(core, lexer, parse_new_target, |core, lexer| {
             parse_expression(core, lexer, Precedence::Comma, true)
