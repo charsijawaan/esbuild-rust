@@ -61,6 +61,7 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
     let mut asset_names = String::new();
     let mut splitting = false;
     let mut preserve_symlinks = false;
+    let mut allow_overwrite = false;
     let mut sourcemap = BuildSourceMap::None;
     let mut source_root = String::new();
     let mut sources_content = BuildSourcesContent::Include;
@@ -105,6 +106,10 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
         }
         if argument == "--preserve-symlinks" {
             preserve_symlinks = true;
+            continue;
+        }
+        if argument == "--allow-overwrite" {
+            allow_overwrite = true;
             continue;
         }
         if argument == "--drop:debugger" {
@@ -416,6 +421,11 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
                 entry_points.push(input_path);
             }
         }
+        let canonical_input_paths = entry_points
+            .iter()
+            .chain(entry_points_advanced.iter().map(|entry| &entry.input_path))
+            .filter_map(|path| fs::canonicalize(path).ok())
+            .collect::<std::collections::HashSet<_>>();
         let stdin = if entry_points.is_empty() && entry_points_advanced.is_empty() {
             let mut contents = Vec::new();
             if let Some(stdin) = stdin_override {
@@ -468,6 +478,7 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
             jsx_side_effects,
             splitting,
             preserve_symlinks,
+            allow_overwrite,
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
             minify_syntax: options.minify_syntax,
@@ -499,6 +510,19 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
         }
         for warning in result.warnings {
             eprintln!("warning: {}", warning.text);
+        }
+        if !allow_overwrite && (!outdir.is_empty() || !outfile.is_empty()) {
+            for output in &result.output_files {
+                if fs::canonicalize(&output.path)
+                    .ok()
+                    .is_some_and(|path| canonical_input_paths.contains(&path))
+                {
+                    return Err(format!(
+                        "Refusing to overwrite input file {:?} (use \"--allow-overwrite\" to allow this)",
+                        output.path
+                    ));
+                }
+            }
         }
         if outdir.is_empty() && outfile.is_empty() {
             let [output] = result.output_files.as_slice() else {
@@ -624,6 +648,7 @@ fn help_text() -> String {
          \x20\x20--asset-names=TEMPLATE\n\
          \x20\x20--splitting\n\
          \x20\x20--preserve-symlinks\n\
+         \x20\x20--allow-overwrite\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
          \x20\x20--source-root=PATH\n\
          \x20\x20--sources-content=true|false\n\
@@ -778,6 +803,44 @@ mod tests {
                 .expect("read generated entry")
                 .contains("console.log(\"advanced entry\")")
         );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn protects_input_files_from_output_overwrites() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-overwrite-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        let original = "console.log('original source')";
+        std::fs::write(&entry, original).expect("write entry file");
+        let arguments = vec![
+            "--bundle".into(),
+            format!("--outfile={}", entry.display()),
+            entry.to_string_lossy().into_owned(),
+        ];
+
+        let Err(error) = run(&arguments) else {
+            panic!("overwrite must be rejected");
+        };
+        assert!(error.contains("Refusing to overwrite input file"));
+        assert_eq!(
+            std::fs::read_to_string(&entry).expect("read protected input"),
+            original
+        );
+
+        let mut allowed = arguments;
+        allowed.insert(1, "--allow-overwrite".into());
+        let Output::Text(output) = run(&allowed).expect("explicit overwrite succeeds") else {
+            panic!("expected file output");
+        };
+        assert!(output.is_empty());
+        let overwritten = std::fs::read_to_string(&entry).expect("read overwritten file");
+        assert!(overwritten.contains("console.log(\"original source\")"));
+        assert_ne!(overwritten, original);
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

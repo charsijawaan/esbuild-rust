@@ -189,6 +189,7 @@ pub struct BuildOptions {
     pub jsx_side_effects: bool,
     pub splitting: bool,
     pub preserve_symlinks: bool,
+    pub allow_overwrite: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
     pub minify_syntax: bool,
@@ -729,19 +730,23 @@ pub fn build(options: BuildOptions) -> BuildResult {
             ..BuildResult::default()
         };
     }
-    let output_dir = if options.outdir.is_empty() {
-        file_system.cwd().to_string()
-    } else if file_system.is_abs(&options.outdir) {
-        options.outdir.clone()
-    } else {
-        file_system.join(&[file_system.cwd(), &options.outdir])
-    };
     let output_file = if options.outfile.is_empty() {
         String::new()
     } else if file_system.is_abs(&options.outfile) {
         options.outfile.clone()
     } else {
         file_system.join(&[file_system.cwd(), &options.outfile])
+    };
+    let output_dir = if !options.outdir.is_empty() {
+        if file_system.is_abs(&options.outdir) {
+            options.outdir.clone()
+        } else {
+            file_system.join(&[file_system.cwd(), &options.outdir])
+        }
+    } else if !output_file.is_empty() {
+        file_system.dir(&output_file)
+    } else {
+        file_system.cwd().to_string()
     };
     let tsconfig_path = if options.tsconfig.is_empty() {
         String::new()
@@ -804,6 +809,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         line_limit: options.line_limit,
         code_splitting: options.splitting,
         preserve_symlinks: options.preserve_symlinks,
+        allow_overwrite: options.allow_overwrite,
         tree_shaking: options.tree_shaking != BuildTreeShaking::Disabled,
         jsx: config::JsxOptions {
             factory: jsx_factory,
