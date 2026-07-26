@@ -182,6 +182,94 @@ pub struct TsConfigPaths {
     pub source: Source,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TsConfigPathCandidate {
+    pub path: String,
+    pub loc: Loc,
+}
+
+/// Return the ordered file-system candidates selected by TypeScript's `paths`
+/// matching algorithm. `Some` means a mapping matched, even if all candidates
+/// were ignored because they ended in `.d.ts`.
+#[must_use]
+pub fn match_tsconfig_path_candidates(
+    config: &TsConfigJson,
+    import_path: &str,
+    file_system: &dyn Fs,
+) -> Option<Vec<TsConfigPathCandidate>> {
+    let paths = config.paths.as_ref()?;
+    let base_url = config
+        .base_url
+        .as_deref()
+        .unwrap_or(&config.base_url_for_paths);
+
+    if let Some(substitutions) = paths.map.get(import_path) {
+        return Some(resolve_tsconfig_substitutions(
+            substitutions,
+            None,
+            base_url,
+            file_system,
+        ));
+    }
+
+    let mut longest_match: Option<(&str, &str, &[TsConfigPath])> = None;
+    for (key, substitutions) in &paths.map {
+        let Some(star_index) = key.find('*') else {
+            continue;
+        };
+        let prefix = &key[..star_index];
+        let suffix = &key[star_index + 1..];
+        if !import_path.starts_with(prefix) || !import_path.ends_with(suffix) {
+            continue;
+        }
+        let is_better = longest_match.is_none_or(|(old_prefix, old_suffix, _)| {
+            prefix.len() > old_prefix.len()
+                || (prefix.len() == old_prefix.len() && suffix.len() > old_suffix.len())
+        });
+        if is_better {
+            longest_match = Some((prefix, suffix, substitutions));
+        }
+    }
+
+    longest_match.map(|(prefix, suffix, substitutions)| {
+        let matched = &import_path[prefix.len()..import_path.len() - suffix.len()];
+        resolve_tsconfig_substitutions(substitutions, Some(matched), base_url, file_system)
+    })
+}
+
+fn resolve_tsconfig_substitutions(
+    substitutions: &[TsConfigPath],
+    matched: Option<&str>,
+    base_url: &str,
+    file_system: &dyn Fs,
+) -> Vec<TsConfigPathCandidate> {
+    substitutions
+        .iter()
+        .filter_map(|substitution| {
+            let path = matched.map_or_else(
+                || substitution.text.clone(),
+                |matched| substitution.text.replacen('*', matched, 1),
+            );
+            if has_case_insensitive_suffix(&path, ".d.ts") {
+                return None;
+            }
+            Some(TsConfigPathCandidate {
+                path: if file_system.is_abs(&path) {
+                    path
+                } else {
+                    file_system.join(&[base_url, &path])
+                },
+                loc: substitution.loc,
+            })
+        })
+        .collect()
+}
+
+fn has_case_insensitive_suffix(text: &str, suffix: &str) -> bool {
+    text.get(text.len().saturating_sub(suffix.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
 type ExtendsCallback<'a> = dyn FnMut(&str, Range) -> Option<TsConfigJson> + 'a;
 
 #[allow(clippy::too_many_lines)]
@@ -713,8 +801,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        DataUrl, DebugMeta, MimeType, PathPair, TsConfigJson,
-        is_valid_tsconfig_path_no_base_url_pattern, parse_tsconfig_json,
+        DataUrl, DebugMeta, MimeType, PathPair, TsConfigJson, TsConfigPath, TsConfigPaths,
+        is_valid_tsconfig_path_no_base_url_pattern, match_tsconfig_path_candidates,
+        parse_tsconfig_json,
     };
     use crate::internal::{
         config::{MaybeBool, TsJsx, TsTarget},
@@ -928,5 +1017,80 @@ mod tests {
             Loc::default()
         ));
         assert_eq!(log.done().len(), 1);
+    }
+
+    #[test]
+    fn matches_tsconfig_paths_with_typescript_precedence() {
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let config = TsConfigJson {
+            base_url: Some("/explicit".into()),
+            base_url_for_paths: "/implicit".into(),
+            paths: Some(TsConfigPaths {
+                map: HashMap::from([
+                    (
+                        "exact".into(),
+                        vec![
+                            TsConfigPath {
+                                text: "types.d.ts".into(),
+                                ..TsConfigPath::default()
+                            },
+                            TsConfigPath {
+                                text: "exact.js".into(),
+                                ..TsConfigPath::default()
+                            },
+                        ],
+                    ),
+                    (
+                        "a*".into(),
+                        vec![TsConfigPath {
+                            text: "short/*".into(),
+                            ..TsConfigPath::default()
+                        }],
+                    ),
+                    (
+                        "abc*".into(),
+                        vec![TsConfigPath {
+                            text: "long/*".into(),
+                            ..TsConfigPath::default()
+                        }],
+                    ),
+                    (
+                        "abc*xyz".into(),
+                        vec![TsConfigPath {
+                            text: "/absolute/*".into(),
+                            ..TsConfigPath::default()
+                        }],
+                    ),
+                ]),
+                ..TsConfigPaths::default()
+            }),
+            ..TsConfigJson::default()
+        };
+
+        assert_eq!(
+            match_tsconfig_path_candidates(&config, "exact", &file_system)
+                .expect("exact match")
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/explicit/exact.js"]
+        );
+        assert_eq!(
+            match_tsconfig_path_candidates(&config, "abcdef", &file_system)
+                .expect("longest prefix")
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/explicit/long/def"]
+        );
+        assert_eq!(
+            match_tsconfig_path_candidates(&config, "abcHELLOxyz", &file_system)
+                .expect("longest suffix tie-break")
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/absolute/HELLO"]
+        );
+        assert!(match_tsconfig_path_candidates(&config, "missing", &file_system).is_none());
     }
 }
