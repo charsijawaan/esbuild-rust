@@ -150,7 +150,9 @@ pub(crate) fn visit_top_level_statements(core: &mut ParserCore, statements: &mut
 
 #[allow(clippy::too_many_lines)]
 fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_identifiers: bool) {
+    let old_control_flow_dead = core.is_control_flow_dead;
     for statement in statements {
+        let was_control_flow_dead = core.is_control_flow_dead;
         match statement.data.as_deref_mut() {
             Some(StmtData::Block(block)) => {
                 visit_block(core, statement.loc, block, resolve_identifiers);
@@ -514,7 +516,27 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
         {
             statement.data = None;
         }
+        if core.options.minify_syntax
+            && was_control_flow_dead
+            && !super::dead_control_flow::should_keep_stmt_in_dead_control_flow(statement)
+        {
+            statement.data = None;
+        }
+        if core.options.minify_syntax
+            && matches!(
+                statement.data.as_deref(),
+                Some(
+                    StmtData::Return(_)
+                        | StmtData::Throw(_)
+                        | StmtData::Break(_)
+                        | StmtData::Continue(_)
+                )
+            )
+        {
+            core.is_control_flow_dead = true;
+        }
     }
+    core.is_control_flow_dead = old_control_flow_dead;
 }
 
 fn minify_constant_if_statement(statement: &mut Stmt) {

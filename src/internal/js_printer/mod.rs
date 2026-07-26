@@ -966,8 +966,10 @@ impl Printer<'_> {
                 if self.options.minify_whitespace
                     && let Some(statement) = switch_statement
                         .cases
-                        .last()
-                        .and_then(|case| case.body.last())
+                        .iter()
+                        .rev()
+                        .flat_map(|case| case.body.iter().rev())
+                        .find(|statement| statement.data.is_some())
                     && statement_can_omit_semicolon_before_close_brace(statement)
                     && self.output.last() == Some(&b';')
                 {
@@ -1132,7 +1134,10 @@ impl Printer<'_> {
         let statements = block.statements.iter().collect::<Vec<_>>();
         self.print_statements(&statements);
         if self.options.minify_whitespace
-            && let Some(statement) = block.statements.last()
+            && let Some(statement) = block
+                .statements
+                .iter()
+                .rfind(|statement| statement.data.is_some())
             && statement_can_omit_semicolon_before_close_brace(statement)
             && self.output.last() == Some(&b';')
         {
@@ -3582,6 +3587,54 @@ mod tests {
             )
             .expect("printer output is UTF-8"),
             "for(let i=0;i<2;i++){sum+=i}for(const key in object)use(key);for(const value of list)use(value);outer:for(let j=0;j<2;j++){if(j)continue outer}if(ready){start()}else if(waiting){pause()}else{stop()}do{tick()}while(running);"
+        );
+    }
+
+    #[test]
+    fn removes_dead_statements_after_jumps_when_minifying() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"label: {\
+                    foo();\
+                    break label;\
+                    bar();\
+                    var kept = sideEffect();\
+                    let dropped = other();\
+                  }"
+                .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(
+            log.clone(),
+            source,
+            js_parser::Options {
+                minify_syntax: true,
+                ..js_parser::Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_syntax: true,
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "label:{foo();break label;var kept}"
         );
     }
 
