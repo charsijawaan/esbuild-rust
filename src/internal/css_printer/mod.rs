@@ -90,6 +90,8 @@ pub fn print(tree: &Ast, symbols: &SymbolMap, options: Options) -> PrintResult {
         extracted_legal_comments: Vec::new(),
         json_metadata_imports: Vec::new(),
         source_map_builder,
+        old_line_start: 0,
+        old_line_end: 0,
     };
     for rule in &tree.rules {
         printer.print_rule(rule, false);
@@ -149,9 +151,34 @@ struct Printer<'a> {
     extracted_legal_comments: Vec<String>,
     json_metadata_imports: Vec<String>,
     source_map_builder: Option<ChunkBuilder>,
+    old_line_start: usize,
+    old_line_end: usize,
 }
 
 impl Printer<'_> {
+    fn current_line_length(&mut self) -> usize {
+        let end = self.css.len();
+        for index in (self.old_line_end..end).rev() {
+            if matches!(self.css[index], b'\r' | b'\n') {
+                self.old_line_start = index + 1;
+                break;
+            }
+        }
+        self.old_line_end = end;
+        end - self.old_line_start
+    }
+
+    fn print_newline_past_line_limit(&mut self, indent: usize) -> bool {
+        if self.current_line_length() < self.options.line_limit {
+            return false;
+        }
+        self.css.push(b'\n');
+        if !self.options.minify_whitespace {
+            self.print_indent_levels(indent);
+        }
+        true
+    }
+
     fn add_source_mapping(&mut self, location: crate::internal::logger::Loc, original_name: &str) {
         if self.options.add_source_mappings
             && let Some(builder) = &mut self.source_map_builder
@@ -218,6 +245,9 @@ impl Printer<'_> {
                 LegalComments::Inline => {}
             }
         }
+        if self.options.line_limit > 0 {
+            self.print_newline_past_line_limit(self.indent);
+        }
         let skip_rule_mapping = (self.indent == 0 || self.options.minify_whitespace)
             && matches!(
                 rule.data,
@@ -263,6 +293,7 @@ impl Printer<'_> {
                 self.print_space();
                 self.open_block();
                 for block in &rule.blocks {
+                    self.add_source_mapping(block.loc, "");
                     if !self.options.minify_whitespace {
                         self.print_indent();
                     }
@@ -278,17 +309,17 @@ impl Printer<'_> {
                         self.css.extend_from_slice(selector.as_bytes());
                     }
                     self.print_space();
-                    self.print_rule_block(&block.rules);
+                    self.print_rule_block(&block.rules, block.close_brace_loc);
                     self.print_newline();
                 }
-                self.close_block();
+                self.close_block(rule.close_brace_loc);
             }
             RuleData::KnownAt(rule) => {
                 self.css.push(b'@');
                 self.print_ident(&rule.at_token);
                 self.print_token_group(&rule.prelude, true);
                 self.print_space();
-                self.print_rule_block(&rule.rules);
+                self.print_rule_block(&rule.rules, rule.close_brace_loc);
             }
             RuleData::UnknownAt(rule) => {
                 self.css.push(b'@');
@@ -304,14 +335,14 @@ impl Printer<'_> {
             RuleData::Selector(rule) => {
                 self.print_complex_selectors(&rule.selectors, true);
                 self.print_space();
-                self.print_rule_block(&rule.rules);
+                self.print_rule_block(&rule.rules, rule.close_brace_loc);
             }
             RuleData::Qualified(rule) => {
                 let has_whitespace_after = self.print_tokens(&rule.prelude);
                 if !has_whitespace_after {
                     self.print_space();
                 }
-                self.print_rule_block(&rule.rules);
+                self.print_rule_block(&rule.rules, rule.close_brace_loc);
             }
             RuleData::Declaration(rule) => {
                 self.print_ident(&rule.key_text);
@@ -380,13 +411,13 @@ impl Printer<'_> {
                 }
                 if rule.rules.is_empty() {
                     if rule.names.is_empty() {
-                        self.print_rule_block(&rule.rules);
+                        self.print_rule_block(&rule.rules, rule.close_brace_loc);
                     } else {
                         self.css.push(b';');
                     }
                 } else {
                     self.print_space();
-                    self.print_rule_block(&rule.rules);
+                    self.print_rule_block(&rule.rules, rule.close_brace_loc);
                 }
             }
             RuleData::AtMedia(rule) => {
@@ -404,7 +435,7 @@ impl Printer<'_> {
                     }
                     self.print_space();
                 }
-                self.print_rule_block(&rule.rules);
+                self.print_rule_block(&rule.rules, rule.close_brace_loc);
             }
             RuleData::AtScope(rule) => {
                 self.css.extend_from_slice(b"@scope");
@@ -425,19 +456,19 @@ impl Printer<'_> {
                     self.css.push(b')');
                 }
                 self.print_space();
-                self.print_rule_block(&rule.rules);
+                self.print_rule_block(&rule.rules, rule.close_brace_loc);
             }
         }
         self.print_newline();
     }
 
-    fn print_rule_block(&mut self, rules: &[Rule]) {
+    fn print_rule_block(&mut self, rules: &[Rule], close_brace_loc: crate::internal::logger::Loc) {
         self.open_block();
         let last = rules.len().saturating_sub(1);
         for (index, rule) in rules.iter().enumerate() {
             self.print_rule(rule, self.options.minify_whitespace && index == last);
         }
-        self.close_block();
+        self.close_block(close_brace_loc);
     }
 
     fn open_block(&mut self) {
@@ -446,8 +477,11 @@ impl Printer<'_> {
         self.print_newline();
     }
 
-    fn close_block(&mut self) {
+    fn close_block(&mut self, close_brace_loc: crate::internal::logger::Loc) {
         self.indent = self.indent.saturating_sub(1);
+        if close_brace_loc.start != 0 {
+            self.add_source_mapping(close_brace_loc, "");
+        }
         if !self.options.minify_whitespace {
             self.print_indent();
         }
@@ -1067,6 +1101,8 @@ mod tests {
             extracted_legal_comments: Vec::new(),
             json_metadata_imports: Vec::new(),
             source_map_builder: None,
+            old_line_start: 0,
+            old_line_end: 0,
         };
         printer.print_quoted(text, None);
         String::from_utf8(printer.css).expect("CSS output is UTF-8")
@@ -1084,6 +1120,8 @@ mod tests {
             extracted_legal_comments: Vec::new(),
             json_metadata_imports: Vec::new(),
             source_map_builder: None,
+            old_line_start: 0,
+            old_line_end: 0,
         };
         printer.print_url_value(text);
         String::from_utf8(printer.css).expect("CSS output is UTF-8")
@@ -1270,5 +1308,32 @@ mod tests {
         );
         assert_eq!(result.css, b"a {\n}\n");
         assert!(!result.source_map_chunk.buffer.data.is_empty());
+    }
+
+    #[test]
+    fn wraps_minified_css_past_the_line_limit() {
+        let tree = Ast {
+            rules: vec![
+                Rule {
+                    loc: Loc::default(),
+                    data: RuleData::Comment(CommentRule { text: "aa".into() }),
+                },
+                Rule {
+                    loc: Loc::default(),
+                    data: RuleData::Comment(CommentRule { text: "bb".into() }),
+                },
+            ],
+            ..Ast::default()
+        };
+        let result = print(
+            &tree,
+            &SymbolMap::default(),
+            Options {
+                line_limit: 2,
+                minify_whitespace: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(result.css, b"aa\nbb");
     }
 }
