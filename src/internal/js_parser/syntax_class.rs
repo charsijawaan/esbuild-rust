@@ -41,12 +41,22 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
     } else {
         None
     };
+    if core.options.ts.parse {
+        super::syntax_typescript::skip_type_parameters(lexer);
+    }
     let extends_or_nil = if lexer.token == Token::Extends {
         lexer.next();
-        parse_expression(core, lexer, Precedence::New, true)
+        let extends = parse_expression(core, lexer, Precedence::New, true);
+        if core.options.ts.parse {
+            super::syntax_typescript::skip_type_parameters(lexer);
+        }
+        extends
     } else {
         Expr::default()
     };
+    if core.options.ts.parse {
+        super::syntax_typescript::skip_class_implements_clause(lexer);
+    }
 
     let body_loc = lexer.loc();
     lexer.expect(Token::OpenBrace);
@@ -57,11 +67,9 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
             lexer.next();
             continue;
         }
-        properties.push(parse_class_property(
-            core,
-            lexer,
-            extends_or_nil.data.is_some(),
-        ));
+        if let Some(property) = parse_class_property(core, lexer, extends_or_nil.data.is_some()) {
+            properties.push(property);
+        }
     }
     let mut has_constructor = false;
     for property in &properties {
@@ -106,7 +114,7 @@ fn parse_class_property(
     core: &mut ParserCore,
     lexer: &mut Lexer,
     class_has_extends: bool,
-) -> Property {
+) -> Option<Property> {
     let start_loc = lexer.loc();
     let mut is_static = false;
     let mut preconsumed_static = None;
@@ -128,7 +136,7 @@ fn parse_class_property(
                 crate::internal::js_ast::ScopeKind::ClassStaticInit,
             );
             core.fn_or_arrow_data_parse = old_context;
-            return Property {
+            return Some(Property {
                 class_static_block: Some(Box::new(ClassStaticBlock {
                     block,
                     loc: block_loc,
@@ -136,7 +144,7 @@ fn parse_class_property(
                 loc: start_loc,
                 kind: PropertyKind::ClassStaticBlock,
                 ..Property::default()
-            };
+            });
         }
         if lexer.token == Token::OpenParen {
             preconsumed_static = Some((name, name_loc, name_range));
@@ -146,8 +154,52 @@ fn parse_class_property(
     }
 
     let mut kind = PropertyKind::Field;
+    let mut is_type_only = false;
+    let mut preconsumed_ts_key = preconsumed_static;
+    while preconsumed_ts_key.is_none()
+        && core.options.ts.parse
+        && lexer.token == Token::Identifier
+        && matches!(
+            lexer.raw(),
+            b"public"
+                | b"private"
+                | b"protected"
+                | b"readonly"
+                | b"abstract"
+                | b"declare"
+                | b"override"
+                | b"accessor"
+                | b"static"
+        )
+    {
+        let name = lexer.identifier.clone();
+        let name_loc = lexer.loc();
+        let name_range = lexer.range();
+        let modifier = lexer.raw().to_vec();
+        lexer.next();
+        let could_be_modifier = lexer.is_identifier_or_keyword()
+            || matches!(
+                lexer.token,
+                Token::OpenBracket
+                    | Token::NumericLiteral
+                    | Token::StringLiteral
+                    | Token::PrivateIdentifier
+                    | Token::Asterisk
+            );
+        if !could_be_modifier || lexer.has_newline_before {
+            preconsumed_ts_key = Some((name, name_loc, name_range));
+            break;
+        }
+        match modifier.as_slice() {
+            b"abstract" | b"declare" => is_type_only = true,
+            b"accessor" => kind = PropertyKind::AutoAccessor,
+            b"static" => is_static = true,
+            _ => {}
+        }
+    }
+
     let mut is_async = false;
-    let mut preconsumed_key = preconsumed_static;
+    let mut preconsumed_key = preconsumed_ts_key;
     if preconsumed_key.is_none()
         && lexer.token == Token::Identifier
         && matches!(lexer.raw(), b"get" | b"set" | b"async")
@@ -233,14 +285,46 @@ fn parse_class_property(
         }
     };
 
+    if core.options.ts.parse {
+        if lexer.token == Token::Question
+            || (lexer.token == Token::Exclamation && !lexer.has_newline_before)
+        {
+            lexer.next();
+        }
+        if kind != PropertyKind::AutoAccessor {
+            super::syntax_typescript::skip_type_parameters(lexer);
+        }
+    }
+
+    if is_type_only {
+        if lexer.token == Token::OpenParen || kind.is_method_definition() {
+            super::syntax_typescript::skip_type_script_method_signature(lexer);
+        } else {
+            super::syntax_typescript::skip_type_annotation(
+                lexer,
+                &[Token::Equals, Token::Semicolon, Token::CloseBrace],
+            );
+            if lexer.token == Token::Equals {
+                let scope_index = core.scopes_in_order.len();
+                lexer.next();
+                let _ = parse_expression(core, lexer, Precedence::Comma, true);
+                core.discard_scopes_up_to(scope_index);
+            }
+            lexer.expect_or_insert_semicolon();
+        }
+        return None;
+    }
+
     if let Some(ExprData::PrivateIdentifier(private)) = key.data.as_deref_mut() {
         let name = String::from_utf8_lossy(core.load_name_from_ref(private.reference)).into_owned();
         let is_method = lexer.token == Token::OpenParen || kind.is_method_definition();
         let symbol_kind = match (is_static, kind, is_method) {
+            (false, PropertyKind::AutoAccessor, _) => SymbolKind::PrivateGetSetPair,
             (false, PropertyKind::Getter, _) => SymbolKind::PrivateGet,
             (false, PropertyKind::Setter, _) => SymbolKind::PrivateSet,
             (false, _, true) => SymbolKind::PrivateMethod,
             (false, _, false) => SymbolKind::PrivateField,
+            (true, PropertyKind::AutoAccessor, _) => SymbolKind::PrivateStaticGetSetPair,
             (true, PropertyKind::Getter, _) => SymbolKind::PrivateStaticGet,
             (true, PropertyKind::Setter, _) => SymbolKind::PrivateStaticSet,
             (true, _, true) => SymbolKind::PrivateStaticMethod,
@@ -328,7 +412,7 @@ fn parse_class_property(
         } else if kind == PropertyKind::Field {
             kind = PropertyKind::Method;
         }
-        return Property {
+        return Some(Property {
             key,
             value_or_nil: Expr::new(
                 start_loc,
@@ -342,12 +426,18 @@ fn parse_class_property(
             kind,
             flags,
             ..Property::default()
-        };
+        });
     }
     if is_generator {
         lexer.expected(Token::OpenParen);
     }
 
+    if core.options.ts.parse {
+        super::syntax_typescript::skip_type_annotation(
+            lexer,
+            &[Token::Equals, Token::Semicolon, Token::CloseBrace],
+        );
+    }
     let initializer_or_nil = if lexer.token == Token::Equals {
         lexer.next();
         let old_context = core.fn_or_arrow_data_parse;
@@ -360,15 +450,15 @@ fn parse_class_property(
         Expr::default()
     };
     lexer.expect_or_insert_semicolon();
-    Property {
+    Some(Property {
         key,
         initializer_or_nil,
         loc: start_loc,
         close_bracket_loc,
-        kind: PropertyKind::Field,
+        kind,
         flags,
         ..Property::default()
-    }
+    })
 }
 
 fn class_property_name(core: &mut ParserCore, loc: Loc, name: MaybeSubstring) -> Expr {
@@ -504,6 +594,60 @@ mod tests {
                 .flags
                 .contains(PropertyFlags::IS_STATIC)
         );
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn erases_type_script_class_types_and_modifiers() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"class Box<T> extends Base<Map<K, V>> implements Readable<T>, Disposable {\
+                    public readonly value!: T;\
+                    protected optional?: number = 1;\
+                    private declare hidden: string;\
+                    abstract omitted: boolean;\
+                    override map<U>(input: U): T { return this.value; }\
+                    static accessor count: number = 0;\
+                    public() {}\
+                }"[..],
+            ),
+            ..Source::default()
+        };
+        let ts_options = TsOptions {
+            parse: true,
+            ..TsOptions::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), ts_options.clone());
+        let mut core = super::ParserCore::new(
+            source,
+            Options {
+                ts: ts_options,
+                ..Options::default()
+            },
+        );
+        let expr = parse_class_prefix(&mut core, &mut lexer).expect("class");
+        let Some(ExprData::Class(class)) = expr.data.as_deref() else {
+            panic!("expected class");
+        };
+        assert!(matches!(
+            class.class.extends_or_nil.data.as_deref(),
+            Some(ExprData::Identifier(_))
+        ));
+        assert_eq!(class.class.properties.len(), 5);
+        assert!(class.class.properties[0].initializer_or_nil.data.is_none());
+        assert!(matches!(
+            class.class.properties[1].initializer_or_nil.data.as_deref(),
+            Some(ExprData::Number(1.0))
+        ));
+        assert_eq!(class.class.properties[2].kind, PropertyKind::Method);
+        assert_eq!(class.class.properties[3].kind, PropertyKind::AutoAccessor);
+        assert!(
+            class.class.properties[3]
+                .flags
+                .contains(PropertyFlags::IS_STATIC)
+        );
+        assert_eq!(class.class.properties[4].kind, PropertyKind::Method);
         assert_eq!(lexer.token, Token::EndOfFile);
     }
 }

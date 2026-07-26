@@ -1974,6 +1974,51 @@ mod tests {
     }
 
     #[test]
+    fn visits_type_script_classes_after_erasing_type_only_syntax() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "class Box<T> extends Base<T> implements Readable<T> {\
+               declare hidden: string;\
+               readonly value!: T;\
+               map<U>(input: U): T { return this.value; }\
+               static accessor count: number = initialize();\
+               accessor #slot: number = 0;\
+             }",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Class(class)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected TypeScript class statement");
+        };
+        assert_eq!(class.class.properties.len(), 4);
+        assert_eq!(
+            class.class.properties[1].kind,
+            crate::internal::js_ast::PropertyKind::Method
+        );
+        assert_eq!(
+            class.class.properties[2].kind,
+            crate::internal::js_ast::PropertyKind::AutoAccessor
+        );
+        assert!(
+            class.class.properties[2]
+                .flags
+                .contains(crate::internal::js_ast::PropertyFlags::IS_STATIC)
+        );
+        assert_eq!(
+            ast.symbols[usize::try_from(
+                ast.parts[1].scopes[2].lock().expect("class body").members["#slot"]
+                    .reference
+                    .inner_index
+            )
+            .expect("symbol index")]
+            .kind,
+            crate::internal::ast::SymbolKind::PrivateGetSetPair
+        );
+    }
+
+    #[test]
     fn validates_class_constructor_and_prototype_names() {
         let (_, ok, log) = parse_source(
             "class Getter { get constructor() {} }\

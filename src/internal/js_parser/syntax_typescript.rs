@@ -21,9 +21,14 @@ pub(crate) fn skip_type_parameters(lexer: &mut Lexer) {
     loop {
         match lexer.token {
             Token::LessThan => depth += 1,
-            Token::GreaterThan => {
+            Token::GreaterThan
+            | Token::GreaterThanEquals
+            | Token::GreaterThanGreaterThan
+            | Token::GreaterThanGreaterThanEquals
+            | Token::GreaterThanGreaterThanGreaterThan
+            | Token::GreaterThanGreaterThanGreaterThanEquals => {
                 depth -= 1;
-                lexer.next();
+                lexer.expect_greater_than(false);
                 if depth == 0 {
                     return;
                 }
@@ -34,6 +39,58 @@ pub(crate) fn skip_type_parameters(lexer: &mut Lexer) {
         }
         lexer.next();
     }
+}
+
+pub(crate) fn skip_class_implements_clause(lexer: &mut Lexer) {
+    if !lexer.is_contextual_keyword(b"implements") {
+        return;
+    }
+    lexer.next();
+    let mut delimiters = Vec::new();
+    loop {
+        if delimiters.is_empty() && lexer.token == Token::OpenBrace {
+            return;
+        }
+        match lexer.token {
+            Token::OpenParen => delimiters.push(Token::CloseParen),
+            Token::OpenBracket => delimiters.push(Token::CloseBracket),
+            Token::LessThan => delimiters.push(Token::GreaterThan),
+            Token::GreaterThan
+            | Token::GreaterThanEquals
+            | Token::GreaterThanGreaterThan
+            | Token::GreaterThanGreaterThanEquals
+            | Token::GreaterThanGreaterThanGreaterThan
+            | Token::GreaterThanGreaterThanGreaterThanEquals
+                if delimiters.last() == Some(&Token::GreaterThan) =>
+            {
+                delimiters.pop();
+                lexer.expect_greater_than(false);
+                continue;
+            }
+            token if delimiters.last() == Some(&token) => {
+                delimiters.pop();
+            }
+            Token::EndOfFile => lexer.expected(Token::OpenBrace),
+            _ => {}
+        }
+        lexer.next();
+    }
+}
+
+pub(crate) fn skip_type_script_method_signature(lexer: &mut Lexer) {
+    lexer.expect(Token::OpenParen);
+    let mut depth = 1_usize;
+    while depth > 0 {
+        match lexer.token {
+            Token::OpenParen => depth += 1,
+            Token::CloseParen => depth -= 1,
+            Token::EndOfFile => lexer.expected(Token::CloseParen),
+            _ => {}
+        }
+        lexer.next();
+    }
+    skip_type_annotation(lexer, &[Token::Semicolon, Token::CloseBrace]);
+    lexer.expect_or_insert_semicolon();
 }
 
 pub(crate) fn skip_type_annotation(lexer: &mut Lexer, stop_tokens: &[Token]) {
