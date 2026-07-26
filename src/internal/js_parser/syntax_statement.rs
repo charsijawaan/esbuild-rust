@@ -3,9 +3,9 @@
 use crate::internal::{
     js_ast::{
         Binding, BindingData, BlockStmt, BreakStmt, Catch, ContinueStmt, Decl, DoWhileStmt, Expr,
-        ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt, ForStmt, IdentifierBinding,
-        IdentifierExpr, IfStmt, LocalKind, LocalStmt, Precedence, ReturnStmt, Stmt, StmtData,
-        SwitchCase, SwitchStmt, ThrowStmt, TryStmt, WhileStmt, WithStmt,
+        ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt, ForStmt, FunctionStmt,
+        IdentifierBinding, IdentifierExpr, IfStmt, LocalKind, LocalStmt, Precedence, ReturnStmt,
+        Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt, TryStmt, WhileStmt, WithStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
@@ -14,6 +14,7 @@ use crate::internal::{
 use super::{
     parser_core::ParserCore,
     syntax_expression::{parse_expression, parse_expression_suffix},
+    syntax_function::{parse_async_prefix, parse_function_prefix},
 };
 
 pub(crate) fn parse_block(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, BlockStmt) {
@@ -68,6 +69,21 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             }),
         );
     }
+    if lexer.is_contextual_keyword(b"async") {
+        let expression = parse_async_prefix(core, lexer).expect("async token was checked");
+        if matches!(expression.data.as_deref(), Some(ExprData::Function(_))) {
+            return function_declaration_from_expression(core, loc, expression);
+        }
+        let value = parse_expression_suffix(core, lexer, expression, Precedence::Lowest, true);
+        lexer.expect_or_insert_semicolon();
+        return Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value,
+                ..ExprStmt::default()
+            }),
+        );
+    }
 
     match lexer.token {
         Token::Semicolon => {
@@ -77,6 +93,11 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         Token::OpenBrace => {
             let (_, block) = parse_block(core, lexer);
             Stmt::new(loc, StmtData::Block(block))
+        }
+        Token::Function => {
+            let expression =
+                parse_function_prefix(core, lexer).expect("function token was checked");
+            function_declaration_from_expression(core, loc, expression)
         }
         Token::If => {
             lexer.next();
@@ -407,6 +428,28 @@ fn parse_local_declarations(
             declarations,
             kind,
             ..LocalStmt::default()
+        }),
+    )
+}
+
+fn function_declaration_from_expression(core: &mut ParserCore, loc: Loc, expression: Expr) -> Stmt {
+    let Some(data) = expression.data else {
+        unreachable!("function parser always returns expression data");
+    };
+    let ExprData::Function(function) = *data else {
+        unreachable!("function declaration requires a function expression");
+    };
+    if function.function.name.is_none() {
+        core.add_error_range(
+            Range { loc, len: 8 },
+            "A function declaration must have a name",
+        );
+    }
+    Stmt::new(
+        loc,
+        StmtData::Function(FunctionStmt {
+            function: function.function,
+            is_export: false,
         }),
     )
 }
@@ -846,6 +889,34 @@ mod tests {
         assert!(matches!(
             block.statements[0].data.as_deref(),
             Some(StmtData::ForOf(for_of)) if for_of.await_range.len > 0
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_function_async_and_generator_declarations() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"{function plain() {} function* generator() { yield 1 } async function task() { await work }}"[..],
+            ),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        assert!(
+            block.statements.iter().all(|statement| {
+                matches!(statement.data.as_deref(), Some(StmtData::Function(_)))
+            })
+        );
+        assert!(matches!(
+            block.statements[1].data.as_deref(),
+            Some(StmtData::Function(function)) if function.function.is_generator
+        ));
+        assert!(matches!(
+            block.statements[2].data.as_deref(),
+            Some(StmtData::Function(function)) if function.function.is_async
         ));
         assert_eq!(lexer.token, Token::EndOfFile);
     }
