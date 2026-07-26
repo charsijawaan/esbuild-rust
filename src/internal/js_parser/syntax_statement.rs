@@ -16,7 +16,9 @@ use super::{
     parser_core::ParserCore,
     syntax_binding::parse_binding,
     syntax_class::parse_class_prefix,
-    syntax_expression::{parse_expression, parse_expression_suffix},
+    syntax_expression::{
+        parse_expression, parse_expression_suffix, parse_expression_suffix_with_flags,
+    },
     syntax_function::{parse_async_statement_prefix, parse_function_declaration_prefix},
     syntax_module::{parse_export_statement, parse_import_statement},
 };
@@ -255,13 +257,14 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         );
     }
     if lexer.token == Token::Identifier && !matches!(lexer.raw(), b"await" | b"yield") {
+        let comment_flags = lexer.has_comment_before;
         let name_loc = lexer.loc();
         let reference = core.store_name_in_ref(lexer.identifier.clone());
         lexer.next();
         if lexer.token == Token::Colon {
             return parse_label_statement(core, lexer, loc, name_loc, reference);
         }
-        let value = parse_expression_suffix(
+        let value = parse_expression_suffix_with_flags(
             core,
             lexer,
             Expr::new(
@@ -273,6 +276,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             ),
             Precedence::Lowest,
             true,
+            comment_flags,
         );
         lexer.expect_or_insert_semicolon();
         return Stmt::new(

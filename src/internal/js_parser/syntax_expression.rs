@@ -2,7 +2,7 @@
 
 use crate::internal::{
     js_ast::{BinaryExpr, Expr, ExprData, IfExpr, Precedence, SpreadExpr},
-    js_lexer::{Lexer, Token},
+    js_lexer::{CommentBefore, Lexer, Token},
 };
 
 use super::{
@@ -35,7 +35,52 @@ pub(crate) fn parse_expression(
     minimum_precedence: Precedence,
     allow_in: bool,
 ) -> Expr {
+    let comment_flags = lexer.has_comment_before;
     let left = parse_prefix(core, lexer, minimum_precedence, allow_in);
+    parse_expression_suffix_with_flags(
+        core,
+        lexer,
+        left,
+        minimum_precedence,
+        allow_in,
+        comment_flags,
+    )
+}
+
+pub(crate) fn parse_expression_suffix_with_flags(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    mut left: Expr,
+    minimum_precedence: Precedence,
+    allow_in: bool,
+    comment_flags: CommentBefore,
+) -> Expr {
+    if !core.options.ignore_dce_annotations {
+        if comment_flags.contains(CommentBefore::NO_SIDE_EFFECTS) {
+            match left.data.as_deref_mut() {
+                Some(ExprData::Arrow(arrow)) => arrow.has_no_side_effects_comment = true,
+                Some(ExprData::Function(function)) => {
+                    function.function.has_no_side_effects_comment = true;
+                }
+                _ => {}
+            }
+        }
+        if comment_flags.contains(CommentBefore::PURE) && minimum_precedence < Precedence::Call {
+            left = parse_high_precedence_suffix_chain(
+                core,
+                lexer,
+                left,
+                Precedence::New,
+                false,
+                |core, lexer, precedence| parse_expression(core, lexer, precedence, true),
+            );
+            match left.data.as_deref_mut() {
+                Some(ExprData::Call(call)) => call.can_be_unwrapped_if_unused = true,
+                Some(ExprData::New(new)) => new.can_be_unwrapped_if_unused = true,
+                _ => {}
+            }
+        }
+    }
     parse_expression_suffix(core, lexer, left, minimum_precedence, allow_in)
 }
 

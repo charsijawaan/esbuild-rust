@@ -400,6 +400,22 @@ mod tests {
     }
 
     #[test]
+    fn preserves_user_authored_pure_annotations() {
+        assert_eq!(
+            code(transform(
+                "const call = /* @__PURE__ */ factory();\
+                 const instance = /* #__PURE__ */ new Factory();",
+                TransformOptions {
+                    loader: Loader::Js,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const call = /* @__PURE__ */ factory();\n\
+             const instance = /* @__PURE__ */ new Factory();\n"
+        );
+    }
+
+    #[test]
     fn transforms_type_script_enums_through_lowering() {
         assert_eq!(
             code(transform(
