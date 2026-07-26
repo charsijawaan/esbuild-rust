@@ -944,15 +944,7 @@ impl Printer<'_> {
                 self.print_indent();
                 self.print_identifier(&self.renamer.name_for_symbol(label.name.reference));
                 self.output.push(b':');
-                if matches!(label.statement.data.as_deref(), Some(StmtData::Block(_))) {
-                    self.print_optional_space();
-                    self.print_stmt(&label.statement);
-                } else {
-                    self.print_newline();
-                    self.indent += 1;
-                    self.print_stmt(&label.statement);
-                    self.indent -= 1;
-                }
+                self.print_loop_body(&label.statement, label.is_single_line_stmt);
             }
             StmtData::Try(try_statement) => {
                 self.print_indent();
@@ -1001,10 +993,19 @@ impl Printer<'_> {
                     }
                     self.print_newline();
                     self.indent += 1;
-                    for statement in &case.body {
-                        self.print_stmt(statement);
-                    }
+                    let statements = case.body.iter().collect::<Vec<_>>();
+                    self.print_statements(&statements);
                     self.indent -= 1;
+                }
+                if self.options.minify_whitespace
+                    && let Some(statement) = switch_statement
+                        .cases
+                        .last()
+                        .and_then(|case| case.body.last())
+                    && statement_can_omit_semicolon_before_close_brace(statement)
+                    && self.output.last() == Some(&b';')
+                {
+                    self.output.pop();
                 }
                 self.indent -= 1;
                 self.print_indent();
@@ -3501,7 +3502,8 @@ mod tests {
             contents: Arc::from(
                 b"for (let i = 0; i < 2; i++) { sum += i; }\
                   for (const key in object) use(key);\
-                  for (const value of list) use(value);"
+                  for (const value of list) use(value);\
+                  outer: for (let j = 0; j < 2; j++) { if (j) continue outer; }"
                     .as_slice(),
             ),
             identifier_name: "entry".into(),
@@ -3520,7 +3522,10 @@ mod tests {
              \x20\x20sum += i;\n\
              }\n\
              for (const key in object) use(key);\n\
-             for (const value of list) use(value);\n"
+             for (const value of list) use(value);\n\
+             outer: for (let j = 0; j < 2; j++) {\n\
+             \x20\x20if (j) continue outer;\n\
+             }\n"
         );
     }
 
@@ -3558,6 +3563,21 @@ mod tests {
              \x20\x20default:\n\
              \x20\x20\x20\x20fallback();\n\
              }\n"
+        );
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "try{work()}catch(error){fail(error)}finally{done()}switch(kind){case 1:break;default:fallback()}"
         );
     }
 
