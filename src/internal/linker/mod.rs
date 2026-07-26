@@ -2655,6 +2655,13 @@ pub struct PreparedCssAst {
     pub has_charset: bool,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompiledCssAst {
+    pub css: Vec<u8>,
+    pub source_index: Index32,
+    pub has_charset: bool,
+}
+
 /// Convert CSS import-order entries into standalone ASTs ready for printing.
 ///
 /// This removes rules that the linker represents separately and encodes nested
@@ -2817,6 +2824,113 @@ pub fn prepare_css_asts(
             }
         })
         .collect()
+}
+
+/// Print each prepared CSS AST independently before chunk concatenation.
+#[must_use]
+pub fn compile_prepared_css_asts(
+    graph: &LinkerGraph,
+    prepared: &[PreparedCssAst],
+    options: &Options,
+) -> Vec<CompiledCssAst> {
+    prepared
+        .iter()
+        .map(|item| {
+            let input_source_index = if item.source_index.is_valid() {
+                item.source_index.get_index()
+            } else {
+                0
+            };
+            let printed = css_printer::print(
+                &item.ast,
+                &graph.symbols,
+                css_printer::Options {
+                    line_limit: options.line_limit,
+                    input_source_index,
+                    minify_whitespace: options.minify_whitespace,
+                    ascii_only: options.ascii_only,
+                    ..css_printer::Options::default()
+                },
+            );
+            CompiledCssAst {
+                css: printed.css,
+                source_index: item.source_index,
+                has_charset: item.has_charset,
+            }
+        })
+        .collect()
+}
+
+/// Concatenate printed CSS files into one chunk and split temporary output
+/// paths into intermediate pieces.
+pub fn assemble_css_chunk(
+    graph: &LinkerGraph,
+    chunk: &mut ChunkInfo,
+    compiled: &[CompiledCssAst],
+    options: &Options,
+    output_paths: &OutputPathContext<'_>,
+) {
+    let mut joiner = Joiner::default();
+    let mut newline_before_comment = false;
+
+    if !options.css_banner.is_empty() {
+        joiner.add_string(options.css_banner.clone());
+        joiner.add_string("\n");
+    }
+
+    if compiled.iter().any(|item| item.has_charset) {
+        let charset = css_printer::print(
+            &CssAst {
+                rules: vec![Rule {
+                    data: RuleData::AtCharset(crate::internal::css_ast::AtCharsetRule {
+                        encoding: "UTF-8".into(),
+                    }),
+                    loc: crate::internal::logger::Loc::default(),
+                }],
+                ..CssAst::default()
+            },
+            &graph.symbols,
+            css_printer::Options {
+                line_limit: options.line_limit,
+                minify_whitespace: options.minify_whitespace,
+                ascii_only: options.ascii_only,
+                ..css_printer::Options::default()
+            },
+        );
+        if !charset.css.is_empty() {
+            joiner.add_bytes(charset.css);
+            newline_before_comment = true;
+        }
+    }
+
+    for item in compiled {
+        if options.mode == Mode::Bundle
+            && !options.minify_whitespace
+            && item.source_index.is_valid()
+        {
+            if newline_before_comment {
+                joiner.add_string("\n");
+            }
+            let source_index = item.source_index.get_index();
+            let path = graph.files[source_index as usize]
+                .input_file
+                .source
+                .pretty_paths
+                .select(options.code_path_style);
+            joiner.add_string(format!("/* {path} */\n"));
+        }
+        if !item.css.is_empty() {
+            newline_before_comment = true;
+            joiner.add_bytes(item.css.clone());
+        }
+    }
+
+    joiner.ensure_newline_at_end();
+    if !options.css_footer.is_empty() {
+        joiner.add_string(options.css_footer.clone());
+        joiner.add_string("\n");
+    }
+    chunk.intermediate_output = output_paths.break_joiner_into_pieces(joiner);
 }
 
 /// Discover symbol edges that cross JavaScript chunk boundaries and assign
@@ -6013,12 +6127,13 @@ mod tests {
 
     use super::{
         AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, ChunkRuntimeRefs,
-        CompileResultForSourceMap, CrossChunkImport, CrossChunkImportItem, CssImportKind,
-        EntryPointTailRefs, ImportStatus, ImportTracker, MatchImportKind, OutputPathContext,
-        OutputPiece, OutputPieceIndexKind, PartRange, RuntimeReExportContext, StableRef,
-        add_exports_for_export_star, advance_import_tracker, append_or_extend_part_range,
-        assemble_javascript_chunk, assign_chunk_path_templates, bind_imports_to_exports_for_file,
-        classify_module_wrappers, compile_part_range_for_chunk, compute_cross_chunk_dependencies,
+        CompileResultForSourceMap, CompiledCssAst, CrossChunkImport, CrossChunkImportItem,
+        CssImportKind, EntryPointTailRefs, ImportStatus, ImportTracker, MatchImportKind,
+        OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, PreparedCssAst,
+        RuntimeReExportContext, StableRef, add_exports_for_export_star, advance_import_tracker,
+        append_or_extend_part_range, assemble_css_chunk, assemble_javascript_chunk,
+        assign_chunk_path_templates, bind_imports_to_exports_for_file, classify_module_wrappers,
+        compile_part_range_for_chunk, compile_prepared_css_asts, compute_cross_chunk_dependencies,
         compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
         create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
         finalize_javascript_chunk_outputs, find_imported_css_files_in_js_order,
@@ -8725,6 +8840,104 @@ mod tests {
             panic!("expected external import");
         };
         assert!(at_import.import_conditions.is_some());
+    }
+
+    #[test]
+    fn compiles_prepared_css_asts_with_printer_options() {
+        let input_files = [css_file(vec![], vec![], vec![])];
+        let graph = clone_linker_graph(&input_files, &[0], &[], false);
+        let compiled = compile_prepared_css_asts(
+            &graph,
+            &[PreparedCssAst {
+                ast: crate::internal::css_ast::Ast {
+                    rules: vec![Rule {
+                        data: RuleData::Comment(crate::internal::css_ast::CommentRule {
+                            text: "a{color:red}".into(),
+                        }),
+                        loc: Loc::default(),
+                    }],
+                    ..crate::internal::css_ast::Ast::default()
+                },
+                source_index: Index32::new(7),
+                has_charset: true,
+            }],
+            &Options {
+                minify_whitespace: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(compiled[0].css, b"a{color:red}");
+        assert_eq!(compiled[0].source_index.get_index(), 7);
+        assert!(compiled[0].has_charset);
+    }
+
+    #[test]
+    fn assembles_css_chunks_with_charset_boundaries_and_banners() {
+        let mut source = css_file(vec![], vec![], vec![]);
+        source.source.pretty_paths = PrettyPaths {
+            abs: "/project/input.css".into(),
+            rel: "input.css".into(),
+        };
+        let input_files = [css_file(vec![], vec![], vec![]), source];
+        let graph = clone_linker_graph(&input_files, &[0, 1], &[], false);
+        let mut chunk = ChunkInfo::default();
+        assemble_css_chunk(
+            &graph,
+            &mut chunk,
+            &[
+                CompiledCssAst {
+                    css: b"@import \"external.css\";\n".to_vec(),
+                    ..CompiledCssAst::default()
+                },
+                CompiledCssAst {
+                    css: b".a { color: red }\n".to_vec(),
+                    source_index: Index32::new(1),
+                    has_charset: true,
+                },
+            ],
+            &Options {
+                mode: Mode::Bundle,
+                css_banner: "/* banner */".into(),
+                css_footer: "/* footer */".into(),
+                ..Options::default()
+            },
+            &context(&[], &[]),
+        );
+        let (joiner, shifts) =
+            context(&[], &[]).substitute_final_paths(chunk.intermediate_output, str::to_owned);
+        assert_eq!(
+            joiner.done(),
+            b"/* banner */\n@charset \"UTF-8\";\n@import \"external.css\";\n\n/* input.css */\n.a { color: red }\n/* footer */\n"
+        );
+        assert_eq!(shifts, [SourceMapShift::default()]);
+    }
+
+    #[test]
+    fn css_chunk_assembly_splits_temporary_asset_paths() {
+        let input_files = [css_file(vec![], vec![], vec![])];
+        let graph = clone_linker_graph(&input_files, &[0], &[], false);
+        let assets = [Some(AssetPath {
+            unique_key: "UNIQUEA00000000".into(),
+            rel_path: "image.png".into(),
+        })];
+        let mut chunk = ChunkInfo::default();
+        assemble_css_chunk(
+            &graph,
+            &mut chunk,
+            &[CompiledCssAst {
+                css: b"a{background:url(UNIQUEA00000000)}".to_vec(),
+                ..CompiledCssAst::default()
+            }],
+            &Options {
+                minify_whitespace: true,
+                ..Options::default()
+            },
+            &context(&assets, &[]),
+        );
+        assert!(chunk.intermediate_output.pieces().is_some());
+        let (joiner, _) = context(&assets, &[])
+            .substitute_final_paths(chunk.intermediate_output, |_| "assets/image.png".into());
+        assert_eq!(joiner.done(), b"a{background:url(assets/image.png)}\n");
     }
 
     fn js_repr(graph: &crate::internal::graph::LinkerGraph, source_index: usize) -> &JsRepr {
