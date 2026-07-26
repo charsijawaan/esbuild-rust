@@ -975,7 +975,11 @@ impl Printer<'_> {
                     || import.star_name_loc.is_some()
                     || import.items.as_ref().is_some_and(|items| !items.is_empty());
                 if has_clause {
-                    self.output.push(b' ');
+                    if import.default_name.is_some() {
+                        self.output.push(b' ');
+                    } else {
+                        self.print_optional_space();
+                    }
                     let mut needs_comma = false;
                     if let Some(default_name) = import.default_name {
                         self.print_identifier(
@@ -988,7 +992,9 @@ impl Printer<'_> {
                             self.output.push(b',');
                             self.print_optional_space();
                         }
-                        self.output.extend_from_slice(b"* as ");
+                        self.output.push(b'*');
+                        self.print_optional_space();
+                        self.output.extend_from_slice(b"as ");
                         self.print_identifier(&self.renamer.name_for_symbol(import.namespace_ref));
                     } else if let Some(items) = &import.items {
                         if needs_comma {
@@ -997,9 +1003,15 @@ impl Printer<'_> {
                         }
                         self.print_import_items(items, true);
                     }
-                    self.output.extend_from_slice(b" from ");
+                    let ends_with_identifier =
+                        import.star_name_loc.is_some() || import.items.is_none();
+                    if ends_with_identifier || !self.options.minify_whitespace {
+                        self.output.push(b' ');
+                    }
+                    self.output.extend_from_slice(b"from");
+                    self.print_optional_space();
                 } else {
-                    self.output.push(b' ');
+                    self.print_optional_space();
                 }
                 self.print_import_path(import.import_record_index, false);
                 self.print_import_attributes(import.import_record_index, false);
@@ -1008,16 +1020,20 @@ impl Printer<'_> {
             }
             StmtData::ExportClause(export) => {
                 self.print_indent();
-                self.output.extend_from_slice(b"export ");
+                self.output.extend_from_slice(b"export");
+                self.print_optional_space();
                 self.print_import_items(&export.items, false);
                 self.output.push(b';');
                 self.print_newline();
             }
             StmtData::ExportFrom(export) => {
                 self.print_indent();
-                self.output.extend_from_slice(b"export ");
+                self.output.extend_from_slice(b"export");
+                self.print_optional_space();
                 self.print_export_from_items(&export.items);
-                self.output.extend_from_slice(b" from ");
+                self.print_optional_space();
+                self.output.extend_from_slice(b"from");
+                self.print_optional_space();
                 self.print_import_path(export.import_record_index, false);
                 self.print_import_attributes(export.import_record_index, false);
                 self.output.push(b';');
@@ -1025,12 +1041,19 @@ impl Printer<'_> {
             }
             StmtData::ExportStar(export) => {
                 self.print_indent();
-                self.output.extend_from_slice(b"export *");
+                self.output.extend_from_slice(b"export");
+                self.print_optional_space();
+                self.output.push(b'*');
                 if let Some(alias) = &export.alias {
-                    self.output.extend_from_slice(b" as ");
+                    self.print_optional_space();
+                    self.output.extend_from_slice(b"as ");
                     self.print_identifier(&alias.original_name);
+                    self.output.push(b' ');
+                } else {
+                    self.print_optional_space();
                 }
-                self.output.extend_from_slice(b" from ");
+                self.output.extend_from_slice(b"from");
+                self.print_optional_space();
                 self.print_import_path(export.import_record_index, false);
                 self.print_import_attributes(export.import_record_index, false);
                 self.output.push(b';');
@@ -3379,6 +3402,21 @@ mod tests {
              export { external as out } from \"third\";\n\
              export * from \"all\";\n\
              export default value;\n"
+        );
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "import value,{named as local}from\"pkg\";import*as ns from\"other\";import\"side\";export{local as renamed};export{external as out}from\"third\";export*from\"all\";export default value;"
         );
         let metadata = print(
             &ast,
