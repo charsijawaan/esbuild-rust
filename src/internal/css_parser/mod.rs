@@ -3,8 +3,9 @@
 use crate::internal::{
     ast::{ImportKind, ImportRecord},
     css_ast::{
-        Ast, AtCharsetRule, AtImportRule, BadDeclarationRule, DeclarationRule, ImportConditions,
-        QualifiedRule, Rule, RuleData, Token, UnknownAtRule, WhitespaceFlags,
+        Ast, AtCharsetRule, AtImportRule, AtLayerRule, AtMediaRule, BadDeclarationRule,
+        DeclarationRule, ImportConditions, KnownAtRule, MediaArbitraryTokensQuery, MediaQuery,
+        MediaQueryData, QualifiedRule, Rule, RuleData, Token, UnknownAtRule, WhitespaceFlags,
     },
     css_lexer::{self, TokenKind},
     logger::{Loc, Log, Path, Range, Source},
@@ -102,8 +103,50 @@ impl Parser {
 
         let prelude_start = self.index;
         let end = self.scan_to_rule_delimiter();
-        let prelude = self.convert_tokens(prelude_start, end);
+        let mut prelude = self.convert_tokens(prelude_start, end);
+        trim_token_boundary_whitespace(&mut prelude);
         self.index = end;
+        if self.current_kind() == TokenKind::OpenBrace {
+            if name.eq_ignore_ascii_case("media") {
+                let queries = split_media_queries(prelude, loc);
+                self.index += 1;
+                let rules = self.parse_rule_list(true);
+                return Rule {
+                    loc,
+                    data: RuleData::AtMedia(AtMediaRule {
+                        queries,
+                        rules,
+                        ..AtMediaRule::default()
+                    }),
+                };
+            }
+            if name.eq_ignore_ascii_case("layer") {
+                let names = parse_layer_names(&prelude);
+                self.index += 1;
+                let rules = self.parse_rule_list(true);
+                return Rule {
+                    loc,
+                    data: RuleData::AtLayer(AtLayerRule {
+                        names,
+                        rules,
+                        ..AtLayerRule::default()
+                    }),
+                };
+            }
+            if is_known_block_at_rule(&name) {
+                self.index += 1;
+                let rules = self.parse_rule_list(true);
+                return Rule {
+                    loc,
+                    data: RuleData::KnownAt(KnownAtRule {
+                        at_token: name,
+                        prelude,
+                        rules,
+                        ..KnownAtRule::default()
+                    }),
+                };
+            }
+        }
         let block = match self.current_kind() {
             TokenKind::Semicolon => {
                 self.index += 1;
@@ -153,7 +196,8 @@ impl Parser {
         ) {
             self.index += 1;
         }
-        let conditions = self.convert_tokens(conditions_start, self.index);
+        let mut conditions = self.convert_tokens(conditions_start, self.index);
+        trim_token_boundary_whitespace(&mut conditions);
         if self.current_kind() == TokenKind::Semicolon {
             self.index += 1;
         }
@@ -462,6 +506,88 @@ fn take_important(tokens: &mut Vec<Token>) -> bool {
     true
 }
 
+fn split_media_queries(tokens: Vec<Token>, loc: Loc) -> Vec<MediaQuery> {
+    let mut queries = Vec::new();
+    let mut current = Vec::new();
+    for token in tokens {
+        if token.kind == TokenKind::Comma {
+            trim_token_boundary_whitespace(&mut current);
+            queries.push(MediaQuery {
+                loc,
+                data: MediaQueryData::ArbitraryTokens(MediaArbitraryTokensQuery {
+                    tokens: std::mem::take(&mut current),
+                }),
+            });
+        } else {
+            current.push(token);
+        }
+    }
+    if !current.is_empty() {
+        trim_token_boundary_whitespace(&mut current);
+        queries.push(MediaQuery {
+            loc,
+            data: MediaQueryData::ArbitraryTokens(MediaArbitraryTokensQuery { tokens: current }),
+        });
+    }
+    queries
+}
+
+fn trim_token_boundary_whitespace(tokens: &mut [Token]) {
+    if tokens.is_empty() {
+        return;
+    }
+    let first_has_after = tokens[0].whitespace.contains(WhitespaceFlags::AFTER);
+    tokens[0].whitespace = if first_has_after {
+        WhitespaceFlags::AFTER
+    } else {
+        WhitespaceFlags::default()
+    };
+    let last = tokens.len() - 1;
+    let last_has_before = tokens[last].whitespace.contains(WhitespaceFlags::BEFORE);
+    tokens[last].whitespace = if last_has_before {
+        WhitespaceFlags::BEFORE
+    } else {
+        WhitespaceFlags::default()
+    };
+}
+
+fn parse_layer_names(tokens: &[Token]) -> Vec<Vec<String>> {
+    let mut names = Vec::new();
+    let mut parts = Vec::new();
+    for token in tokens {
+        match token.kind {
+            TokenKind::Ident => parts.push(token.text.clone()),
+            TokenKind::Comma if !parts.is_empty() => {
+                names.push(std::mem::take(&mut parts));
+            }
+            _ => {}
+        }
+    }
+    if !parts.is_empty() {
+        names.push(parts);
+    }
+    names
+}
+
+fn is_known_block_at_rule(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "container"
+            | "document"
+            | "font-face"
+            | "font-feature-values"
+            | "font-palette-values"
+            | "keyframes"
+            | "-webkit-keyframes"
+            | "page"
+            | "position-try"
+            | "property"
+            | "starting-style"
+            | "supports"
+            | "view-transition"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
@@ -539,6 +665,38 @@ mod tests {
                 false
             ),
             "@import \"theme.css\";\na {\n  background: url(image.png);\n}\n"
+        );
+    }
+
+    #[test]
+    fn parses_structured_media_layer_and_supports_rules() {
+        assert_eq!(
+            parse_and_print(
+                "@media screen,(width > 1px) {\
+                   @supports (display: grid) { a { display: grid } }\
+                 }\
+                 @layer framework { b { color: blue } }",
+                false
+            ),
+            "@media screen, (width > 1px) {\n\
+             \x20\x20@supports (display: grid) {\n\
+             \x20\x20\x20\x20a {\n\
+             \x20\x20\x20\x20\x20\x20display: grid;\n\
+             \x20\x20\x20\x20}\n\
+             \x20\x20}\n\
+             }\n\
+             @layer framework {\n\
+             \x20\x20b {\n\
+             \x20\x20\x20\x20color: blue;\n\
+             \x20\x20}\n\
+             }\n"
+        );
+        assert_eq!(
+            parse_and_print(
+                "@media screen { @supports (display: grid) { a { display: grid } } }",
+                true
+            ),
+            "@media screen{@supports (display:grid){a{display:grid}}}"
         );
     }
 }
