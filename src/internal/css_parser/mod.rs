@@ -309,11 +309,12 @@ impl Parser {
 
         let prelude_start = self.index;
         let end = self.scan_to_rule_delimiter();
-        let mut prelude = if name.eq_ignore_ascii_case("container") {
-            self.convert_tokens_preserving_whitespace(prelude_start, end)
-        } else {
-            self.convert_tokens(prelude_start, end)
-        };
+        let mut prelude =
+            if name.eq_ignore_ascii_case("container") || name.eq_ignore_ascii_case("supports") {
+                self.convert_tokens_preserving_whitespace(prelude_start, end)
+            } else {
+                self.convert_tokens(prelude_start, end)
+            };
         trim_token_boundary_whitespace(&mut prelude);
         self.index = end;
         if self.current_kind() == TokenKind::OpenBrace {
@@ -1421,6 +1422,28 @@ fn merge_adjacent_selector_rules(rules: &mut Vec<Rule>) {
 fn mangle_empty_and_nested_rules(rules: &mut Vec<Rule>) {
     let mut index = 0;
     while index < rules.len() {
+        let nested_replacement = match &mut rules[index].data {
+            RuleData::Selector(selector)
+                if selector.selectors.len() == 1
+                    && selector.selectors[0].selectors.len() == 1
+                    && selector.selectors[0].selectors[0].is_single_ampersand() =>
+            {
+                Some(std::mem::take(&mut selector.rules))
+            }
+            RuleData::Selector(selector) => {
+                for complex in &mut selector.selectors {
+                    if complex.selectors.len() > 1 && complex.selectors[0].is_single_ampersand() {
+                        complex.selectors.remove(0);
+                    }
+                }
+                None
+            }
+            _ => None,
+        };
+        if let Some(replacement) = nested_replacement {
+            rules.splice(index..=index, replacement);
+            continue;
+        }
         let remove = match &mut rules[index].data {
             RuleData::Selector(selector) => selector.rules.is_empty(),
             RuleData::AtMedia(media) => media.rules.is_empty(),
@@ -4574,11 +4597,20 @@ mod tests {
     }
 
     fn parse_and_print(contents: &str, minify_whitespace: bool) -> String {
+        parse_and_print_with_options(contents, false, minify_whitespace)
+    }
+
+    fn parse_and_print_with_options(
+        contents: &str,
+        minify_syntax: bool,
+        minify_whitespace: bool,
+    ) -> String {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let tree = parse(
             log.clone(),
             source(contents),
             Options {
+                minify_syntax,
                 minify_whitespace,
                 ..Options::default()
             },
@@ -4659,7 +4691,19 @@ mod tests {
                 "@media screen { @supports (display: grid) { a { display: grid } } }",
                 true
             ),
-            "@media screen{@supports (display:grid){a{display:grid}}}"
+            "@media screen{@supports (display: grid){a{display:grid}}}"
+        );
+    }
+
+    #[test]
+    fn minifies_redundant_css_nesting_selectors() {
+        assert_eq!(
+            parse_and_print_with_options(
+                ".parent { & > .child { color: red } & { background: blue } }",
+                true,
+                true,
+            ),
+            ".parent{>.child{color:red}background:#00f}"
         );
     }
 
