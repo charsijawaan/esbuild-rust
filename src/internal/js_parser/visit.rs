@@ -2906,7 +2906,9 @@ fn visit_expr_with_target(
             };
             visit_expr(core, &mut binary.right, resolve_identifiers);
             keep_inferred_name(core, &mut binary.right, inferred_name);
-            if core.should_fold_type_script_constant_expressions
+            if (core.should_fold_type_script_constant_expressions
+                || (core.options.minify_syntax
+                    && crate::internal::js_ast::should_fold_binary_operator_when_minifying(binary)))
                 && let Some(folded) =
                     crate::internal::js_ast::fold_binary_operator(expression.loc, binary)
                 && let Some(folded) = folded.data

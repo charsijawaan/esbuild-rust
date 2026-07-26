@@ -3875,6 +3875,20 @@ mod tests {
     }
 
     #[test]
+    fn folds_binary_constants_when_minifying_syntax() {
+        assert_eq!(
+            code(transform(
+                "const sum = 1 + 2 * 3; const shifted = 8 << 2; const text = 'a' + 'b';",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const sum = 7, shifted = 32, text = \"ab\";\n"
+        );
+    }
+
+    #[test]
     fn minifies_transform_identifiers_by_frequency() {
         assert_eq!(
             code(transform(
