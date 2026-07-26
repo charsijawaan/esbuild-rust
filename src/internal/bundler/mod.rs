@@ -614,6 +614,7 @@ fn find_nearest_tsconfig(
     log: &Log,
     file_system: &dyn Fs,
     start_directory: &str,
+    override_path: Option<&str>,
 ) -> Option<resolver::TsConfigJson> {
     fn load(
         log: &Log,
@@ -665,8 +666,20 @@ fn find_nearest_tsconfig(
         )
     }
 
-    let mut directory = start_directory.to_string();
     let mut visited = HashSet::new();
+    if let Some(path) = override_path {
+        let (_, error, _) = file_system.read_file(path);
+        if error.is_some() {
+            log.add_error(
+                None,
+                Range::default(),
+                format!("Cannot find tsconfig file {path:?}"),
+            );
+            return None;
+        }
+        return load(log, file_system, path, &mut visited);
+    }
+    let mut directory = start_directory.to_string();
     loop {
         let path = file_system.join(&[&directory, "tsconfig.json"]);
         let (_, error, _) = file_system.read_file(&path);
@@ -809,8 +822,12 @@ pub fn scan_bundle(
             ..Source::default()
         };
         let mut file_options = options.clone();
-        let tsconfig =
-            find_nearest_tsconfig(log, file_system, &file_system.dir(&source.key_path.text));
+        let tsconfig = find_nearest_tsconfig(
+            log,
+            file_system,
+            &file_system.dir(&source.key_path.text),
+            (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
+        );
         if let Some(tsconfig) = &tsconfig {
             tsconfig.jsx_settings.apply_to(&mut file_options.jsx);
             file_options.ts.config = tsconfig.settings;

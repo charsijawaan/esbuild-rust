@@ -149,6 +149,7 @@ pub struct BuildOptions {
     pub outfile: String,
     pub outbase: String,
     pub abs_working_dir: String,
+    pub tsconfig: String,
     pub format: BuildFormat,
     pub platform: BuildPlatform,
     pub global_name: String,
@@ -658,6 +659,13 @@ pub fn build(options: BuildOptions) -> BuildResult {
     } else {
         file_system.join(&[file_system.cwd(), &options.outfile])
     };
+    let tsconfig_path = if options.tsconfig.is_empty() {
+        String::new()
+    } else if file_system.is_abs(&options.tsconfig) {
+        options.tsconfig.clone()
+    } else {
+        file_system.join(&[file_system.cwd(), &options.tsconfig])
+    };
     let mut internal_options = config::Options {
         mode: Mode::Bundle,
         output_format: match options.format {
@@ -722,6 +730,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         abs_output_dir: output_dir,
         abs_output_file: output_file,
         abs_output_base,
+        tsconfig_path,
         ..config::Options::default()
     };
     let entry_points: Vec<_> = options
@@ -2119,6 +2128,60 @@ mod tests {
             ..BuildOptions::default()
         });
         assert!(!invalid.errors.is_empty());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn applies_explicit_build_tsconfig() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-tsconfig-{unique}"));
+        std::fs::create_dir_all(directory.join("config")).expect("create config directory");
+        std::fs::create_dir_all(directory.join("src/lib")).expect("create source directory");
+        std::fs::write(
+            directory.join("config/tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":"..","paths":{"@lib/*":["src/lib/*"]}}}"#,
+        )
+        .expect("write tsconfig");
+        std::fs::write(
+            directory.join("src/entry.ts"),
+            "import { value } from '@lib/value'; console.log(value)",
+        )
+        .expect("write entry");
+        std::fs::write(
+            directory.join("src/lib/value.ts"),
+            "export const value: number = 123",
+        )
+        .expect("write dependency");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["src/entry.ts".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            tsconfig: "config/tsconfig.json".into(),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("const value = 123;"), "{output}");
+        assert!(output.contains("console.log(value);"), "{output}");
+
+        let missing = build(BuildOptions {
+            entry_points: vec!["src/entry.ts".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            tsconfig: "config/missing.json".into(),
+            ..BuildOptions::default()
+        });
+        assert!(
+            missing
+                .errors
+                .iter()
+                .any(|error| error.text.contains("Cannot find tsconfig file"))
+        );
+
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

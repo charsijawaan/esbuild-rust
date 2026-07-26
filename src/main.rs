@@ -44,6 +44,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut outdir = String::new();
     let mut outfile = String::new();
     let mut outbase = String::new();
+    let mut tsconfig = String::new();
     let mut format = BuildFormat::Iife;
     let mut platform = BuildPlatform::Browser;
     let mut global_name = String::new();
@@ -166,6 +167,10 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         }
         if let Some(value) = argument.strip_prefix("--outbase=") {
             outbase = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--tsconfig=") {
+            tsconfig = value.into();
             continue;
         }
         if let Some(value) = argument.strip_prefix("--format=") {
@@ -340,6 +345,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             outdir: outdir.clone(),
             outfile: outfile.clone(),
             outbase,
+            tsconfig,
             format,
             platform,
             global_name,
@@ -476,6 +482,7 @@ fn help_text() -> String {
          \x20\x20--outdir=DIR\n\
          \x20\x20--outfile=FILE\n\
          \x20\x20--outbase=DIR\n\
+         \x20\x20--tsconfig=FILE\n\
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--platform=browser|node|neutral\n\
          \x20\x20--global-name=NAME\n\
