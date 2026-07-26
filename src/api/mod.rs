@@ -4687,7 +4687,7 @@ mod tests {
             "foo((a, b));\n\
              const x = (a, b);\n\
              const y = [(a, b)];\n\
-             const {\"z\": z = (a, b)} = obj;\n"
+             const { z = (a, b) } = obj;\n"
         );
     }
 

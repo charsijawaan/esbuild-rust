@@ -1189,6 +1189,9 @@ impl Printer<'_> {
             }
             Some(BindingData::Object(object)) => {
                 self.output.push(b'{');
+                if !object.properties.is_empty() {
+                    self.print_optional_space();
+                }
                 for (index, property) in object.properties.iter().enumerate() {
                     if index > 0 {
                         self.output.push(b',');
@@ -1199,22 +1202,46 @@ impl Printer<'_> {
                         self.print_binding(&property.value);
                         continue;
                     }
-                    if property.is_computed {
-                        self.output.push(b'[');
-                        self.print_expr_at(&property.key, Precedence::Lowest);
-                        self.output.push(b']');
+                    let is_shorthand = if let (
+                        Some(ExprData::String(key)),
+                        Some(BindingData::Identifier(value)),
+                    ) =
+                        (property.key.data.as_deref(), property.value.data.as_deref())
+                    {
+                        !property.prefer_quoted_key
+                            && String::from_utf16_lossy(&key.value)
+                                == self.renamer.name_for_symbol(value.reference)
                     } else {
-                        self.print_expr_at(&property.key, Precedence::Lowest);
+                        false
+                    };
+                    if is_shorthand {
+                        self.print_binding(&property.value);
+                    } else {
+                        if property.is_computed {
+                            self.output.push(b'[');
+                            self.print_expr_at(&property.key, Precedence::Lowest);
+                            self.output.push(b']');
+                        } else if property.prefer_quoted_key
+                            && let Some(ExprData::String(key)) = property.key.data.as_deref()
+                        {
+                            self.output
+                                .extend(quote_utf16(&key.value, self.options, true));
+                        } else {
+                            self.print_property_key(&property.key);
+                        }
+                        self.output.push(b':');
+                        self.print_optional_space();
+                        self.print_binding(&property.value);
                     }
-                    self.output.push(b':');
-                    self.print_optional_space();
-                    self.print_binding(&property.value);
                     if property.default_value_or_nil.data.is_some() {
                         self.print_optional_space();
                         self.output.push(b'=');
                         self.print_optional_space();
                         self.print_expr_at(&property.default_value_or_nil, Precedence::Spread);
                     }
+                }
+                if !object.properties.is_empty() {
+                    self.print_optional_space();
                 }
                 self.output.push(b'}');
             }
@@ -1226,12 +1253,23 @@ impl Printer<'_> {
             self.output.extend_from_slice(b"export ");
         }
         self.output.extend_from_slice(match local.kind {
-            LocalKind::Var => b"var ",
-            LocalKind::Let => b"let ",
-            LocalKind::Const => b"const ",
-            LocalKind::Using => b"using ",
-            LocalKind::AwaitUsing => b"await using ",
+            LocalKind::Var => b"var",
+            LocalKind::Let => b"let",
+            LocalKind::Const => b"const",
+            LocalKind::Using => b"using",
+            LocalKind::AwaitUsing => b"await using",
         });
+        if matches!(
+            local
+                .declarations
+                .first()
+                .and_then(|declaration| declaration.binding.data.as_deref()),
+            Some(BindingData::Identifier(_))
+        ) {
+            self.output.push(b' ');
+        } else {
+            self.print_optional_space();
+        }
         for (index, declaration) in local.declarations.iter().enumerate() {
             if index > 0 {
                 self.output.push(b',');
@@ -3241,7 +3279,8 @@ mod tests {
             contents: Arc::from(
                 b"const value = 1, rest = {};\
                   const config = {name: 'demo', ['x']: value, value, ...rest,\
-                    method(){}, get current(){return value}, set current(next){}};"
+                    method(){}, get current(){return value}, set current(next){}};\
+                  const {name, current: selected, ...tail} = config;"
                     .as_slice(),
             ),
             identifier_name: "entry".into(),
@@ -3261,7 +3300,8 @@ mod tests {
              }, get current() {\n\
              \x20\x20return value;\n\
              }, set current(next) {\n\
-             } };\n"
+             } };\n\
+             const { name, current: selected, ...tail } = config;\n"
         );
         assert_eq!(
             String::from_utf8(
@@ -3276,7 +3316,7 @@ mod tests {
                 .js,
             )
             .expect("printer output is UTF-8"),
-            "const value=1,rest={};const config={name:\"demo\",[\"x\"]:value,value,...rest,method(){},get current(){return value},set current(next){}};"
+            "const value=1,rest={};const config={name:\"demo\",[\"x\"]:value,value,...rest,method(){},get current(){return value},set current(next){}};const{name,current:selected,...tail}=config;"
         );
     }
 
