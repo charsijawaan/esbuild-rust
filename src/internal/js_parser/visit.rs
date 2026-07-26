@@ -259,7 +259,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.push_scope_for_visit_pass(ScopeKind::Label, statement.loc);
                 let name = String::from_utf8_lossy(core.load_name_from_ref(label.name.reference))
                     .into_owned();
-                let reference = core.new_symbol(crate::internal::ast::SymbolKind::Label, name);
+                let should_drop = core.options.drop_labels.contains(&name);
+                let reference =
+                    core.new_symbol(crate::internal::ast::SymbolKind::Label, name.clone());
                 label.name.reference = reference;
                 {
                     let mut scope = core
@@ -283,8 +285,16 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                         )
                     );
                 }
+                let old_control_flow_dead = core.is_control_flow_dead;
+                if should_drop {
+                    core.is_control_flow_dead = true;
+                }
                 visit_statement(core, &mut label.statement, resolve_identifiers);
+                core.is_control_flow_dead = old_control_flow_dead;
                 core.pop_scope();
+                if should_drop {
+                    statement.data = Some(Box::new(StmtData::Empty));
+                }
             }
             Some(StmtData::Switch(switch)) => {
                 visit_expr(core, &mut switch.test, resolve_identifiers);

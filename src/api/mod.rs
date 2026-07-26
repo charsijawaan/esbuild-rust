@@ -58,6 +58,7 @@ pub struct TransformOptions {
     pub minify_syntax: bool,
     pub ascii_only: bool,
     pub drop_debugger: bool,
+    pub drop_labels: Vec<String>,
     pub ignore_annotations: bool,
 }
 
@@ -173,6 +174,7 @@ pub struct BuildOptions {
     pub minify_syntax: bool,
     pub ascii_only: bool,
     pub drop_debugger: bool,
+    pub drop_labels: Vec<String>,
     pub ignore_annotations: bool,
     pub banner: String,
     pub footer: String,
@@ -711,6 +713,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         minify_syntax: options.minify_syntax,
         ascii_only: options.ascii_only,
         drop_debugger: options.drop_debugger,
+        drop_labels: options.drop_labels,
         ignore_dce_annotations: options.ignore_annotations,
         js_banner: options.banner,
         js_footer: options.footer,
@@ -1000,6 +1003,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     parser_options.minify_whitespace = options.minify_whitespace;
     parser_options.ascii_only = options.ascii_only;
     parser_options.drop_debugger = options.drop_debugger;
+    parser_options.drop_labels.clone_from(&options.drop_labels);
     parser_options.ignore_dce_annotations = options.ignore_annotations;
     let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
     if !ok {
@@ -2305,6 +2309,47 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(!output.contains("debugger"));
         assert!(output.contains("console.log(\"live\")"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn drops_configured_labels_in_transforms_and_builds() {
+        let transformed = code(transform(
+            "DROP: { console.log('dead'); INNER: console.log('also dead') } KEEP: console.log('live')",
+            TransformOptions {
+                drop_labels: vec!["DROP".into()],
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(!transformed.contains("dead"));
+        assert!(!transformed.contains("DROP"));
+        assert!(transformed.contains("KEEP:"));
+        assert!(transformed.contains("console.log(\"live\")"));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-drop-labels-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "DEV: console.log('development'); PROD: console.log('production')",
+        )
+        .expect("write entry file");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            drop_labels: vec!["DEV".into()],
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(!output.contains("development"));
+        assert!(!output.contains("DEV:"));
+        assert!(output.contains("PROD:"));
+        assert!(output.contains("console.log(\"production\")"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

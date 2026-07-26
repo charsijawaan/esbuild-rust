@@ -96,6 +96,13 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             options.drop_debugger = true;
             continue;
         }
+        if let Some(value) = argument.strip_prefix("--drop-labels=") {
+            if value.is_empty() || value.split(',').any(str::is_empty) {
+                return Err("Invalid empty label in \"--drop-labels\"".into());
+            }
+            options.drop_labels = value.split(',').map(str::to_string).collect();
+            continue;
+        }
         if argument == "--ignore-annotations" {
             options.ignore_annotations = true;
             continue;
@@ -380,6 +387,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             minify_syntax: options.minify_syntax,
             ascii_only: options.ascii_only,
             drop_debugger: options.drop_debugger,
+            drop_labels: options.drop_labels,
             ignore_annotations: options.ignore_annotations,
             banner: options.banner,
             footer: options.footer,
@@ -538,6 +546,7 @@ fn help_text() -> String {
          \x20\x20--resolve-extensions=EXTENSIONS\n\
          \x20\x20--conditions=CONDITIONS\n\
          \x20\x20--drop:debugger\n\
+         \x20\x20--drop-labels=LABELS\n\
          \x20\x20--ignore-annotations\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
@@ -591,6 +600,8 @@ mod tests {
         assert!(run(&["--jsx=wat".into()]).is_err());
         assert!(run(&["--alias:missing-value".into()]).is_err());
         assert!(run(&["--out-extension:.js".into()]).is_err());
+        assert!(run(&["--drop-labels=".into()]).is_err());
+        assert!(run(&["--drop-labels=DEV,".into()]).is_err());
     }
 
     #[test]
@@ -640,6 +651,37 @@ mod tests {
             assert!(output.contains("console.log(\"live\")"));
         }
 
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn drops_configured_labels_for_bundles() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-drop-labels-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(
+            &entry,
+            "DEV: console.log('development'); PROD: console.log('production')",
+        )
+        .expect("write entry file");
+
+        let Output::Code(output) = run(&[
+            "--bundle".into(),
+            "--drop-labels=DEV,TEST".into(),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("bundle succeeds") else {
+            panic!("expected bundled code");
+        };
+        let output = String::from_utf8(output).expect("bundle output is UTF-8");
+        assert!(!output.contains("development"));
+        assert!(!output.contains("DEV:"));
+        assert!(output.contains("PROD:"));
+        assert!(output.contains("console.log(\"production\")"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
