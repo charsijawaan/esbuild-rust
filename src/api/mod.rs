@@ -908,6 +908,27 @@ pub fn build(options: BuildOptions) -> BuildResult {
             };
         }
     };
+    let entry_point_count = options.entry_points.len()
+        + options.entry_points_advanced.len()
+        + usize::from(options.stdin.is_some());
+    let output_topology_error = if options.outdir.is_empty() && entry_point_count > 1 {
+        Some("Must use \"outdir\" when there are multiple input files")
+    } else if options.outdir.is_empty() && options.splitting {
+        Some("Must use \"outdir\" when code splitting is enabled")
+    } else if !options.outfile.is_empty() && !options.outdir.is_empty() {
+        Some("Cannot use both \"outfile\" and \"outdir\"")
+    } else {
+        None
+    };
+    if let Some(text) = output_topology_error {
+        return BuildResult {
+            errors: vec![Message {
+                text: text.into(),
+                kind: MessageKind::Error,
+            }],
+            ..BuildResult::default()
+        };
+    }
     if !bundle {
         let mut errors = Vec::new();
         if !options.external.is_empty() {
@@ -1147,6 +1168,15 @@ pub fn build(options: BuildOptions) -> BuildResult {
     } else {
         Mode::ConvertFormat
     };
+    if options.splitting && output_format != config::Format::EsModule {
+        return BuildResult {
+            errors: vec![Message {
+                text: "Splitting currently only works with the \"esm\" format".into(),
+                kind: MessageKind::Error,
+            }],
+            ..BuildResult::default()
+        };
+    }
     let mut internal_options = config::Options {
         mode,
         output_format,
@@ -1942,6 +1972,57 @@ mod tests {
         assert_eq!(
             alias.errors.first().map(|message| message.text.as_str()),
             Some("Cannot use \"alias\" without \"bundle\"")
+        );
+    }
+
+    #[test]
+    fn validates_build_output_topology() {
+        let multiple = super::build(BuildOptions {
+            entry_points: vec!["a.js".into(), "b.js".into()],
+            ..BuildOptions::default()
+        });
+        assert_eq!(
+            multiple.errors.first().map(|message| message.text.as_str()),
+            Some("Must use \"outdir\" when there are multiple input files")
+        );
+
+        let splitting_without_outdir = super::build(BuildOptions {
+            splitting: true,
+            ..BuildOptions::default()
+        });
+        assert_eq!(
+            splitting_without_outdir
+                .errors
+                .first()
+                .map(|message| message.text.as_str()),
+            Some("Must use \"outdir\" when code splitting is enabled")
+        );
+
+        let conflicting = super::build(BuildOptions {
+            outdir: "out".into(),
+            outfile: "out.js".into(),
+            ..BuildOptions::default()
+        });
+        assert_eq!(
+            conflicting
+                .errors
+                .first()
+                .map(|message| message.text.as_str()),
+            Some("Cannot use both \"outfile\" and \"outdir\"")
+        );
+
+        let splitting_iife = super::build(BuildOptions {
+            bundle: true,
+            splitting: true,
+            outdir: "out".into(),
+            ..BuildOptions::default()
+        });
+        assert_eq!(
+            splitting_iife
+                .errors
+                .first()
+                .map(|message| message.text.as_str()),
+            Some("Splitting currently only works with the \"esm\" format")
         );
     }
 
