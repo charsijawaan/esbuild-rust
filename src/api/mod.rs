@@ -4206,6 +4206,20 @@ mod tests {
     }
 
     #[test]
+    fn preserves_comma_expressions_in_separator_contexts() {
+        assert_eq!(
+            code(transform(
+                "foo((a,b)); const x = (a,b); const y = [(a,b)]; const {z = (a,b)} = obj;",
+                TransformOptions::default()
+            )),
+            "foo((a, b));\n\
+             const x = (a, b);\n\
+             const y = [(a, b)];\n\
+             const {\"z\": z = (a, b)} = obj;\n"
+        );
+    }
+
+    #[test]
     fn lowers_type_script_constructor_parameter_properties() {
         let defined = code(transform(
             "class Box { constructor(public id: string, readonly size = 1) {} }",
@@ -4286,12 +4300,30 @@ mod tests {
         assert_eq!(nested.matches("this.id = id").count(), 2, "{nested}");
         assert_eq!(nested.matches("this.id = id, this").count(), 2, "{nested}");
         assert!(
-            nested.contains("consume([super(1), this.id = id, this])"),
+            nested.contains("consume([(super(1), this.id = id, this)])"),
             "{nested}"
         );
         assert!(
             nested.contains("${super(2), this.id = id, this}"),
             "{nested}"
+        );
+
+        let locals = code(transform(
+            "class Box extends Base { constructor(public id: string) { if (flag) { const value = consume(super(1)); return value } else { const { value = super(2) } = source } } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(locals.matches("this.id = id").count(), 2, "{locals}");
+        assert_eq!(locals.matches("this.id = id, this").count(), 2, "{locals}");
+        assert!(
+            locals.contains("consume((super(1), this.id = id, this))"),
+            "{locals}"
+        );
+        assert!(
+            locals.contains("value = (super(2), this.id = id, this)"),
+            "{locals}"
         );
     }
 

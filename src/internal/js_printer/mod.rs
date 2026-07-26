@@ -821,7 +821,7 @@ impl Printer<'_> {
                 self.output.push(b'(');
                 self.print_for_init(&for_statement.init);
                 self.output.extend_from_slice(b" of ");
-                self.print_expr_at(&for_statement.value, Precedence::Comma);
+                self.print_expr_at(&for_statement.value, Precedence::Spread);
                 self.output.push(b')');
                 self.print_body(&for_statement.body);
             }
@@ -922,7 +922,7 @@ impl Printer<'_> {
                 self.print_optional_space();
                 self.output.push(b'=');
                 self.print_optional_space();
-                self.print_expr_at(&export.value, Precedence::Comma);
+                self.print_expr_at(&export.value, Precedence::Spread);
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -1005,7 +1005,7 @@ impl Printer<'_> {
                 self.output.extend_from_slice(b"export default ");
                 match export.value.data.as_deref() {
                     Some(StmtData::Expr(expression)) => {
-                        self.print_expr_at(&expression.value, Precedence::Comma);
+                        self.print_expr_at(&expression.value, Precedence::Spread);
                         self.output.push(b';');
                     }
                     Some(StmtData::Function(function)) => self.print_function(&function.function),
@@ -1079,7 +1079,7 @@ impl Printer<'_> {
                         self.print_optional_space();
                         self.output.push(b'=');
                         self.print_optional_space();
-                        self.print_expr_at(&item.default_value_or_nil, Precedence::Comma);
+                        self.print_expr_at(&item.default_value_or_nil, Precedence::Spread);
                     }
                 }
                 self.output.push(b']');
@@ -1110,7 +1110,7 @@ impl Printer<'_> {
                         self.print_optional_space();
                         self.output.push(b'=');
                         self.print_optional_space();
-                        self.print_expr_at(&property.default_value_or_nil, Precedence::Comma);
+                        self.print_expr_at(&property.default_value_or_nil, Precedence::Spread);
                     }
                 }
                 self.output.push(b'}');
@@ -1139,7 +1139,7 @@ impl Printer<'_> {
                 self.print_optional_space();
                 self.output.push(b'=');
                 self.print_optional_space();
-                self.print_expr_at(&declaration.value_or_nil, Precedence::Comma);
+                self.print_expr_at(&declaration.value_or_nil, Precedence::Spread);
             }
         }
     }
@@ -1351,7 +1351,7 @@ impl Printer<'_> {
                 self.print_optional_space();
                 self.output.push(b'=');
                 self.print_optional_space();
-                self.print_expr_at(&argument.default_or_nil, Precedence::Comma);
+                self.print_expr_at(&argument.default_or_nil, Precedence::Spread);
             }
         }
         self.output.push(b')');
@@ -1425,7 +1425,7 @@ impl Printer<'_> {
                 self.print_optional_space();
                 self.output.push(b'=');
                 self.print_optional_space();
-                self.print_expr_at(initializer, Precedence::Comma);
+                self.print_expr_at(initializer, Precedence::Spread);
             }
             self.output.push(b';');
             self.print_newline();
@@ -1530,7 +1530,7 @@ impl Printer<'_> {
                         self.output.push(b',');
                         self.print_optional_space();
                     }
-                    self.print_expr_at(item, Precedence::Comma);
+                    self.print_expr_at(item, Precedence::Spread);
                 }
                 self.output.push(b']');
             }
@@ -1546,7 +1546,7 @@ impl Printer<'_> {
                     }
                     if property.kind == PropertyKind::Spread {
                         self.output.extend_from_slice(b"...");
-                        self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                        self.print_expr_at(&property.value_or_nil, Precedence::Spread);
                         continue;
                     }
                     if property.flags.contains(PropertyFlags::IS_COMPUTED) {
@@ -1561,13 +1561,13 @@ impl Printer<'_> {
                     if !is_shorthand {
                         self.output.push(b':');
                         self.print_optional_space();
-                        self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                        self.print_expr_at(&property.value_or_nil, Precedence::Spread);
                     }
                     if property.initializer_or_nil.data.is_some() {
                         self.print_optional_space();
                         self.output.push(b'=');
                         self.print_optional_space();
-                        self.print_expr_at(&property.initializer_or_nil, Precedence::Comma);
+                        self.print_expr_at(&property.initializer_or_nil, Precedence::Spread);
                     }
                 }
                 if !object.properties.is_empty() {
@@ -1577,7 +1577,7 @@ impl Printer<'_> {
             }
             ExprData::Spread(spread) => {
                 self.output.extend_from_slice(b"...");
-                self.print_expr_at(&spread.value, Precedence::Comma);
+                self.print_expr_at(&spread.value, Precedence::Spread);
             }
             ExprData::Unary(unary) => {
                 let operator = unary.op.table_entry();
@@ -1634,7 +1634,7 @@ impl Printer<'_> {
                 self.print_optional_space();
                 self.output.push(b'?');
                 self.print_optional_space();
-                self.print_expr_at(&conditional.yes, Precedence::Comma);
+                self.print_expr_at(&conditional.yes, Precedence::Spread);
                 self.print_optional_space();
                 self.output.push(b':');
                 self.print_optional_space();
@@ -1737,7 +1737,7 @@ impl Printer<'_> {
                         self.print_optional_space();
                         self.output.push(b'=');
                         self.print_optional_space();
-                        self.print_expr_at(&argument.default_or_nil, Precedence::Comma);
+                        self.print_expr_at(&argument.default_or_nil, Precedence::Spread);
                     }
                 }
                 self.output.push(b')');
@@ -1822,11 +1822,11 @@ impl Printer<'_> {
             }
             ExprData::ImportCall(import) => {
                 self.print_import_start(import.phase);
-                self.print_expr_at(&import.expr, Precedence::Comma);
+                self.print_expr_at(&import.expr, Precedence::Spread);
                 if import.options_or_nil.data.is_some() {
                     self.output.push(b',');
                     self.print_optional_space();
-                    self.print_expr_at(&import.options_or_nil, Precedence::Comma);
+                    self.print_expr_at(&import.options_or_nil, Precedence::Spread);
                 }
                 self.output.push(b')');
             }
@@ -2026,7 +2026,7 @@ impl Printer<'_> {
             self.print_optional_space();
             self.output.extend_from_slice(b"=>");
             self.print_optional_space();
-            Precedence::Comma
+            Precedence::Spread
         }
     }
 
@@ -2055,7 +2055,7 @@ impl Printer<'_> {
                 self.output.push(b',');
                 self.print_optional_space();
             }
-            self.print_expr_at(argument, Precedence::Comma);
+            self.print_expr_at(argument, Precedence::Spread);
         }
         self.output.push(b')');
     }
@@ -2117,16 +2117,16 @@ impl Printer<'_> {
             self.output.push(b' ');
             if property.kind == PropertyKind::Spread {
                 self.output.extend_from_slice(b"{...");
-                self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                self.print_expr_at(&property.value_or_nil, Precedence::Spread);
                 self.output.push(b'}');
                 continue;
             }
             if property.flags.contains(PropertyFlags::IS_COMPUTED) {
                 self.output.extend_from_slice(b"{...{ [");
-                self.print_expr_at(&property.key, Precedence::Comma);
+                self.print_expr_at(&property.key, Precedence::Spread);
                 self.output.extend_from_slice(b"]:");
                 self.print_optional_space();
-                self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                self.print_expr_at(&property.value_or_nil, Precedence::Spread);
                 self.output.extend_from_slice(b" }}");
                 continue;
             }
@@ -2149,7 +2149,7 @@ impl Printer<'_> {
                 }
                 _ => {
                     self.output.push(b'{');
-                    self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                    self.print_expr_at(&property.value_or_nil, Precedence::Spread);
                     self.output.push(b'}');
                 }
             }
@@ -2170,7 +2170,7 @@ impl Printer<'_> {
                 }
                 _ => {
                     self.output.push(b'{');
-                    self.print_expr_at(child, Precedence::Comma);
+                    self.print_expr_at(child, Precedence::Spread);
                     self.output.push(b'}');
                 }
             }

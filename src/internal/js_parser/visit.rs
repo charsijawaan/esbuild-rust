@@ -1038,6 +1038,20 @@ fn insert_parameter_fields_in_statement(statement: &mut Stmt, assignments: &[Stm
         Some(StmtData::Throw(value)) => {
             insert_parameter_fields_after_super_expression(&mut value.value, assignments)
         }
+        Some(StmtData::Local(value)) => {
+            let mut inserted = false;
+            for declaration in &mut value.declarations {
+                inserted |= insert_parameter_fields_after_super_binding(
+                    &mut declaration.binding,
+                    assignments,
+                );
+                inserted |= insert_parameter_fields_after_super_expression(
+                    &mut declaration.value_or_nil,
+                    assignments,
+                );
+            }
+            inserted
+        }
         Some(
             StmtData::Comment(_)
             | StmtData::Debugger
@@ -1055,7 +1069,6 @@ fn insert_parameter_fields_in_statement(statement: &mut Stmt, assignments: &[Stm
             | StmtData::Function(_)
             | StmtData::Class(_)
             | StmtData::Import(_)
-            | StmtData::Local(_)
             | StmtData::Break(_)
             | StmtData::Continue(_),
         )
@@ -1234,6 +1247,45 @@ fn insert_parameter_fields_after_super_expressions(
         inserted |= insert_parameter_fields_after_super_expression(expression, assignments);
     }
     inserted
+}
+
+fn insert_parameter_fields_after_super_binding(
+    binding: &mut Binding,
+    assignments: &[Stmt],
+) -> bool {
+    match binding.data.as_deref_mut() {
+        Some(BindingData::Array(array)) => {
+            let mut inserted = false;
+            for item in &mut array.items {
+                inserted |=
+                    insert_parameter_fields_after_super_binding(&mut item.binding, assignments);
+                inserted |= insert_parameter_fields_after_super_expression(
+                    &mut item.default_value_or_nil,
+                    assignments,
+                );
+            }
+            inserted
+        }
+        Some(BindingData::Object(object)) => {
+            let mut inserted = false;
+            for property in &mut object.properties {
+                if property.is_computed {
+                    inserted |= insert_parameter_fields_after_super_expression(
+                        &mut property.key,
+                        assignments,
+                    );
+                }
+                inserted |=
+                    insert_parameter_fields_after_super_binding(&mut property.value, assignments);
+                inserted |= insert_parameter_fields_after_super_expression(
+                    &mut property.default_value_or_nil,
+                    assignments,
+                );
+            }
+            inserted
+        }
+        Some(BindingData::Missing | BindingData::Identifier(_)) | None => false,
+    }
 }
 
 fn visit_binding_initializers(
