@@ -90,6 +90,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             )
         });
         let declared_symbols = declare_top_level_symbols(&mut core, &mut statements);
+        core.hoist_symbols();
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
         visit_top_level_statements(&mut core, &mut statements);
@@ -688,5 +689,35 @@ mod tests {
             })
             .expect("inherited arguments reference");
         assert_eq!(ast.parts[1].symbol_uses[&arguments_ref].count_estimate, 1);
+    }
+
+    #[test]
+    fn hoists_var_but_keeps_lexical_bindings_inside_blocks() {
+        let (ast, ok, log) =
+            parse_source("{ var hoisted = 1; let lexical = 2; } hoisted; lexical;");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let entry = ast.parts[1].scopes[0].lock().expect("entry scope");
+        let block = ast.parts[1].scopes[1].lock().expect("block scope");
+        let hoisted = block.members["hoisted"].reference;
+        assert_eq!(entry.members["hoisted"].reference, hoisted);
+        assert_eq!(
+            ast.symbols[usize::try_from(hoisted.inner_index).expect("symbol index")].kind,
+            crate::internal::ast::SymbolKind::Hoisted
+        );
+
+        let block_lexical = block.members["lexical"].reference;
+        let unbound_lexical = entry.members["lexical"].reference;
+        assert_ne!(block_lexical, unbound_lexical);
+        assert_eq!(
+            ast.symbols[usize::try_from(block_lexical.inner_index).expect("symbol index")].kind,
+            crate::internal::ast::SymbolKind::Other
+        );
+        assert_eq!(
+            ast.symbols[usize::try_from(unbound_lexical.inner_index).expect("symbol index")].kind,
+            crate::internal::ast::SymbolKind::Unbound
+        );
+        assert_eq!(ast.parts[1].symbol_uses[&hoisted].count_estimate, 1);
+        assert_eq!(ast.parts[1].symbol_uses[&unbound_lexical].count_estimate, 1);
     }
 }

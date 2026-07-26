@@ -300,6 +300,90 @@ impl ParserCore {
         }
     }
 
+    pub(crate) fn hoist_symbols(&mut self) {
+        let module_scope = self
+            .module_scope
+            .clone()
+            .expect("symbol hoisting requires a module scope");
+        self.hoist_symbols_in_scope(&module_scope);
+    }
+
+    fn hoist_symbols_in_scope(&mut self, scope: &ScopeRef) {
+        let (kind, parent, mut members, children) = {
+            let scope = scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                scope.kind,
+                scope.parent.as_ref().and_then(std::sync::Weak::upgrade),
+                scope.members.values().copied().collect::<Vec<_>>(),
+                scope.children.clone(),
+            )
+        };
+        members.sort_by_key(|member| (member.reference.inner_index, member.reference.source_index));
+
+        if !kind.stops_hoisting() {
+            for member in members {
+                let symbol_index =
+                    usize::try_from(member.reference.inner_index).expect("symbol index fits usize");
+                let symbol_kind = self.symbols[symbol_index].kind;
+                if !symbol_kind.is_hoisted() {
+                    continue;
+                }
+                let name = self.symbols[symbol_index].original_name.clone();
+                let mut target = parent.clone();
+                while let Some(target_scope) = target {
+                    let (existing, target_kind, next_parent) = {
+                        let target = target_scope
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        (
+                            target.members.get(&name).copied(),
+                            target.kind,
+                            target.parent.as_ref().and_then(std::sync::Weak::upgrade),
+                        )
+                    };
+
+                    if let Some(existing) = existing {
+                        if existing.reference == member.reference {
+                            break;
+                        }
+                        let existing_index = usize::try_from(existing.reference.inner_index)
+                            .expect("symbol index fits usize");
+                        let existing_kind = self.symbols[existing_index].kind;
+                        if existing_kind == SymbolKind::Unbound
+                            || existing_kind == SymbolKind::Hoisted
+                            || (existing_kind.is_function()
+                                && symbol_kind.is_function()
+                                && target_kind.stops_hoisting())
+                        {
+                            self.symbols[symbol_index].link = existing.reference;
+                        } else if existing_kind != SymbolKind::CatchIdentifier
+                            && existing_kind != SymbolKind::Arguments
+                        {
+                            self.add_symbol_already_declared_error(&name, member.loc, existing.loc);
+                        }
+                        break;
+                    }
+
+                    target_scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .members
+                        .insert(name.clone(), member);
+                    if target_kind.stops_hoisting() {
+                        break;
+                    }
+                    target = next_parent;
+                }
+            }
+        }
+
+        for child in children {
+            self.hoist_symbols_in_scope(&child);
+        }
+    }
+
     fn declare_common_js_symbol(&mut self, kind: SymbolKind, name: &str) -> Ref {
         let module_scope = self
             .module_scope
