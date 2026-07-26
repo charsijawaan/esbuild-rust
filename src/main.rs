@@ -7,8 +7,8 @@ use std::{
 use esbuild_rs::{
     api::{
         BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
-        BuildSourceMap, BuildSourcesContent, BuildTreeShaking, Loader, Packages, TransformOptions,
-        build, transform,
+        BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, Loader, Packages,
+        TransformOptions, build, transform,
     },
     internal::cli_helpers,
 };
@@ -39,6 +39,11 @@ enum Output {
 
 #[allow(clippy::too_many_lines)]
 fn run(arguments: &[String]) -> Result<Output, String> {
+    run_with_stdin(arguments, None)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result<Output, String> {
     let mut options = TransformOptions::default();
     let mut input_paths = Vec::new();
     let mut bundle = false;
@@ -387,13 +392,10 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     }
 
     if bundle {
-        if input_paths.is_empty() {
-            return Err("Bundling from stdin is not implemented yet".into());
-        }
         if !outdir.is_empty() && !outfile.is_empty() {
             return Err("Cannot use both \"--outfile\" and \"--outdir\"".into());
         }
-        if options.loader != Loader::None {
+        if !input_paths.is_empty() && options.loader != Loader::None {
             return Err("Use \"--loader:.ext=loader\" when bundling".into());
         }
         if !metafile_path.is_empty() && outdir.is_empty() && outfile.is_empty() {
@@ -414,9 +416,32 @@ fn run(arguments: &[String]) -> Result<Output, String> {
                 entry_points.push(input_path);
             }
         }
+        let stdin = if entry_points.is_empty() && entry_points_advanced.is_empty() {
+            let mut contents = Vec::new();
+            if let Some(stdin) = stdin_override {
+                contents.extend_from_slice(stdin);
+            } else {
+                io::stdin()
+                    .read_to_end(&mut contents)
+                    .map_err(|error| format!("Could not read stdin: {error}"))?;
+            }
+            Some(BuildStdin {
+                contents: String::from_utf8(contents)
+                    .map_err(|_| "Bundled stdin must be valid UTF-8".to_string())?,
+                resolve_dir: env::current_dir()
+                    .ok()
+                    .and_then(|path| path.to_str().map(str::to_string))
+                    .unwrap_or_default(),
+                sourcefile: options.sourcefile.clone(),
+                loader: options.loader,
+            })
+        } else {
+            None
+        };
         let result = build(BuildOptions {
             entry_points,
             entry_points_advanced,
+            stdin,
             outdir: outdir.clone(),
             outfile: outfile.clone(),
             outbase,
@@ -532,6 +557,8 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             options.loader = Loader::Default;
         }
         fs::read(&path).map_err(|error| format!("Could not read {path:?}: {error}"))?
+    } else if let Some(stdin) = stdin_override {
+        stdin.to_vec()
     } else {
         let mut input = Vec::new();
         io::stdin()
@@ -638,7 +665,7 @@ fn help_text() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Loader, Output, parse_loader, run};
+    use super::{Loader, Output, parse_loader, run, run_with_stdin};
 
     #[test]
     fn parses_loader_flags_and_file_extensions() {
@@ -701,6 +728,25 @@ mod tests {
         assert!(output.contains("console.log(\"cli bundle\");"));
         assert!(output.starts_with("(() => {\n"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn bundles_standard_input() {
+        let Output::Code(output) = run_with_stdin(
+            &[
+                "--bundle".into(),
+                "--loader=ts".into(),
+                "--sourcefile=virtual-entry.ts".into(),
+            ],
+            Some(b"const value: number = 42; console.log(value)"),
+        )
+        .expect("stdin bundle succeeds") else {
+            panic!("expected bundled code");
+        };
+        let output = String::from_utf8(output).expect("bundle output is UTF-8");
+        assert!(output.contains("const value = 42;"));
+        assert!(output.contains("console.log(value);"));
+        assert!(!output.contains(": number"));
     }
 
     #[test]
