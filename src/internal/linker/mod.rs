@@ -5584,7 +5584,7 @@ pub fn assemble_javascript_chunk(
     is_executable
 }
 
-/// Assign the output path template for every JavaScript chunk, leaving the
+/// Assign the output path template for every JavaScript and CSS chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
 /// # Panics
@@ -5598,7 +5598,11 @@ pub fn assign_chunk_path_templates(
     options: &Options,
 ) {
     for chunk in chunks {
-        let standard_extension = options.output_extension_js.clone();
+        let standard_extension = if chunk.is_css {
+            options.output_extension_css.clone()
+        } else {
+            options.output_extension_js.clone()
+        };
         let (directory, base, extension, mut template) = if chunk.is_entry_point {
             let file = &graph.files[chunk.source_index as usize];
             let template = if file.is_user_specified_entry_point() {
@@ -6627,6 +6631,61 @@ mod tests {
             template_to_string(&chunks[0].final_template),
             "custom-[hash].cjs"
         );
+    }
+
+    #[test]
+    fn css_chunks_use_the_configured_css_extension() {
+        let graph = clone_linker_graph(&[], &[], &[], false);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let mut chunks = vec![ChunkInfo {
+            is_css: true,
+            ..ChunkInfo::default()
+        }];
+        assign_chunk_path_templates(
+            &file_system,
+            &graph,
+            &mut chunks,
+            &Options {
+                chunk_path_template: vec![PathTemplate {
+                    placeholder: PathPlaceholder::Name,
+                    ..PathTemplate::default()
+                }],
+                output_extension_css: ".bundle.css".into(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(
+            template_to_string(&chunks[0].final_template),
+            "chunk.bundle.css"
+        );
+    }
+
+    #[test]
+    fn secondary_css_chunk_ignores_javascript_outfile_extension() {
+        let input_files = [js_file(js_ast::Ast::default())];
+        let entry_points = [EntryPoint::default()];
+        let graph = clone_linker_graph(&input_files, &[0], &entry_points, false);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let mut chunks = vec![ChunkInfo {
+            is_entry_point: true,
+            is_css: true,
+            ..ChunkInfo::default()
+        }];
+        assign_chunk_path_templates(
+            &file_system,
+            &graph,
+            &mut chunks,
+            &Options {
+                abs_output_file: "/out/custom.cjs".into(),
+                entry_path_template: vec![PathTemplate {
+                    placeholder: PathPlaceholder::Name,
+                    ..PathTemplate::default()
+                }],
+                output_extension_css: ".css".into(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(template_to_string(&chunks[0].final_template), "custom.css");
     }
 
     #[test]
