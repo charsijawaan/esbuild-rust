@@ -134,6 +134,7 @@ pub struct BuildOptions {
     pub format: BuildFormat,
     pub platform: BuildPlatform,
     pub global_name: String,
+    pub public_path: String,
     pub sourcemap: BuildSourceMap,
     pub legal_comments: BuildLegalComments,
     pub splitting: bool,
@@ -413,6 +414,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         external_packages: options.packages == Packages::External,
         extension_to_loader,
         global_name,
+        public_path: options.public_path,
         abs_output_dir: output_dir,
         abs_output_file: output_file,
         abs_output_base,
@@ -1241,6 +1243,7 @@ mod tests {
             abs_working_dir: directory.to_string_lossy().into_owned(),
             format: BuildFormat::Iife,
             loader: HashMap::from([(".asset".into(), Loader::File)]),
+            public_path: "https://cdn.example/assets".into(),
             ..BuildOptions::default()
         });
 
@@ -1263,7 +1266,9 @@ mod tests {
             .to_string_lossy();
         assert!(asset_name.starts_with("image-"));
         assert!(asset_name.ends_with(".asset"));
-        assert!(String::from_utf8_lossy(&javascript.contents).contains(asset_name.as_ref()));
+        let javascript = String::from_utf8_lossy(&javascript.contents);
+        assert!(javascript.contains(asset_name.as_ref()));
+        assert!(javascript.contains("https://cdn.example/assets/"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

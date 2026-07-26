@@ -47,6 +47,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut format = BuildFormat::Iife;
     let mut platform = BuildPlatform::Browser;
     let mut global_name = String::new();
+    let mut public_path = String::new();
     let mut splitting = false;
     let mut sourcemap = BuildSourceMap::None;
     let mut legal_comments = BuildLegalComments::Inline;
@@ -131,6 +132,10 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         }
         if let Some(value) = argument.strip_prefix("--global-name=") {
             global_name = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--public-path=") {
+            public_path = value.into();
             continue;
         }
         if let Some(value) = argument.strip_prefix("--external:") {
@@ -225,6 +230,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             format,
             platform,
             global_name,
+            public_path,
             sourcemap,
             legal_comments,
             splitting,
@@ -339,6 +345,7 @@ fn help_text() -> String {
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--platform=browser|node|neutral\n\
          \x20\x20--global-name=NAME\n\
+         \x20\x20--public-path=PATH\n\
          \x20\x20--splitting\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
          \x20\x20--legal-comments=none|inline|eof|linked|external\n\
