@@ -715,6 +715,24 @@ mod tests {
     }
 
     #[test]
+    fn links_local_counter_style_definitions_and_references() {
+        assert_eq!(
+            code(transform(
+                "@counter-style custom { system: fixed; symbols: \"x\" } a { list-style-type: custom } @counter-style second { system: cyclic; symbols: \"y\" } b { list-style: second inside }",
+                TransformOptions {
+                    sourcefile: "entry.module.css".into(),
+                    loader: Loader::LocalCss,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "@counter-style s{system:fixed;symbols:\"x\"}a{list-style-type:s}@counter-style e{system:cyclic;symbols:\"y\"}b{list-style:e inside}\n"
+        );
+    }
+
+    #[test]
     fn processes_local_css_container_names() {
         assert_eq!(
             code(transform(

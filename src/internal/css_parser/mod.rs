@@ -227,6 +227,14 @@ impl Parser {
                 };
             }
             if is_known_block_at_rule(&name) {
+                if name.eq_ignore_ascii_case("counter-style")
+                    && let [token] = prelude.as_mut_slice()
+                    && token.kind == TokenKind::Ident
+                {
+                    let reference = self.new_css_symbol(&token.text, token.loc);
+                    token.kind = TokenKind::Symbol;
+                    token.payload_index = reference.inner_index;
+                }
                 self.index += 1;
                 let preserve_legal_comments =
                     preserve_legal_comments && known_at_rule_preserves_legal_comments(&name);
@@ -4391,7 +4399,8 @@ fn keyframe_selectors(tokens: &[Token]) -> Vec<String> {
 fn is_known_block_at_rule(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "container"
+        "counter-style"
+            | "container"
             | "document"
             | "font-face"
             | "font-feature-values"
