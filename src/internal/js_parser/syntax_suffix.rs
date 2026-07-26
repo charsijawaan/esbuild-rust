@@ -198,9 +198,12 @@ pub(crate) fn parse_high_precedence_suffix_chain(
     core: &mut ParserCore,
     lexer: &mut Lexer,
     mut left: Expr,
+    minimum_precedence: Precedence,
+    is_new_target: bool,
     mut parse_nested: impl FnMut(&mut ParserCore, &mut Lexer) -> Expr,
 ) -> Expr {
     let mut optional_chain = OptionalChain::None;
+    let mut report_optional_chain_in_new_target = is_new_target;
     loop {
         let old_optional_chain = optional_chain;
         optional_chain = OptionalChain::None;
@@ -244,6 +247,13 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                 optional_chain = old_optional_chain;
             }
             Token::QuestionDot => {
+                if report_optional_chain_in_new_target {
+                    core.add_error_range(
+                        lexer.range(),
+                        "Cannot use an unparenthesized optional chain inside the target of \"new\"",
+                    );
+                    report_optional_chain_in_new_target = false;
+                }
                 lexer.next();
                 let optional_start = OptionalChain::Start;
                 match lexer.token {
@@ -264,6 +274,9 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                         );
                     }
                     Token::OpenParen => {
+                        if minimum_precedence >= Precedence::Call {
+                            return left;
+                        }
                         let kind = if is_property_access(&left) {
                             CallKind::TargetWasOriginallyPropertyAccess
                         } else {
@@ -323,6 +336,9 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                 optional_chain = old_optional_chain;
             }
             Token::OpenParen => {
+                if minimum_precedence >= Precedence::Call {
+                    return left;
+                }
                 let kind = if is_property_access(&left) {
                     CallKind::TargetWasOriginallyPropertyAccess
                 } else {
@@ -349,6 +365,9 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                     .expect("template token was checked");
             }
             Token::MinusMinus if !lexer.has_newline_before => {
+                if minimum_precedence >= Precedence::Postfix {
+                    return left;
+                }
                 lexer.next();
                 left = Expr::new(
                     left.loc,
@@ -360,6 +379,9 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                 );
             }
             Token::PlusPlus if !lexer.has_newline_before => {
+                if minimum_precedence >= Precedence::Postfix {
+                    return left;
+                }
                 lexer.next();
                 left = Expr::new(
                     left.loc,
@@ -424,12 +446,19 @@ mod tests {
         let left =
             crate::internal::js_parser::syntax_literals::parse_simple_prefix(&mut core, &mut lexer)
                 .expect("expected identifier");
-        let result = parse_high_precedence_suffix_chain(&mut core, &mut lexer, left, |_, lexer| {
-            let loc = lexer.loc();
-            let value = lexer.number;
-            lexer.next();
-            Expr::new(loc, ExprData::Number(value))
-        });
+        let result = parse_high_precedence_suffix_chain(
+            &mut core,
+            &mut lexer,
+            left,
+            crate::internal::js_ast::Precedence::Lowest,
+            false,
+            |_, lexer| {
+                let loc = lexer.loc();
+                let value = lexer.number;
+                lexer.next();
+                Expr::new(loc, ExprData::Number(value))
+            },
+        );
         let Some(ExprData::Unary(postfix)) = result.data.as_deref() else {
             panic!("expected postfix expression");
         };

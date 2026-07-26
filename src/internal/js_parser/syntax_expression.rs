@@ -13,6 +13,7 @@ use super::{
         parse_regular_expression_literal, parse_simple_prefix, parse_string_literal,
         parse_unary_prefix, parse_untagged_template_prefix,
     },
+    syntax_new::parse_new_prefix,
     syntax_suffix::{binary_operator, parse_high_precedence_suffix_chain},
 };
 
@@ -23,9 +24,14 @@ pub(crate) fn parse_expression(
     allow_in: bool,
 ) -> Expr {
     let mut left = parse_prefix(core, lexer, allow_in);
-    left = parse_high_precedence_suffix_chain(core, lexer, left, |core, lexer| {
-        parse_expression(core, lexer, Precedence::Lowest, true)
-    });
+    left = parse_high_precedence_suffix_chain(
+        core,
+        lexer,
+        left,
+        minimum_precedence,
+        false,
+        |core, lexer| parse_expression(core, lexer, Precedence::Lowest, true),
+    );
 
     let mut previous_operator = None;
     loop {
@@ -99,6 +105,10 @@ fn parse_prefix(core: &mut ParserCore, lexer: &mut Lexer, allow_in: bool) -> Exp
         return expr;
     }
     match lexer.token {
+        Token::New => parse_new_prefix(core, lexer, parse_new_target, |core, lexer| {
+            parse_expression(core, lexer, Precedence::Comma, true)
+        })
+        .expect("new token was checked"),
         Token::Import => parse_import_prefix(core, lexer, |core, lexer| {
             parse_expression(core, lexer, Precedence::Comma, true)
         })
@@ -132,6 +142,19 @@ fn parse_prefix(core: &mut ParserCore, lexer: &mut Lexer, allow_in: bool) -> Exp
         })
         .unwrap_or_else(|| lexer.unexpected()),
     }
+}
+
+fn parse_new_target(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
+    let mut target = parse_prefix(core, lexer, true);
+    target = parse_high_precedence_suffix_chain(
+        core,
+        lexer,
+        target,
+        Precedence::Member,
+        true,
+        |core, lexer| parse_expression(core, lexer, Precedence::Lowest, true),
+    );
+    target
 }
 
 #[cfg(test)]
@@ -189,6 +212,42 @@ mod tests {
             Some(ExprData::Number(_))
         ));
         assert_eq!(lexer.token, Token::In);
+    }
+
+    #[test]
+    fn parses_new_with_member_target_and_constructor_arguments() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"new namespace.Constructor(1 + 2)"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        let Some(ExprData::New(new)) = expression.data.as_deref() else {
+            panic!("expected new expression");
+        };
+        assert!(matches!(new.target.data.as_deref(), Some(ExprData::Dot(_))));
+        assert!(matches!(
+            new.args[0].data.as_deref(),
+            Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryAdd
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn reports_optional_chain_in_new_target() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"new namespace?.Constructor()"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log.clone(), source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new_with_log(source, Options::default(), log.clone());
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        assert!(matches!(expression.data.as_deref(), Some(ExprData::New(_))));
+        assert_eq!(log.peek().len(), 1);
+        assert_eq!(lexer.token, Token::EndOfFile);
     }
 
     #[test]

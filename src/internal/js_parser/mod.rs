@@ -16,6 +16,7 @@ mod symbols;
 mod syntax_expression;
 mod syntax_import;
 mod syntax_literals;
+mod syntax_new;
 mod syntax_suffix;
 
 pub use define::parse_define_expr;
