@@ -22,6 +22,10 @@ use super::{
 };
 
 pub(crate) fn parse_block(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, BlockStmt) {
+    parse_block_with_scope(core, lexer, crate::internal::js_ast::ScopeKind::Block)
+}
+
+fn parse_block_without_scope(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, BlockStmt) {
     let loc = lexer.loc();
     lexer.expect(Token::OpenBrace);
     let mut statements = Vec::new();
@@ -46,7 +50,7 @@ pub(crate) fn parse_block_with_scope(
 ) -> (Loc, BlockStmt) {
     let loc = lexer.loc();
     core.push_scope_for_parse_pass(kind, loc);
-    let block = parse_block(core, lexer);
+    let block = parse_block_without_scope(core, lexer);
     core.pop_scope();
     block
 }
@@ -443,7 +447,15 @@ fn parse_local_declarations(
         if kind != LocalKind::Var && name_text.as_deref() == Some("let") {
             core.add_error_range(binding_range, "Cannot use \"let\" as an identifier here:");
         }
-        let binding = parse_binding(core, lexer);
+        let mut binding = parse_binding(core, lexer);
+        let symbol_kind = match kind {
+            LocalKind::Var => crate::internal::ast::SymbolKind::Hoisted,
+            LocalKind::Const => crate::internal::ast::SymbolKind::Const,
+            LocalKind::Let | LocalKind::Using | LocalKind::AwaitUsing => {
+                crate::internal::ast::SymbolKind::Other
+            }
+        };
+        core.declare_binding(symbol_kind, &mut binding);
         let value_or_nil = if lexer.token == Token::Equals {
             lexer.next();
             parse_expression(core, lexer, Precedence::Comma, allow_in)

@@ -590,4 +590,36 @@ mod tests {
             outer.function.arguments_ref
         );
     }
+
+    #[test]
+    fn block_scopes_hold_distinct_lexical_bindings() {
+        let (ast, ok, log) =
+            parse_source("let outer = 0; { let outer = 1; const inner = outer; } outer;");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].scopes.len(), 2);
+        let entry = ast.parts[1].scopes[0].lock().expect("entry scope");
+        let block = ast.parts[1].scopes[1].lock().expect("block scope");
+        let entry_outer = entry.members["outer"].reference;
+        let block_outer = block.members["outer"].reference;
+        assert_ne!(entry_outer, block_outer);
+        assert_eq!(
+            ast.symbols[usize::try_from(entry_outer.inner_index).expect("symbol index")].kind,
+            crate::internal::ast::SymbolKind::Other
+        );
+        assert_eq!(
+            ast.symbols[usize::try_from(block.members["inner"].reference.inner_index)
+                .expect("symbol index")]
+            .kind,
+            crate::internal::ast::SymbolKind::Const
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &block
+                .parent
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .expect("block parent"),
+            &ast.parts[1].scopes[0]
+        ));
+    }
 }
