@@ -88,6 +88,10 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             splitting = true;
             continue;
         }
+        if argument == "--drop:debugger" {
+            options.drop_debugger = true;
+            continue;
+        }
         if argument == "--sourcemap" {
             sourcemap = BuildSourceMap::Linked;
             continue;
@@ -336,6 +340,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             minify_identifiers: options.minify_identifiers,
             minify_syntax: options.minify_syntax,
             ascii_only: options.ascii_only,
+            drop_debugger: options.drop_debugger,
             banner: options.banner,
             footer: options.footer,
             external,
@@ -471,6 +476,7 @@ fn help_text() -> String {
          \x20\x20--main-fields=FIELDS\n\
          \x20\x20--resolve-extensions=EXTENSIONS\n\
          \x20\x20--conditions=CONDITIONS\n\
+         \x20\x20--drop:debugger\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
          \x20\x20--minify-identifiers\n\

@@ -57,6 +57,7 @@ pub struct TransformOptions {
     pub minify_identifiers: bool,
     pub minify_syntax: bool,
     pub ascii_only: bool,
+    pub drop_debugger: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,6 +168,7 @@ pub struct BuildOptions {
     pub minify_identifiers: bool,
     pub minify_syntax: bool,
     pub ascii_only: bool,
+    pub drop_debugger: bool,
     pub banner: String,
     pub footer: String,
     pub external: Vec<String>,
@@ -648,6 +650,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         minify_identifiers: options.minify_identifiers,
         minify_syntax: options.minify_syntax,
         ascii_only: options.ascii_only,
+        drop_debugger: options.drop_debugger,
         js_banner: options.banner,
         js_footer: options.footer,
         external_settings,
@@ -924,6 +927,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     parser_options.minify_identifiers = options.minify_identifiers;
     parser_options.minify_whitespace = options.minify_whitespace;
     parser_options.ascii_only = options.ascii_only;
+    parser_options.drop_debugger = options.drop_debugger;
     let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
     if !ok {
         return Vec::new();
@@ -1938,6 +1942,43 @@ mod tests {
             )),
             "const value = 1;\n"
         );
+    }
+
+    #[test]
+    fn drops_debugger_statements_in_transforms_and_builds() {
+        let transformed = code(transform(
+            "debugger; function run() { debugger; return 1 }",
+            TransformOptions {
+                drop_debugger: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(!transformed.contains("debugger"));
+        assert!(transformed.contains("function run()"));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-drop-debugger-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "debugger; console.log('live'); debugger",
+        )
+        .expect("write entry file");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            drop_debugger: true,
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(!output.contains("debugger"));
+        assert!(output.contains("console.log(\"live\")"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]

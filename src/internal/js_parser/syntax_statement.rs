@@ -612,7 +612,14 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         Token::Debugger => {
             lexer.next();
             lexer.expect_or_insert_semicolon();
-            Stmt::new(loc, StmtData::Debugger)
+            Stmt::new(
+                loc,
+                if core.options.drop_debugger {
+                    StmtData::Empty
+                } else {
+                    StmtData::Debugger
+                },
+            )
         }
         _ => {
             let value = parse_expression(core, lexer, Precedence::Lowest, true);
