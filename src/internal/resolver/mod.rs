@@ -10,11 +10,12 @@ use base64::engine::general_purpose::STANDARD;
 
 use crate::internal::{
     config::{
-        MaybeBool, TsAlwaysStrict, TsConfig, TsConfigJsx, TsImportsNotUsedAsValues, TsJsx, TsTarget,
+        MaybeBool, Platform, TsAlwaysStrict, TsConfig, TsConfigJsx, TsImportsNotUsedAsValues,
+        TsJsx, TsTarget,
     },
     fs::{DifferentCase, Fs},
     helpers::{is_inside_node_modules, utf16_to_string},
-    js_ast::{Expr, ExprData, ModuleTypeData},
+    js_ast::{Expr, ExprData, ModuleType, ModuleTypeData},
     js_lexer::{JsonFlavor, range_of_identifier},
     js_parser::{JsonOptions, parse_json},
     logger::{LineColumnTracker, Loc, Log, Msg, MsgData, MsgId, MsgKind, Path, Range, Source},
@@ -59,6 +60,250 @@ pub struct ResolveResult {
     pub ts_config: Option<TsConfig>,
     pub ts_always_strict: Option<TsAlwaysStrict>,
     pub module_type_data: ModuleTypeData,
+}
+
+pub struct PackageJson {
+    pub name: String,
+    pub main_fields: HashMap<String, MainField>,
+    pub module_type_data: ModuleTypeData,
+    pub tsconfig: String,
+    pub browser_map: HashMap<String, Option<String>>,
+    pub side_effects_map: Option<HashMap<String, bool>>,
+    pub side_effects_regexps: Vec<regex::Regex>,
+    pub side_effects_data: Option<SideEffectsData>,
+    pub imports_map: Option<PackageMap>,
+    pub exports_map: Option<PackageMap>,
+    pub source: Source,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MainField {
+    pub relative_path: String,
+    pub key_loc: Loc,
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn parse_package_json(
+    log: &Log,
+    source: &Source,
+    package_dir: &str,
+    file_system: &dyn Fs,
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+) -> Option<PackageJson> {
+    let (json, ok) = parse_json(log.clone(), source.clone(), JsonOptions::default());
+    if !ok {
+        return None;
+    }
+    let mut tracker = LineColumnTracker::new(Some(source));
+    let mut package = PackageJson {
+        name: String::new(),
+        main_fields: HashMap::new(),
+        module_type_data: ModuleTypeData::default(),
+        tsconfig: String::new(),
+        browser_map: HashMap::new(),
+        side_effects_map: None,
+        side_effects_regexps: Vec::new(),
+        side_effects_data: None,
+        imports_map: None,
+        exports_map: None,
+        source: source.clone(),
+    };
+    package.name = get_property(&json, "name")
+        .and_then(|(value, _)| get_string(value))
+        .unwrap_or_default();
+    if let Some((value, key_loc)) = get_property(&json, "type") {
+        if let Some(text) = get_string(value) {
+            let module_type = match text.as_str() {
+                "commonjs" => Some(ModuleType::CommonJsPackageJson),
+                "module" => Some(ModuleType::EsmPackageJson),
+                _ => None,
+            };
+            if let Some(module_type) = module_type {
+                package.module_type_data = ModuleTypeData {
+                    source: Some(Box::new(source.clone())),
+                    range: source.range_of_string(value.loc),
+                    module_type,
+                };
+            } else {
+                let mut notes = vec![MsgData {
+                    text: "The \"type\" field must be set to either \"commonjs\" or \"module\"."
+                        .into(),
+                    ..MsgData::default()
+                }];
+                let kind = if text.ends_with(".d.ts") {
+                    notes[0] = tracker.msg_data(
+                        source.range_of_string(key_loc),
+                        "TypeScript type declarations use the \"types\" field, not the \"type\" field:",
+                    );
+                    if let Some(location) = &mut notes[0].location {
+                        location.suggestion = "\"types\"".into();
+                    }
+                    if is_inside_node_modules(&source.key_path.text) {
+                        MsgKind::Debug
+                    } else {
+                        MsgKind::Warning
+                    }
+                } else {
+                    MsgKind::Warning
+                };
+                log.add_id_with_notes(
+                    MsgId::PackageJsonInvalidType,
+                    kind,
+                    Some(&mut tracker),
+                    source.range_of_string(value.loc),
+                    format!("{text:?} is not a valid value for the \"type\" field"),
+                    notes,
+                );
+            }
+        } else {
+            log.add_id(
+                MsgId::PackageJsonInvalidType,
+                MsgKind::Warning,
+                Some(&mut tracker),
+                Range {
+                    loc: value.loc,
+                    ..Range::default()
+                },
+                "The value for \"type\" must be a string",
+            );
+        }
+    }
+    package.tsconfig = get_property(&json, "tsconfig")
+        .and_then(|(value, _)| get_string(value))
+        .unwrap_or_default();
+
+    let defaults: &[&str] = match platform {
+        Platform::Browser => &["browser", "module", "main"],
+        Platform::Node => &["main", "module"],
+        Platform::Neutral => &[],
+    };
+    let main_fields: Vec<&str> = configured_main_fields.map_or_else(
+        || defaults.to_vec(),
+        |fields| fields.iter().map(String::as_str).collect(),
+    );
+    for field in main_fields.into_iter().chain(["main", "module"]) {
+        if package.main_fields.contains_key(field) {
+            continue;
+        }
+        if let Some((value, key_loc)) = get_property(&json, field)
+            && let Some(path) = get_string(value)
+            && !path.is_empty()
+        {
+            package.main_fields.insert(
+                field.to_string(),
+                MainField {
+                    relative_path: path,
+                    key_loc,
+                },
+            );
+        }
+    }
+    if platform == Platform::Browser
+        && let Some((value, _)) = get_property(&json, "browser")
+        && let Some(ExprData::Object(object)) = value.data.as_deref()
+    {
+        for property in &object.properties {
+            let Some(key) = get_string(&property.key) else {
+                continue;
+            };
+            if let Some(replacement) = get_string(&property.value_or_nil) {
+                package.browser_map.insert(key, Some(replacement));
+            } else if get_bool(&property.value_or_nil) == Some(false) {
+                package.browser_map.insert(key, None);
+            } else {
+                log.add_id(
+                    MsgId::PackageJsonInvalidBrowser,
+                    MsgKind::Warning,
+                    Some(&mut tracker),
+                    Range {
+                        loc: property.value_or_nil.loc,
+                        ..Range::default()
+                    },
+                    "Each \"browser\" mapping must be a string or a boolean",
+                );
+            }
+        }
+    }
+    if let Some((value, key_loc)) = get_property(&json, "sideEffects") {
+        match value.data.as_deref() {
+            Some(ExprData::Boolean(false)) => {
+                package.side_effects_map = Some(HashMap::new());
+                package.side_effects_data = Some(SideEffectsData {
+                    source: Some(source.clone()),
+                    range: source.range_of_string(key_loc),
+                    ..SideEffectsData::default()
+                });
+            }
+            Some(ExprData::Array(array)) => {
+                package.side_effects_map = Some(HashMap::new());
+                package.side_effects_data = Some(SideEffectsData {
+                    source: Some(source.clone()),
+                    range: source.range_of_string(key_loc),
+                    is_side_effects_array_in_json: true,
+                    ..SideEffectsData::default()
+                });
+                for item in &array.items {
+                    let Some(mut pattern) = get_string(item) else {
+                        log.add_id(
+                            MsgId::PackageJsonInvalidSideEffects,
+                            MsgKind::Warning,
+                            Some(&mut tracker),
+                            Range {
+                                loc: item.loc,
+                                ..Range::default()
+                            },
+                            "Expected string in array for \"sideEffects\"",
+                        );
+                        continue;
+                    };
+                    if !pattern.contains('/') {
+                        pattern = format!("**/{pattern}");
+                    }
+                    let absolute = file_system
+                        .join(&[package_dir, &pattern])
+                        .replace('\\', "/");
+                    let (regexp, wildcard) = globstar_to_escaped_regexp(&absolute);
+                    if wildcard {
+                        if let Ok(regexp) = regex::Regex::new(&regexp) {
+                            package.side_effects_regexps.push(regexp);
+                        }
+                    } else if let Some(map) = &mut package.side_effects_map {
+                        map.insert(absolute, true);
+                    }
+                }
+            }
+            Some(ExprData::Boolean(true)) => {}
+            _ => log.add_id(
+                MsgId::PackageJsonInvalidSideEffects,
+                MsgKind::Warning,
+                Some(&mut tracker),
+                Range {
+                    loc: value.loc,
+                    ..Range::default()
+                },
+                "The value for \"sideEffects\" must be a boolean or an array",
+            ),
+        }
+    }
+    if let Some((value, key_loc)) = get_property(&json, "imports") {
+        package.imports_map = parse_imports_exports_map(source, log, value, "imports", key_loc);
+        if let Some(map) = &package.imports_map
+            && map.root.kind != PackageMapKind::Object
+        {
+            log.add_id(
+                MsgId::PackageJsonInvalidImportsOrExports,
+                MsgKind::Warning,
+                Some(&mut tracker),
+                map.root.first_token,
+                "The value for \"imports\" must be an object",
+            );
+        }
+    }
+    if let Some((value, key_loc)) = get_property(&json, "exports") {
+        package.exports_map = parse_imports_exports_map(source, log, value, "exports", key_loc);
+    }
+    Some(package)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2143,11 +2388,12 @@ mod tests {
         find_invalid_package_segment, globstar_to_escaped_regexp,
         handle_package_map_post_conditions, is_valid_tsconfig_path_no_base_url_pattern,
         match_tsconfig_path_candidates, parse_bare_identifier, parse_esm_package_name,
-        parse_imports_exports_map, parse_tsconfig_json, resolve_package_exports,
-        resolve_package_imports, reverse_resolve_package_exports, sort_package_expansion_keys,
+        parse_imports_exports_map, parse_package_json, parse_tsconfig_json,
+        resolve_package_exports, resolve_package_imports, reverse_resolve_package_exports,
+        sort_package_expansion_keys,
     };
     use crate::internal::{
-        config::{MaybeBool, TsJsx, TsTarget},
+        config::{MaybeBool, Platform, TsJsx, TsTarget},
         fs::{MockKind, mock_fs},
         js_parser::{JsonOptions, parse_json},
         logger::{DeferLogKind, Loc, Log, Path, PrettyPaths, Range, Source},
@@ -2781,5 +3027,68 @@ mod tests {
                 .status,
             PnpStatus::Skipped
         );
+    }
+
+    #[test]
+    fn parses_package_json_resolution_metadata() {
+        let contents = r##"{
+          "name": "demo",
+          "type": "module",
+          "main": "./index.cjs",
+          "module": "./index.js",
+          "browser": {"fs": false, "./index.js": "./browser.js"},
+          "sideEffects": ["styles.css", "./polyfill.js"],
+          "imports": {"#internal": "./internal.js"},
+          "exports": {".": "./index.js"}
+        }"##;
+        let source = Source {
+            key_path: Path {
+                text: "/project/package.json".into(),
+                ..Path::default()
+            },
+            contents: Arc::from(contents.as_bytes()),
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let package = parse_package_json(
+            &log,
+            &source,
+            "/project",
+            &file_system,
+            Platform::Browser,
+            None,
+        )
+        .expect("package json");
+        assert_eq!(package.name, "demo");
+        assert_eq!(
+            package.module_type_data.module_type,
+            crate::internal::js_ast::ModuleType::EsmPackageJson
+        );
+        assert_eq!(
+            package
+                .main_fields
+                .get("module")
+                .expect("module field")
+                .relative_path,
+            "./index.js"
+        );
+        assert_eq!(package.browser_map.get("fs"), Some(&None));
+        assert_eq!(
+            package.browser_map.get("./index.js"),
+            Some(&Some("./browser.js".into()))
+        );
+        assert_eq!(package.side_effects_regexps.len(), 1);
+        assert_eq!(
+            package
+                .side_effects_map
+                .as_ref()
+                .expect("side effects")
+                .get("/project/polyfill.js"),
+            Some(&true)
+        );
+        assert!(package.imports_map.is_some());
+        assert!(package.exports_map.is_some());
+        assert!(log.done().is_empty());
     }
 }
