@@ -2823,6 +2823,7 @@ pub struct CompiledCssAst {
     pub css: Vec<u8>,
     pub extracted_legal_comments: Vec<String>,
     pub json_metadata_imports: Vec<String>,
+    pub source_map_chunk: SourceMapChunk,
     pub source_index: Index32,
     pub has_charset: bool,
 }
@@ -3006,10 +3007,29 @@ pub fn compile_prepared_css_asts(
             } else {
                 0
             };
+            let (input_source_map, line_offset_tables, add_source_mappings) =
+                if item.source_index.is_valid() && options.source_map != SourceMapMode::None {
+                    let file = &graph.files[input_source_index as usize];
+                    (
+                        file.input_file
+                            .input_source_map
+                            .clone()
+                            .map(std::sync::Arc::new),
+                        crate::internal::sourcemap::generate_line_offset_tables(
+                            &file.input_file.source.contents,
+                            item.ast.approximate_line_count.max(0),
+                        ),
+                        file.input_file.loader.can_have_source_map(),
+                    )
+                } else {
+                    (None, Vec::new(), false)
+                };
             let printed = css_printer::print(
                 &item.ast,
                 &graph.symbols,
                 css_printer::Options {
+                    input_source_map,
+                    line_offset_tables,
                     line_limit: options.line_limit,
                     input_source_index,
                     minify_whitespace: options.minify_whitespace,
@@ -3017,6 +3037,8 @@ pub fn compile_prepared_css_asts(
                     legal_comments: options.legal_comments,
                     needs_metafile: options.needs_metafile,
                     metafile_format: options.metafile_format,
+                    source_map: options.source_map,
+                    add_source_mappings,
                     ..css_printer::Options::default()
                 },
             );
@@ -3024,6 +3046,7 @@ pub fn compile_prepared_css_asts(
                 css: printed.css,
                 extracted_legal_comments: printed.extracted_legal_comments,
                 json_metadata_imports: printed.json_metadata_imports,
+                source_map_chunk: printed.source_map_chunk,
                 source_index: item.source_index,
                 has_charset: item.has_charset,
             }

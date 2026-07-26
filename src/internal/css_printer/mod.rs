@@ -1,20 +1,29 @@
 //! Port of upstream `internal/css_printer`.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::internal::{
     ast::{ImportRecordFlags, Ref, SymbolMap},
-    config::{LegalComments, MetafileFormat},
+    config::{LegalComments, MetafileFormat, SourceMap as SourceMapMode},
     css_ast::{
         Ast, ComplexSelector, MediaBinaryOp, MediaCmp, MediaQuery, MediaQueryData, MediaTypeOp,
         NamespacedName, NthIndex, Rule, RuleData, SubclassData, Token, WhitespaceFlags,
     },
     css_lexer::{TokenKind, is_name_continue, would_start_identifier_without_escapes},
     helpers::quote_for_json,
+    sourcemap::{
+        Chunk as SourceMapChunk, ChunkBuilder, LineOffsetTable, SourceMap, make_chunk_builder,
+    },
 };
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default)]
 pub struct Options {
+    pub input_source_map: Option<Arc<SourceMap>>,
+    pub line_offset_tables: Vec<LineOffsetTable>,
     pub local_names: HashMap<Ref, String>,
     pub line_limit: usize,
     pub input_source_index: u32,
@@ -23,6 +32,8 @@ pub struct Options {
     pub legal_comments: LegalComments,
     pub needs_metafile: bool,
     pub metafile_format: MetafileFormat,
+    pub source_map: SourceMapMode,
+    pub add_source_mappings: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -30,6 +41,7 @@ pub struct PrintResult {
     pub css: Vec<u8>,
     pub extracted_legal_comments: Vec<String>,
     pub json_metadata_imports: Vec<String>,
+    pub source_map_chunk: SourceMapChunk,
 }
 
 fn function_multiline_comma_period(token: &Token) -> usize {
@@ -61,6 +73,13 @@ fn function_multiline_comma_period(token: &Token) -> usize {
 
 #[must_use]
 pub fn print(tree: &Ast, symbols: &SymbolMap, options: Options) -> PrintResult {
+    let source_map_builder = (options.source_map != SourceMapMode::None).then(|| {
+        make_chunk_builder(
+            options.input_source_map.clone(),
+            options.line_offset_tables.clone(),
+            options.ascii_only,
+        )
+    });
     let mut printer = Printer {
         css: Vec::new(),
         import_records: &tree.import_records,
@@ -70,14 +89,21 @@ pub fn print(tree: &Ast, symbols: &SymbolMap, options: Options) -> PrintResult {
         legal_comments: HashSet::new(),
         extracted_legal_comments: Vec::new(),
         json_metadata_imports: Vec::new(),
+        source_map_builder,
     };
     for rule in &tree.rules {
         printer.print_rule(rule, false);
     }
+    let source_map_chunk = printer
+        .source_map_builder
+        .take()
+        .map(|builder| builder.generate_chunk(&printer.css))
+        .unwrap_or_default();
     PrintResult {
         css: printer.css,
         extracted_legal_comments: printer.extracted_legal_comments,
         json_metadata_imports: printer.json_metadata_imports,
+        source_map_chunk,
     }
 }
 
@@ -122,6 +148,7 @@ struct Printer<'a> {
     legal_comments: HashSet<String>,
     extracted_legal_comments: Vec<String>,
     json_metadata_imports: Vec<String>,
+    source_map_builder: Option<ChunkBuilder>,
 }
 
 impl Printer<'_> {
@@ -182,6 +209,11 @@ impl Printer<'_> {
                 }
                 LegalComments::Inline => {}
             }
+        }
+        if self.options.add_source_mappings
+            && let Some(builder) = &mut self.source_map_builder
+        {
+            builder.add_source_mapping(rule.loc, "", &self.css);
         }
         if !self.options.minify_whitespace {
             self.print_indent();
@@ -916,6 +948,7 @@ mod tests {
         },
         css_lexer::TokenKind,
         logger::{Loc, Path},
+        sourcemap::generate_line_offset_tables,
     };
 
     fn token(kind: TokenKind, text: &str) -> Token {
@@ -1002,6 +1035,7 @@ mod tests {
             legal_comments: std::collections::HashSet::new(),
             extracted_legal_comments: Vec::new(),
             json_metadata_imports: Vec::new(),
+            source_map_builder: None,
         };
         printer.print_quoted(text, None);
         String::from_utf8(printer.css).expect("CSS output is UTF-8")
@@ -1018,6 +1052,7 @@ mod tests {
             legal_comments: std::collections::HashSet::new(),
             extracted_legal_comments: Vec::new(),
             json_metadata_imports: Vec::new(),
+            source_map_builder: None,
         };
         printer.print_url_value(text);
         String::from_utf8(printer.css).expect("CSS output is UTF-8")
@@ -1145,5 +1180,22 @@ mod tests {
             result.json_metadata_imports[0],
             "{\"path\":\"theme.css\",\"kind\":\"import-rule\",\"external\":true}"
         );
+    }
+
+    #[test]
+    fn generates_css_source_map_chunks() {
+        let source = b".card { color: red }";
+        let result = print(
+            &stylesheet(),
+            &SymbolMap::default(),
+            Options {
+                line_offset_tables: generate_line_offset_tables(source, 1),
+                source_map: crate::internal::config::SourceMap::LinkedWithComment,
+                add_source_mappings: true,
+                ..Options::default()
+            },
+        );
+        assert!(!result.source_map_chunk.should_ignore);
+        assert!(!result.source_map_chunk.buffer.data.is_empty());
     }
 }
