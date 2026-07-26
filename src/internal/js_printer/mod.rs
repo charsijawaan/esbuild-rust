@@ -1748,9 +1748,18 @@ impl Printer<'_> {
             ExprData::Class(class) => self.print_class(&class.class),
             ExprData::Template(template) => self.print_template(template),
             ExprData::RequireString(require) => {
+                let wrap_as_target = level >= Precedence::New && !wrap;
+                if wrap_as_target {
+                    self.output.push(b'(');
+                }
+                let nested_level = if wrap_as_target {
+                    Precedence::Lowest
+                } else {
+                    level
+                };
                 if !self.print_linked_require_or_import(
                     require.import_record_index,
-                    level,
+                    nested_level,
                     result_is_unused,
                 ) && !self.print_external_require(require.import_record_index)
                 {
@@ -1758,16 +1767,35 @@ impl Printer<'_> {
                     self.print_import_path(require.import_record_index, true);
                     self.output.push(b')');
                 }
+                if wrap_as_target {
+                    self.output.push(b')');
+                }
             }
             ExprData::RequireResolveString(require) => {
+                let wrap_as_target = level >= Precedence::New && !wrap;
+                if wrap_as_target {
+                    self.output.push(b'(');
+                }
                 self.output.extend_from_slice(b"require.resolve(");
                 self.print_import_path(require.import_record_index, true);
                 self.output.push(b')');
+                if wrap_as_target {
+                    self.output.push(b')');
+                }
             }
             ExprData::ImportString(import) => {
+                let wrap_as_target = level >= Precedence::New && !wrap;
+                if wrap_as_target {
+                    self.output.push(b'(');
+                }
+                let nested_level = if wrap_as_target {
+                    Precedence::Lowest
+                } else {
+                    level
+                };
                 if !self.print_linked_require_or_import(
                     import.import_record_index,
-                    level,
+                    nested_level,
                     result_is_unused,
                 ) && !self.print_external_dynamic_import_fallback(import.import_record_index)
                 {
@@ -1777,6 +1805,9 @@ impl Printer<'_> {
                     self.print_import_start(phase);
                     self.print_import_path(import.import_record_index, false);
                     self.print_import_attributes(import.import_record_index, true);
+                    self.output.push(b')');
+                }
+                if wrap_as_target {
                     self.output.push(b')');
                 }
             }
@@ -2487,6 +2518,59 @@ mod tests {
             b"init_esm(), init_esm();\n\
               for (init_esm();; init_esm()) {\n\
               }\n"
+        );
+    }
+
+    #[test]
+    fn parenthesizes_require_expressions_used_as_targets() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"new (require('./cjs'))();\
+                  require('./cjs')();\
+                  new (require.resolve('./pkg'))();"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (mut ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 3);
+        ast.import_records[0].source_index = Index32::new(1);
+        ast.import_records[1].source_index = Index32::new(1);
+
+        let wrapper_ref = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let mut symbols = SymbolMap::new(2);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        symbols.symbols_for_source[1] = vec![Symbol::new(SymbolKind::Other, "require_cjs")];
+        let renamer = new_no_op_renamer(symbols);
+        let metadata = |_| RequireOrImportMeta {
+            wrapper_ref,
+            exports_ref: INVALID_REF,
+            is_wrapper_async: false,
+        };
+
+        assert_eq!(
+            print_linked(
+                &ast,
+                &renamer,
+                Options::default(),
+                LinkerOptions {
+                    require_or_import_meta_for_source: &metadata,
+                    to_common_js_ref: INVALID_REF,
+                    to_esm_ref: INVALID_REF,
+                    runtime_require_ref: INVALID_REF,
+                },
+            )
+            .js,
+            b"new (require_cjs())();\n\
+              (require_cjs())();\n\
+              new (require.resolve(\"./pkg\"))();\n"
         );
     }
 
