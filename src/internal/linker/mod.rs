@@ -3963,6 +3963,147 @@ fn global_name_accessor(name: &str, options: &Options) -> String {
     }
 }
 
+/// Join all generated JavaScript fragments for one chunk and split temporary
+/// asset/chunk paths into intermediate output pieces.
+///
+/// Returns whether the chunk is executable due to an entry-point hashbang.
+///
+/// # Panics
+///
+/// Panics when an entry-point chunk is not JavaScript.
+#[allow(clippy::too_many_lines)]
+pub fn assemble_javascript_chunk(
+    graph: &LinkerGraph,
+    chunk: &mut ChunkInfo,
+    compiled_parts: &[CompiledPartRange],
+    bindings: &PrintedCrossChunkBindings,
+    entry_point_tail: &[u8],
+    options: &Options,
+    output_paths: &OutputPathContext<'_>,
+) -> bool {
+    let mut joiner = Joiner::default();
+    let newline = if options.minify_whitespace { "" } else { "\n" };
+    let space = if options.minify_whitespace { "" } else { " " };
+    let mut newline_before_comment = false;
+    let mut is_executable = false;
+
+    if chunk.is_entry_point {
+        let Some(InputFileRepr::Js(repr)) = graph.files[chunk.source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+        else {
+            panic!("JavaScript entry chunk must reference JavaScript");
+        };
+        if !repr.ast.hashbang.is_empty() {
+            joiner.add_string(format!("#!{}\n", repr.ast.hashbang));
+            newline_before_comment = true;
+            is_executable = true;
+        }
+    }
+    if !options.js_banner.is_empty() {
+        joiner.add_string(options.js_banner.clone());
+        joiner.add_string("\n");
+        newline_before_comment = true;
+    }
+    if chunk.is_entry_point {
+        let Some(InputFileRepr::Js(repr)) = graph.files[chunk.source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+        else {
+            unreachable!("entry chunk representation was checked above");
+        };
+        for directive in &repr.ast.directives {
+            if directive != "use strict" || options.output_format != Format::EsModule {
+                joiner.add_bytes(crate::internal::helpers::quote_for_json(
+                    directive.as_bytes(),
+                    options.ascii_only,
+                ));
+                joiner.add_string(";");
+                joiner.add_string(newline);
+                newline_before_comment = true;
+            }
+        }
+    }
+    if options.output_format == Format::Iife {
+        let mut opening = if options.global_name.is_empty() {
+            String::new()
+        } else {
+            generate_global_name_prefix(options)
+        };
+        if options
+            .unsupported_js_features
+            .contains(crate::internal::compat::JsFeature::ARROW)
+        {
+            write!(opening, "(function(){space}{{{newline}")
+                .expect("writing to a string cannot fail");
+        } else {
+            write!(opening, "((){space}=>{space}{{{newline}")
+                .expect("writing to a string cannot fail");
+        }
+        joiner.add_string(opening);
+        newline_before_comment = false;
+    }
+    if !bindings.prefix.is_empty() {
+        joiner.add_bytes(bindings.prefix.clone());
+        newline_before_comment = true;
+    }
+
+    let mut previous_source = None;
+    for compiled in compiled_parts {
+        if options.mode == Mode::Bundle
+            && !options.minify_whitespace
+            && previous_source != Some(compiled.source_index)
+            && !compiled.js.is_empty()
+        {
+            if newline_before_comment {
+                joiner.add_string("\n");
+            }
+            let path = graph.files[compiled.source_index as usize]
+                .input_file
+                .source
+                .pretty_paths
+                .select(options.code_path_style)
+                .replace('\r', "\\r")
+                .replace('\n', "\\n")
+                .replace('\u{2028}', "\\u2028")
+                .replace('\u{2029}', "\\u2029");
+            let indent = if options.output_format == Format::Iife {
+                "  "
+            } else {
+                ""
+            };
+            joiner.add_string(format!("{indent}// {path}\n"));
+            previous_source = Some(compiled.source_index);
+        }
+        if !compiled.js.is_empty() {
+            joiner.add_bytes(compiled.js.clone());
+            newline_before_comment = true;
+        }
+    }
+    if !entry_point_tail.is_empty() {
+        joiner.add_bytes(entry_point_tail.to_vec());
+        newline_before_comment = true;
+    }
+    if !bindings.suffix.is_empty() {
+        if newline_before_comment {
+            joiner.add_string(newline);
+        }
+        joiner.add_bytes(bindings.suffix.clone());
+    }
+    if options.output_format == Format::Iife {
+        joiner.add_string(format!("}})();{newline}"));
+    }
+    joiner.ensure_newline_at_end();
+    if !options.js_footer.is_empty() {
+        joiner.add_string(options.js_footer.clone());
+        joiner.add_string("\n");
+    }
+    chunk.intermediate_output = output_paths.break_joiner_into_pieces(joiner);
+    is_executable
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -4359,19 +4500,19 @@ mod tests {
         CrossChunkImport, CrossChunkImportItem, EntryPointTailRefs, ImportStatus, ImportTracker,
         MatchImportKind, OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange,
         RuntimeReExportContext, StableRef, add_exports_for_export_star, advance_import_tracker,
-        append_or_extend_part_range, assign_chunk_path_templates, bind_imports_to_exports_for_file,
-        classify_module_wrappers, compile_part_range_for_chunk, compute_cross_chunk_dependencies,
-        compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
-        create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
-        generate_cross_chunk_stmts, generate_entry_point_tail, generate_global_name_prefix,
-        generate_isolated_hash, has_dynamic_exports_due_to_export_star,
-        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
-        merge_adjacent_local_stmts, path_between_chunks, print_cross_chunk_bindings,
-        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
-        wrap_common_js_stmts, wrap_esm_stmts,
+        append_or_extend_part_range, assemble_javascript_chunk, assign_chunk_path_templates,
+        bind_imports_to_exports_for_file, classify_module_wrappers, compile_part_range_for_chunk,
+        compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
+        convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
+        finalize_chunk_paths, generate_cross_chunk_stmts, generate_entry_point_tail,
+        generate_global_name_prefix, generate_isolated_hash,
+        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
+        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
+        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
+        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
+        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -5680,6 +5821,50 @@ mod tests {
             prefix(&["Bundle", "lib"], true),
             "var Bundle;(Bundle||={}).lib="
         );
+    }
+
+    #[test]
+    fn assembles_javascript_chunk_in_upstream_order() {
+        let mut input = js_file(js_ast::Ast {
+            hashbang: "usr/bin/env node".into(),
+            directives: vec!["use strict".into(), "custom".into()],
+            ..js_ast::Ast::default()
+        });
+        input.source.pretty_paths.rel = "src/entry.js".into();
+        let graph = clone_linker_graph(&[input], &[0], &[EntryPoint::default()], false);
+        let mut chunk = ChunkInfo {
+            is_entry_point: true,
+            ..ChunkInfo::default()
+        };
+        let options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            global_name: vec!["Bundle".into()],
+            js_banner: "/* banner */".into(),
+            js_footer: "/* footer */".into(),
+            ..Options::default()
+        };
+        let executable = assemble_javascript_chunk(
+            &graph,
+            &mut chunk,
+            &[super::CompiledPartRange {
+                source_index: 0,
+                js: b"  work();\n".to_vec(),
+            }],
+            &super::PrintedCrossChunkBindings::default(),
+            b"  return 1;\n",
+            &options,
+            &context(&[], &[]),
+        );
+        assert!(executable);
+        let (joiner, _) =
+            context(&[], &[]).substitute_final_paths(chunk.intermediate_output, str::to_owned);
+        let output = String::from_utf8(joiner.done()).expect("UTF-8");
+        assert!(output.starts_with(
+            "#!usr/bin/env node\n/* banner */\n\"use strict\";\n\"custom\";\nvar Bundle = (() => {\n"
+        ));
+        assert!(output.contains("  // src/entry.js\n  work();\n  return 1;\n"));
+        assert!(output.ends_with("})();\n/* footer */\n"));
     }
 
     #[test]
