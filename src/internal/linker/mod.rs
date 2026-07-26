@@ -72,12 +72,20 @@ pub struct ChunkInfo {
     pub intermediate_output: IntermediateOutput,
     pub output_source_map: SourceMapPieces,
     pub source_map_results: Vec<CompileResultForSourceMap>,
+    pub metadata_imports: Vec<IntermediateOutput>,
+    pub metadata_inputs: Vec<MetadataInput>,
     pub external_legal_comments: Vec<u8>,
     pub isolated_hash: Vec<u8>,
     pub entry_point_bit: usize,
     pub source_index: u32,
     pub is_entry_point: bool,
     pub is_executable: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct MetadataInput {
+    pub source_index: u32,
+    pub outputs: Vec<IntermediateOutput>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -4417,6 +4425,9 @@ pub fn assemble_javascript_chunk(
     let mut joiner = Joiner::default();
     let mut legal_comment_list = Vec::new();
     let mut source_map_results = Vec::new();
+    let mut metadata_imports = Vec::new();
+    let mut metadata_inputs = Vec::<MetadataInput>::new();
+    let mut metadata_input_indices = HashMap::<u32, usize>::new();
     let mut previous_offset = LineColumnOffset::default();
     let newline = if options.minify_whitespace { "" } else { "\n" };
     let space = if options.minify_whitespace { "" } else { " " };
@@ -4424,6 +4435,16 @@ pub fn assemble_javascript_chunk(
     let mut is_executable = false;
     chunk.external_legal_comments.clear();
     chunk.source_map_results.clear();
+    chunk.metadata_imports.clear();
+    chunk.metadata_inputs.clear();
+    if options.needs_metafile {
+        metadata_imports.extend(
+            bindings
+                .json_metadata_imports
+                .iter()
+                .map(|json| output_paths.break_output_into_pieces(json.as_bytes().to_vec())),
+        );
+    }
 
     if chunk.is_entry_point {
         let Some(InputFileRepr::Js(repr)) = graph.files[chunk.source_index as usize]
@@ -4500,6 +4521,32 @@ pub fn assemble_javascript_chunk(
 
     let mut previous_source = None;
     for compiled in compiled_parts {
+        if options.needs_metafile {
+            metadata_imports.extend(
+                compiled
+                    .json_metadata_imports
+                    .iter()
+                    .map(|json| output_paths.break_output_into_pieces(json.as_bytes().to_vec())),
+            );
+            if !graph.files[compiled.source_index as usize]
+                .input_file
+                .omit_from_source_maps_and_metafile
+            {
+                let index = *metadata_input_indices
+                    .entry(compiled.source_index)
+                    .or_insert_with(|| {
+                        let index = metadata_inputs.len();
+                        metadata_inputs.push(MetadataInput {
+                            source_index: compiled.source_index,
+                            ..MetadataInput::default()
+                        });
+                        index
+                    });
+                metadata_inputs[index]
+                    .outputs
+                    .push(output_paths.break_output_into_pieces(compiled.js.clone()));
+            }
+        }
         if !compiled.extracted_legal_comments.is_empty() {
             legal_comment_list.push(LegalCommentEntry {
                 source_index: compiled.source_index,
@@ -4606,6 +4653,8 @@ pub fn assemble_javascript_chunk(
     }
     chunk.intermediate_output = output_paths.break_joiner_into_pieces(joiner);
     chunk.source_map_results = source_map_results;
+    chunk.metadata_imports = metadata_imports;
+    chunk.metadata_inputs = metadata_inputs;
     chunk.is_executable = is_executable;
     is_executable
 }
@@ -4897,6 +4946,133 @@ fn append_javascript_source_map_outputs(
     }
 }
 
+fn metafile_output_path(file_system: &dyn Fs, options: &Options, rel_path: &str) -> String {
+    let absolute = file_system.join(&[&options.abs_output_dir, rel_path]);
+    if options.metafile_path_style == crate::internal::logger::PathStyle::Absolute {
+        absolute
+    } else {
+        file_system
+            .rel(file_system.cwd(), &absolute)
+            .unwrap_or(absolute)
+            .replace('\\', "/")
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn generate_javascript_metadata_chunk(
+    file_system: &dyn Fs,
+    graph: &LinkerGraph,
+    chunk: &mut ChunkInfo,
+    output_paths: &OutputPathContext<'_>,
+    options: &Options,
+    final_directory: &str,
+    final_output_size: usize,
+) -> String {
+    if !options.needs_metafile {
+        return String::new();
+    }
+    let fragment = |text: &str| options.metafile_format.maybe_remove_whitespace(text);
+    let mut joiner = Joiner::default();
+    joiner.add_string(fragment("{\n      \"imports\": ["));
+    let mut is_first = true;
+    for import in std::mem::take(&mut chunk.metadata_imports) {
+        if is_first {
+            is_first = false;
+        } else {
+            joiner.add_string(",");
+        }
+        let (import, _) = output_paths.substitute_final_paths(import, |target_path| {
+            metafile_output_path(file_system, options, target_path)
+        });
+        joiner.add_bytes(import.done());
+    }
+    if !is_first {
+        joiner.add_string(fragment("\n      "));
+    }
+
+    joiner.add_string(fragment("],\n      \"exports\": ["));
+    let mut exports = Vec::new();
+    if options.output_format.keep_esm_import_export_syntax() {
+        if chunk.is_entry_point {
+            if let Some(InputFileRepr::Js(repr)) = graph.files[chunk.source_index as usize]
+                .input_file
+                .repr
+                .as_ref()
+            {
+                if repr.meta.wrap == WrapKind::Cjs {
+                    exports.push("default".to_string());
+                } else {
+                    exports.extend(repr.meta.resolved_exports.keys().cloned());
+                }
+            }
+        } else {
+            exports.extend(chunk.exports_to_other_chunks.values().cloned());
+        }
+    }
+    exports.sort();
+    exports.dedup();
+    for (index, alias) in exports.iter().enumerate() {
+        if index != 0 {
+            joiner.add_string(",");
+        }
+        joiner.add_string(fragment("\n        "));
+        joiner.add_bytes(quote_for_json(alias.as_bytes(), options.ascii_only));
+    }
+    if !exports.is_empty() {
+        joiner.add_string(fragment("\n      "));
+    }
+    joiner.add_string(fragment("],\n"));
+
+    if chunk.is_entry_point {
+        let entry_point = graph.files[chunk.source_index as usize]
+            .input_file
+            .source
+            .pretty_paths
+            .select(options.metafile_path_style);
+        joiner.add_string(fragment("      \"entryPoint\": "));
+        joiner.add_bytes(quote_for_json(entry_point.as_bytes(), options.ascii_only));
+        joiner.add_string(fragment(",\n"));
+    }
+    joiner.add_string(fragment("      \"inputs\": {"));
+    for (index, input) in chunk.metadata_inputs.iter().enumerate() {
+        if index != 0 {
+            joiner.add_string(",");
+        }
+        let bytes_in_output = input
+            .outputs
+            .iter()
+            .map(|output| {
+                output_paths.accurate_final_byte_count(output, |target_path| {
+                    path_between_chunks(
+                        file_system,
+                        &options.public_path,
+                        final_directory,
+                        target_path,
+                    )
+                    .expect("metadata input paths must have a relative path")
+                })
+            })
+            .sum::<usize>();
+        let input_path = graph.files[input.source_index as usize]
+            .input_file
+            .source
+            .pretty_paths
+            .select(options.metafile_path_style);
+        joiner.add_string(fragment("\n        "));
+        joiner.add_bytes(quote_for_json(input_path.as_bytes(), options.ascii_only));
+        joiner.add_string(fragment(": {\n          \"bytesInOutput\": "));
+        joiner.add_string(bytes_in_output.to_string());
+        joiner.add_string(fragment("\n        }"));
+    }
+    if !chunk.metadata_inputs.is_empty() {
+        joiner.add_string(fragment("\n      "));
+    }
+    joiner.add_string(fragment("},\n      \"bytes\": "));
+    joiner.add_string(final_output_size.to_string());
+    joiner.add_string(fragment("\n    }"));
+    String::from_utf8(joiner.done()).expect("metadata JSON is UTF-8")
+}
+
 /// Substitute final chunk and asset paths and emit concrete output files.
 ///
 /// # Panics
@@ -4904,6 +5080,7 @@ fn append_javascript_source_map_outputs(
 /// Panics when output paths cannot be made relative, a temporary path index is
 /// invalid, or an asset marker violates linker invariants.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn finalize_javascript_chunk_outputs(
     file_system: &dyn Fs,
     graph: &LinkerGraph,
@@ -5001,14 +5178,23 @@ pub fn finalize_javascript_chunk_outputs(
             &mut output_files,
         );
 
+        let json_metadata_chunk = generate_javascript_metadata_chunk(
+            file_system,
+            graph,
+            chunk,
+            &output_paths,
+            options,
+            &final_directory,
+            joiner.len() as usize,
+        );
         output_files.push(OutputFile {
             abs_path: file_system.join(&[
                 options.abs_output_dir.as_str(),
                 chunk.final_rel_path.as_str(),
             ]),
             contents: joiner.done(),
+            json_metadata_chunk,
             is_executable: chunk.is_executable,
-            ..OutputFile::default()
         });
     }
     output_files
@@ -5200,8 +5386,8 @@ mod tests {
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
         config::{
-            Format, LegalComments, Loader, Mode, Options, PathPlaceholder, PathTemplate,
-            SourceMap as SourceMapMode, template_to_string,
+            Format, LegalComments, Loader, MetafileFormat, Mode, Options, PathPlaceholder,
+            PathTemplate, SourceMap as SourceMapMode, template_to_string,
         },
         css_ast::{
             ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
@@ -6770,6 +6956,140 @@ mod tests {
                 assert_eq!(outputs[0].abs_path, "/out/app.js.map");
             }
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn finalizes_javascript_chunk_metafile_metadata() {
+        let mut input = js_file(js_ast::Ast::default());
+        input.source.pretty_paths.rel = "src/entry.js".into();
+        let mut graph = clone_linker_graph(&[input], &[0], &[EntryPoint::default()], false);
+        let Some(InputFileRepr::Js(repr)) = graph.files[0].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta
+            .resolved_exports
+            .insert("foo".into(), super::ExportData::default());
+        let temporary_paths = [
+            ChunkPath {
+                unique_key: "UNIQUEC00000000".into(),
+                ..ChunkPath::default()
+            },
+            ChunkPath {
+                unique_key: "UNIQUEC00000001".into(),
+                ..ChunkPath::default()
+            },
+        ];
+        let options = Options {
+            abs_output_dir: "/out".into(),
+            mode: Mode::Bundle,
+            output_format: Format::EsModule,
+            needs_metafile: true,
+            ..Options::default()
+        };
+        let mut entry = ChunkInfo {
+            unique_key: temporary_paths[0].unique_key.clone(),
+            final_template: vec![PathTemplate {
+                data: "entry.js".into(),
+                ..PathTemplate::default()
+            }],
+            is_entry_point: true,
+            ..ChunkInfo::default()
+        };
+        assemble_javascript_chunk(
+            &graph,
+            &mut entry,
+            &[super::CompiledPartRange {
+                source_index: 0,
+                js: b"load(\"UNIQUEC00000001\");\n".to_vec(),
+                json_metadata_imports: vec![
+                    "\n        {\n          \"path\": \"external package\",\n          \"kind\": \"dynamic-import\",\n          \"external\": true\n        }"
+                        .into(),
+                ],
+                ..super::CompiledPartRange::default()
+            }],
+            &super::PrintedCrossChunkBindings {
+                prefix: b"import \"UNIQUEC00000001\";\n".to_vec(),
+                json_metadata_imports: vec![
+                    "\n        {\n          \"path\": \"UNIQUEC00000001\",\n          \"kind\": \"import-statement\"\n        }"
+                        .into(),
+                ],
+                ..super::PrintedCrossChunkBindings::default()
+            },
+            &[],
+            &options,
+            &context(&[], &temporary_paths),
+        );
+        let mut dependency_joiner = Joiner::default();
+        dependency_joiner.add_string("export const dep = 1;\n");
+        let mut chunks = vec![
+            entry,
+            ChunkInfo {
+                unique_key: temporary_paths[1].unique_key.clone(),
+                final_template: vec![PathTemplate {
+                    data: "chunk file.js".into(),
+                    ..PathTemplate::default()
+                }],
+                intermediate_output: context(&[], &temporary_paths)
+                    .break_joiner_into_pieces(dependency_joiner),
+                ..ChunkInfo::default()
+            },
+        ];
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let outputs =
+            finalize_javascript_chunk_outputs(&file_system, &graph, &mut chunks, &[], &options);
+        assert_eq!(outputs.len(), 2);
+        let entry_output = &outputs[0];
+        let metadata = &entry_output.json_metadata_chunk;
+        assert!(metadata.contains("\"path\": \"out/chunk file.js\""));
+        assert!(metadata.contains("\"path\": \"external package\""));
+        assert!(metadata.contains("\"external\": true"));
+        assert!(
+            metadata.contains("\"exports\": [\n        \"foo\"\n      ]"),
+            "{metadata}"
+        );
+        assert!(metadata.contains("\"entryPoint\": \"src/entry.js\""));
+        assert!(metadata.contains("\"inputs\": {\n        \"src/entry.js\""));
+        assert!(metadata.contains("\"bytesInOutput\": 25"));
+        assert!(metadata.contains(&format!("\"bytes\": {}", entry_output.contents.len())));
+
+        let mut minified_chunk = ChunkInfo {
+            final_template: vec![PathTemplate {
+                data: "min.js".into(),
+                ..PathTemplate::default()
+            }],
+            ..ChunkInfo::default()
+        };
+        assemble_javascript_chunk(
+            &graph,
+            &mut minified_chunk,
+            &[super::CompiledPartRange {
+                source_index: 0,
+                js: b"x();\n".to_vec(),
+                ..super::CompiledPartRange::default()
+            }],
+            &super::PrintedCrossChunkBindings::default(),
+            &[],
+            &Options {
+                needs_metafile: true,
+                metafile_format: MetafileFormat::Minified,
+                ..options.clone()
+            },
+            &context(&[], &[]),
+        );
+        let minified = finalize_javascript_chunk_outputs(
+            &file_system,
+            &graph,
+            std::slice::from_mut(&mut minified_chunk),
+            &[],
+            &Options {
+                needs_metafile: true,
+                metafile_format: MetafileFormat::Minified,
+                ..options
+            },
+        );
+        assert!(!minified[0].json_metadata_chunk.contains('\n'));
+        assert!(minified[0].json_metadata_chunk.contains("\"src/entry.js\""));
     }
 
     #[test]
@@ -9264,6 +9584,7 @@ mod tests {
         let mut graph = clone_linker_graph(&input_files, &[0, 1, 2, 3], &entry_points, true);
         let options = Options {
             code_splitting: true,
+            needs_metafile: true,
             output_format: Format::EsModule,
             tree_shaking: true,
             ..Options::default()
@@ -9319,6 +9640,9 @@ mod tests {
             b"import { shared } from \"UNIQUEC00000002\";\n"
         );
         assert!(entry_bindings.suffix.is_empty());
+        assert_eq!(entry_bindings.json_metadata_imports.len(), 1);
+        assert!(entry_bindings.json_metadata_imports[0].contains("UNIQUEC00000002"));
+        assert!(!entry_bindings.json_metadata_imports[0].contains("\"external\""));
         let shared_bindings = print_cross_chunk_bindings(&chunks, 2, &renamer, &options);
         assert!(shared_bindings.prefix.is_empty());
         assert_eq!(shared_bindings.suffix, b"export { shared };\n");
