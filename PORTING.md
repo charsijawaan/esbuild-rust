@@ -10,7 +10,7 @@ Status values:
 | Upstream package | Status |
 | --- | --- |
 | `api` | in progress |
-| `cmd/esbuild` | not started |
+| `cmd/esbuild` | in progress |
 | `internal/api_helpers` | ported |
 | `internal/ast` | ported |
 | `internal/bundler` | not started |
