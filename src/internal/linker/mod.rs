@@ -3525,6 +3525,337 @@ pub fn compile_part_range_for_chunk(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EntryPointTailRefs {
+    pub to_common_js_ref: Ref,
+    pub unbound_module_ref: Ref,
+}
+
+/// Generate and print the format-specific tail for a JavaScript entry point.
+///
+/// # Panics
+///
+/// Panics when the source is not JavaScript, resolved exports are inconsistent,
+/// or the printer encounters an unsupported AST invariant.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn generate_entry_point_tail(
+    graph: &LinkerGraph,
+    options: &Options,
+    source_index: u32,
+    refs: EntryPointTailRefs,
+    renamer: &dyn crate::internal::renamer::Renamer,
+) -> Vec<u8> {
+    let file = &graph.files[source_index as usize];
+    let Some(InputFileRepr::Js(repr)) = file.input_file.repr.as_ref() else {
+        panic!("entry point must be JavaScript");
+    };
+    let location = crate::internal::logger::Loc::default();
+    let mut statements = Vec::new();
+    match options.output_format {
+        Format::Preserve => {
+            if repr.meta.wrap != WrapKind::None {
+                statements.push(expr_statement(wrapper_call(repr.ast.wrapper_ref, location)));
+            }
+        }
+        Format::Iife => {
+            if repr.meta.wrap == WrapKind::Cjs {
+                let call = wrapper_call(repr.ast.wrapper_ref, location);
+                statements.push(if options.global_name.is_empty() {
+                    expr_statement(call)
+                } else {
+                    js_ast::Stmt::new(
+                        location,
+                        js_ast::StmtData::Return(js_ast::ReturnStmt { value_or_nil: call }),
+                    )
+                });
+            } else {
+                if repr.meta.wrap == WrapKind::Esm {
+                    statements.push(expr_statement(wrapper_call(repr.ast.wrapper_ref, location)));
+                }
+                if repr.meta.force_include_exports_for_entry_point {
+                    statements.push(js_ast::Stmt::new(
+                        location,
+                        js_ast::StmtData::Return(js_ast::ReturnStmt {
+                            value_or_nil: call_with_args(
+                                refs.to_common_js_ref,
+                                vec![identifier_expr(repr.ast.exports_ref, location)],
+                                location,
+                            ),
+                        }),
+                    ));
+                }
+            }
+        }
+        Format::CommonJs => {
+            if repr.meta.wrap == WrapKind::Cjs {
+                statements.push(js_ast::assign_stmt(
+                    module_exports_expr(refs.unbound_module_ref, location),
+                    wrapper_call(repr.ast.wrapper_ref, location),
+                ));
+            } else if repr.meta.wrap == WrapKind::Esm {
+                statements.push(expr_statement(wrapper_call(repr.ast.wrapper_ref, location)));
+            }
+            if options.platform == crate::internal::config::Platform::Node {
+                append_node_common_js_export_annotations(
+                    &mut statements,
+                    repr,
+                    refs.unbound_module_ref,
+                    options,
+                );
+            }
+        }
+        Format::EsModule => {
+            if repr.meta.wrap == WrapKind::Cjs {
+                statements.push(js_ast::Stmt::new(
+                    location,
+                    js_ast::StmtData::ExportDefault(js_ast::ExportDefaultStmt {
+                        value: expr_statement(wrapper_call(repr.ast.wrapper_ref, location)),
+                        ..js_ast::ExportDefaultStmt::default()
+                    }),
+                ));
+            } else {
+                if repr.meta.wrap == WrapKind::Esm {
+                    let call = wrapper_call(repr.ast.wrapper_ref, location);
+                    statements.push(expr_statement(
+                        if repr.meta.is_async_or_has_async_dependency {
+                            js_ast::Expr::new(
+                                location,
+                                js_ast::ExprData::Await(js_ast::AwaitExpr { value: call }),
+                            )
+                        } else {
+                            call
+                        },
+                    ));
+                }
+                let mut items = Vec::new();
+                for (index, alias) in repr
+                    .meta
+                    .sorted_and_filtered_export_aliases
+                    .iter()
+                    .enumerate()
+                {
+                    let mut export = repr.meta.resolved_exports[alias].clone();
+                    let Some(InputFileRepr::Js(target)) = graph.files[export.source_index as usize]
+                        .input_file
+                        .repr
+                        .as_ref()
+                    else {
+                        panic!("resolved export target must be JavaScript");
+                    };
+                    if let Some(import) = target.meta.imports_to_bind.get(&export.reference) {
+                        export.reference = import.reference;
+                        export.source_index = import.source_index;
+                    }
+                    if graph
+                        .symbols
+                        .get(export.reference)
+                        .namespace_alias
+                        .is_some()
+                    {
+                        let temp_ref = repr.meta.cjs_export_copies[index];
+                        statements.push(js_ast::Stmt::new(
+                            location,
+                            js_ast::StmtData::Local(js_ast::LocalStmt {
+                                declarations: vec![js_ast::Decl {
+                                    binding: identifier_binding(temp_ref),
+                                    value_or_nil: js_ast::Expr::new(
+                                        location,
+                                        js_ast::ExprData::ImportIdentifier(
+                                            js_ast::ImportIdentifierExpr {
+                                                reference: export.reference,
+                                                ..js_ast::ImportIdentifierExpr::default()
+                                            },
+                                        ),
+                                    ),
+                                }],
+                                ..js_ast::LocalStmt::default()
+                            }),
+                        ));
+                        items.push(js_ast::ClauseItem {
+                            name: LocRef {
+                                reference: temp_ref,
+                                ..LocRef::default()
+                            },
+                            alias: alias.clone(),
+                            ..js_ast::ClauseItem::default()
+                        });
+                    } else {
+                        items.push(js_ast::ClauseItem {
+                            name: LocRef {
+                                reference: export.reference,
+                                ..LocRef::default()
+                            },
+                            alias: alias.clone(),
+                            ..js_ast::ClauseItem::default()
+                        });
+                    }
+                }
+                if !items.is_empty() {
+                    statements.push(js_ast::Stmt::new(
+                        location,
+                        js_ast::StmtData::ExportClause(js_ast::ExportClauseStmt {
+                            items,
+                            ..js_ast::ExportClauseStmt::default()
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+    if statements.is_empty() {
+        return Vec::new();
+    }
+    let mut tree = repr.ast.clone();
+    tree.directives.clear();
+    tree.hashbang.clear();
+    tree.parts = vec![js_ast::Part {
+        statements,
+        ..js_ast::Part::default()
+    }];
+    crate::internal::js_printer::print(
+        &tree,
+        renamer,
+        crate::internal::js_printer::Options {
+            unsupported_features: options.unsupported_js_features,
+            line_limit: options.line_limit,
+            minify_syntax: options.minify_syntax,
+            minify_whitespace: options.minify_whitespace,
+            ascii_only: options.ascii_only,
+        },
+    )
+    .js
+}
+
+fn expr_statement(value: js_ast::Expr) -> js_ast::Stmt {
+    js_ast::Stmt::new(
+        value.loc,
+        js_ast::StmtData::Expr(js_ast::ExprStmt {
+            value,
+            ..js_ast::ExprStmt::default()
+        }),
+    )
+}
+
+fn identifier_expr(reference: Ref, location: crate::internal::logger::Loc) -> js_ast::Expr {
+    js_ast::Expr::new(
+        location,
+        js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+            reference,
+            ..js_ast::IdentifierExpr::default()
+        }),
+    )
+}
+
+fn call_with_args(
+    reference: Ref,
+    args: Vec<js_ast::Expr>,
+    location: crate::internal::logger::Loc,
+) -> js_ast::Expr {
+    js_ast::Expr::new(
+        location,
+        js_ast::ExprData::Call(js_ast::CallExpr {
+            target: identifier_expr(reference, location),
+            args,
+            ..js_ast::CallExpr::default()
+        }),
+    )
+}
+
+fn module_exports_expr(reference: Ref, location: crate::internal::logger::Loc) -> js_ast::Expr {
+    js_ast::Expr::new(
+        location,
+        js_ast::ExprData::Dot(js_ast::DotExpr {
+            target: identifier_expr(reference, location),
+            name: "exports".into(),
+            ..js_ast::DotExpr::default()
+        }),
+    )
+}
+
+fn append_node_common_js_export_annotations(
+    statements: &mut Vec<js_ast::Stmt>,
+    repr: &crate::internal::graph::JsRepr,
+    module_ref: Ref,
+    options: &Options,
+) {
+    let mut properties = Vec::new();
+    for alias in &repr.meta.sorted_and_filtered_export_aliases {
+        if alias == "default" {
+            continue;
+        }
+        let value_or_nil = if crate::internal::js_lexer::KEYWORDS.contains(&alias.as_str())
+            || !js_ast::is_identifier(alias)
+        {
+            js_ast::Expr::new(
+                crate::internal::logger::Loc::default(),
+                js_ast::ExprData::Null,
+            )
+        } else {
+            js_ast::Expr::default()
+        };
+        properties.push(js_ast::Property {
+            key: js_ast::Expr::new(
+                crate::internal::logger::Loc::default(),
+                js_ast::ExprData::String(js_ast::StringExpr {
+                    value: crate::internal::helpers::string_to_utf16(alias.as_bytes()),
+                    ..js_ast::StringExpr::default()
+                }),
+            ),
+            value_or_nil,
+            ..js_ast::Property::default()
+        });
+    }
+    for &import_record_index in &repr.ast.export_star_import_records {
+        if !repr.ast.import_records[import_record_index as usize]
+            .source_index
+            .is_valid()
+        {
+            properties.push(js_ast::Property {
+                kind: js_ast::PropertyKind::Spread,
+                value_or_nil: js_ast::Expr::new(
+                    crate::internal::logger::Loc::default(),
+                    js_ast::ExprData::RequireString(js_ast::RequireStringExpr {
+                        import_record_index,
+                        ..js_ast::RequireStringExpr::default()
+                    }),
+                ),
+                ..js_ast::Property::default()
+            });
+        }
+    }
+    if properties.is_empty() {
+        return;
+    }
+    if !options.minify_whitespace {
+        statements.push(js_ast::Stmt::new(
+            crate::internal::logger::Loc::default(),
+            js_ast::StmtData::Comment(js_ast::CommentStmt {
+                text: "// Annotate the CommonJS export names for ESM import in node:".into(),
+                ..js_ast::CommentStmt::default()
+            }),
+        ));
+    }
+    let location = crate::internal::logger::Loc::default();
+    statements.push(expr_statement(js_ast::Expr::new(
+        location,
+        js_ast::ExprData::Binary(js_ast::BinaryExpr {
+            left: js_ast::Expr::new(location, js_ast::ExprData::Number(0.0)),
+            right: js_ast::assign(
+                module_exports_expr(module_ref, location),
+                js_ast::Expr::new(
+                    location,
+                    js_ast::ExprData::Object(js_ast::ObjectExpr {
+                        properties,
+                        ..js_ast::ObjectExpr::default()
+                    }),
+                ),
+            ),
+            op: js_ast::OpCode::BinaryLogicalAnd,
+        }),
+    )));
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -3918,21 +4249,21 @@ mod tests {
 
     use super::{
         AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, ChunkRuntimeRefs,
-        CrossChunkImport, CrossChunkImportItem, ImportStatus, ImportTracker, MatchImportKind,
-        OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, RuntimeReExportContext,
-        StableRef, add_exports_for_export_star, advance_import_tracker,
+        CrossChunkImport, CrossChunkImportItem, EntryPointTailRefs, ImportStatus, ImportTracker,
+        MatchImportKind, OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange,
+        RuntimeReExportContext, StableRef, add_exports_for_export_star, advance_import_tracker,
         append_or_extend_part_range, assign_chunk_path_templates, bind_imports_to_exports_for_file,
         classify_module_wrappers, compile_part_range_for_chunk, compute_cross_chunk_dependencies,
         compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
         create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
-        generate_cross_chunk_stmts, generate_isolated_hash, has_dynamic_exports_due_to_export_star,
-        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
-        merge_adjacent_local_stmts, path_between_chunks, print_cross_chunk_bindings,
-        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
-        wrap_common_js_stmts, wrap_esm_stmts,
+        generate_cross_chunk_stmts, generate_entry_point_tail, generate_isolated_hash,
+        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
+        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
+        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
+        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
+        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -5114,6 +5445,107 @@ mod tests {
         let output = String::from_utf8(result.js).expect("UTF-8");
         assert!(output.contains("var require_file = __commonJS("));
         assert!(output.contains("1;"));
+    }
+
+    #[test]
+    fn entry_point_tail_covers_all_output_formats() {
+        let wrapper_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let to_common_js_ref = Ref {
+            source_index: 0,
+            inner_index: 1,
+        };
+        let module_ref = Ref {
+            source_index: 0,
+            inner_index: 2,
+        };
+        let input_files = [js_file(js_ast::Ast {
+            symbols: vec![
+                Symbol::new(SymbolKind::Other, "require_entry"),
+                Symbol::new(SymbolKind::Other, "__toCommonJS"),
+                Symbol::new(SymbolKind::Unbound, "module"),
+            ],
+            wrapper_ref,
+            ..js_ast::Ast::default()
+        })];
+        let mut graph = clone_linker_graph(&input_files, &[0], &[EntryPoint::default()], false);
+        let Some(InputFileRepr::Js(repr)) = graph.files[0].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta.wrap = WrapKind::Cjs;
+        let renamer = crate::internal::renamer::new_no_op_renamer(graph.symbols.clone());
+        let refs = EntryPointTailRefs {
+            to_common_js_ref,
+            unbound_module_ref: module_ref,
+        };
+        let tail = |format, global_name: Vec<String>| {
+            String::from_utf8(generate_entry_point_tail(
+                &graph,
+                &Options {
+                    output_format: format,
+                    global_name,
+                    ..Options::default()
+                },
+                0,
+                refs,
+                &renamer,
+            ))
+            .expect("UTF-8")
+        };
+        assert_eq!(tail(Format::Preserve, Vec::new()), "require_entry();\n");
+        assert_eq!(
+            tail(Format::Iife, vec!["Bundle".into()]),
+            "return require_entry();\n"
+        );
+        assert_eq!(
+            tail(Format::CommonJs, Vec::new()),
+            "module.exports = require_entry();\n"
+        );
+        assert_eq!(
+            tail(Format::EsModule, Vec::new()),
+            "export default require_entry();\n"
+        );
+    }
+
+    #[test]
+    fn esm_entry_point_tail_exports_resolved_symbols() {
+        let export_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let input_files = [js_file(js_ast::Ast {
+            symbols: vec![Symbol::new(SymbolKind::Other, "foo")],
+            ..js_ast::Ast::default()
+        })];
+        let mut graph = clone_linker_graph(&input_files, &[0], &[EntryPoint::default()], false);
+        let Some(InputFileRepr::Js(repr)) = graph.files[0].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta.sorted_and_filtered_export_aliases = vec!["foo".into()];
+        repr.meta.resolved_exports.insert(
+            "foo".into(),
+            crate::internal::graph::ExportData {
+                reference: export_ref,
+                source_index: 0,
+                ..crate::internal::graph::ExportData::default()
+            },
+        );
+        let renamer = crate::internal::renamer::new_no_op_renamer(graph.symbols.clone());
+        assert_eq!(
+            generate_entry_point_tail(
+                &graph,
+                &Options {
+                    output_format: Format::EsModule,
+                    ..Options::default()
+                },
+                0,
+                EntryPointTailRefs::default(),
+                &renamer,
+            ),
+            b"export { foo };\n"
+        );
     }
 
     #[test]
