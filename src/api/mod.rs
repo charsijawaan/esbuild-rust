@@ -2,6 +2,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fs as std_fs,
+    io::{self, Write as _},
     path::{Path as FsPath, PathBuf},
     sync::Arc,
 };
@@ -329,6 +331,7 @@ pub struct BuildOptions {
     pub splitting: bool,
     pub preserve_symlinks: bool,
     pub allow_overwrite: bool,
+    pub write: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
     pub minify_syntax: bool,
@@ -387,6 +390,89 @@ pub struct BuildResult {
 
 fn output_file_hash(contents: &[u8]) -> String {
     STANDARD_NO_PAD.encode(xxhash::sum64(contents).to_le_bytes())
+}
+
+fn write_build_output_files(
+    output_files: &[BuildOutputFile],
+    write_to_stdout: bool,
+    input_paths: &HashSet<PathBuf>,
+    allow_overwrite: bool,
+) -> Vec<Message> {
+    if write_to_stdout {
+        if output_files.len() != 1 {
+            return vec![Message {
+                text: format!(
+                    "Internal error: did not expect to generate {} files when writing to stdout",
+                    output_files.len()
+                ),
+                kind: MessageKind::Error,
+            }];
+        }
+        return io::stdout()
+            .write_all(&output_files[0].contents)
+            .err()
+            .map_or_else(Vec::new, |error| {
+                vec![Message {
+                    text: format!("Could not write to stdout: {error}"),
+                    kind: MessageKind::Error,
+                }]
+            });
+    }
+
+    let mut errors = Vec::new();
+    for output in output_files {
+        let path = FsPath::new(&output.path);
+        if !allow_overwrite
+            && std_fs::canonicalize(path).is_ok_and(|canonical| input_paths.contains(&canonical))
+        {
+            errors.push(Message {
+                text: format!(
+                    "Refusing to overwrite input file {} (use allow_overwrite to allow this)",
+                    path.display()
+                ),
+                kind: MessageKind::Error,
+            });
+            continue;
+        }
+        if let Some(parent) = path.parent()
+            && let Err(error) = std_fs::create_dir_all(parent)
+        {
+            errors.push(Message {
+                text: format!(
+                    "Could not create output directory {}: {error}",
+                    parent.display()
+                ),
+                kind: MessageKind::Error,
+            });
+            continue;
+        }
+        if let Err(error) = std_fs::write(path, &output.contents) {
+            errors.push(Message {
+                text: format!("Could not write output file {}: {error}", path.display()),
+                kind: MessageKind::Error,
+            });
+            continue;
+        }
+        #[cfg(unix)]
+        if output.executable {
+            use std::os::unix::fs::PermissionsExt;
+
+            let permissions = std_fs::metadata(path).map(|metadata| metadata.permissions());
+            if let Ok(mut permissions) = permissions {
+                permissions.set_mode(permissions.mode() | 0o111);
+                if let Err(error) = std_fs::set_permissions(path, permissions) {
+                    errors.push(Message {
+                        text: format!(
+                            "Could not make output file {} executable: {error}",
+                            path.display()
+                        ),
+                        kind: MessageKind::Error,
+                    });
+                }
+            }
+        }
+    }
+    errors
 }
 
 fn validate_externals(
@@ -759,6 +845,9 @@ fn validate_defines(
 #[allow(clippy::too_many_lines)]
 pub fn build(options: BuildOptions) -> BuildResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let write = options.write;
+    let write_to_stdout = write && options.outdir.is_empty() && options.outfile.is_empty();
+    let allow_overwrite = options.allow_overwrite;
     let file_system = match real_fs(RealFsOptions {
         abs_working_dir: options.abs_working_dir.clone(),
         ..RealFsOptions::default()
@@ -783,6 +872,24 @@ pub fn build(options: BuildOptions) -> BuildResult {
             };
         }
     };
+    let canonical_input_paths = options
+        .entry_points
+        .iter()
+        .chain(
+            options
+                .entry_points_advanced
+                .iter()
+                .map(|entry| &entry.input_path),
+        )
+        .filter_map(|path| {
+            let path = if file_system.is_abs(path) {
+                path.clone()
+            } else {
+                file_system.join(&[file_system.cwd(), path])
+            };
+            std_fs::canonicalize(path).ok()
+        })
+        .collect::<HashSet<_>>();
     let all_entry_point_paths = options
         .entry_points
         .iter()
@@ -1042,7 +1149,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
     } else {
         String::new()
     };
-    let output_files = if errors.is_empty() {
+    let output_files: Vec<BuildOutputFile> = if errors.is_empty() {
         compiled
             .output_files
             .into_iter()
@@ -1056,6 +1163,14 @@ pub fn build(options: BuildOptions) -> BuildResult {
     } else {
         Vec::new()
     };
+    if write && errors.is_empty() {
+        errors.extend(write_build_output_files(
+            &output_files,
+            write_to_stdout,
+            &canonical_input_paths,
+            allow_overwrite,
+        ));
+    }
     BuildResult {
         errors,
         warnings,
@@ -1675,6 +1790,94 @@ mod tests {
         let output = &result.output_files[0];
         assert_eq!(output.hash, super::output_file_hash(&output.contents));
         assert_eq!(output.hash.len(), 11);
+    }
+
+    #[test]
+    fn optionally_writes_build_outputs_to_disk() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-api-write-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        let output = directory.join("nested/out.js");
+        std::fs::write(&entry, "#!/usr/bin/env node\nconsole.log('written')")
+            .expect("write entry file");
+
+        let in_memory = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outfile: "nested/out.js".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            ..BuildOptions::default()
+        });
+        assert!(in_memory.errors.is_empty(), "{:?}", in_memory.errors);
+        assert_eq!(in_memory.output_files.len(), 1);
+        assert!(!output.exists());
+
+        let written = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outfile: "nested/out.js".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            write: true,
+            ..BuildOptions::default()
+        });
+        assert!(written.errors.is_empty(), "{:?}", written.errors);
+        assert_eq!(written.output_files.len(), 1);
+        assert_eq!(
+            std::fs::read(&output).expect("read written output"),
+            written.output_files[0].contents
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&output)
+                .expect("read output metadata")
+                .permissions()
+                .mode();
+            assert_ne!(mode & 0o111, 0);
+        }
+
+        let protected = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outfile: "entry.js".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            write: true,
+            ..BuildOptions::default()
+        });
+        assert!(
+            protected
+                .errors
+                .iter()
+                .any(|error| error.text.contains("Refusing to overwrite input file")),
+            "{:?}",
+            protected.errors
+        );
+        assert_eq!(
+            std::fs::read_to_string(&entry).expect("read protected entry"),
+            "#!/usr/bin/env node\nconsole.log('written')"
+        );
+
+        let blocked = directory.join("blocked");
+        std::fs::write(&blocked, "not a directory").expect("write blocking file");
+        let failed = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outfile: "blocked/out.js".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            write: true,
+            ..BuildOptions::default()
+        });
+        assert!(
+            failed
+                .errors
+                .iter()
+                .any(|error| error.text.contains("Could not create output directory")),
+            "{:?}",
+            failed.errors
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
