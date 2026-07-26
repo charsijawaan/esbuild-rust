@@ -1075,6 +1075,7 @@ fn is_direct_super_call_statement(statement: &Stmt) -> bool {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn insert_parameter_fields_after_super_expression(
     expression: &mut Expr,
     assignments: &[Stmt],
@@ -1111,9 +1112,67 @@ fn insert_parameter_fields_after_super_expression(
         return true;
     }
     match expression.data.as_deref_mut() {
+        Some(ExprData::Array(value)) => {
+            insert_parameter_fields_after_super_expressions(&mut value.items, assignments)
+        }
         Some(ExprData::Binary(value)) => {
             insert_parameter_fields_after_super_expression(&mut value.left, assignments)
                 | insert_parameter_fields_after_super_expression(&mut value.right, assignments)
+        }
+        Some(ExprData::New(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.target, assignments)
+                | insert_parameter_fields_after_super_expressions(&mut value.args, assignments)
+        }
+        Some(ExprData::Call(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.target, assignments)
+                | insert_parameter_fields_after_super_expressions(&mut value.args, assignments)
+        }
+        Some(ExprData::Dot(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.target, assignments)
+        }
+        Some(ExprData::Index(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.target, assignments)
+                | insert_parameter_fields_after_super_expression(&mut value.index, assignments)
+        }
+        Some(ExprData::Object(value)) => {
+            let mut inserted = false;
+            for property in &mut value.properties {
+                inserted |=
+                    insert_parameter_fields_after_super_expression(&mut property.key, assignments);
+                inserted |= insert_parameter_fields_after_super_expression(
+                    &mut property.value_or_nil,
+                    assignments,
+                );
+                inserted |= insert_parameter_fields_after_super_expression(
+                    &mut property.initializer_or_nil,
+                    assignments,
+                );
+                for decorator in &mut property.decorators {
+                    inserted |= insert_parameter_fields_after_super_expression(
+                        &mut decorator.value,
+                        assignments,
+                    );
+                }
+            }
+            inserted
+        }
+        Some(ExprData::Spread(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.value, assignments)
+        }
+        Some(ExprData::Template(value)) => {
+            let mut inserted =
+                insert_parameter_fields_after_super_expression(&mut value.tag_or_nil, assignments);
+            for part in &mut value.parts {
+                inserted |=
+                    insert_parameter_fields_after_super_expression(&mut part.value, assignments);
+            }
+            inserted
+        }
+        Some(ExprData::InlinedEnum(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.value, assignments)
+        }
+        Some(ExprData::Annotation(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.value, assignments)
         }
         Some(ExprData::If(value)) => {
             insert_parameter_fields_after_super_expression(&mut value.test, assignments)
@@ -1129,19 +1188,21 @@ fn insert_parameter_fields_after_super_expression(
         Some(ExprData::Yield(value)) => {
             insert_parameter_fields_after_super_expression(&mut value.value_or_nil, assignments)
         }
+        Some(ExprData::ImportCall(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.expr, assignments)
+                | insert_parameter_fields_after_super_expression(
+                    &mut value.options_or_nil,
+                    assignments,
+                )
+        }
         Some(
-            ExprData::Array(_)
-            | ExprData::Boolean(_)
+            ExprData::Boolean(_)
             | ExprData::Super
             | ExprData::Null
             | ExprData::Undefined
             | ExprData::This
-            | ExprData::New(_)
             | ExprData::NewTarget(_)
             | ExprData::ImportMeta(_)
-            | ExprData::Call(_)
-            | ExprData::Dot(_)
-            | ExprData::Index(_)
             | ExprData::Arrow(_)
             | ExprData::Function(_)
             | ExprData::Class(_)
@@ -1154,20 +1215,25 @@ fn insert_parameter_fields_after_super_expression(
             | ExprData::Missing
             | ExprData::Number(_)
             | ExprData::BigInt(_)
-            | ExprData::Object(_)
-            | ExprData::Spread(_)
             | ExprData::String(_)
-            | ExprData::Template(_)
             | ExprData::RegExp(_)
-            | ExprData::InlinedEnum(_)
-            | ExprData::Annotation(_)
             | ExprData::RequireString(_)
             | ExprData::RequireResolveString(_)
-            | ExprData::ImportString(_)
-            | ExprData::ImportCall(_),
+            | ExprData::ImportString(_),
         )
         | None => false,
     }
+}
+
+fn insert_parameter_fields_after_super_expressions(
+    expressions: &mut [Expr],
+    assignments: &[Stmt],
+) -> bool {
+    let mut inserted = false;
+    for expression in expressions {
+        inserted |= insert_parameter_fields_after_super_expression(expression, assignments);
+    }
+    inserted
 }
 
 fn visit_binding_initializers(

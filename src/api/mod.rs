@@ -4275,6 +4275,24 @@ mod tests {
             2,
             "{returned}"
         );
+
+        let nested = code(transform(
+            "class Box extends Base { constructor(public id: string) { return flag ? consume([super(1)]) : consume({ value: `${super(2)}` }) } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(nested.matches("this.id = id").count(), 2, "{nested}");
+        assert_eq!(nested.matches("this.id = id, this").count(), 2, "{nested}");
+        assert!(
+            nested.contains("consume([super(1), this.id = id, this])"),
+            "{nested}"
+        );
+        assert!(
+            nested.contains("${super(2), this.id = id, this}"),
+            "{nested}"
+        );
     }
 
     #[test]
