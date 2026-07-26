@@ -3,16 +3,16 @@
 use std::collections::HashMap;
 
 use crate::internal::{
-    ast::{CharFreq, ImportKind, ImportRecord, LocRef, Ref, Symbol, SymbolKind},
+    ast::{CharFreq, ImportKind, ImportRecord, LocRef, Ref, Symbol, SymbolKind, SymbolMap},
     css_ast::{
         Ast, AtCharsetRule, AtImportRule, AtKeyframesRule, AtLayerRule, AtMediaRule,
         BadDeclarationRule, ClassSelector, Combinator, CommentRule, ComplexSelector, Composes,
-        CompoundSelector, Declaration, DeclarationRule, HashSelector, ImportConditions,
-        ImportedComposesName, KNOWN_DECLARATIONS, KeyframeBlock, KnownAtRule,
+        CompoundSelector, CrossFileEqualityCheck, Declaration, DeclarationRule, HashSelector,
+        ImportConditions, ImportedComposesName, KNOWN_DECLARATIONS, KeyframeBlock, KnownAtRule,
         MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, NameToken, NamespacedName,
-        PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule, SubclassData,
-        SubclassSelector, Token, UnknownAtRule, WhitespaceFlags, media_queries_equal, rules_equal,
-        tokens_are_comma_separated,
+        PseudoClassKind, PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule,
+        SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags, media_queries_equal,
+        rules_equal, tokens_are_comma_separated,
     },
     css_lexer::{self, TokenKind, is_name_continue, would_start_identifier_without_escapes},
     logger::{Loc, Log, Path, Range, Source},
@@ -32,6 +32,115 @@ pub enum SymbolMode {
     Disabled,
     Global,
     Local,
+}
+
+#[derive(Clone, Debug)]
+struct DeadRuleEntry {
+    data: RuleData,
+    call_counter: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DeadRuleHashEntry {
+    rules: Vec<DeadRuleEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct DeadRuleCallEntry {
+    import_records: Vec<ImportRecord>,
+    source_index: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DeadRuleRemover {
+    entries: HashMap<u32, DeadRuleHashEntry>,
+    calls: Vec<DeadRuleCallEntry>,
+    symbols: SymbolMap,
+}
+
+#[must_use]
+pub fn make_dead_rule_mangler(symbols: SymbolMap) -> DeadRuleRemover {
+    DeadRuleRemover {
+        symbols,
+        ..DeadRuleRemover::default()
+    }
+}
+
+impl DeadRuleRemover {
+    /// Remove rules made redundant by this or any previously processed CSS
+    /// file, keeping the last duplicate in overall output order.
+    #[must_use]
+    pub fn remove_dead_rules_in_place(
+        &mut self,
+        source_index: u32,
+        rules: Vec<Rule>,
+        import_records: &[ImportRecord],
+    ) -> Vec<Rule> {
+        let call_counter = self.calls.len();
+        self.calls.push(DeadRuleCallEntry {
+            import_records: import_records.to_vec(),
+            source_index,
+        });
+
+        let mut kept = Vec::with_capacity(rules.len());
+        'next_rule: for rule in rules.into_iter().rev() {
+            if let RuleData::Selector(selector) = &rule.data
+                && all_selectors_are_dead(&selector.selectors)
+            {
+                continue;
+            }
+
+            if let Some(hash) = rule.data.hash() {
+                let entry = self.entries.entry(hash).or_default();
+                for current in &entry.rules {
+                    let equal = if current.call_counter == call_counter {
+                        rule.data.equal(&current.data, None)
+                    } else {
+                        let previous_call = &self.calls[current.call_counter];
+                        rule.data.equal(
+                            &current.data,
+                            Some(&CrossFileEqualityCheck {
+                                import_records_a: import_records,
+                                import_records_b: &previous_call.import_records,
+                                symbols: Some(&self.symbols),
+                                source_index_a: source_index,
+                                source_index_b: previous_call.source_index,
+                            }),
+                        )
+                    };
+                    if equal {
+                        continue 'next_rule;
+                    }
+                }
+                entry.rules.push(DeadRuleEntry {
+                    data: rule.data.clone(),
+                    call_counter,
+                });
+            }
+            kept.push(rule);
+        }
+        kept.reverse();
+        kept
+    }
+}
+
+fn contains_dead_selectors(selectors: &[CompoundSelector]) -> bool {
+    selectors.iter().any(|selector| {
+        selector.subclass_selectors.iter().any(|subclass| {
+            matches!(
+                &subclass.data,
+                SubclassData::PseudoWithSelectorList(pseudo)
+                    if pseudo.selectors.is_empty()
+                        && matches!(pseudo.kind, PseudoClassKind::Is | PseudoClassKind::Where)
+            )
+        })
+    })
+}
+
+fn all_selectors_are_dead(selectors: &[ComplexSelector]) -> bool {
+    selectors
+        .iter()
+        .all(|selector| contains_dead_selectors(&selector.selectors))
 }
 
 #[must_use]
@@ -4446,7 +4555,7 @@ fn known_at_rule_preserves_legal_comments(name: &str) -> bool {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use super::{Options, SymbolMode, parse};
+    use super::{Options, SymbolMode, make_dead_rule_mangler, parse};
     use crate::internal::{
         ast::{ImportKind, SymbolKind, SymbolMap},
         css_printer,
@@ -4638,5 +4747,81 @@ mod tests {
             panic!("expected selector rule");
         };
         assert_eq!(selector.rules.len(), 1);
+    }
+
+    #[test]
+    fn removes_duplicate_rules_across_css_files_back_to_front() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let earlier = parse(
+            log.clone(),
+            source("a { color: red } b { color: blue }"),
+            Options::default(),
+        );
+        let later = parse(log.clone(), source("a { color: red }"), Options::default());
+        assert!(log.done().is_empty());
+        let mut remover = make_dead_rule_mangler(SymbolMap::default());
+        let later_rules = remover.remove_dead_rules_in_place(2, later.rules, &later.import_records);
+        let earlier_rules =
+            remover.remove_dead_rules_in_place(1, earlier.rules, &earlier.import_records);
+        assert_eq!(later_rules.len(), 1);
+        assert_eq!(earlier_rules.len(), 1);
+        let crate::internal::css_ast::RuleData::Selector(selector) = &earlier_rules[0].data else {
+            panic!("expected selector");
+        };
+        assert_eq!(
+            selector.selectors[0].selectors[0]
+                .type_selector
+                .as_ref()
+                .expect("type selector")
+                .name
+                .text,
+            "b"
+        );
+    }
+
+    #[test]
+    fn removes_css_rules_whose_selectors_can_never_match() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut tree = parse(
+            log.clone(),
+            source("a { color: green }"),
+            Options::default(),
+        );
+        assert!(log.done().is_empty());
+        let dead_rule = |kind| {
+            crate::internal::css_ast::Rule {
+            loc: crate::internal::logger::Loc::default(),
+            data: crate::internal::css_ast::RuleData::Selector(
+                crate::internal::css_ast::SelectorRule {
+                    selectors: vec![crate::internal::css_ast::ComplexSelector {
+                        selectors: vec![crate::internal::css_ast::CompoundSelector {
+                            subclass_selectors: vec![
+                                crate::internal::css_ast::SubclassSelector {
+                                    data: crate::internal::css_ast::SubclassData::PseudoWithSelectorList(
+                                        crate::internal::css_ast::PseudoClassWithSelectorList {
+                                            kind,
+                                            ..crate::internal::css_ast::PseudoClassWithSelectorList::default()
+                                        },
+                                    ),
+                                    range: crate::internal::logger::Range::default(),
+                                },
+                            ],
+                            ..crate::internal::css_ast::CompoundSelector::default()
+                        }],
+                    }],
+                    ..crate::internal::css_ast::SelectorRule::default()
+                },
+            ),
+        }
+        };
+        tree.rules
+            .insert(0, dead_rule(crate::internal::css_ast::PseudoClassKind::Is));
+        tree.rules.insert(
+            1,
+            dead_rule(crate::internal::css_ast::PseudoClassKind::Where),
+        );
+        let mut remover = make_dead_rule_mangler(SymbolMap::default());
+        let rules = remover.remove_dead_rules_in_place(1, tree.rules, &tree.import_records);
+        assert_eq!(rules.len(), 1);
     }
 }

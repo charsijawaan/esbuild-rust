@@ -27,7 +27,7 @@ use crate::internal::{
         media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
     },
     css_lexer::TokenKind,
-    css_printer,
+    css_parser, css_printer,
     fs::Fs,
     graph::{
         ExportData, ImportData, InputFileRepr, LinkerGraph, OutputFile, SideEffectsKind, WrapKind,
@@ -2845,7 +2845,7 @@ pub fn prepare_css_asts(
     order: &[CssImportOrder],
     options: &Options,
 ) -> Vec<PreparedCssAst> {
-    order
+    let mut prepared: Vec<_> = order
         .iter()
         .map(|entry| match entry.kind {
             CssImportKind::None => PreparedCssAst::default(),
@@ -2989,7 +2989,20 @@ pub fn prepare_css_asts(
                 }
             }
         })
-        .collect()
+        .collect();
+    if options.minify_syntax {
+        let mut remover = css_parser::make_dead_rule_mangler(graph.symbols.clone());
+        for item in prepared.iter_mut().rev() {
+            if item.source_index.is_valid() {
+                item.ast.rules = remover.remove_dead_rules_in_place(
+                    item.source_index.get_index(),
+                    std::mem::take(&mut item.ast.rules),
+                    &item.ast.import_records,
+                );
+            }
+        }
+    }
+    prepared
 }
 
 /// Print each prepared CSS AST independently before chunk concatenation.
@@ -9268,6 +9281,55 @@ mod tests {
             panic!("expected external import");
         };
         assert!(at_import.import_conditions.is_some());
+    }
+
+    #[test]
+    fn prepares_css_with_cross_file_dead_rule_removal_when_minifying() {
+        let duplicate_rule = Rule {
+            data: RuleData::UnknownAt(crate::internal::css_ast::UnknownAtRule {
+                at_token: "custom".into(),
+                prelude: vec![Token {
+                    kind: TokenKind::Ident,
+                    text: "same".into(),
+                    ..Token::default()
+                }],
+                ..crate::internal::css_ast::UnknownAtRule::default()
+            }),
+            loc: Loc::default(),
+        };
+        let mut earlier = css_file(vec![], vec![], vec![]);
+        let Some(InputFileRepr::Css(repr)) = earlier.repr.as_mut() else {
+            panic!("expected CSS");
+        };
+        repr.ast.rules = vec![duplicate_rule.clone()];
+        let mut later = css_file(vec![], vec![], vec![]);
+        let Some(InputFileRepr::Css(repr)) = later.repr.as_mut() else {
+            panic!("expected CSS");
+        };
+        repr.ast.rules = vec![duplicate_rule];
+        let input_files = [css_file(vec![], vec![], vec![]), earlier, later];
+        let graph = clone_linker_graph(&input_files, &[0, 1, 2], &[], false);
+        let prepared = prepare_css_asts(
+            &graph,
+            &[
+                super::CssImportOrder {
+                    kind: CssImportKind::SourceIndex,
+                    source_index: 1,
+                    ..super::CssImportOrder::default()
+                },
+                super::CssImportOrder {
+                    kind: CssImportKind::SourceIndex,
+                    source_index: 2,
+                    ..super::CssImportOrder::default()
+                },
+            ],
+            &Options {
+                minify_syntax: true,
+                ..Options::default()
+            },
+        );
+        assert!(prepared[0].ast.rules.is_empty());
+        assert_eq!(prepared[1].ast.rules.len(), 1);
     }
 
     #[test]
