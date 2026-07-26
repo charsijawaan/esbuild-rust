@@ -236,10 +236,23 @@ pub(crate) fn parse_type_script_statement(
         return Some(parse_declare_statement(core, lexer, loc, is_export));
     }
     if lexer.is_contextual_keyword(b"namespace") || lexer.is_contextual_keyword(b"module") {
+        let is_module = lexer.is_contextual_keyword(b"module");
         let reference = core.store_name_in_ref(lexer.identifier.clone());
         lexer.next();
         if lexer.token == Token::Identifier {
             return Some(parse_namespace_statement(core, lexer, loc, is_export));
+        }
+        if is_module && lexer.token == Token::StringLiteral {
+            lexer.next();
+            if lexer.token == Token::OpenBrace {
+                skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
+            } else {
+                lexer.expect_or_insert_semicolon();
+            }
+            return Some(Stmt::new(
+                loc,
+                StmtData::TypeScript(TypeScriptStmt::default()),
+            ));
         }
         if !is_export {
             let value = parse_expression_suffix(
@@ -429,6 +442,30 @@ fn parse_declare_statement(
         Token::Enum => {
             lexer.next();
             lexer.expect(Token::Identifier);
+            skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
+        }
+        Token::Identifier
+            if lexer.is_contextual_keyword(b"namespace")
+                || lexer.is_contextual_keyword(b"module") =>
+        {
+            lexer.next();
+            if matches!(lexer.token, Token::Identifier | Token::StringLiteral) {
+                lexer.next();
+            } else {
+                lexer.expected(Token::Identifier);
+            }
+            while lexer.token == Token::Dot {
+                lexer.next();
+                lexer.expect(Token::Identifier);
+            }
+            if lexer.token == Token::OpenBrace {
+                skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
+            } else {
+                lexer.expect_or_insert_semicolon();
+            }
+        }
+        Token::Identifier if lexer.is_contextual_keyword(b"global") => {
+            lexer.next();
             skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
         }
         Token::Identifier if lexer.is_contextual_keyword(b"let") => {

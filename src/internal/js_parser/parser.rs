@@ -2062,6 +2062,10 @@ mod tests {
              declare const version: string;\
              declare let state: number;\
              declare enum Ambient { A, B }\
+             declare namespace AmbientSpace { export const value: number; }\
+             declare module 'package' { export interface API { value: string } }\
+             declare global { interface Window { value: string } }\
+             module 'other' { export type Value = string; }\
              abstract class Runtime<T> {\
                abstract value: T;\
                method(): T { return this.value; }\
@@ -2071,20 +2075,20 @@ mod tests {
         );
         assert!(ok);
         assert!(log.done().is_empty());
-        assert_eq!(ast.parts[1].statements.len(), 7);
+        assert_eq!(ast.parts[1].statements.len(), 11);
         assert!(
-            ast.parts[1].statements[..5]
+            ast.parts[1].statements[..9]
                 .iter()
                 .all(|statement| matches!(
                     statement.data.as_deref(),
                     Some(StmtData::TypeScript(_))
                 ))
         );
-        let Some(StmtData::Class(runtime)) = ast.parts[1].statements[5].data.as_deref() else {
+        let Some(StmtData::Class(runtime)) = ast.parts[1].statements[9].data.as_deref() else {
             panic!("expected abstract runtime class");
         };
         assert_eq!(runtime.class.properties.len(), 1);
-        let Some(StmtData::Class(public)) = ast.parts[1].statements[6].data.as_deref() else {
+        let Some(StmtData::Class(public)) = ast.parts[1].statements[10].data.as_deref() else {
             panic!("expected exported abstract class");
         };
         assert_eq!(public.class.properties.len(), 1);
