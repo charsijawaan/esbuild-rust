@@ -4240,6 +4240,27 @@ mod tests {
         let assignment_index = derived.find("this.id = id;").expect("assignment");
         let after_index = derived.find("after();").expect("following statement");
         assert!(super_index < assignment_index && assignment_index < after_index);
+
+        let conditional = code(transform(
+            "class Box extends Base { constructor(public id: string) { if (flag) super(1); else { super(2) } } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(
+            conditional.matches("this.id = id;").count(),
+            2,
+            "{conditional}"
+        );
+        let first_super = conditional.find("super(1)").expect("first super call");
+        let first_assignment = conditional.find("this.id = id;").expect("first assignment");
+        let second_super = conditional.find("super(2);").expect("second super call");
+        let second_assignment = conditional
+            .rfind("this.id = id;")
+            .expect("second assignment");
+        assert!(first_super < first_assignment);
+        assert!(second_super < second_assignment);
     }
 
     #[test]

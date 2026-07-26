@@ -901,21 +901,9 @@ fn lower_type_script_constructor_parameter_fields(core: &ParserCore, class: &mut
         }
         let statements = &mut function.function.body.block.statements;
         if is_derived {
-            let Some(super_index) = statements.iter().position(|statement| {
-                matches!(
-                    statement.data.as_deref(),
-                    Some(StmtData::Expr(expression))
-                        if matches!(
-                            expression.value.data.as_deref(),
-                            Some(ExprData::Call(call))
-                                if matches!(call.target.data.as_deref(), Some(ExprData::Super))
-                        )
-                )
-            }) else {
+            if !insert_parameter_fields_after_super(statements, &assignments) {
                 return;
-            };
-            let insertion_index = super_index + 1;
-            statements.splice(insertion_index..insertion_index, assignments);
+            }
         } else {
             statements.splice(0..0, assignments);
         }
@@ -924,6 +912,134 @@ fn lower_type_script_constructor_parameter_fields(core: &ParserCore, class: &mut
         }
     }
     class.properties.splice(0..0, field_properties);
+}
+
+fn insert_parameter_fields_after_super(statements: &mut Vec<Stmt>, assignments: &[Stmt]) -> bool {
+    let mut inserted = false;
+    let mut index = 0;
+    while index < statements.len() {
+        if is_direct_super_call_statement(&statements[index]) {
+            let insertion_index = index + 1;
+            statements.splice(
+                insertion_index..insertion_index,
+                assignments.iter().cloned(),
+            );
+            inserted = true;
+            index = insertion_index + assignments.len();
+        } else {
+            inserted |= insert_parameter_fields_in_statement(&mut statements[index], assignments);
+            index += 1;
+        }
+    }
+    inserted
+}
+
+fn insert_parameter_fields_in_statement(statement: &mut Stmt, assignments: &[Stmt]) -> bool {
+    if is_direct_super_call_statement(statement) {
+        let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() else {
+            return false;
+        };
+        let mut value = std::mem::take(&mut expression.value);
+        for assignment in assignments {
+            let Some(StmtData::Expr(assignment)) = assignment.data.as_deref() else {
+                continue;
+            };
+            let loc = value.loc;
+            value = Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: value,
+                    right: assignment.value.clone(),
+                    op: OpCode::BinaryComma,
+                }),
+            );
+        }
+        expression.value = value;
+        return true;
+    }
+    match statement.data.as_deref_mut() {
+        Some(StmtData::Block(block)) => {
+            insert_parameter_fields_after_super(&mut block.statements, assignments)
+        }
+        Some(StmtData::If(value)) => {
+            insert_parameter_fields_in_statement(&mut value.yes, assignments)
+                | insert_parameter_fields_in_statement(&mut value.no_or_nil, assignments)
+        }
+        Some(StmtData::For(value)) => {
+            insert_parameter_fields_in_statement(&mut value.body, assignments)
+        }
+        Some(StmtData::ForIn(value)) => {
+            insert_parameter_fields_in_statement(&mut value.body, assignments)
+        }
+        Some(StmtData::ForOf(value)) => {
+            insert_parameter_fields_in_statement(&mut value.body, assignments)
+        }
+        Some(StmtData::DoWhile(value)) => {
+            insert_parameter_fields_in_statement(&mut value.body, assignments)
+        }
+        Some(StmtData::While(value)) => {
+            insert_parameter_fields_in_statement(&mut value.body, assignments)
+        }
+        Some(StmtData::With(value)) => {
+            insert_parameter_fields_in_statement(&mut value.body, assignments)
+        }
+        Some(StmtData::Label(value)) => {
+            insert_parameter_fields_in_statement(&mut value.statement, assignments)
+        }
+        Some(StmtData::Try(value)) => {
+            let mut inserted =
+                insert_parameter_fields_after_super(&mut value.block.statements, assignments);
+            if let Some(catch) = &mut value.catch {
+                inserted |=
+                    insert_parameter_fields_after_super(&mut catch.block.statements, assignments);
+            }
+            if let Some(finally) = &mut value.finally {
+                inserted |=
+                    insert_parameter_fields_after_super(&mut finally.block.statements, assignments);
+            }
+            inserted
+        }
+        Some(StmtData::Switch(value)) => value.cases.iter_mut().fold(false, |inserted, case| {
+            insert_parameter_fields_after_super(&mut case.body, assignments) | inserted
+        }),
+        Some(
+            StmtData::Comment(_)
+            | StmtData::Debugger
+            | StmtData::Directive(_)
+            | StmtData::Empty
+            | StmtData::TypeScript(_)
+            | StmtData::ExportClause(_)
+            | StmtData::ExportFrom(_)
+            | StmtData::ExportDefault(_)
+            | StmtData::ExportStar(_)
+            | StmtData::ExportEquals(_)
+            | StmtData::LazyExport(_)
+            | StmtData::Expr(_)
+            | StmtData::Enum(_)
+            | StmtData::Namespace(_)
+            | StmtData::Function(_)
+            | StmtData::Class(_)
+            | StmtData::Import(_)
+            | StmtData::Return(_)
+            | StmtData::Throw(_)
+            | StmtData::Local(_)
+            | StmtData::Break(_)
+            | StmtData::Continue(_),
+        )
+        | None => false,
+    }
+}
+
+fn is_direct_super_call_statement(statement: &Stmt) -> bool {
+    matches!(
+        statement.data.as_deref(),
+        Some(StmtData::Expr(expression))
+            if matches!(
+                expression.value.data.as_deref(),
+                Some(ExprData::Call(call))
+                    if matches!(call.target.data.as_deref(), Some(ExprData::Super))
+            )
+    )
 }
 
 fn visit_binding_initializers(
