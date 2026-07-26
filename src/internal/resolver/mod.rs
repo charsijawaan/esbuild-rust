@@ -1,6 +1,7 @@
 //! Port of upstream `internal/resolver`.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::sync::Arc;
@@ -379,6 +380,7 @@ pub struct ResolverContext<'a> {
     pub external_settings: Option<&'a ExternalSettings>,
     pub external_packages: bool,
     pub conditions: Option<&'a [String]>,
+    pub package_aliases: Option<&'a HashMap<String, String>>,
     pub strip_node_prefix_for_import: bool,
     pub strip_node_prefix_for_require: bool,
 }
@@ -454,6 +456,34 @@ fn resolve_file_or_package_core(
     context: ResolverContext<'_>,
     forbid_package_imports: bool,
 ) -> Option<LoadedPathPair> {
+    let mut source_dir = Cow::Borrowed(source_dir);
+    let mut import_path = Cow::Borrowed(import_path);
+    if is_package_path(&import_path)
+        && let Some(aliases) = context.package_aliases
+    {
+        let mut matched: Option<(&str, &str)> = None;
+        for (key, value) in aliases {
+            if import_path.starts_with(key)
+                && (import_path.len() == key.len()
+                    || import_path.as_bytes().get(key.len()) == Some(&b'/'))
+                && matched.is_none_or(|(old, _)| key.len() > old.len())
+            {
+                matched = Some((key, value));
+            }
+        }
+        if let Some((key, value)) = matched {
+            let tail = &import_path[key.len()..];
+            import_path = Cow::Owned(if tail == "/" {
+                value.to_string()
+            } else {
+                format!("{value}{tail}")
+            });
+            source_dir = Cow::Owned(file_system.cwd().to_string());
+        }
+    }
+    let source_dir = source_dir.as_ref();
+    let import_path = import_path.as_ref();
+
     if context
         .external_settings
         .is_some_and(|settings| is_external_match(&settings.pre_resolve, import_path))

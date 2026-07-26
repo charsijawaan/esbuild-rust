@@ -61,6 +61,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut jsx_import_source = String::new();
     let mut jsx_development = false;
     let mut external = Vec::new();
+    let mut aliases = HashMap::new();
     let mut packages = Packages::Bundle;
     let mut build_loaders = HashMap::new();
     let mut defines = HashMap::new();
@@ -232,6 +233,13 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             external.push(value.into());
             continue;
         }
+        if let Some(value) = argument.strip_prefix("--alias:") {
+            let Some((old, new)) = value.split_once('=') else {
+                return Err(format!("Missing \"=\" in {argument:?}"));
+            };
+            aliases.insert(old.into(), new.into());
+            continue;
+        }
         if let Some(value) = argument.strip_prefix("--packages=") {
             packages = match value {
                 "bundle" => Packages::Bundle,
@@ -350,6 +358,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             banner: options.banner,
             footer: options.footer,
             external,
+            alias: aliases,
             packages,
             loader: build_loaders,
             define: defines,
@@ -475,6 +484,7 @@ fn help_text() -> String {
          \x20\x20--jsx-import-source=PATH\n\
          \x20\x20--jsx-dev\n\
          \x20\x20--external:PATH\n\
+         \x20\x20--alias:OLD=NEW\n\
          \x20\x20--packages=bundle|external\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
          \x20\x20--loader:.EXT=LOADER\n\
@@ -534,6 +544,7 @@ mod tests {
         assert!(run(&["--sourcemap=wat".into()]).is_err());
         assert!(run(&["--tree-shaking=wat".into()]).is_err());
         assert!(run(&["--jsx=wat".into()]).is_err());
+        assert!(run(&["--alias:missing-value".into()]).is_err());
     }
 
     #[test]

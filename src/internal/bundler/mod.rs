@@ -572,6 +572,7 @@ pub fn resolve_import_records(
                 external_settings: Some(&options.external_settings),
                 external_packages: options.external_packages,
                 conditions: Some(&options.conditions),
+                package_aliases: Some(&options.package_aliases),
                 ..ResolverContext::default()
             },
         ) else {
@@ -663,6 +664,7 @@ pub fn scan_bundle(
                 external_settings: Some(&options.external_settings),
                 external_packages: options.external_packages,
                 conditions: Some(&options.conditions),
+                package_aliases: Some(&options.package_aliases),
                 ..ResolverContext::default()
             },
         ) else {

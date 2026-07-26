@@ -175,6 +175,7 @@ pub struct BuildOptions {
     pub banner: String,
     pub footer: String,
     pub external: Vec<String>,
+    pub alias: HashMap<String, String>,
     pub packages: Packages,
     pub loader: HashMap<String, Loader>,
     pub define: HashMap<String, String>,
@@ -660,6 +661,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         js_footer: options.footer,
         external_settings,
         external_packages: options.packages == Packages::External,
+        package_aliases: options.alias,
         extension_to_loader,
         extension_order: options.resolve_extensions,
         main_fields: options.main_fields,
@@ -1988,6 +1990,47 @@ mod tests {
             "{limited}"
         );
         assert!(limited.contains("console.log("));
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn applies_build_package_aliases() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-alias-{unique}"));
+        std::fs::create_dir_all(directory.join("src")).expect("create source directory");
+        std::fs::create_dir_all(directory.join("node_modules/replacement"))
+            .expect("create package directory");
+        std::fs::write(
+            directory.join("src/entry.js"),
+            "import { value } from 'original/feature'; console.log(value)",
+        )
+        .expect("write entry file");
+        std::fs::write(
+            directory.join("node_modules/replacement/package.json"),
+            r#"{"main":"index.js","sideEffects":false}"#,
+        )
+        .expect("write package metadata");
+        std::fs::write(
+            directory.join("node_modules/replacement/feature.js"),
+            "export const value = 'aliased package'",
+        )
+        .expect("write package module");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["src/entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            alias: HashMap::from([("original".into(), "replacement".into())]),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("\"aliased package\""), "{output}");
+        assert!(!output.contains("original/feature"));
 
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
