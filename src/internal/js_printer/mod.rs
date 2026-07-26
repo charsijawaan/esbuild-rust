@@ -9,7 +9,7 @@ use crate::internal::compat::JsFeature;
 use crate::internal::config::{LegalComments, MetafileFormat};
 use crate::internal::helpers::{escape_closing_tag, quote_for_json};
 use crate::internal::js_ast::{
-    Ast, Binding, BindingData, BlockStmt, Expr, ExprData, ExprStmt, LocalKind, OpCode,
+    Ast, Binding, BindingData, BlockStmt, Expr, ExprData, ExprStmt, IfStmt, LocalKind, OpCode,
     OptionalChain, Precedence, PropertyFlags, PropertyKind, ReturnStmt, Stmt, StmtData,
     is_identifier_es5_and_es_next, join_with_comma,
 };
@@ -810,48 +810,7 @@ impl Printer<'_> {
                 self.print_newline();
             }
             StmtData::If(if_statement) => {
-                self.print_indent();
-                self.output.extend_from_slice(b"if");
-                self.print_optional_space();
-                self.output.push(b'(');
-                self.print_expr_at(&if_statement.test, Precedence::Lowest);
-                self.output.push(b')');
-                let yes_is_block = self.print_if_body(
-                    &if_statement.yes,
-                    if_statement.is_single_line_yes,
-                    if_statement.no_or_nil.data.is_some(),
-                );
-                if if_statement.no_or_nil.data.is_some() {
-                    if yes_is_block {
-                        self.print_optional_space();
-                    } else if !self.options.minify_whitespace {
-                        self.print_indent();
-                    }
-                    self.output.extend_from_slice(b"else");
-                    if self.options.minify_whitespace
-                        && matches!(
-                            if_statement.no_or_nil.data.as_deref(),
-                            Some(
-                                StmtData::If(_)
-                                    | StmtData::While(_)
-                                    | StmtData::With(_)
-                                    | StmtData::DoWhile(_)
-                                    | StmtData::For(_)
-                                    | StmtData::ForIn(_)
-                                    | StmtData::ForOf(_)
-                                    | StmtData::Try(_)
-                                    | StmtData::Switch(_)
-                            )
-                        )
-                    {
-                        self.output.push(b' ');
-                    }
-                    self.print_if_body(
-                        &if_statement.no_or_nil,
-                        if_statement.is_single_line_no,
-                        false,
-                    );
-                }
+                self.print_if(if_statement, true);
             }
             StmtData::While(while_statement) => {
                 self.print_indent();
@@ -874,15 +833,22 @@ impl Printer<'_> {
             StmtData::DoWhile(do_while) => {
                 self.print_indent();
                 self.output.extend_from_slice(b"do");
-                if self.options.minify_whitespace
-                    && !matches!(
-                        do_while.body.data.as_deref(),
-                        None | Some(StmtData::Empty | StmtData::Block(_))
-                    )
-                {
-                    self.output.push(b' ');
+                if let Some(StmtData::Block(block)) = do_while.body.data.as_deref() {
+                    self.print_optional_space();
+                    self.print_block(block, false);
+                    self.print_optional_space();
+                } else {
+                    if self.options.minify_whitespace
+                        && !matches!(do_while.body.data.as_deref(), None | Some(StmtData::Empty))
+                    {
+                        self.output.push(b' ');
+                    }
+                    self.print_newline();
+                    self.indent += 1;
+                    self.print_stmt(&do_while.body);
+                    self.indent -= 1;
+                    self.print_indent();
                 }
-                self.print_body(&do_while.body);
                 self.output.extend_from_slice(b"while");
                 self.print_optional_space();
                 self.output.push(b'(');
@@ -1178,6 +1144,58 @@ impl Printer<'_> {
         if trailing_newline {
             self.print_newline();
         }
+    }
+
+    fn print_if(&mut self, if_statement: &IfStmt, print_indent: bool) {
+        if print_indent {
+            self.print_indent();
+        }
+        self.output.extend_from_slice(b"if");
+        self.print_optional_space();
+        self.output.push(b'(');
+        self.print_expr_at(&if_statement.test, Precedence::Lowest);
+        self.output.push(b')');
+        let yes_is_block = self.print_if_body(
+            &if_statement.yes,
+            if_statement.is_single_line_yes,
+            if_statement.no_or_nil.data.is_some(),
+        );
+        if if_statement.no_or_nil.data.is_none() {
+            return;
+        }
+        if yes_is_block {
+            self.print_optional_space();
+        } else if !self.options.minify_whitespace {
+            self.print_indent();
+        }
+        self.output.extend_from_slice(b"else");
+        if let Some(StmtData::If(nested)) = if_statement.no_or_nil.data.as_deref() {
+            self.output.push(b' ');
+            self.print_if(nested, false);
+            return;
+        }
+        if self.options.minify_whitespace
+            && matches!(
+                if_statement.no_or_nil.data.as_deref(),
+                Some(
+                    StmtData::While(_)
+                        | StmtData::With(_)
+                        | StmtData::DoWhile(_)
+                        | StmtData::For(_)
+                        | StmtData::ForIn(_)
+                        | StmtData::ForOf(_)
+                        | StmtData::Try(_)
+                        | StmtData::Switch(_)
+                )
+            )
+        {
+            self.output.push(b' ');
+        }
+        self.print_if_body(
+            &if_statement.no_or_nil,
+            if_statement.is_single_line_no,
+            false,
+        );
     }
 
     fn print_body(&mut self, body: &Stmt) {
@@ -2589,7 +2607,8 @@ fn statement_can_omit_semicolon_before_close_brace(statement: &Stmt) -> bool {
             | StmtData::Return(_)
             | StmtData::Throw(_)
             | StmtData::Break(_)
-            | StmtData::Continue(_),
+            | StmtData::Continue(_)
+            | StmtData::DoWhile(_),
         ) => true,
         Some(StmtData::For(statement)) => {
             statement_can_omit_semicolon_before_close_brace(&statement.body)
@@ -2605,6 +2624,16 @@ fn statement_can_omit_semicolon_before_close_brace(statement: &Stmt) -> bool {
         }
         Some(StmtData::With(statement)) => {
             statement_can_omit_semicolon_before_close_brace(&statement.body)
+        }
+        Some(StmtData::If(statement)) => {
+            if statement.no_or_nil.data.is_some() {
+                statement_can_omit_semicolon_before_close_brace(&statement.no_or_nil)
+            } else {
+                statement_can_omit_semicolon_before_close_brace(&statement.yes)
+            }
+        }
+        Some(StmtData::Label(statement)) => {
+            statement_can_omit_semicolon_before_close_brace(&statement.statement)
         }
         _ => false,
     }
@@ -3503,7 +3532,9 @@ mod tests {
                 b"for (let i = 0; i < 2; i++) { sum += i; }\
                   for (const key in object) use(key);\
                   for (const value of list) use(value);\
-                  outer: for (let j = 0; j < 2; j++) { if (j) continue outer; }"
+                  outer: for (let j = 0; j < 2; j++) { if (j) continue outer; }\
+                  if (ready) { start(); } else if (waiting) { pause(); } else { stop(); }\
+                  do { tick(); } while (running);"
                     .as_slice(),
             ),
             identifier_name: "entry".into(),
@@ -3525,7 +3556,32 @@ mod tests {
              for (const value of list) use(value);\n\
              outer: for (let j = 0; j < 2; j++) {\n\
              \x20\x20if (j) continue outer;\n\
-             }\n"
+             }\n\
+             if (ready) {\n\
+             \x20\x20start();\n\
+             } else if (waiting) {\n\
+             \x20\x20pause();\n\
+             } else {\n\
+             \x20\x20stop();\n\
+             }\n\
+             do {\n\
+             \x20\x20tick();\n\
+             } while (running);\n"
+        );
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "for(let i=0;i<2;i++){sum+=i}for(const key in object)use(key);for(const value of list)use(value);outer:for(let j=0;j<2;j++){if(j)continue outer}if(ready){start()}else if(waiting){pause()}else{stop()}do{tick()}while(running);"
         );
     }
 
