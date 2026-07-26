@@ -4,9 +4,12 @@ use std::{
 };
 
 use crate::internal::{
-    ast::SymbolKind,
+    ast::{Ref, SymbolKind},
     helpers::utf16_to_string,
-    js_ast::{Ast, ExportsKind, ExprData, Part, Scope, ScopeKind, Stmt, StmtData, StrictModeKind},
+    js_ast::{
+        Ast, DeclaredSymbol, ExportsKind, ExprData, LocalKind, Part, Scope, ScopeKind, Stmt,
+        StmtData, StrictModeKind, for_each_identifier_binding,
+    },
     js_lexer::{Lexer, LexerPanic, Token},
     logger::{Loc, Log, Source},
 };
@@ -85,6 +88,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 Some(StmtData::Class(class)) if class.is_export
             )
         });
+        let declared_symbols = declare_top_level_symbols(&mut core, &mut statements);
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
         let module_scope = core
             .module_scope
@@ -111,6 +115,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 statements,
                 scopes: vec![module_scope.clone()],
                 import_record_indices,
+                declared_symbols,
                 symbol_uses: std::mem::take(&mut core.symbol_uses),
                 ..Part::default()
             });
@@ -156,6 +161,111 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         Ok(()) => (result, true),
         Err(payload) if payload.downcast_ref::<LexerPanic>().is_some() => (result, false),
         Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn declare_top_level_symbols(
+    core: &mut ParserCore,
+    statements: &mut [Stmt],
+) -> Vec<DeclaredSymbol> {
+    let mut declared = Vec::new();
+    for statement in statements {
+        match statement.data.as_deref_mut() {
+            Some(StmtData::Local(local)) => {
+                let kind = match local.kind {
+                    LocalKind::Var => SymbolKind::Hoisted,
+                    LocalKind::Const => SymbolKind::Const,
+                    LocalKind::Let | LocalKind::Using | LocalKind::AwaitUsing => SymbolKind::Other,
+                };
+                for declaration in &mut local.declarations {
+                    for_each_identifier_binding(
+                        &mut declaration.binding,
+                        &mut |loc, identifier| {
+                            let name = String::from_utf8_lossy(
+                                core.load_name_from_ref(identifier.reference),
+                            )
+                            .into_owned();
+                            identifier.reference = core.declare_symbol(kind, loc, &name);
+                            record_top_level_symbol(&mut declared, identifier.reference);
+                        },
+                    );
+                }
+            }
+            Some(StmtData::Function(function)) => {
+                if let Some(name) = &mut function.function.name {
+                    let kind = if function.function.is_async || function.function.is_generator {
+                        SymbolKind::GeneratorOrAsyncFunction
+                    } else {
+                        SymbolKind::HoistedFunction
+                    };
+                    bind_loc_ref(core, name, kind, &mut declared);
+                }
+            }
+            Some(StmtData::Class(class)) => {
+                if let Some(name) = &mut class.class.name {
+                    bind_loc_ref(core, name, SymbolKind::Class, &mut declared);
+                }
+            }
+            Some(StmtData::Import(import)) => {
+                if let Some(name) = &mut import.default_name {
+                    bind_loc_ref(core, name, SymbolKind::Import, &mut declared);
+                }
+                if let Some(star_loc) = import.star_name_loc {
+                    let mut name = crate::internal::ast::LocRef {
+                        loc: star_loc,
+                        reference: import.namespace_ref,
+                    };
+                    bind_loc_ref(core, &mut name, SymbolKind::Import, &mut declared);
+                    import.namespace_ref = name.reference;
+                }
+                if let Some(items) = &mut import.items {
+                    for item in items {
+                        bind_loc_ref(core, &mut item.name, SymbolKind::Import, &mut declared);
+                    }
+                }
+            }
+            Some(StmtData::ExportDefault(export)) => match export.value.data.as_deref_mut() {
+                Some(StmtData::Function(function)) => {
+                    if let Some(name) = &mut function.function.name {
+                        bind_loc_ref(core, name, SymbolKind::HoistedFunction, &mut declared);
+                        export.default_name.reference = name.reference;
+                    } else {
+                        record_top_level_symbol(&mut declared, export.default_name.reference);
+                    }
+                }
+                Some(StmtData::Class(class)) => {
+                    if let Some(name) = &mut class.class.name {
+                        bind_loc_ref(core, name, SymbolKind::Class, &mut declared);
+                        export.default_name.reference = name.reference;
+                    } else {
+                        record_top_level_symbol(&mut declared, export.default_name.reference);
+                    }
+                }
+                _ => record_top_level_symbol(&mut declared, export.default_name.reference),
+            },
+            _ => {}
+        }
+    }
+    declared
+}
+
+fn bind_loc_ref(
+    core: &mut ParserCore,
+    name: &mut crate::internal::ast::LocRef,
+    kind: SymbolKind,
+    declared: &mut Vec<DeclaredSymbol>,
+) {
+    let text = String::from_utf8_lossy(core.load_name_from_ref(name.reference)).into_owned();
+    name.reference = core.declare_symbol(kind, name.loc, &text);
+    record_top_level_symbol(declared, name.reference);
+}
+
+fn record_top_level_symbol(declared: &mut Vec<DeclaredSymbol>, reference: Ref) {
+    if !declared.iter().any(|symbol| symbol.reference == reference) {
+        declared.push(DeclaredSymbol {
+            reference,
+            is_top_level: true,
+        });
     }
 }
 
@@ -230,7 +340,7 @@ mod tests {
         assert_eq!(ast.parts[1].statements.len(), 2);
         assert_eq!(ast.parts[1].scopes.len(), 1);
         assert!(ast.module_scope.is_some());
-        assert_eq!(ast.symbols.len(), 4);
+        assert_eq!(ast.symbols.len(), 6);
         assert_eq!(
             ast.module_scope
                 .as_ref()
@@ -343,5 +453,39 @@ mod tests {
             ast.parts[1].statements[7].data.as_deref(),
             Some(StmtData::ExportDefault(_))
         ));
+    }
+
+    #[test]
+    fn top_level_bindings_are_declared_before_commonjs_symbols() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"var exports; let local; function fn() {} class Item {}"[..]),
+            identifier_name: "entry".to_owned(),
+            ..Source::default()
+        };
+        let (ast, ok) = parse(
+            log.clone(),
+            source,
+            Options {
+                mode: crate::internal::config::Mode::ConvertFormat,
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].declared_symbols.len(), 4);
+        let Some(StmtData::Local(exports)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected exports declaration");
+        };
+        let Some(crate::internal::js_ast::BindingData::Identifier(exports_binding)) =
+            exports.declarations[0].binding.data.as_deref()
+        else {
+            panic!("expected identifier binding");
+        };
+        assert_eq!(ast.exports_ref, exports_binding.reference);
+        assert_eq!(
+            ast.symbols[usize::try_from(ast.exports_ref.inner_index).expect("symbol index")].kind,
+            crate::internal::ast::SymbolKind::Hoisted
+        );
     }
 }
