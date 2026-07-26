@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
 
 use crate::internal::{
-    ast::{ImportKind, ImportRecordFlags, Index32, Ref},
+    ast::{INVALID_REF, ImportKind, ImportRecordFlags, Index32, NamespaceAlias, Ref},
     config::{Format, Loader, Options},
     css_ast::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
@@ -61,6 +61,58 @@ pub struct CrossChunkImport {
 pub struct StableRef {
     pub stable_source_index: u32,
     pub reference: Ref,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ImportTracker {
+    pub source_index: u32,
+    pub name_loc: crate::internal::logger::Loc,
+    pub import_ref: Ref,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ImportStatus {
+    #[default]
+    NoMatch,
+    Found,
+    CommonJs,
+    DynamicFallback,
+    CommonJsWithoutExports,
+    Disabled,
+    External,
+    ProbablyTypeScriptType,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum MatchImportKind {
+    #[default]
+    Ignore,
+    Normal,
+    Namespace,
+    NormalAndNamespace,
+    Cycle,
+    ProbablyTypeScriptType,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MatchImportResult {
+    pub alias: String,
+    pub kind: MatchImportKind,
+    pub namespace_ref: Ref,
+    pub source_index: u32,
+    pub name_loc: crate::internal::logger::Loc,
+    pub other_source_index: u32,
+    pub other_name_loc: crate::internal::logger::Loc,
+    pub reference: Ref,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ImportMatchIssue {
+    pub import_ref: Ref,
+    pub result: MatchImportResult,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -892,6 +944,430 @@ pub fn resolve_export_stars(graph: &mut LinkerGraph) {
     }
 }
 
+/// Advance import resolution by one re-export edge.
+///
+/// # Panics
+///
+/// Panics if the tracker does not reference a named import or if a resolved
+/// import points to a non-JavaScript representation, matching linker graph
+/// invariants.
+#[must_use]
+pub fn advance_import_tracker(
+    graph: &LinkerGraph,
+    tracker: ImportTracker,
+) -> (ImportTracker, ImportStatus, Vec<ImportData>) {
+    let file = &graph.files[tracker.source_index as usize];
+    let InputFileRepr::Js(repr) = file
+        .input_file
+        .repr
+        .as_ref()
+        .expect("import tracker source must have a representation")
+    else {
+        panic!("import tracker source must be JavaScript");
+    };
+    let named_import = &repr.ast.named_imports[&tracker.import_ref];
+    let record = &repr.ast.import_records[named_import.import_record_index as usize];
+    if !record.source_index.is_valid() {
+        return (ImportTracker::default(), ImportStatus::External, Vec::new());
+    }
+
+    let other_source_index = record.source_index.get_index();
+    let InputFileRepr::Js(other) = graph.files[other_source_index as usize]
+        .input_file
+        .repr
+        .as_ref()
+        .expect("resolved import target must have a representation")
+    else {
+        panic!("resolved import target must be JavaScript");
+    };
+
+    if !named_import.alias_is_star
+        && !other.ast.has_lazy_export
+        && other.ast.export_keyword.len == 0
+        && named_import.alias != "default"
+        && !other.ast.uses_exports_ref
+        && !other.ast.uses_module_ref
+    {
+        return (
+            ImportTracker {
+                source_index: other_source_index,
+                import_ref: INVALID_REF,
+                ..ImportTracker::default()
+            },
+            ImportStatus::CommonJsWithoutExports,
+            Vec::new(),
+        );
+    }
+
+    if other.ast.exports_kind == ExportsKind::CommonJs {
+        return (
+            ImportTracker {
+                source_index: other_source_index,
+                import_ref: INVALID_REF,
+                ..ImportTracker::default()
+            },
+            ImportStatus::CommonJs,
+            Vec::new(),
+        );
+    }
+
+    let matching_export = if named_import.alias_is_star {
+        other.meta.resolved_export_star.as_ref()
+    } else {
+        other.meta.resolved_exports.get(&named_import.alias)
+    };
+    if let Some(matching_export) = matching_export {
+        return (
+            ImportTracker {
+                source_index: matching_export.source_index,
+                import_ref: matching_export.reference,
+                name_loc: matching_export.name_loc,
+            },
+            ImportStatus::Found,
+            matching_export
+                .potentially_ambiguous_export_star_refs
+                .clone(),
+        );
+    }
+
+    if other.ast.exports_kind == ExportsKind::EsmWithDynamicFallback {
+        return (
+            ImportTracker {
+                source_index: other_source_index,
+                import_ref: other.ast.exports_ref,
+                ..ImportTracker::default()
+            },
+            ImportStatus::DynamicFallback,
+            Vec::new(),
+        );
+    }
+
+    if file.input_file.loader.is_type_script() && named_import.is_exported {
+        return (
+            ImportTracker::default(),
+            ImportStatus::ProbablyTypeScriptType,
+            Vec::new(),
+        );
+    }
+
+    (
+        ImportTracker {
+            source_index: other_source_index,
+            ..ImportTracker::default()
+        },
+        ImportStatus::NoMatch,
+        Vec::new(),
+    )
+}
+
+/// Follow an import through all re-export edges until it reaches its final
+/// binding or a terminal import status.
+///
+/// # Panics
+///
+/// Panics when import trackers violate JavaScript linker graph invariants.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn match_import_with_export(
+    graph: &LinkerGraph,
+    mut tracker: ImportTracker,
+    mut re_exports: Vec<crate::internal::js_ast::Dependency>,
+    cycle_detector: &mut Vec<ImportTracker>,
+    output_format: Format,
+) -> (MatchImportResult, Vec<crate::internal::js_ast::Dependency>) {
+    let mut result = MatchImportResult::default();
+    let mut ambiguous_results = Vec::new();
+
+    loop {
+        if cycle_detector.contains(&tracker) {
+            result.kind = MatchImportKind::Cycle;
+            break;
+        }
+        cycle_detector.push(tracker);
+
+        let (next_tracker, status, potentially_ambiguous) = advance_import_tracker(graph, tracker);
+        match status {
+            ImportStatus::CommonJs
+            | ImportStatus::CommonJsWithoutExports
+            | ImportStatus::External
+            | ImportStatus::Disabled => {
+                if status != ImportStatus::External
+                    || !output_format.keep_esm_import_export_syntax()
+                {
+                    let InputFileRepr::Js(repr) = graph.files[tracker.source_index as usize]
+                        .input_file
+                        .repr
+                        .as_ref()
+                        .expect("import tracker source must have a representation")
+                    else {
+                        panic!("import tracker source must be JavaScript");
+                    };
+                    let named_import = &repr.ast.named_imports[&tracker.import_ref];
+                    if named_import.namespace_ref != INVALID_REF {
+                        if result.kind == MatchImportKind::Normal {
+                            result.kind = MatchImportKind::NormalAndNamespace;
+                            result.namespace_ref = named_import.namespace_ref;
+                            result.alias.clone_from(&named_import.alias);
+                        } else {
+                            result = MatchImportResult {
+                                kind: MatchImportKind::Namespace,
+                                namespace_ref: named_import.namespace_ref,
+                                alias: named_import.alias.clone(),
+                                ..MatchImportResult::default()
+                            };
+                        }
+                    }
+                }
+            }
+
+            ImportStatus::DynamicFallback => {
+                let InputFileRepr::Js(repr) = graph.files[tracker.source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                    .expect("import tracker source must have a representation")
+                else {
+                    panic!("import tracker source must be JavaScript");
+                };
+                let named_import = &repr.ast.named_imports[&tracker.import_ref];
+                if result.kind == MatchImportKind::Normal {
+                    result.kind = MatchImportKind::NormalAndNamespace;
+                    result.namespace_ref = next_tracker.import_ref;
+                    result.alias.clone_from(&named_import.alias);
+                } else {
+                    result = MatchImportResult {
+                        kind: MatchImportKind::Namespace,
+                        namespace_ref: next_tracker.import_ref,
+                        alias: named_import.alias.clone(),
+                        ..MatchImportResult::default()
+                    };
+                }
+            }
+
+            ImportStatus::NoMatch => {}
+
+            ImportStatus::ProbablyTypeScriptType => {
+                result = MatchImportResult {
+                    kind: MatchImportKind::ProbablyTypeScriptType,
+                    ..MatchImportResult::default()
+                };
+            }
+
+            ImportStatus::Found => {
+                for ambiguous in potentially_ambiguous {
+                    let InputFileRepr::Js(ambiguous_repr) = graph.files
+                        [ambiguous.source_index as usize]
+                        .input_file
+                        .repr
+                        .as_ref()
+                        .expect("ambiguous export source must have a representation")
+                    else {
+                        panic!("ambiguous export source must be JavaScript");
+                    };
+                    if ambiguous_repr
+                        .ast
+                        .named_imports
+                        .contains_key(&ambiguous.reference)
+                    {
+                        let mut nested_cycle_detector = cycle_detector.clone();
+                        let (ambiguous_result, new_re_exports) = match_import_with_export(
+                            graph,
+                            ImportTracker {
+                                source_index: ambiguous.source_index,
+                                import_ref: ambiguous.reference,
+                                ..ImportTracker::default()
+                            },
+                            re_exports,
+                            &mut nested_cycle_detector,
+                            output_format,
+                        );
+                        ambiguous_results.push(ambiguous_result);
+                        re_exports = new_re_exports;
+                    } else {
+                        ambiguous_results.push(MatchImportResult {
+                            kind: MatchImportKind::Normal,
+                            source_index: ambiguous.source_index,
+                            reference: ambiguous.reference,
+                            name_loc: ambiguous.name_loc,
+                            ..MatchImportResult::default()
+                        });
+                    }
+                }
+
+                result = MatchImportResult {
+                    kind: MatchImportKind::Normal,
+                    source_index: next_tracker.source_index,
+                    reference: next_tracker.import_ref,
+                    name_loc: next_tracker.name_loc,
+                    ..MatchImportResult::default()
+                };
+
+                let InputFileRepr::Js(repr) = graph.files[tracker.source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                    .expect("import tracker source must have a representation")
+                else {
+                    panic!("import tracker source must be JavaScript");
+                };
+                if let Some(part_indices) = repr.top_level_symbol_to_parts(tracker.import_ref) {
+                    re_exports.extend(part_indices.iter().map(|&part_index| {
+                        crate::internal::js_ast::Dependency {
+                            source_index: tracker.source_index,
+                            part_index,
+                        }
+                    }));
+                }
+
+                let InputFileRepr::Js(next_repr) = graph.files[next_tracker.source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                    .expect("resolved export source must have a representation")
+                else {
+                    panic!("resolved export source must be JavaScript");
+                };
+                if next_repr
+                    .ast
+                    .named_imports
+                    .contains_key(&next_tracker.import_ref)
+                {
+                    tracker = next_tracker;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+
+    for ambiguous_result in ambiguous_results {
+        if ambiguous_result != result {
+            if result.kind == MatchImportKind::Normal
+                && ambiguous_result.kind == MatchImportKind::Normal
+                && result.name_loc.start != 0
+                && ambiguous_result.name_loc.start != 0
+            {
+                return (
+                    MatchImportResult {
+                        kind: MatchImportKind::Ambiguous,
+                        source_index: result.source_index,
+                        name_loc: result.name_loc,
+                        other_source_index: ambiguous_result.source_index,
+                        other_name_loc: ambiguous_result.name_loc,
+                        ..MatchImportResult::default()
+                    },
+                    Vec::new(),
+                );
+            }
+            return (
+                MatchImportResult {
+                    kind: MatchImportKind::Ambiguous,
+                    ..MatchImportResult::default()
+                },
+                Vec::new(),
+            );
+        }
+    }
+
+    (result, re_exports)
+}
+
+/// Match and bind all named imports in one file in deterministic symbol order.
+/// Cycles and ambiguities are returned for the diagnostic layer.
+///
+/// # Panics
+///
+/// Panics when the source or its import symbols violate linker graph
+/// invariants.
+#[must_use]
+pub fn bind_imports_to_exports_for_file(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    output_format: Format,
+) -> Vec<ImportMatchIssue> {
+    let mut import_refs = {
+        let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+            .expect("import source must have a representation")
+        else {
+            panic!("import source must be JavaScript");
+        };
+        repr.ast.named_imports.keys().copied().collect::<Vec<_>>()
+    };
+    import_refs.sort_unstable_by_key(|reference| reference.inner_index);
+
+    let mut issues = Vec::new();
+    for import_ref in import_refs {
+        let (result, re_exports) = match_import_with_export(
+            graph,
+            ImportTracker {
+                source_index,
+                import_ref,
+                ..ImportTracker::default()
+            },
+            Vec::new(),
+            &mut Vec::new(),
+            output_format,
+        );
+
+        if matches!(
+            result.kind,
+            MatchImportKind::Normal | MatchImportKind::NormalAndNamespace
+        ) {
+            let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+                .input_file
+                .repr
+                .as_mut()
+                .expect("import source must have a representation")
+            else {
+                unreachable!();
+            };
+            repr.meta.imports_to_bind.insert(
+                import_ref,
+                ImportData {
+                    re_exports,
+                    source_index: result.source_index,
+                    reference: result.reference,
+                    ..ImportData::default()
+                },
+            );
+        }
+
+        if matches!(
+            result.kind,
+            MatchImportKind::Namespace | MatchImportKind::NormalAndNamespace
+        ) {
+            graph.symbols.get_mut(import_ref).namespace_alias = Some(NamespaceAlias {
+                namespace_ref: result.namespace_ref,
+                alias: result.alias.clone(),
+            });
+        }
+
+        match result.kind {
+            MatchImportKind::ProbablyTypeScriptType => {
+                let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+                    .input_file
+                    .repr
+                    .as_mut()
+                    .expect("import source must have a representation")
+                else {
+                    unreachable!();
+                };
+                repr.meta
+                    .is_probably_type_script_type
+                    .insert(import_ref, true);
+            }
+            MatchImportKind::Cycle | MatchImportKind::Ambiguous => {
+                issues.push(ImportMatchIssue { import_ref, result });
+            }
+            _ => {}
+        }
+    }
+    issues
+}
+
 #[must_use]
 pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
     left.len() == right.len()
@@ -1057,16 +1533,17 @@ mod tests {
 
     use super::{
         AssetPath, ChunkImport, ChunkInfo, ChunkPath, CrossChunkImport, CrossChunkImportItem,
-        OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, StableRef,
-        add_exports_for_export_star, append_or_extend_part_range, classify_module_wrappers,
-        enforce_no_cyclic_chunk_imports, has_dynamic_exports_due_to_export_star,
-        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, path_between_chunks, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports,
+        ImportStatus, ImportTracker, MatchImportKind, OutputPathContext, OutputPiece,
+        OutputPieceIndexKind, PartRange, StableRef, add_exports_for_export_star,
+        advance_import_tracker, append_or_extend_part_range, bind_imports_to_exports_for_file,
+        classify_module_wrappers, enforce_no_cyclic_chunk_imports,
+        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
+        is_conditional_import_redundant, join_with_public_path, match_import_with_export,
+        path_between_chunks, propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
     };
     use crate::internal::{
-        ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref},
+        ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
         config::{Format, Loader, Options},
         css_ast::{
             ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
@@ -1079,8 +1556,8 @@ mod tests {
             clone_linker_graph,
         },
         helpers::Joiner,
-        js_ast::{self, ExportsKind, NamedExport},
-        logger::{DeferLogKind, Loc, Log},
+        js_ast::{self, ExportsKind, NamedExport, NamedImport},
+        logger::{DeferLogKind, Loc, Log, Range},
         sourcemap::{LineColumnOffset, SourceMapShift},
     };
 
@@ -2269,5 +2746,690 @@ mod tests {
         let mut resolved = HashMap::new();
         add_exports_for_export_star(&mut graph, &mut resolved, 1, &mut Vec::new());
         assert!(resolved.is_empty());
+    }
+
+    fn import_tracker_graph(
+        importer_loader: Loader,
+        named_import: NamedImport,
+        record: ImportRecord,
+        target: JsRepr,
+    ) -> (crate::internal::graph::LinkerGraph, ImportTracker) {
+        let import_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            InputFile {
+                repr: Some(InputFileRepr::Js(Box::new(JsRepr {
+                    ast: js_ast::Ast {
+                        import_records: vec![record],
+                        named_imports: HashMap::from([(import_ref, named_import)]),
+                        ..js_ast::Ast::default()
+                    },
+                    ..JsRepr::default()
+                }))),
+                loader: importer_loader,
+                ..InputFile::default()
+            },
+            InputFile {
+                repr: Some(InputFileRepr::Js(Box::new(target))),
+                loader: Loader::Js,
+                ..InputFile::default()
+            },
+        ];
+        (
+            clone_linker_graph(&input_files, &[0, 1], &[EntryPoint::default()], false),
+            ImportTracker {
+                source_index: 0,
+                import_ref,
+                ..ImportTracker::default()
+            },
+        )
+    }
+
+    #[test]
+    fn import_tracker_identifies_external_and_empty_modules() {
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "missing".into(),
+                ..NamedImport::default()
+            },
+            ImportRecord::default(),
+            JsRepr::default(),
+        );
+        assert_eq!(
+            advance_import_tracker(&graph, tracker).1,
+            ImportStatus::External
+        );
+
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "missing".into(),
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr::default(),
+        );
+        let (next, status, _) = advance_import_tracker(&graph, tracker);
+        assert_eq!(status, ImportStatus::CommonJsWithoutExports);
+        assert_eq!(next.source_index, 1);
+        assert_eq!(next.import_ref, crate::internal::ast::INVALID_REF);
+    }
+
+    #[test]
+    fn import_tracker_identifies_common_js_and_dynamic_fallbacks() {
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "value".into(),
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    exports_kind: ExportsKind::CommonJs,
+                    uses_exports_ref: true,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        assert_eq!(
+            advance_import_tracker(&graph, tracker).1,
+            ImportStatus::CommonJs
+        );
+
+        let namespace_ref = Ref {
+            source_index: 1,
+            inner_index: 7,
+        };
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "value".into(),
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    exports_kind: ExportsKind::EsmWithDynamicFallback,
+                    exports_ref: namespace_ref,
+                    uses_exports_ref: true,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        let (next, status, _) = advance_import_tracker(&graph, tracker);
+        assert_eq!(status, ImportStatus::DynamicFallback);
+        assert_eq!(next.import_ref, namespace_ref);
+    }
+
+    #[test]
+    fn import_tracker_matches_named_and_namespace_exports() {
+        let export_ref = Ref {
+            source_index: 1,
+            inner_index: 3,
+        };
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "value".into(),
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    named_exports: HashMap::from([(
+                        "value".into(),
+                        NamedExport {
+                            reference: export_ref,
+                            alias_loc: Loc { start: 9 },
+                        },
+                    )]),
+                    export_keyword: Range {
+                        loc: Loc { start: 1 },
+                        len: 6,
+                    },
+                    exports_kind: ExportsKind::Esm,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        let (next, status, _) = advance_import_tracker(&graph, tracker);
+        assert_eq!(status, ImportStatus::Found);
+        assert_eq!(next.source_index, 1);
+        assert_eq!(next.import_ref, export_ref);
+        assert_eq!(next.name_loc, Loc { start: 9 });
+
+        let namespace_ref = Ref {
+            source_index: 1,
+            inner_index: 8,
+        };
+        let (mut graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "*".into(),
+                alias_is_star: true,
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    exports_ref: namespace_ref,
+                    exports_kind: ExportsKind::Esm,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        resolve_export_stars(&mut graph);
+        let (next, status, _) = advance_import_tracker(&graph, tracker);
+        assert_eq!(status, ImportStatus::Found);
+        assert_eq!(next.import_ref, namespace_ref);
+    }
+
+    #[test]
+    fn import_tracker_distinguishes_typescript_types_from_missing_exports() {
+        let missing_target = || JsRepr {
+            ast: js_ast::Ast {
+                export_keyword: Range {
+                    loc: Loc { start: 1 },
+                    len: 6,
+                },
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            },
+            ..JsRepr::default()
+        };
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Ts,
+            NamedImport {
+                alias: "Type".into(),
+                is_exported: true,
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            missing_target(),
+        );
+        assert_eq!(
+            advance_import_tracker(&graph, tracker).1,
+            ImportStatus::ProbablyTypeScriptType
+        );
+
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "missing".into(),
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            missing_target(),
+        );
+        let (next, status, _) = advance_import_tracker(&graph, tracker);
+        assert_eq!(status, ImportStatus::NoMatch);
+        assert_eq!(next.source_index, 1);
+    }
+
+    #[test]
+    fn import_matcher_handles_normal_namespace_and_external_results() {
+        let export_ref = Ref {
+            source_index: 1,
+            inner_index: 1,
+        };
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "value".into(),
+                namespace_ref: crate::internal::ast::INVALID_REF,
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    named_exports: HashMap::from([("value".into(), named_export(export_ref))]),
+                    export_keyword: Range {
+                        loc: Loc { start: 1 },
+                        len: 6,
+                    },
+                    exports_kind: ExportsKind::Esm,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        let (result, _) = match_import_with_export(
+            &graph,
+            tracker,
+            Vec::new(),
+            &mut Vec::new(),
+            Format::EsModule,
+        );
+        assert_eq!(result.kind, MatchImportKind::Normal);
+        assert_eq!(result.reference, export_ref);
+
+        let namespace_ref = Ref {
+            source_index: 0,
+            inner_index: 9,
+        };
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "value".into(),
+                namespace_ref,
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    exports_kind: ExportsKind::CommonJs,
+                    uses_exports_ref: true,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        let (result, _) = match_import_with_export(
+            &graph,
+            tracker,
+            Vec::new(),
+            &mut Vec::new(),
+            Format::CommonJs,
+        );
+        assert_eq!(result.kind, MatchImportKind::Namespace);
+        assert_eq!(result.namespace_ref, namespace_ref);
+        assert_eq!(result.alias, "value");
+
+        let (graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "external".into(),
+                namespace_ref,
+                ..NamedImport::default()
+            },
+            ImportRecord::default(),
+            JsRepr::default(),
+        );
+        let (preserved, _) = match_import_with_export(
+            &graph,
+            tracker,
+            Vec::new(),
+            &mut Vec::new(),
+            Format::EsModule,
+        );
+        assert_eq!(preserved.kind, MatchImportKind::Ignore);
+        let (converted, _) = match_import_with_export(
+            &graph,
+            tracker,
+            Vec::new(),
+            &mut Vec::new(),
+            Format::CommonJs,
+        );
+        assert_eq!(converted.kind, MatchImportKind::Namespace);
+    }
+
+    #[test]
+    fn import_matcher_follows_reexports_and_collects_dependencies() {
+        let root_import = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let middle_import = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let leaf_export = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(1),
+                    ..ImportRecord::default()
+                }],
+                named_imports: HashMap::from([(
+                    root_import,
+                    NamedImport {
+                        alias: "public".into(),
+                        namespace_ref: crate::internal::ast::INVALID_REF,
+                        ..NamedImport::default()
+                    },
+                )]),
+                top_level_symbol_to_parts_from_parser: HashMap::from([(root_import, vec![5])]),
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(2),
+                    ..ImportRecord::default()
+                }],
+                named_imports: HashMap::from([(
+                    middle_import,
+                    NamedImport {
+                        alias: "leaf".into(),
+                        namespace_ref: crate::internal::ast::INVALID_REF,
+                        ..NamedImport::default()
+                    },
+                )]),
+                named_exports: HashMap::from([("public".into(), named_export(middle_import))]),
+                top_level_symbol_to_parts_from_parser: HashMap::from([(middle_import, vec![6])]),
+                export_keyword: Range {
+                    loc: Loc { start: 1 },
+                    len: 6,
+                },
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                named_exports: HashMap::from([("leaf".into(), named_export(leaf_export))]),
+                export_keyword: Range {
+                    loc: Loc { start: 1 },
+                    len: 6,
+                },
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let graph = clone_linker_graph(&input_files, &[0, 1, 2], &[EntryPoint::default()], false);
+        let (result, dependencies) = match_import_with_export(
+            &graph,
+            ImportTracker {
+                source_index: 0,
+                import_ref: root_import,
+                ..ImportTracker::default()
+            },
+            Vec::new(),
+            &mut Vec::new(),
+            Format::EsModule,
+        );
+        assert_eq!(result.kind, MatchImportKind::Normal);
+        assert_eq!(result.source_index, 2);
+        assert_eq!(result.reference, leaf_export);
+        assert_eq!(
+            dependencies,
+            vec![
+                js_ast::Dependency {
+                    source_index: 0,
+                    part_index: 5,
+                },
+                js_ast::Dependency {
+                    source_index: 1,
+                    part_index: 6,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn import_matcher_detects_cycles_and_divergent_ambiguity() {
+        let first = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let second = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(1),
+                    ..ImportRecord::default()
+                }],
+                named_imports: HashMap::from([(
+                    first,
+                    NamedImport {
+                        alias: "a".into(),
+                        ..NamedImport::default()
+                    },
+                )]),
+                named_exports: HashMap::from([("a".into(), named_export(first))]),
+                export_keyword: Range {
+                    loc: Loc { start: 1 },
+                    len: 6,
+                },
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(0),
+                    ..ImportRecord::default()
+                }],
+                named_imports: HashMap::from([(
+                    second,
+                    NamedImport {
+                        alias: "a".into(),
+                        ..NamedImport::default()
+                    },
+                )]),
+                named_exports: HashMap::from([("a".into(), named_export(second))]),
+                export_keyword: Range {
+                    loc: Loc { start: 1 },
+                    len: 6,
+                },
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let graph = clone_linker_graph(&input_files, &[0, 1], &[EntryPoint::default()], false);
+        let (cycle, _) = match_import_with_export(
+            &graph,
+            ImportTracker {
+                source_index: 0,
+                import_ref: first,
+                ..ImportTracker::default()
+            },
+            Vec::new(),
+            &mut Vec::new(),
+            Format::EsModule,
+        );
+        assert_eq!(cycle.kind, MatchImportKind::Cycle);
+
+        let import_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let first_export = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let second_export = Ref {
+            source_index: 3,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(1),
+                    ..ImportRecord::default()
+                }],
+                named_imports: HashMap::from([(
+                    import_ref,
+                    NamedImport {
+                        alias: "same".into(),
+                        ..NamedImport::default()
+                    },
+                )]),
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                export_keyword: Range {
+                    loc: Loc { start: 1 },
+                    len: 6,
+                },
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast::default()),
+        ];
+        let mut graph =
+            clone_linker_graph(&input_files, &[0, 1, 2, 3], &[EntryPoint::default()], false);
+        let InputFileRepr::Js(target) = graph.files[1]
+            .input_file
+            .repr
+            .as_mut()
+            .expect("JavaScript representation")
+        else {
+            panic!("JavaScript representation");
+        };
+        target.meta.resolved_exports.insert(
+            "same".into(),
+            crate::internal::graph::ExportData {
+                source_index: 2,
+                reference: first_export,
+                name_loc: Loc { start: 10 },
+                potentially_ambiguous_export_star_refs: vec![crate::internal::graph::ImportData {
+                    source_index: 3,
+                    reference: second_export,
+                    name_loc: Loc { start: 20 },
+                    ..crate::internal::graph::ImportData::default()
+                }],
+            },
+        );
+        let (ambiguous, dependencies) = match_import_with_export(
+            &graph,
+            ImportTracker {
+                source_index: 0,
+                import_ref,
+                ..ImportTracker::default()
+            },
+            Vec::new(),
+            &mut Vec::new(),
+            Format::EsModule,
+        );
+        assert_eq!(ambiguous.kind, MatchImportKind::Ambiguous);
+        assert_eq!(ambiguous.source_index, 2);
+        assert_eq!(ambiguous.name_loc, Loc { start: 10 });
+        assert_eq!(ambiguous.other_source_index, 3);
+        assert_eq!(ambiguous.other_name_loc, Loc { start: 20 });
+        assert!(dependencies.is_empty());
+    }
+
+    #[test]
+    fn phase_four_binder_populates_graph_metadata() {
+        let export_ref = Ref {
+            source_index: 1,
+            inner_index: 1,
+        };
+        let (mut graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "value".into(),
+                namespace_ref: crate::internal::ast::INVALID_REF,
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    named_exports: HashMap::from([("value".into(), named_export(export_ref))]),
+                    export_keyword: Range {
+                        loc: Loc { start: 1 },
+                        len: 6,
+                    },
+                    exports_kind: ExportsKind::Esm,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        assert!(bind_imports_to_exports_for_file(&mut graph, 0, Format::EsModule).is_empty());
+        let import = &js_repr(&graph, 0).meta.imports_to_bind[&tracker.import_ref];
+        assert_eq!(import.source_index, 1);
+        assert_eq!(import.reference, export_ref);
+
+        let namespace_ref = Ref {
+            source_index: 0,
+            inner_index: 7,
+        };
+        let (mut graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "property".into(),
+                namespace_ref,
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    exports_kind: ExportsKind::CommonJs,
+                    uses_exports_ref: true,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        graph.symbols.symbols_for_source[0].push(Symbol::new(SymbolKind::Import, "property"));
+        assert!(bind_imports_to_exports_for_file(&mut graph, 0, Format::CommonJs).is_empty());
+        let alias = graph
+            .symbols
+            .get(tracker.import_ref)
+            .namespace_alias
+            .as_ref()
+            .expect("namespace alias");
+        assert_eq!(alias.namespace_ref, namespace_ref);
+        assert_eq!(alias.alias, "property");
+
+        let (mut graph, tracker) = import_tracker_graph(
+            Loader::Ts,
+            NamedImport {
+                alias: "Type".into(),
+                is_exported: true,
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    export_keyword: Range {
+                        loc: Loc { start: 1 },
+                        len: 6,
+                    },
+                    exports_kind: ExportsKind::Esm,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        assert!(bind_imports_to_exports_for_file(&mut graph, 0, Format::EsModule).is_empty());
+        assert!(js_repr(&graph, 0).meta.is_probably_type_script_type[&tracker.import_ref]);
     }
 }
