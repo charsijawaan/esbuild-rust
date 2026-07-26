@@ -9,8 +9,9 @@ use crate::internal::compat::JsFeature;
 use crate::internal::config::{LegalComments, MetafileFormat};
 use crate::internal::helpers::{escape_closing_tag, quote_for_json};
 use crate::internal::js_ast::{
-    Ast, Binding, BindingData, BlockStmt, Expr, ExprData, LocalKind, OpCode, OptionalChain,
-    Precedence, PropertyFlags, PropertyKind, Stmt, StmtData, is_identifier_es5_and_es_next,
+    Ast, Binding, BindingData, BlockStmt, Expr, ExprData, ExprStmt, LocalKind, OpCode,
+    OptionalChain, Precedence, PropertyFlags, PropertyKind, ReturnStmt, Stmt, StmtData,
+    is_identifier_es5_and_es_next, join_with_comma,
 };
 use crate::internal::renamer::Renamer;
 use crate::internal::sourcemap::{
@@ -552,34 +553,7 @@ fn print_internal<'a>(
         .iter()
         .flat_map(|part| &part.statements)
         .collect::<Vec<_>>();
-    let mut statement_index = 0;
-    while statement_index < statements.len() {
-        let statement = statements[statement_index];
-        if options.minify_syntax
-            && let Some(StmtData::Local(first)) = statement.data.as_deref()
-        {
-            let mut merged = first.clone();
-            let mut next_index = statement_index + 1;
-            while let Some(next) = statements.get(next_index)
-                && let Some(StmtData::Local(next)) = next.data.as_deref()
-                && next.kind == merged.kind
-                && next.is_export == merged.is_export
-                && next.was_ts_import_equals == merged.was_ts_import_equals
-            {
-                merged
-                    .declarations
-                    .extend(next.declarations.iter().cloned());
-                next_index += 1;
-            }
-            if next_index > statement_index + 1 {
-                printer.print_stmt(&Stmt::new(statement.loc, StmtData::Local(merged)));
-                statement_index = next_index;
-                continue;
-            }
-        }
-        printer.print_stmt(statement);
-        statement_index += 1;
-    }
+    printer.print_statements(&statements);
     let source_map_chunk = printer
         .source_map_builder
         .take()
@@ -642,6 +616,76 @@ impl Printer<'_> {
         } else {
             self.output.extend_from_slice(text.as_bytes());
             self.output.push(b'\n');
+        }
+    }
+
+    fn print_statements(&mut self, statements: &[&Stmt]) {
+        let mut statement_index = 0;
+        while statement_index < statements.len() {
+            let statement = statements[statement_index];
+            if self.options.minify_syntax
+                && let Some(StmtData::Local(first)) = statement.data.as_deref()
+            {
+                let mut merged = first.clone();
+                let mut next_index = statement_index + 1;
+                while let Some(next) = statements.get(next_index)
+                    && let Some(StmtData::Local(next)) = next.data.as_deref()
+                    && next.kind == merged.kind
+                    && next.is_export == merged.is_export
+                    && next.was_ts_import_equals == merged.was_ts_import_equals
+                {
+                    merged
+                        .declarations
+                        .extend(next.declarations.iter().cloned());
+                    next_index += 1;
+                }
+                if next_index > statement_index + 1 {
+                    self.print_stmt(&Stmt::new(statement.loc, StmtData::Local(merged)));
+                    statement_index = next_index;
+                    continue;
+                }
+            }
+            if self.options.minify_syntax
+                && let Some(StmtData::Expr(first)) = statement.data.as_deref()
+                && !first.is_from_class_or_fn_that_can_be_removed_if_unused
+            {
+                let mut combined = first.value.clone();
+                let mut next_index = statement_index + 1;
+                while let Some(next) = statements.get(next_index)
+                    && let Some(StmtData::Expr(next)) = next.data.as_deref()
+                    && !next.is_from_class_or_fn_that_can_be_removed_if_unused
+                {
+                    combined = join_with_comma(combined, next.value.clone());
+                    next_index += 1;
+                }
+                if let Some(next) = statements.get(next_index)
+                    && let Some(StmtData::Return(next)) = next.data.as_deref()
+                    && next.value_or_nil.data.is_some()
+                {
+                    combined = join_with_comma(combined, next.value_or_nil.clone());
+                    self.print_stmt(&Stmt::new(
+                        statement.loc,
+                        StmtData::Return(ReturnStmt {
+                            value_or_nil: combined,
+                        }),
+                    ));
+                    statement_index = next_index + 1;
+                    continue;
+                }
+                if next_index > statement_index + 1 {
+                    self.print_stmt(&Stmt::new(
+                        statement.loc,
+                        StmtData::Expr(ExprStmt {
+                            value: combined,
+                            ..ExprStmt::default()
+                        }),
+                    ));
+                    statement_index = next_index;
+                    continue;
+                }
+            }
+            self.print_stmt(statement);
+            statement_index += 1;
         }
     }
 
@@ -1118,15 +1162,14 @@ impl Printer<'_> {
         self.output.push(b'{');
         self.print_newline();
         self.indent += 1;
-        for (index, statement) in block.statements.iter().enumerate() {
-            self.print_stmt(statement);
-            if self.options.minify_whitespace
-                && index + 1 == block.statements.len()
-                && statement_can_omit_semicolon_before_close_brace(statement)
-                && self.output.last() == Some(&b';')
-            {
-                self.output.pop();
-            }
+        let statements = block.statements.iter().collect::<Vec<_>>();
+        self.print_statements(&statements);
+        if self.options.minify_whitespace
+            && let Some(statement) = block.statements.last()
+            && statement_can_omit_semicolon_before_close_brace(statement)
+            && self.output.last() == Some(&b';')
+        {
+            self.output.pop();
         }
         self.indent -= 1;
         self.print_indent();
@@ -1837,7 +1880,11 @@ impl Printer<'_> {
                 } else {
                     self.print_expr_at_with_usage(
                         &binary.right,
-                        higher,
+                        if binary.op == OpCode::BinaryComma {
+                            operator.level
+                        } else {
+                            higher
+                        },
                         binary.op == OpCode::BinaryComma && result_is_unused,
                     );
                 }
@@ -3321,7 +3368,7 @@ mod tests {
             contents: Arc::from(
                 b"function add(a, b = 1) { return a + b; }\
                   const twice = (value) => value * 2;\
-                  async function load(){await work();return()=>1}\
+                  async function load(){await prepare();await work();return()=>1}\
                   function* values(){yield 1;yield* other}\
                   async function consume(){for await(const item of items)use(item)}"
                     .as_slice(),
@@ -3343,6 +3390,7 @@ mod tests {
              }\n\
              const twice = (value) => value * 2;\n\
              async function load() {\n\
+             \x20\x20await prepare();\n\
              \x20\x20await work();\n\
              \x20\x20return () => 1;\n\
              }\n\
@@ -3367,7 +3415,34 @@ mod tests {
                 .js,
             )
             .expect("printer output is UTF-8"),
-            "function add(a,b=1){return a+b}const twice=value=>value*2;async function load(){await work();return()=>1}function*values(){yield 1;yield*other}async function consume(){for await(const item of items)use(item)}"
+            "function add(a,b=1){return a+b}const twice=value=>value*2;async function load(){await prepare();await work();return()=>1}function*values(){yield 1;yield*other}async function consume(){for await(const item of items)use(item)}"
+        );
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_syntax: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "function add(a, b = 1) {\n\
+             \x20\x20return a + b;\n\
+             }\n\
+             const twice = (value) => value * 2;\n\
+             async function load() {\n\
+             \x20\x20return await prepare(), await work(), () => 1;\n\
+             }\n\
+             function* values() {\n\
+             \x20\x20yield 1, yield* other;\n\
+             }\n\
+             async function consume() {\n\
+             \x20\x20for await (const item of items) use(item);\n\
+             }\n"
         );
     }
 
