@@ -1487,9 +1487,8 @@ impl Printer<'_> {
                 }
                 self.output.push(b')');
             }
-            ExprData::JsxElement(_) | ExprData::JsxText(_) => {
-                panic!("Internal error: expression printer case has not been ported yet")
-            }
+            ExprData::JsxElement(element) => self.print_jsx_element(element),
+            ExprData::JsxText(text) => self.output.extend_from_slice(text.raw.as_bytes()),
         }
         if wrap {
             self.output.push(b')');
@@ -1556,6 +1555,111 @@ impl Printer<'_> {
             ImportPhase::Defer => b"import.defer(",
             ImportPhase::Source => b"import.source(",
         });
+    }
+
+    fn print_jsx_element(&mut self, element: &crate::internal::js_ast::JsxElementExpr) {
+        self.output.push(b'<');
+        self.print_jsx_tag(&element.tag_or_nil);
+        for property in &element.properties {
+            self.output.push(b' ');
+            if property.kind == PropertyKind::Spread {
+                self.output.extend_from_slice(b"{...");
+                self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                self.output.push(b'}');
+                continue;
+            }
+            if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+                self.output.extend_from_slice(b"{...{ [");
+                self.print_expr_at(&property.key, Precedence::Comma);
+                self.output.extend_from_slice(b"]:");
+                self.print_optional_space();
+                self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                self.output.extend_from_slice(b" }}");
+                continue;
+            }
+            self.print_jsx_attribute_name(&property.key);
+            if property.flags.contains(PropertyFlags::WAS_SHORTHAND)
+                && matches!(
+                    property.value_or_nil.data.as_deref(),
+                    Some(ExprData::Boolean(true))
+                )
+            {
+                continue;
+            }
+            self.output.push(b'=');
+            match property.value_or_nil.data.as_deref() {
+                Some(ExprData::JsxText(text)) => {
+                    self.output.extend_from_slice(text.raw.as_bytes());
+                }
+                Some(ExprData::JsxElement(_)) => {
+                    self.print_expr_at(&property.value_or_nil, Precedence::Lowest);
+                }
+                _ => {
+                    self.output.push(b'{');
+                    self.print_expr_at(&property.value_or_nil, Precedence::Comma);
+                    self.output.push(b'}');
+                }
+            }
+        }
+        if element.tag_or_nil.data.is_some() && element.nullable_children.is_empty() {
+            self.output.extend_from_slice(b" />");
+            return;
+        }
+        self.output.push(b'>');
+        for child in &element.nullable_children {
+            match child.data.as_deref() {
+                None => self.output.extend_from_slice(b"{}"),
+                Some(ExprData::JsxText(text)) => {
+                    self.output.extend_from_slice(text.raw.as_bytes());
+                }
+                Some(ExprData::JsxElement(_)) => {
+                    self.print_expr_at(child, Precedence::Lowest);
+                }
+                _ => {
+                    self.output.push(b'{');
+                    self.print_expr_at(child, Precedence::Comma);
+                    self.output.push(b'}');
+                }
+            }
+        }
+        self.output.extend_from_slice(b"</");
+        self.print_jsx_tag(&element.tag_or_nil);
+        self.output.push(b'>');
+    }
+
+    fn print_jsx_tag(&mut self, tag: &Expr) {
+        match tag.data.as_deref() {
+            None => {}
+            Some(ExprData::String(string)) => {
+                self.output
+                    .extend_from_slice(String::from_utf16_lossy(&string.value).as_bytes());
+            }
+            Some(ExprData::Identifier(identifier)) => {
+                self.output.extend_from_slice(
+                    self.renamer
+                        .name_for_symbol(identifier.reference)
+                        .as_bytes(),
+                );
+            }
+            Some(ExprData::Dot(dot)) => {
+                self.print_jsx_tag(&dot.target);
+                self.output.push(b'.');
+                self.output.extend_from_slice(dot.name.as_bytes());
+            }
+            _ => self.print_expr_at(tag, Precedence::Lowest),
+        }
+    }
+
+    fn print_jsx_attribute_name(&mut self, key: &Expr) {
+        if let Some(ExprData::String(string)) = key.data.as_deref() {
+            self.output
+                .extend_from_slice(String::from_utf16_lossy(&string.value).as_bytes());
+        } else if let Some(ExprData::NameOfSymbol(name)) = key.data.as_deref() {
+            self.output
+                .extend_from_slice(self.renamer.name_for_symbol(name.reference).as_bytes());
+        } else {
+            self.print_expr_at(key, Precedence::Lowest);
+        }
     }
 
     fn print_identifier(&mut self, name: &str) {
@@ -2057,6 +2161,35 @@ mod tests {
              const lazy = import(\"./lazy\", { with: { type: \"json\" } });\n\
              const loaded = require(\"./dep\");\n\
              const resolved = require.resolve(\"./dep\");\n"
+        );
+    }
+
+    #[test]
+    fn prints_preserved_jsx_elements() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"const view = <Panel title=\"Hi\" enabled {...props}><span>{name}</span> text</Panel>;\
+                  const fragment = <><Item /></>;"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let mut options = js_parser::Options::default();
+        options.jsx.parse = true;
+        options.jsx.preserve = true;
+        let (ast, ok) = js_parser::parse(log.clone(), source, options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "const view = <Panel title=\"Hi\" enabled {...props}><span>{name}</span> text</Panel>;\n\
+             const fragment = <><Item /></>;\n"
         );
     }
 }
