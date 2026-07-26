@@ -2,14 +2,18 @@
 
 use crate::internal::{
     js_ast::{
-        BlockStmt, DoWhileStmt, Expr, ExprData, ExprStmt, IfStmt, Precedence, ReturnStmt, Stmt,
-        StmtData, ThrowStmt, WhileStmt,
+        Binding, BindingData, BlockStmt, Decl, DoWhileStmt, Expr, ExprData, ExprStmt,
+        IdentifierBinding, IdentifierExpr, IfStmt, LocalKind, LocalStmt, Precedence, ReturnStmt,
+        Stmt, StmtData, ThrowStmt, WhileStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
 };
 
-use super::{parser_core::ParserCore, syntax_expression::parse_expression};
+use super::{
+    parser_core::ParserCore,
+    syntax_expression::{parse_expression, parse_expression_suffix},
+};
 
 pub(crate) fn parse_block(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, BlockStmt) {
     let loc = lexer.loc();
@@ -32,6 +36,38 @@ pub(crate) fn parse_block(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, Blo
 #[allow(clippy::too_many_lines)]
 pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
+    if lexer.is_contextual_keyword(b"let") {
+        let reference = core.store_name_in_ref(lexer.identifier.clone());
+        lexer.next();
+        if matches!(
+            lexer.token,
+            Token::Identifier | Token::OpenBracket | Token::OpenBrace
+        ) {
+            return parse_local_declarations(core, lexer, loc, LocalKind::Let);
+        }
+        let value = parse_expression_suffix(
+            core,
+            lexer,
+            Expr::new(
+                loc,
+                ExprData::Identifier(IdentifierExpr {
+                    reference,
+                    ..IdentifierExpr::default()
+                }),
+            ),
+            Precedence::Lowest,
+            true,
+        );
+        lexer.expect_or_insert_semicolon();
+        return Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value,
+                ..ExprStmt::default()
+            }),
+        );
+    }
+
     match lexer.token {
         Token::Semicolon => {
             lexer.next();
@@ -94,6 +130,14 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                 }),
             )
         }
+        Token::Var => {
+            lexer.next();
+            parse_local_declarations(core, lexer, loc, LocalKind::Var)
+        }
+        Token::Const => {
+            lexer.next();
+            parse_local_declarations(core, lexer, loc, LocalKind::Const)
+        }
         Token::Return => {
             if core.fn_or_arrow_data_parse.is_return_disallowed {
                 core.add_error_range(lexer.range(), "A return statement cannot be used here:");
@@ -148,6 +192,64 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             )
         }
     }
+}
+
+fn parse_local_declarations(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    loc: Loc,
+    kind: LocalKind,
+) -> Stmt {
+    let mut declarations = Vec::new();
+    loop {
+        if lexer.token != Token::Identifier {
+            lexer.expected(Token::Identifier);
+        }
+        let binding_loc = lexer.loc();
+        let binding_range = lexer.range();
+        let name = lexer.identifier.clone();
+        let name_text = String::from_utf8(name.string.clone())
+            .expect("binding identifiers must be valid UTF-8");
+        if kind != LocalKind::Var && name_text == "let" {
+            core.add_error_range(binding_range, "Cannot use \"let\" as an identifier here:");
+        }
+        let binding = Binding {
+            loc: binding_loc,
+            data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                reference: core.store_name_in_ref(name),
+            }))),
+        };
+        lexer.next();
+        let value_or_nil = if lexer.token == Token::Equals {
+            lexer.next();
+            parse_expression(core, lexer, Precedence::Comma, true)
+        } else {
+            Expr::default()
+        };
+        if kind == LocalKind::Const && value_or_nil.data.is_none() {
+            core.add_error_range(
+                binding_range,
+                format!("The constant \"{name_text}\" must be initialized"),
+            );
+        }
+        declarations.push(Decl {
+            binding,
+            value_or_nil,
+        });
+        if lexer.token != Token::Comma {
+            break;
+        }
+        lexer.next();
+    }
+    lexer.expect_or_insert_semicolon();
+    Stmt::new(
+        loc,
+        StmtData::Local(LocalStmt {
+            declarations,
+            kind,
+            ..LocalStmt::default()
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -207,5 +309,51 @@ mod tests {
             Some(StmtData::DoWhile(_))
         ));
         assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_local_declarations_and_disambiguates_let_expressions() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"{var a, b = 2; let c = 3; const d = 4; let + 5;}"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        assert!(matches!(
+            block.statements[0].data.as_deref(),
+            Some(StmtData::Local(local))
+                if local.kind == crate::internal::js_ast::LocalKind::Var
+                    && local.declarations.len() == 2
+        ));
+        assert!(matches!(
+            block.statements[1].data.as_deref(),
+            Some(StmtData::Local(local))
+                if local.kind == crate::internal::js_ast::LocalKind::Let
+        ));
+        assert!(matches!(
+            block.statements[2].data.as_deref(),
+            Some(StmtData::Local(local))
+                if local.kind == crate::internal::js_ast::LocalKind::Const
+        ));
+        assert!(matches!(
+            block.statements[3].data.as_deref(),
+            Some(StmtData::Expr(_))
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn reports_uninitialized_constants() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"{const missing;}"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log.clone(), source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new_with_log(source, Options::default(), log.clone());
+        let _ = parse_block(&mut core, &mut lexer);
+        assert_eq!(log.peek().len(), 1);
     }
 }

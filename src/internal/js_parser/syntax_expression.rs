@@ -28,7 +28,17 @@ pub(crate) fn parse_expression(
     minimum_precedence: Precedence,
     allow_in: bool,
 ) -> Expr {
-    let mut left = parse_prefix(core, lexer, minimum_precedence, allow_in);
+    let left = parse_prefix(core, lexer, minimum_precedence, allow_in);
+    parse_expression_suffix(core, lexer, left, minimum_precedence, allow_in)
+}
+
+pub(crate) fn parse_expression_suffix(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    mut left: Expr,
+    minimum_precedence: Precedence,
+    allow_in: bool,
+) -> Expr {
     left = parse_high_precedence_suffix_chain(
         core,
         lexer,
