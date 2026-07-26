@@ -6,8 +6,8 @@ use std::{
 
 use esbuild_rs::{
     api::{
-        BuildFormat, BuildOptions, BuildSourceMap, Loader, Packages, TransformOptions, build,
-        transform,
+        BuildFormat, BuildOptions, BuildPlatform, BuildSourceMap, Loader, Packages,
+        TransformOptions, build, transform,
     },
     internal::cli_helpers,
 };
@@ -45,6 +45,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut outfile = String::new();
     let mut outbase = String::new();
     let mut format = BuildFormat::Iife;
+    let mut platform = BuildPlatform::Browser;
     let mut splitting = false;
     let mut sourcemap = BuildSourceMap::None;
     let mut external = Vec::new();
@@ -103,6 +104,15 @@ fn run(arguments: &[String]) -> Result<Output, String> {
                 "cjs" => BuildFormat::CommonJs,
                 "esm" => BuildFormat::EsModule,
                 _ => return Err(format!("Invalid format {value:?}")),
+            };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--platform=") {
+            platform = match value {
+                "browser" => BuildPlatform::Browser,
+                "node" => BuildPlatform::Node,
+                "neutral" => BuildPlatform::Neutral,
+                _ => return Err(format!("Invalid platform {value:?}")),
             };
             continue;
         }
@@ -196,6 +206,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             outfile: outfile.clone(),
             outbase,
             format,
+            platform,
             sourcemap,
             splitting,
             minify_whitespace: options.minify_whitespace,
@@ -307,6 +318,7 @@ fn help_text() -> String {
          \x20\x20--outfile=FILE\n\
          \x20\x20--outbase=DIR\n\
          \x20\x20--format=iife|cjs|esm\n\
+         \x20\x20--platform=browser|node|neutral\n\
          \x20\x20--splitting\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
          \x20\x20--external:PATH\n\
@@ -358,6 +370,7 @@ mod tests {
         assert!(run(&["--not-a-real-option".into()]).is_err());
         assert!(run(&["--loader=wat".into()]).is_err());
         assert!(run(&["--format=wat".into()]).is_err());
+        assert!(run(&["--platform=wat".into()]).is_err());
         assert!(run(&["--packages=wat".into()]).is_err());
         assert!(run(&["--sourcemap=wat".into()]).is_err());
     }

@@ -89,6 +89,14 @@ pub enum BuildFormat {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BuildPlatform {
+    #[default]
+    Browser,
+    Node,
+    Neutral,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BuildSourceMap {
     #[default]
     None,
@@ -114,6 +122,7 @@ pub struct BuildOptions {
     pub outbase: String,
     pub abs_working_dir: String,
     pub format: BuildFormat,
+    pub platform: BuildPlatform,
     pub sourcemap: BuildSourceMap,
     pub splitting: bool,
     pub minify_whitespace: bool,
@@ -329,6 +338,11 @@ pub fn build(options: BuildOptions) -> BuildResult {
             BuildFormat::Iife => config::Format::Iife,
             BuildFormat::CommonJs => config::Format::CommonJs,
             BuildFormat::EsModule => config::Format::EsModule,
+        },
+        platform: match options.platform {
+            BuildPlatform::Browser => config::Platform::Browser,
+            BuildPlatform::Node => config::Platform::Node,
+            BuildPlatform::Neutral => config::Platform::Neutral,
         },
         source_map: match options.sourcemap {
             BuildSourceMap::None => config::SourceMap::None,
@@ -774,8 +788,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        BuildFormat, BuildOptions, BuildSourceMap, Loader, Packages, TransformOptions, build,
-        transform,
+        BuildFormat, BuildOptions, BuildPlatform, BuildSourceMap, Loader, Packages,
+        TransformOptions, build, transform,
     };
 
     fn code(result: super::TransformResult) -> String {
@@ -1006,6 +1020,36 @@ mod tests {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("from \"missing-package\""));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn externalizes_node_builtins_for_node_platform_builds() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-node-platform-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import fs from 'node:fs'; console.log(fs.readFileSync)",
+        )
+        .expect("write entry file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::CommonJs,
+            platform: BuildPlatform::Node,
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("require(\"node:fs\")"));
+        assert!(output.contains("readFileSync"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
