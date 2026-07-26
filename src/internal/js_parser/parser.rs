@@ -1854,6 +1854,32 @@ mod tests {
     }
 
     #[test]
+    fn validates_class_constructor_and_prototype_names() {
+        let (_, ok, log) = parse_source(
+            "class Getter { get constructor() {} }\
+             class StaticMethod { static prototype() {} }\
+             class Field { constructor; }\
+             class StaticField { static prototype; }\
+             class Private { #constructor() {} }",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 5);
+
+        let (_, ok, log) = parse_source("class Duplicate { constructor() {} constructor() {} }");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+
+        let (_, ok, log) = parse_source(
+            "class Valid {\
+               static constructor() {}\
+               prototype() {}\
+             }",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
     fn validates_unlabeled_break_and_continue_contexts() {
         let (_, ok, log) = parse_source("break; continue;");
         assert!(ok);

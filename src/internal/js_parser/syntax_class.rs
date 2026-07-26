@@ -63,6 +63,24 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
             extends_or_nil.data.is_some(),
         ));
     }
+    let mut has_constructor = false;
+    for property in &properties {
+        if property.kind == PropertyKind::Method
+            && !property.flags.contains(PropertyFlags::IS_STATIC)
+            && key_is_named(&property.key, "constructor")
+        {
+            if has_constructor {
+                core.add_error_range(
+                    crate::internal::logger::Range {
+                        loc: property.key.loc,
+                        len: 0,
+                    },
+                    "Classes cannot contain more than one constructor",
+                );
+            }
+            has_constructor = true;
+        }
+    }
     let close_brace_loc = lexer.loc();
     lexer.expect(Token::CloseBrace);
     core.pop_scope();
@@ -231,7 +249,43 @@ fn parse_class_property(
         private.reference = core.declare_symbol(symbol_kind, key.loc, &name);
     }
 
-    if lexer.token == Token::OpenParen || kind.is_method_definition() {
+    let is_method = lexer.token == Token::OpenParen || kind.is_method_definition();
+    let key_name = class_key_name(core, &key);
+    if is_method {
+        if key_name.as_deref() == Some("#constructor") {
+            core.add_error_range(key_range, "Invalid method name \"#constructor\"");
+        } else if is_static && key_name.as_deref() == Some("prototype") {
+            core.add_error_range(key_range, "Invalid static method name \"prototype\"");
+        } else if !is_static && key_name.as_deref() == Some("constructor") {
+            let error = if is_async {
+                Some("Class constructor cannot be an async function")
+            } else if is_generator {
+                Some("Class constructor cannot be a generator")
+            } else if kind == PropertyKind::Getter {
+                Some("Class constructor cannot be a getter")
+            } else if kind == PropertyKind::Setter {
+                Some("Class constructor cannot be a setter")
+            } else {
+                None
+            };
+            if let Some(error) = error {
+                core.add_error_range(key_range, error);
+            }
+        }
+    } else if key_name.as_deref() == Some("constructor")
+        || key_name.as_deref() == Some("#constructor")
+        || (is_static && key_name.as_deref() == Some("prototype"))
+    {
+        core.add_error_range(
+            key_range,
+            format!(
+                "Invalid field name {:?}",
+                key_name.expect("invalid field name is present")
+            ),
+        );
+    }
+
+    if is_method {
         let is_constructor = !is_static && key_is_named(&key, "constructor");
         let mut function = parse_function_tail(
             core,
@@ -345,6 +399,22 @@ fn key_is_named(key: &Expr, expected: &str) -> bool {
         Some(ExprData::String(string))
             if crate::internal::helpers::utf16_to_string(&string.value) == expected.as_bytes()
     )
+}
+
+fn class_key_name(core: &ParserCore, key: &Expr) -> Option<String> {
+    match key.data.as_deref() {
+        Some(ExprData::String(string)) => Some(
+            String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(&string.value))
+                .into_owned(),
+        ),
+        Some(ExprData::PrivateIdentifier(private)) => {
+            let index = usize::try_from(private.reference.inner_index).ok()?;
+            core.symbols
+                .get(index)
+                .map(|symbol| symbol.original_name.clone())
+        }
+        _ => None,
+    }
 }
 
 fn key_name_for_error(key: &Expr) -> String {
