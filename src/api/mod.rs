@@ -150,6 +150,7 @@ pub struct BuildOptions {
     pub external: Vec<String>,
     pub packages: Packages,
     pub loader: HashMap<String, Loader>,
+    pub define: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -331,6 +332,55 @@ fn validate_path_template(template: &str) -> Vec<config::PathTemplate> {
     parts
 }
 
+fn validate_defines(
+    log: &Log,
+    defines: &HashMap<String, String>,
+) -> Option<Arc<config::ProcessedDefines>> {
+    if defines.is_empty() {
+        return None;
+    }
+    let mut keys = defines.keys().collect::<Vec<_>>();
+    keys.sort();
+    let mut raw = Vec::with_capacity(keys.len());
+    for key in keys {
+        let (key_parts, ok) = js_parser::parse_global_name(
+            log.clone(),
+            Source {
+                contents: Arc::from(key.as_bytes()),
+                ..Source::default()
+            },
+        );
+        if !ok {
+            continue;
+        }
+        let value = &defines[key];
+        let (define_expr, injected) = js_parser::parse_define_expr(value);
+        if define_expr.constant.data.is_some() || !define_expr.parts.is_empty() {
+            raw.push(config::DefineData {
+                key_parts: key_parts
+                    .into_iter()
+                    .map(|part| String::from_utf8_lossy(&part).into_owned())
+                    .collect(),
+                define_expr: Some(define_expr),
+                ..config::DefineData::default()
+            });
+        } else if injected.data.is_some() {
+            log.add_error(
+                None,
+                crate::internal::logger::Range::default(),
+                format!("Complex define value is not implemented yet: {value}"),
+            );
+        } else {
+            log.add_error(
+                None,
+                crate::internal::logger::Range::default(),
+                format!("Invalid define value (must be an entity name or JS literal): {value}"),
+            );
+        }
+    }
+    Some(Arc::new(config::process_defines(&raw)))
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn build(options: BuildOptions) -> BuildResult {
@@ -406,6 +456,15 @@ pub fn build(options: BuildOptions) -> BuildResult {
             .map(|part| String::from_utf8_lossy(&part).into_owned())
             .collect()
     };
+    let defines = validate_defines(&log, &options.define);
+    if log.has_errors() {
+        let (errors, warnings) = public_messages(log.done());
+        return BuildResult {
+            errors,
+            warnings,
+            ..BuildResult::default()
+        };
+    }
     let output_dir = if options.outdir.is_empty() {
         file_system.cwd().to_string()
     } else if file_system.is_abs(&options.outdir) {
@@ -462,6 +521,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         entry_path_template: validate_path_template(&options.entry_names),
         chunk_path_template: validate_path_template(&options.chunk_names),
         asset_path_template: validate_path_template(&options.asset_names),
+        defines,
         abs_output_dir: output_dir,
         abs_output_file: output_file,
         abs_output_base,
@@ -1321,6 +1381,42 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("\"hello loader\""));
         assert!(output.contains("console.log("));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn substitutes_build_defines() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-defines-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "console.log(process.env.NODE_ENV, DEBUG)",
+        )
+        .expect("write entry file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::Iife,
+            define: HashMap::from([
+                ("process.env.NODE_ENV".into(), r#""production""#.into()),
+                ("DEBUG".into(), "false".into()),
+            ]),
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(
+            output.contains("console.log(\"production\", false)"),
+            "{output}"
+        );
+        assert!(!output.contains("process.env.NODE_ENV"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

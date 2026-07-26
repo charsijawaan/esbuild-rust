@@ -57,6 +57,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut external = Vec::new();
     let mut packages = Packages::Bundle;
     let mut build_loaders = HashMap::new();
+    let mut defines = HashMap::new();
     for argument in arguments {
         if argument == "--help" || argument == "-h" {
             return Ok(Output::Text(help_text()));
@@ -191,6 +192,13 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             build_loaders.insert(extension.into(), loader);
             continue;
         }
+        if let Some(value) = argument.strip_prefix("--define:") {
+            let Some((key, value)) = value.split_once('=') else {
+                return Err(format!("Missing \"=\" in {argument:?}"));
+            };
+            defines.insert(key.into(), value.into());
+            continue;
+        }
         if let Some(loader) = argument.strip_prefix("--loader=") {
             options.loader = parse_loader(loader)?;
             continue;
@@ -261,6 +269,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             external,
             packages,
             loader: build_loaders,
+            define: defines,
             ..BuildOptions::default()
         });
         if !result.errors.is_empty() {
@@ -292,6 +301,9 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         return Ok(Output::Text(String::new()));
     }
 
+    if !defines.is_empty() {
+        return Err("\"--define\" without \"--bundle\" is not implemented yet".into());
+    }
     if sourcemap != BuildSourceMap::None {
         return Err("\"--sourcemap\" without \"--bundle\" is not implemented yet".into());
     }
@@ -374,6 +386,7 @@ fn help_text() -> String {
          \x20\x20--packages=bundle|external\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
          \x20\x20--loader:.EXT=LOADER\n\
+         \x20\x20--define:KEY=VALUE\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
          \x20\x20--minify-identifiers\n\
@@ -533,6 +546,30 @@ mod tests {
         };
         let output = String::from_utf8(output).expect("bundle output is UTF-8");
         assert!(output.contains("\"cli custom loader\""));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn bundles_with_define_substitutions() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-define-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "console.log(DEBUG)").expect("write entry file");
+
+        let Output::Code(output) = run(&[
+            "--bundle".into(),
+            "--define:DEBUG=false".into(),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("bundle succeeds") else {
+            panic!("expected bundled code");
+        };
+        let output = String::from_utf8(output).expect("bundle output is UTF-8");
+        assert!(output.contains("console.log(false)"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

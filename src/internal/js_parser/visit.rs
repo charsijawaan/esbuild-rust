@@ -747,6 +747,75 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
     visit_expr_with_target(core, expression, resolve_identifiers, AssignTarget::None);
 }
 
+fn instantiate_define_expr(
+    core: &mut ParserCore,
+    loc: Loc,
+    define: &crate::internal::config::DefineExpr,
+) -> Option<ExprData> {
+    if define.constant.data.is_some() {
+        let mut value = define.constant.clone();
+        value.loc = loc;
+        return value.data.map(|data| *data);
+    }
+    let first = define.parts.first()?;
+    let result = core.find_symbol(loc, first);
+    core.record_usage(result.reference);
+    let mut value = Expr::new(
+        loc,
+        ExprData::Identifier(IdentifierExpr {
+            reference: result.reference,
+            must_keep_due_to_with_stmt: result.is_inside_with_scope,
+            ..IdentifierExpr::default()
+        }),
+    );
+    for part in &define.parts[1..] {
+        value = Expr::new(
+            loc,
+            ExprData::Dot(DotExpr {
+                target: value,
+                name: part.clone(),
+                name_loc: loc,
+                ..DotExpr::default()
+            }),
+        );
+    }
+    value.data.map(|data| *data)
+}
+
+fn dot_chain_parts(core: &ParserCore, expression: &Expr, tail: &str) -> Option<Vec<String>> {
+    fn append(core: &ParserCore, expression: &Expr, parts: &mut Vec<String>) -> bool {
+        match expression.data.as_deref() {
+            Some(ExprData::Identifier(identifier)) => {
+                let Some(symbol) = core.symbols.get(identifier.reference.inner_index as usize)
+                else {
+                    return false;
+                };
+                if symbol.kind != crate::internal::ast::SymbolKind::Unbound {
+                    return false;
+                }
+                parts.push(symbol.original_name.clone());
+                true
+            }
+            Some(ExprData::Dot(dot)) => {
+                if !append(core, &dot.target, parts) {
+                    return false;
+                }
+                parts.push(dot.name.clone());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    let mut parts = Vec::new();
+    if append(core, expression, &mut parts) {
+        parts.push(tail.to_string());
+        Some(parts)
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn visit_expr_with_target(
     core: &mut ParserCore,
@@ -799,6 +868,23 @@ fn visit_expr_with_target(
                 identifier.must_keep_due_to_with_stmt = result.is_inside_with_scope;
             } else {
                 core.record_usage(identifier.reference);
+            }
+            if assign_target == AssignTarget::None {
+                let symbol = &core.symbols[identifier.reference.inner_index as usize];
+                if symbol.kind == crate::internal::ast::SymbolKind::Unbound
+                    && let Some(define) = core
+                        .options
+                        .defines
+                        .as_ref()
+                        .and_then(|defines| defines.identifier_defines.get(&symbol.original_name))
+                        .and_then(|define| define.define_expr.as_ref())
+                        .cloned()
+                    && let Some(replacement) =
+                        instantiate_define_expr(core, expression.loc, &define)
+                {
+                    *data = replacement;
+                    return;
+                }
             }
             if assign_target != AssignTarget::None {
                 let symbol_index =
@@ -1009,6 +1095,25 @@ fn visit_expr_with_target(
         }
         ExprData::Dot(dot) => {
             visit_expr(core, &mut dot.target, resolve_identifiers);
+            if assign_target == AssignTarget::None
+                && let Some(parts) = dot_chain_parts(core, &dot.target, &dot.name)
+                && let Some(define) = core
+                    .options
+                    .defines
+                    .as_ref()
+                    .and_then(|defines| defines.dot_defines.get(&dot.name))
+                    .and_then(|defines| {
+                        defines
+                            .iter()
+                            .find(|define| define.key_parts == parts)
+                            .and_then(|define| define.define_expr.as_ref())
+                    })
+                    .cloned()
+                && let Some(replacement) = instantiate_define_expr(core, expression.loc, &define)
+            {
+                *data = replacement;
+                return;
+            }
             let replacement = if assign_target == AssignTarget::None {
                 let reference = match dot.target.data.as_deref() {
                     Some(ExprData::Identifier(identifier)) => Some(identifier.reference),
