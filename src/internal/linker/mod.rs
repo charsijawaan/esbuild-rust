@@ -2734,6 +2734,12 @@ pub struct ConvertedStmts {
     pub outside_wrapper_prefix: Vec<js_ast::Stmt>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RuntimeReExportContext {
+    pub re_export_ref: Ref,
+    pub unbound_module_ref: Option<Ref>,
+}
+
 impl ConvertedStmts {
     fn push_esm_statement(&mut self, statement: js_ast::Stmt, extract_from_wrapper: bool) {
         if extract_from_wrapper {
@@ -2753,8 +2759,7 @@ impl ConvertedStmts {
 /// # Panics
 ///
 /// Panics when the source is not JavaScript, an import record is invalid, or
-/// an `export *` statement requires the runtime re-export helper. Runtime
-/// re-export generation is handled by the subsequent linker phase.
+/// an `export *` statement requires a missing runtime re-export context.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn convert_stmts_for_chunk(
@@ -2762,6 +2767,7 @@ pub fn convert_stmts_for_chunk(
     options: &Options,
     source_index: u32,
     part_statements: &[js_ast::Stmt],
+    runtime_re_export: Option<RuntimeReExportContext>,
 ) -> ConvertedStmts {
     let file = &graph.files[source_index as usize];
     let Some(InputFileRepr::Js(repr)) = file.input_file.repr.as_ref() else {
@@ -2850,28 +2856,102 @@ pub fn convert_stmts_for_chunk(
             }
             Some(js_ast::StmtData::ExportStar(export)) if should_strip_exports => {
                 let record = &repr.ast.import_records[export.import_record_index as usize];
-                if record
+                let namespace_ref = export.namespace_ref;
+                let import_record_index = export.import_record_index;
+                let calls_runtime = record
                     .flags
-                    .contains(ImportRecordFlags::CALLS_RUN_TIME_RE_EXPORT_FN)
-                {
-                    panic!("runtime export-star conversion must run in the runtime binding phase");
-                }
+                    .contains(ImportRecordFlags::CALLS_RUN_TIME_RE_EXPORT_FN);
                 if !record.source_index.is_valid()
                     && options.output_format.keep_esm_import_export_syntax()
                 {
+                    if calls_runtime {
+                        statement.data =
+                            Some(Box::new(js_ast::StmtData::Import(js_ast::ImportStmt {
+                                namespace_ref,
+                                star_name_loc: Some(statement.loc),
+                                import_record_index,
+                                ..js_ast::ImportStmt::default()
+                            })));
+                        result
+                            .inside_wrapper_prefix
+                            .push(runtime_re_export_statement(
+                                runtime_re_export
+                                    .expect("runtime export-star conversion requires runtime refs"),
+                                repr.ast.exports_ref,
+                                js_ast::Expr::new(
+                                    statement.loc,
+                                    js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                                        reference: namespace_ref,
+                                        ..js_ast::IdentifierExpr::default()
+                                    }),
+                                ),
+                                options.output_format == Format::CommonJs && file.is_entry_point(),
+                                statement.loc,
+                            ));
+                    }
                     result.push_esm_statement(statement, extract_esm_from_wrapper);
                 } else if record.source_index.is_valid() {
-                    let conversion = convert_import_for_chunk(
-                        graph,
-                        source_index,
-                        original.loc,
-                        export.namespace_ref,
-                        export.import_record_index,
-                        options.output_format,
-                    );
-                    if let Some(prefix) = conversion.prefix_statement {
-                        result.inside_wrapper_prefix.push(prefix);
+                    let target_file = &graph.files[record.source_index.get_index() as usize];
+                    let Some(InputFileRepr::Js(target)) = target_file.input_file.repr.as_ref()
+                    else {
+                        panic!("export-star target must be JavaScript");
+                    };
+                    if target.meta.wrap == WrapKind::Esm {
+                        result.inside_wrapper_prefix.push(js_ast::Stmt::new(
+                            statement.loc,
+                            js_ast::StmtData::Expr(js_ast::ExprStmt {
+                                value: wrapper_call(target.ast.wrapper_ref, statement.loc),
+                                ..js_ast::ExprStmt::default()
+                            }),
+                        ));
                     }
+                    if calls_runtime {
+                        let target_expr =
+                            if target.ast.exports_kind == ExportsKind::EsmWithDynamicFallback {
+                                js_ast::Expr::new(
+                                    record.range.loc,
+                                    js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                                        reference: target.ast.exports_ref,
+                                        ..js_ast::IdentifierExpr::default()
+                                    }),
+                                )
+                            } else {
+                                js_ast::Expr::new(
+                                    record.range.loc,
+                                    js_ast::ExprData::RequireString(js_ast::RequireStringExpr {
+                                        import_record_index,
+                                        ..js_ast::RequireStringExpr::default()
+                                    }),
+                                )
+                            };
+                        result
+                            .inside_wrapper_prefix
+                            .push(runtime_re_export_statement(
+                                runtime_re_export
+                                    .expect("runtime export-star conversion requires runtime refs"),
+                                repr.ast.exports_ref,
+                                target_expr,
+                                options.output_format == Format::CommonJs && file.is_entry_point(),
+                                statement.loc,
+                            ));
+                    }
+                } else if calls_runtime {
+                    result
+                        .inside_wrapper_prefix
+                        .push(runtime_re_export_statement(
+                            runtime_re_export
+                                .expect("runtime export-star conversion requires runtime refs"),
+                            repr.ast.exports_ref,
+                            js_ast::Expr::new(
+                                record.range.loc,
+                                js_ast::ExprData::RequireString(js_ast::RequireStringExpr {
+                                    import_record_index,
+                                    ..js_ast::RequireStringExpr::default()
+                                }),
+                            ),
+                            options.output_format == Format::CommonJs && file.is_entry_point(),
+                            statement.loc,
+                        ));
                 }
                 continue;
             }
@@ -2896,6 +2976,80 @@ pub fn convert_stmts_for_chunk(
         result.inside_wrapper_suffix.push(statement);
     }
     result
+}
+
+fn wrapper_call(wrapper_ref: Ref, location: crate::internal::logger::Loc) -> js_ast::Expr {
+    js_ast::Expr::new(
+        location,
+        js_ast::ExprData::Call(js_ast::CallExpr {
+            target: js_ast::Expr::new(
+                location,
+                js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                    reference: wrapper_ref,
+                    ..js_ast::IdentifierExpr::default()
+                }),
+            ),
+            ..js_ast::CallExpr::default()
+        }),
+    )
+}
+
+fn runtime_re_export_statement(
+    context: RuntimeReExportContext,
+    exports_ref: Ref,
+    target: js_ast::Expr,
+    include_module_exports: bool,
+    location: crate::internal::logger::Loc,
+) -> js_ast::Stmt {
+    let mut arguments = vec![
+        js_ast::Expr::new(
+            location,
+            js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                reference: exports_ref,
+                ..js_ast::IdentifierExpr::default()
+            }),
+        ),
+        target,
+    ];
+    if include_module_exports {
+        let module_ref = context
+            .unbound_module_ref
+            .expect("CommonJS entry re-export requires the unbound module ref");
+        arguments.push(js_ast::Expr::new(
+            location,
+            js_ast::ExprData::Dot(js_ast::DotExpr {
+                target: js_ast::Expr::new(
+                    location,
+                    js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                        reference: module_ref,
+                        ..js_ast::IdentifierExpr::default()
+                    }),
+                ),
+                name: "exports".into(),
+                ..js_ast::DotExpr::default()
+            }),
+        ));
+    }
+    js_ast::Stmt::new(
+        location,
+        js_ast::StmtData::Expr(js_ast::ExprStmt {
+            value: js_ast::Expr::new(
+                location,
+                js_ast::ExprData::Call(js_ast::CallExpr {
+                    target: js_ast::Expr::new(
+                        location,
+                        js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                            reference: context.re_export_ref,
+                            ..js_ast::IdentifierExpr::default()
+                        }),
+                    ),
+                    args: arguments,
+                    ..js_ast::CallExpr::default()
+                }),
+            ),
+            ..js_ast::ExprStmt::default()
+        }),
+    )
 }
 
 /// Assign the output path template for every JavaScript chunk, leaving the
@@ -3292,9 +3446,9 @@ mod tests {
     use super::{
         AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, CrossChunkImport,
         CrossChunkImportItem, ImportStatus, ImportTracker, MatchImportKind, OutputPathContext,
-        OutputPiece, OutputPieceIndexKind, PartRange, StableRef, add_exports_for_export_star,
-        advance_import_tracker, append_or_extend_part_range, assign_chunk_path_templates,
-        bind_imports_to_exports_for_file, classify_module_wrappers,
+        OutputPiece, OutputPieceIndexKind, PartRange, RuntimeReExportContext, StableRef,
+        add_exports_for_export_star, advance_import_tracker, append_or_extend_part_range,
+        assign_chunk_path_templates, bind_imports_to_exports_for_file, classify_module_wrappers,
         compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
         convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
         finalize_chunk_paths, generate_cross_chunk_stmts, generate_isolated_hash,
@@ -4073,6 +4227,7 @@ mod tests {
             },
             0,
             &statements,
+            None,
         );
         assert_eq!(converted.inside_wrapper_prefix.len(), 1);
         assert!(matches!(
@@ -4099,6 +4254,108 @@ mod tests {
         assert!(matches!(
             converted.inside_wrapper_suffix[0].data.as_deref(),
             Some(js_ast::StmtData::Local(local)) if !local.is_export
+        ));
+    }
+
+    #[test]
+    fn runtime_export_star_uses_namespace_and_commonjs_targets() {
+        let exports_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let namespace_ref = Ref {
+            source_index: 0,
+            inner_index: 1,
+        };
+        let runtime_ref = Ref {
+            source_index: 0,
+            inner_index: 2,
+        };
+        let module_ref = Ref {
+            source_index: 0,
+            inner_index: 3,
+        };
+        let input_files = [js_file(js_ast::Ast {
+            exports_ref,
+            import_records: vec![ImportRecord {
+                flags: ImportRecordFlags::CALLS_RUN_TIME_RE_EXPORT_FN,
+                ..ImportRecord::default()
+            }],
+            ..js_ast::Ast::default()
+        })];
+        let graph = clone_linker_graph(&input_files, &[0], &[EntryPoint::default()], false);
+        let statements = [js_ast::Stmt::new(
+            Loc::default(),
+            js_ast::StmtData::ExportStar(js_ast::ExportStarStmt {
+                namespace_ref,
+                ..js_ast::ExportStarStmt::default()
+            }),
+        )];
+        let context = RuntimeReExportContext {
+            re_export_ref: runtime_ref,
+            unbound_module_ref: Some(module_ref),
+        };
+
+        let esm = convert_stmts_for_chunk(
+            &graph,
+            &Options {
+                mode: Mode::Bundle,
+                output_format: Format::EsModule,
+                ..Options::default()
+            },
+            0,
+            &statements,
+            Some(context),
+        );
+        assert_eq!(esm.inside_wrapper_prefix.len(), 1);
+        assert!(matches!(
+            esm.inside_wrapper_suffix[0].data.as_deref(),
+            Some(js_ast::StmtData::Import(import))
+                if import.namespace_ref == namespace_ref && import.star_name_loc.is_some()
+        ));
+        let Some(js_ast::StmtData::Expr(call_statement)) =
+            esm.inside_wrapper_prefix[0].data.as_deref()
+        else {
+            panic!("runtime re-export call");
+        };
+        let Some(js_ast::ExprData::Call(call)) = call_statement.value.data.as_deref() else {
+            panic!("runtime re-export call expression");
+        };
+        assert_eq!(call.args.len(), 2);
+        assert!(matches!(
+            call.args[1].data.as_deref(),
+            Some(js_ast::ExprData::Identifier(identifier))
+                if identifier.reference == namespace_ref
+        ));
+
+        let common_js = convert_stmts_for_chunk(
+            &graph,
+            &Options {
+                mode: Mode::Bundle,
+                output_format: Format::CommonJs,
+                ..Options::default()
+            },
+            0,
+            &statements,
+            Some(context),
+        );
+        assert!(common_js.inside_wrapper_suffix.is_empty());
+        let Some(js_ast::StmtData::Expr(call_statement)) =
+            common_js.inside_wrapper_prefix[0].data.as_deref()
+        else {
+            panic!("runtime re-export call");
+        };
+        let Some(js_ast::ExprData::Call(call)) = call_statement.value.data.as_deref() else {
+            panic!("runtime re-export call expression");
+        };
+        assert_eq!(call.args.len(), 3);
+        assert!(matches!(
+            call.args[1].data.as_deref(),
+            Some(js_ast::ExprData::RequireString(_))
+        ));
+        assert!(matches!(
+            call.args[2].data.as_deref(),
+            Some(js_ast::ExprData::Dot(dot)) if dot.name == "exports"
         ));
     }
 
