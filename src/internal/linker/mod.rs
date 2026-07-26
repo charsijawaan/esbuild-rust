@@ -3052,6 +3052,137 @@ fn runtime_re_export_statement(
     )
 }
 
+/// Wrap `CommonJS` module statements in the generated `__commonJS` initializer.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn wrap_common_js_stmts(
+    ast: &js_ast::Ast,
+    body: Vec<js_ast::Stmt>,
+    mut outside_wrapper_prefix: Vec<js_ast::Stmt>,
+    common_js_runtime_ref: Ref,
+    options: &Options,
+    pretty_path: &str,
+) -> Vec<js_ast::Stmt> {
+    let mut arguments = Vec::new();
+    if ast.uses_exports_ref || ast.uses_module_ref {
+        arguments.push(js_ast::Arg {
+            binding: identifier_binding(ast.exports_ref),
+            ..js_ast::Arg::default()
+        });
+        if ast.uses_module_ref {
+            arguments.push(js_ast::Arg {
+                binding: identifier_binding(ast.module_ref),
+                ..js_ast::Arg::default()
+            });
+        }
+    }
+    let function_body = js_ast::FunctionBody {
+        block: js_ast::BlockStmt {
+            statements: body,
+            ..js_ast::BlockStmt::default()
+        },
+        ..js_ast::FunctionBody::default()
+    };
+    let initializer = if options.profiler_names {
+        let kind = if options
+            .unsupported_js_features
+            .contains(crate::internal::compat::JsFeature::OBJECT_EXTENSIONS)
+        {
+            js_ast::PropertyKind::Field
+        } else {
+            js_ast::PropertyKind::Method
+        };
+        js_ast::Expr::new(
+            crate::internal::logger::Loc::default(),
+            js_ast::ExprData::Object(js_ast::ObjectExpr {
+                properties: vec![js_ast::Property {
+                    kind,
+                    key: js_ast::Expr::new(
+                        crate::internal::logger::Loc::default(),
+                        js_ast::ExprData::String(js_ast::StringExpr {
+                            value: crate::internal::helpers::string_to_utf16(
+                                pretty_path.as_bytes(),
+                            ),
+                            ..js_ast::StringExpr::default()
+                        }),
+                    ),
+                    value_or_nil: js_ast::Expr::new(
+                        crate::internal::logger::Loc::default(),
+                        js_ast::ExprData::Function(js_ast::FunctionExpr {
+                            function: js_ast::Function {
+                                args: arguments,
+                                body: function_body,
+                                ..js_ast::Function::default()
+                            },
+                            ..js_ast::FunctionExpr::default()
+                        }),
+                    ),
+                    ..js_ast::Property::default()
+                }],
+                ..js_ast::ObjectExpr::default()
+            }),
+        )
+    } else if options
+        .unsupported_js_features
+        .contains(crate::internal::compat::JsFeature::ARROW)
+    {
+        js_ast::Expr::new(
+            crate::internal::logger::Loc::default(),
+            js_ast::ExprData::Function(js_ast::FunctionExpr {
+                function: js_ast::Function {
+                    args: arguments,
+                    body: function_body,
+                    ..js_ast::Function::default()
+                },
+                ..js_ast::FunctionExpr::default()
+            }),
+        )
+    } else {
+        js_ast::Expr::new(
+            crate::internal::logger::Loc::default(),
+            js_ast::ExprData::Arrow(js_ast::ArrowExpr {
+                args: arguments,
+                body: function_body,
+                ..js_ast::ArrowExpr::default()
+            }),
+        )
+    };
+    let value = js_ast::Expr::new(
+        crate::internal::logger::Loc::default(),
+        js_ast::ExprData::Call(js_ast::CallExpr {
+            target: js_ast::Expr::new(
+                crate::internal::logger::Loc::default(),
+                js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                    reference: common_js_runtime_ref,
+                    ..js_ast::IdentifierExpr::default()
+                }),
+            ),
+            args: vec![initializer],
+            ..js_ast::CallExpr::default()
+        }),
+    );
+    outside_wrapper_prefix.push(js_ast::Stmt::new(
+        crate::internal::logger::Loc::default(),
+        js_ast::StmtData::Local(js_ast::LocalStmt {
+            declarations: vec![js_ast::Decl {
+                binding: identifier_binding(ast.wrapper_ref),
+                value_or_nil: value,
+            }],
+            ..js_ast::LocalStmt::default()
+        }),
+    ));
+    outside_wrapper_prefix
+}
+
+fn identifier_binding(reference: Ref) -> js_ast::Binding {
+    js_ast::Binding {
+        data: Some(Box::new(js_ast::BindingData::Identifier(
+            js_ast::IdentifierBinding { reference },
+        ))),
+        ..js_ast::Binding::default()
+    }
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -3458,7 +3589,7 @@ mod tests {
         print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
         recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
         sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
-        tree_shaking_and_code_splitting,
+        tree_shaking_and_code_splitting, wrap_common_js_stmts,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -4356,6 +4487,79 @@ mod tests {
         assert!(matches!(
             call.args[2].data.as_deref(),
             Some(js_ast::ExprData::Dot(dot)) if dot.name == "exports"
+        ));
+    }
+
+    #[test]
+    fn commonjs_wrapper_selects_arguments_and_function_shape() {
+        let ast = js_ast::Ast {
+            exports_ref: Ref {
+                source_index: 0,
+                inner_index: 0,
+            },
+            module_ref: Ref {
+                source_index: 0,
+                inner_index: 1,
+            },
+            wrapper_ref: Ref {
+                source_index: 0,
+                inner_index: 2,
+            },
+            uses_exports_ref: true,
+            uses_module_ref: true,
+            ..js_ast::Ast::default()
+        };
+        let runtime_ref = Ref {
+            source_index: 0,
+            inner_index: 3,
+        };
+        let wrapper = |options: &Options| {
+            let statements = wrap_common_js_stmts(
+                &ast,
+                vec![js_ast::Stmt::default()],
+                Vec::new(),
+                runtime_ref,
+                options,
+                "src/file.js",
+            );
+            let Some(js_ast::StmtData::Local(local)) = statements[0].data.as_deref() else {
+                panic!("wrapper declaration");
+            };
+            let Some(js_ast::ExprData::Call(call)) =
+                local.declarations[0].value_or_nil.data.as_deref()
+            else {
+                panic!("runtime call");
+            };
+            call.args[0].clone()
+        };
+
+        let arrow = wrapper(&Options::default());
+        assert!(matches!(
+            arrow.data.as_deref(),
+            Some(js_ast::ExprData::Arrow(arrow)) if arrow.args.len() == 2
+        ));
+
+        let function = wrapper(&Options {
+            unsupported_js_features: crate::internal::compat::JsFeature::ARROW,
+            ..Options::default()
+        });
+        assert!(matches!(
+            function.data.as_deref(),
+            Some(js_ast::ExprData::Function(function)) if function.function.args.len() == 2
+        ));
+
+        let profiled = wrapper(&Options {
+            profiler_names: true,
+            ..Options::default()
+        });
+        let Some(js_ast::ExprData::Object(object)) = profiled.data.as_deref() else {
+            panic!("profiled wrapper object");
+        };
+        assert_eq!(object.properties.len(), 1);
+        assert_eq!(object.properties[0].kind, js_ast::PropertyKind::Method);
+        assert!(matches!(
+            object.properties[0].value_or_nil.data.as_deref(),
+            Some(js_ast::ExprData::Function(function)) if function.function.args.len() == 2
         ));
     }
 
