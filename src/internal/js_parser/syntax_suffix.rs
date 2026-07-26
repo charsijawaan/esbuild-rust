@@ -124,6 +124,28 @@ pub(crate) fn parse_binary_expression(
     }
 }
 
+pub(crate) fn parse_conditional_suffix(
+    lexer: &mut Lexer,
+    left: Expr,
+    mut parse_branch: impl FnMut(&mut Lexer, Precedence) -> Expr,
+) -> Expr {
+    if lexer.token != Token::Question {
+        return left;
+    }
+    lexer.next();
+    let yes = parse_branch(lexer, Precedence::Comma);
+    lexer.expect(Token::Colon);
+    let no = parse_branch(lexer, Precedence::Comma);
+    Expr::new(
+        left.loc,
+        ExprData::If(crate::internal::js_ast::IfExpr {
+            test: left,
+            yes,
+            no,
+        }),
+    )
+}
+
 const fn precedence_before(precedence: Precedence) -> Precedence {
     match precedence {
         Precedence::Assign => Precedence::Yield,
@@ -358,7 +380,7 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use super::{
-        binary_operator, parse_binary_expression, parse_call_args,
+        binary_operator, parse_binary_expression, parse_call_args, parse_conditional_suffix,
         parse_high_precedence_suffix_chain,
     };
     use crate::internal::{
@@ -511,5 +533,34 @@ mod tests {
         );
         assert!(matches!(result.data.as_deref(), Some(ExprData::Number(_))));
         assert_eq!(lexer.token, Token::In);
+    }
+
+    #[test]
+    fn parses_conditional_branches() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"? 2 : 3"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source, TsOptions::default());
+        let test = Expr::new(
+            crate::internal::logger::Loc::default(),
+            ExprData::Boolean(true),
+        );
+        let result = parse_conditional_suffix(&mut lexer, test, |lexer, minimum| {
+            assert_eq!(minimum, crate::internal::js_ast::Precedence::Comma);
+            let loc = lexer.loc();
+            let value = lexer.number;
+            lexer.next();
+            Expr::new(loc, ExprData::Number(value))
+        });
+        let Some(ExprData::If(conditional)) = result.data.as_deref() else {
+            panic!("expected conditional expression");
+        };
+        assert!(matches!(
+            conditional.yes.data.as_deref(),
+            Some(ExprData::Number(value)) if value.to_bits() == 2.0_f64.to_bits()
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
     }
 }
