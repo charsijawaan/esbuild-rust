@@ -2432,6 +2432,76 @@ pub fn generate_cross_chunk_stmts(
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PrintedCrossChunkBindings {
+    pub prefix: Vec<u8>,
+    pub suffix: Vec<u8>,
+}
+
+/// Print the generated cross-chunk import/export statements using temporary
+/// chunk keys. Final paths are substituted after all chunk hashes are known.
+///
+/// # Panics
+///
+/// Panics when a cross-chunk import references an invalid chunk index or the
+/// generated AST violates JavaScript-printer invariants.
+#[must_use]
+pub fn print_cross_chunk_bindings(
+    chunks: &[ChunkInfo],
+    chunk_index: usize,
+    renamer: &dyn crate::internal::renamer::Renamer,
+    options: &Options,
+) -> PrintedCrossChunkBindings {
+    let chunk = &chunks[chunk_index];
+    let import_records = chunk
+        .cross_chunk_imports
+        .iter()
+        .map(|chunk_import| crate::internal::ast::ImportRecord {
+            kind: chunk_import.import_kind,
+            path: crate::internal::logger::Path {
+                text: chunks[chunk_import.chunk_index as usize].unique_key.clone(),
+                ..crate::internal::logger::Path::default()
+            },
+            flags: ImportRecordFlags::SHOULD_NOT_BE_EXTERNAL_IN_METAFILE
+                | ImportRecordFlags::CONTAINS_UNIQUE_KEY,
+            ..crate::internal::ast::ImportRecord::default()
+        })
+        .collect();
+    let print_options = crate::internal::js_printer::Options {
+        unsupported_features: options.unsupported_js_features,
+        line_limit: options.line_limit,
+        minify_syntax: options.minify_syntax,
+        minify_whitespace: options.minify_whitespace,
+        ascii_only: options.ascii_only,
+    };
+    let prefix = crate::internal::js_printer::print(
+        &js_ast::Ast {
+            import_records,
+            parts: vec![js_ast::Part {
+                statements: chunk.cross_chunk_prefix_stmts.clone(),
+                ..js_ast::Part::default()
+            }],
+            ..js_ast::Ast::default()
+        },
+        renamer,
+        print_options,
+    )
+    .js;
+    let suffix = crate::internal::js_printer::print(
+        &js_ast::Ast {
+            parts: vec![js_ast::Part {
+                statements: chunk.cross_chunk_suffix_stmts.clone(),
+                ..js_ast::Part::default()
+            }],
+            ..js_ast::Ast::default()
+        },
+        renamer,
+        print_options,
+    )
+    .js;
+    PrintedCrossChunkBindings { prefix, suffix }
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -2834,9 +2904,10 @@ mod tests {
         generate_isolated_hash, has_dynamic_exports_due_to_export_star,
         import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
         join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
-        path_between_chunks, propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, tree_shaking_and_code_splitting,
+        path_between_chunks, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
+        tree_shaking_and_code_splitting,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -5629,5 +5700,16 @@ mod tests {
         assert_eq!(export.items.len(), 1);
         assert_eq!(export.items[0].alias, "shared");
         assert_eq!(export.items[0].name.reference, shared_ref);
+
+        let renamer = crate::internal::renamer::new_no_op_renamer(graph.symbols.clone());
+        let entry_bindings = print_cross_chunk_bindings(&chunks, 0, &renamer, &options);
+        assert_eq!(
+            entry_bindings.prefix,
+            b"import { shared } from \"UNIQUEC00000002\";\n"
+        );
+        assert!(entry_bindings.suffix.is_empty());
+        let shared_bindings = print_cross_chunk_bindings(&chunks, 2, &renamer, &options);
+        assert!(shared_bindings.prefix.is_empty());
+        assert_eq!(shared_bindings.suffix, b"export { shared };\n");
     }
 }
