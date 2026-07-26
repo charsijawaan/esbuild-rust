@@ -188,6 +188,19 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     visit_binding_initializers(core, &mut declaration.binding, resolve_identifiers);
                     visit_expr(core, &mut declaration.value_or_nil, resolve_identifiers);
                     if core.options.minify_syntax
+                        && local.kind == LocalKind::Let
+                        && matches!(
+                            declaration.binding.data.as_deref(),
+                            Some(BindingData::Identifier(_))
+                        )
+                        && matches!(
+                            declaration.value_or_nil.data.as_deref(),
+                            Some(ExprData::Undefined)
+                        )
+                    {
+                        declaration.value_or_nil.data = None;
+                    }
+                    if core.options.minify_syntax
                         && local.kind == crate::internal::js_ast::LocalKind::Const
                         && let Some(BindingData::Identifier(identifier)) =
                             declaration.binding.data.as_deref()
@@ -4504,7 +4517,9 @@ fn visit_expr_with_target(
             }
         }
         ExprData::Array(array) => {
+            let mut has_spread = false;
             for item in &mut array.items {
+                has_spread |= matches!(item.data.as_deref(), Some(ExprData::Spread(_)));
                 visit_expr_with_target(
                     core,
                     item,
@@ -4515,6 +4530,9 @@ fn visit_expr_with_target(
                         AssignTarget::Replace
                     },
                 );
+            }
+            if core.options.minify_syntax && has_spread && assign_target == AssignTarget::None {
+                array.items = inline_spreads_of_array_literals(&array.items);
             }
         }
         ExprData::Unary(unary) => {
@@ -4612,8 +4630,13 @@ fn visit_expr_with_target(
         }
         ExprData::New(new) => {
             visit_expr(core, &mut new.target, resolve_identifiers);
+            let mut has_spread = false;
             for argument in &mut new.args {
+                has_spread |= matches!(argument.data.as_deref(), Some(ExprData::Spread(_)));
                 visit_expr(core, argument, resolve_identifiers);
+            }
+            if core.options.minify_syntax && has_spread {
+                new.args = inline_spreads_of_array_literals(&new.args);
             }
         }
         ExprData::Call(call) => {

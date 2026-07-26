@@ -6274,6 +6274,25 @@ mod tests {
     }
 
     #[test]
+    fn simplifies_undefined_initializers_and_array_spreads_like_esbuild() {
+        assert_eq!(
+            code(transform(
+                "let value=undefined;let {}=undefined;var other=undefined;\
+                 x=new foo(1,...[2,...y,3],4);z=[1,...[,2,,],3]",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "let value, {} = void 0;\n",
+                "var other = void 0;\n",
+                "x = new foo(1, 2, ...y, 3, 4), z = [1, void 0, 2, void 0, 3];\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(
