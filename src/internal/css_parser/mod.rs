@@ -145,6 +145,7 @@ impl Parser {
         }
         if self.minify_syntax {
             mangle_border_radius_declarations(&mut rules, self.minify_whitespace);
+            mangle_box_declarations(&mut rules);
             mangle_empty_and_nested_rules(&mut rules);
             merge_adjacent_selector_rules(&mut rules);
         }
@@ -673,7 +674,9 @@ impl Parser {
                     minify_single_color(std::slice::from_mut(token));
                 }
             }
-            if matches!(key_lower.as_str(), "margin" | "padding" | "inset") {
+            if matches!(key_lower.as_str(), "margin" | "inset") && is_box_quad(&value, true)
+                || key_lower == "padding" && is_box_quad(&value, false)
+            {
                 minify_four_side_shorthand(&mut value);
             }
             if key_lower == "border-radius" {
@@ -2370,6 +2373,243 @@ fn mangle_border_radius_declarations(rules: &mut Vec<Rule>, minify_whitespace: b
                 3,
             ),
             _ => {}
+        }
+    }
+    let mut index = 0;
+    rules.retain(|_| {
+        let keep = !removed[index];
+        index += 1;
+        keep
+    });
+}
+
+#[derive(Clone, Debug)]
+struct BoxSide {
+    token: Token,
+    unit_safety: UnitSafety,
+    rule_index: usize,
+    was_single_rule: bool,
+}
+
+#[derive(Debug)]
+struct BoxTracker {
+    key: Declaration,
+    key_text: &'static str,
+    allow_auto: bool,
+    sides: [Option<BoxSide>; 4],
+    important: bool,
+}
+
+impl BoxTracker {
+    fn new(key: Declaration, key_text: &'static str, allow_auto: bool) -> Self {
+        Self {
+            key,
+            key_text,
+            allow_auto,
+            sides: Default::default(),
+            important: false,
+        }
+    }
+
+    fn reset_for_importance(&mut self, important: bool) {
+        if self.important != important {
+            self.sides = Default::default();
+            self.important = important;
+        }
+    }
+
+    fn update_side(&mut self, removed: &mut [bool], side: usize, new: BoxSide) {
+        if let Some(old) = &self.sides[side]
+            && (!new.was_single_rule || old.was_single_rule)
+            && old.unit_safety.status == UnitSafetyStatus::Safe
+            && new.unit_safety.status == UnitSafetyStatus::Safe
+        {
+            removed[old.rule_index] = true;
+        }
+        self.sides[side] = Some(new);
+    }
+
+    fn mangle_shorthand(
+        &mut self,
+        rules: &mut [Rule],
+        removed: &mut [bool],
+        rule_index: usize,
+        declaration: &DeclarationRule,
+    ) {
+        self.reset_for_importance(declaration.important);
+        let Some(mut quad) = expand_box_quad(&declaration.value, self.allow_auto) else {
+            self.sides = Default::default();
+            return;
+        };
+        let mut unit_safety = UnitSafety::default();
+        for token in &quad {
+            if token.kind.is_numeric() {
+                unit_safety.include_unit_of(token);
+            }
+        }
+        if unit_safety.status == UnitSafetyStatus::Safe {
+            for token in &mut quad {
+                token.turn_length_into_number_if_zero();
+            }
+        }
+        for (side, token) in quad.into_iter().enumerate() {
+            self.update_side(
+                removed,
+                side,
+                BoxSide {
+                    token,
+                    unit_safety: unit_safety.clone(),
+                    rule_index,
+                    was_single_rule: false,
+                },
+            );
+        }
+        self.compact_rules(rules, removed, declaration.key_range);
+    }
+
+    fn mangle_side(
+        &mut self,
+        rules: &mut [Rule],
+        removed: &mut [bool],
+        rule_index: usize,
+        declaration: &DeclarationRule,
+        side: usize,
+    ) {
+        self.reset_for_importance(declaration.important);
+        let [token] = declaration.value.as_slice() else {
+            self.sides = Default::default();
+            return;
+        };
+        if !is_box_value(token, self.allow_auto) {
+            self.sides = Default::default();
+            return;
+        }
+
+        let mut token = token.clone();
+        let mut unit_safety = UnitSafety::default();
+        if token.kind.is_numeric() {
+            unit_safety.include_unit_of(&token);
+        }
+        if unit_safety.status == UnitSafetyStatus::Safe {
+            token.turn_length_into_number_if_zero();
+        }
+        if let RuleData::Declaration(current) = &mut rules[rule_index].data {
+            current.value = vec![token.clone()];
+        }
+        self.update_side(
+            removed,
+            side,
+            BoxSide {
+                token,
+                unit_safety,
+                rule_index,
+                was_single_rule: true,
+            },
+        );
+        self.compact_rules(rules, removed, declaration.key_range);
+    }
+
+    fn compact_rules(&self, rules: &mut [Rule], removed: &mut [bool], key_range: Range) {
+        let Some(sides) = self
+            .sides
+            .iter()
+            .map(Option::as_ref)
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
+        if sides[1..]
+            .iter()
+            .any(|side| !side.unit_safety.is_safe_with(&sides[0].unit_safety))
+        {
+            return;
+        }
+
+        let mut value = sides
+            .iter()
+            .map(|side| side.token.clone())
+            .collect::<Vec<_>>();
+        minify_four_side_shorthand(&mut value);
+        let target = sides[3].rule_index;
+        let min_loc = sides
+            .iter()
+            .map(|side| rules[side.rule_index].loc)
+            .min_by_key(|loc| loc.start)
+            .unwrap_or_default();
+        for side in &sides {
+            removed[side.rule_index] = true;
+        }
+        removed[target] = false;
+        rules[target] = Rule {
+            loc: min_loc,
+            data: RuleData::Declaration(DeclarationRule {
+                key_text: self.key_text.into(),
+                value,
+                key_range,
+                key: self.key,
+                important: self.important,
+            }),
+        };
+    }
+}
+
+fn is_box_value(token: &Token, allow_auto: bool) -> bool {
+    token.kind.is_numeric()
+        || allow_auto && token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("auto")
+}
+
+fn is_box_quad(tokens: &[Token], allow_auto: bool) -> bool {
+    (1..=4).contains(&tokens.len()) && tokens.iter().all(|token| is_box_value(token, allow_auto))
+}
+
+fn expand_box_quad(tokens: &[Token], allow_auto: bool) -> Option<Vec<Token>> {
+    if !is_box_quad(tokens, allow_auto) {
+        return None;
+    }
+    Some(vec![
+        tokens[0].clone(),
+        tokens.get(1).unwrap_or(&tokens[0]).clone(),
+        tokens.get(2).unwrap_or(&tokens[0]).clone(),
+        tokens
+            .get(3)
+            .or_else(|| tokens.get(1))
+            .unwrap_or(&tokens[0])
+            .clone(),
+    ])
+}
+
+fn mangle_box_declarations(rules: &mut Vec<Rule>) {
+    let mut margin = BoxTracker::new(Declaration::Margin, "margin", true);
+    let mut padding = BoxTracker::new(Declaration::Padding, "padding", false);
+    let mut inset = BoxTracker::new(Declaration::Inset, "inset", true);
+    let mut removed = vec![false; rules.len()];
+    for rule_index in 0..rules.len() {
+        let RuleData::Declaration(declaration) = &rules[rule_index].data else {
+            continue;
+        };
+        let declaration = declaration.clone();
+        let (tracker, side) = match declaration.key {
+            Declaration::Margin => (&mut margin, None),
+            Declaration::MarginTop => (&mut margin, Some(0)),
+            Declaration::MarginRight => (&mut margin, Some(1)),
+            Declaration::MarginBottom => (&mut margin, Some(2)),
+            Declaration::MarginLeft => (&mut margin, Some(3)),
+            Declaration::Padding => (&mut padding, None),
+            Declaration::PaddingTop => (&mut padding, Some(0)),
+            Declaration::PaddingRight => (&mut padding, Some(1)),
+            Declaration::PaddingBottom => (&mut padding, Some(2)),
+            Declaration::PaddingLeft => (&mut padding, Some(3)),
+            Declaration::Inset => (&mut inset, None),
+            Declaration::Top => (&mut inset, Some(0)),
+            Declaration::Right => (&mut inset, Some(1)),
+            Declaration::Bottom => (&mut inset, Some(2)),
+            Declaration::Left => (&mut inset, Some(3)),
+            _ => continue,
+        };
+        if let Some(side) = side {
+            tracker.mangle_side(rules, &mut removed, rule_index, &declaration, side);
+        } else {
+            tracker.mangle_shorthand(rules, &mut removed, rule_index, &declaration);
         }
     }
     let mut index = 0;

@@ -638,6 +638,22 @@ mod tests {
     }
 
     #[test]
+    fn merges_css_box_declarations() {
+        assert_eq!(
+            code(transform(
+                "a { margin: 1px 2px 3px 4px; margin-top: 5px } b { padding: 1px 2px; padding-top: 5px } c { inset: 1px; top: 5px } d { margin-left: 1px; margin-right: 2px; margin-top: 3px; margin-bottom: 4px } e { padding: 1px 2px 3px 4px; padding-left: -4px; padding-right: -2px } f { margin: var(--x) var(--y) var(--z) var(--y) } g { margin: 1px auto 3px 4px; margin-left: auto } h { inset: auto; left: 1px } i { padding: 1px auto 3px 4px; padding-left: auto } j { margin-left: 1Q; margin-right: 2Q; margin-top: 3Q; margin-bottom: 0 } k { margin: 1px; margin-top: 2px !important }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{margin:5px 2px 3px 4px}b{padding:5px 2px 1px}c{inset:5px 1px 1px}d{margin:3px 2px 4px 1px}e{padding:1px -2px 3px -4px}f{margin:var(--x) var(--y) var(--z) var(--y)}g{margin:1px auto 3px}h{inset:auto auto auto 1px}i{padding:1px auto 3px 4px;padding-left:auto}j{margin-left:1Q;margin-right:2Q;margin-top:3Q;margin-bottom:0}k{margin:1px;margin-top:2px!important}\n"
+        );
+    }
+
+    #[test]
     fn minifies_css_transforms() {
         assert_eq!(
             code(transform(
