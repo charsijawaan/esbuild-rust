@@ -8,6 +8,7 @@ use crate::internal::js_ast::{
 };
 use crate::internal::logger::{Loc, Range};
 
+use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properties};
 use super::{parser_core::ParserCore, standalone_helpers::is_simple_parameter_list};
 
 pub(crate) fn visit_top_level_statements(core: &mut ParserCore, statements: &mut [Stmt]) {
@@ -365,6 +366,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
     }
     visit_expr(core, &mut class.extends_or_nil, resolve_identifiers);
     core.push_scope_for_visit_pass(ScopeKind::ClassBody, class.body_loc);
+    report_duplicate_properties(core, &class.properties, DuplicatePropertiesIn::Class);
     for property in &mut class.properties {
         if let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref_mut() {
             core.record_declared_symbol(private.reference);
@@ -752,6 +754,10 @@ fn visit_expr_with_target(
             visit_expr(core, &mut index.index, resolve_identifiers);
         }
         ExprData::Object(object) => {
+            report_duplicate_properties(core, &object.properties, DuplicatePropertiesIn::Object);
+            if assign_target == AssignTarget::None {
+                report_duplicate_proto_properties(core, &object.properties);
+            }
             for property in &mut object.properties {
                 if property.flags.contains(PropertyFlags::IS_COMPUTED) {
                     visit_expr(core, &mut property.key, resolve_identifiers);
@@ -931,6 +937,56 @@ fn is_identifier_named(core: &ParserCore, expression: &Expr, expected: &str) -> 
     core.symbols
         .get(usize::try_from(identifier.reference.inner_index).unwrap_or(usize::MAX))
         .is_some_and(|symbol| symbol.original_name == expected)
+}
+
+fn report_duplicate_properties(
+    core: &mut ParserCore,
+    properties: &[crate::internal::js_ast::Property],
+    context: DuplicatePropertiesIn,
+) {
+    for duplicate in find_duplicate_properties(properties, context) {
+        let key = String::from_utf16_lossy(&duplicate.key);
+        let context = match context {
+            DuplicatePropertiesIn::Object => "object literal",
+            DuplicatePropertiesIn::Class => "class body",
+        };
+        core.add_warning_range(
+            Range {
+                loc: duplicate.duplicate_loc,
+                len: 0,
+            },
+            format!("Duplicate key {key:?} in {context}"),
+        );
+    }
+}
+
+fn report_duplicate_proto_properties(
+    core: &mut ParserCore,
+    properties: &[crate::internal::js_ast::Property],
+) {
+    let mut found = false;
+    for property in properties {
+        let is_proto = property.kind == crate::internal::js_ast::PropertyKind::Field
+            && !property.flags.contains(PropertyFlags::IS_COMPUTED)
+            && !property.flags.contains(PropertyFlags::WAS_SHORTHAND)
+            && matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::String(string))
+                    if string.value == "__proto__".encode_utf16().collect::<Vec<_>>()
+            );
+        if is_proto {
+            if found {
+                core.add_error_range(
+                    Range {
+                        loc: property.key.loc,
+                        len: 0,
+                    },
+                    "Cannot specify the \"__proto__\" property more than once per object",
+                );
+            }
+            found = true;
+        }
+    }
 }
 
 fn is_unbound_identifier_named(core: &ParserCore, expression: &Expr, expected: &str) -> bool {

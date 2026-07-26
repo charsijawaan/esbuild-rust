@@ -1880,6 +1880,43 @@ mod tests {
     }
 
     #[test]
+    fn reports_duplicate_object_and_class_properties() {
+        let (_, ok, log) = parse_source(
+            "const object = {\
+               x: 1,\
+               x: 2,\
+               get y() {},\
+               set y(value) {},\
+               get y() {}\
+             };",
+        );
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.kind == MsgKind::Warning)
+        );
+
+        let (_, ok, log) = parse_source("class Item { field; field; static field; }");
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Warning);
+
+        let (_, ok, log) = parse_source("const object = {__proto__: one, __proto__: two};");
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Error);
+
+        let (_, ok, log) = parse_source("({__proto__: one, __proto__: two} = object);");
+        assert!(ok);
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
     fn validates_unlabeled_break_and_continue_contexts() {
         let (_, ok, log) = parse_source("break; continue;");
         assert!(ok);
