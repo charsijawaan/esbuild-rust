@@ -11,7 +11,7 @@ use crate::internal::helpers::{escape_closing_tag, quote_for_json};
 use crate::internal::js_ast::{
     Ast, Binding, BindingData, BlockStmt, Expr, ExprData, ExprStmt, IfStmt, LocalKind, OpCode,
     OptionalChain, Precedence, PropertyFlags, PropertyKind, ReturnStmt, Stmt, StmtData,
-    is_identifier_es5_and_es_next, join_with_comma,
+    is_identifier_es5_and_es_next, is_optional_chain, join_with_comma,
 };
 use crate::internal::renamer::Renamer;
 use crate::internal::sourcemap::{
@@ -1623,7 +1623,7 @@ impl Printer<'_> {
         }
         if class.extends_or_nil.data.is_some() {
             self.output.extend_from_slice(b" extends ");
-            self.print_expr_at(&class.extends_or_nil, Precedence::Compare);
+            self.print_expr_at(&class.extends_or_nil, Precedence::Postfix);
         }
         self.print_optional_space();
         self.output.push(b'{');
@@ -1724,6 +1724,17 @@ impl Printer<'_> {
 
     #[allow(clippy::too_many_lines)]
     fn print_expr_at_with_usage(&mut self, expr: &Expr, level: Precedence, result_is_unused: bool) {
+        self.print_expr_at_with_usage_and_new_target(expr, level, result_is_unused, false);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn print_expr_at_with_usage_and_new_target(
+        &mut self,
+        expr: &Expr,
+        level: Precedence,
+        result_is_unused: bool,
+        is_new_target: bool,
+    ) {
         let Some(data) = expr.data.as_deref() else {
             return;
         };
@@ -1741,7 +1752,20 @@ impl Printer<'_> {
                 ExprData::New(new) => new.can_be_unwrapped_if_unused,
                 _ => false,
             };
-        let wrap = own_level < level || (has_pure_comment && level >= Precedence::Postfix);
+        let wrap_for_new_target = is_new_target
+            && match data {
+                ExprData::Call(_)
+                | ExprData::RequireString(_)
+                | ExprData::RequireResolveString(_)
+                | ExprData::ImportString(_)
+                | ExprData::ImportCall(_) => true,
+                ExprData::Dot(dot) => dot.optional_chain != OptionalChain::None,
+                ExprData::Index(index) => index.optional_chain != OptionalChain::None,
+                _ => false,
+            };
+        let wrap = own_level < level
+            || (has_pure_comment && level >= Precedence::Postfix)
+            || wrap_for_new_target;
         if wrap {
             self.output.push(b'(');
         }
@@ -1941,12 +1965,19 @@ impl Printer<'_> {
                 self.print_expr_at(&conditional.no, Precedence::Assign);
             }
             ExprData::Dot(dot) => {
-                if matches!(dot.target.data.as_deref(), Some(ExprData::Number(_))) {
+                if (dot.optional_chain == OptionalChain::None && is_optional_chain(&dot.target))
+                    || matches!(dot.target.data.as_deref(), Some(ExprData::Number(_)))
+                {
                     self.output.push(b'(');
                     self.print_expr_at(&dot.target, Precedence::Lowest);
                     self.output.push(b')');
                 } else {
-                    self.print_expr_at(&dot.target, Precedence::Postfix);
+                    self.print_expr_at_with_usage_and_new_target(
+                        &dot.target,
+                        Precedence::Postfix,
+                        false,
+                        is_new_target && dot.optional_chain == OptionalChain::None,
+                    );
                 }
                 if is_identifier_es5_and_es_next(&dot.name) {
                     if dot.optional_chain == OptionalChain::Start {
@@ -1969,7 +2000,18 @@ impl Printer<'_> {
                 }
             }
             ExprData::Index(index) => {
-                self.print_expr_at(&index.target, Precedence::Postfix);
+                if index.optional_chain == OptionalChain::None && is_optional_chain(&index.target) {
+                    self.output.push(b'(');
+                    self.print_expr_at(&index.target, Precedence::Lowest);
+                    self.output.push(b')');
+                } else {
+                    self.print_expr_at_with_usage_and_new_target(
+                        &index.target,
+                        Precedence::Postfix,
+                        false,
+                        is_new_target && index.optional_chain == OptionalChain::None,
+                    );
+                }
                 if matches!(
                     index.index.data.as_deref(),
                     Some(ExprData::PrivateIdentifier(_))
@@ -1995,7 +2037,13 @@ impl Printer<'_> {
                 if has_pure_comment {
                     self.output.extend_from_slice(b"/* @__PURE__ */ ");
                 }
-                self.print_expr_at(&call.target, Precedence::Call);
+                if call.optional_chain == OptionalChain::None && is_optional_chain(&call.target) {
+                    self.output.push(b'(');
+                    self.print_expr_at(&call.target, Precedence::Lowest);
+                    self.output.push(b')');
+                } else {
+                    self.print_expr_at(&call.target, Precedence::Postfix);
+                }
                 if call.optional_chain == OptionalChain::Start {
                     self.output.extend_from_slice(b"?.");
                 }
@@ -2005,12 +2053,30 @@ impl Printer<'_> {
                 if has_pure_comment {
                     self.output.extend_from_slice(b"/* @__PURE__ */ ");
                 }
-                self.output.extend_from_slice(b"new ");
-                self.print_expr_at(&new.target, Precedence::New);
-                self.print_arguments(&new.args);
+                self.output.extend_from_slice(b"new");
+                if !self.options.minify_whitespace || new_target_needs_space(&new.target) {
+                    self.output.push(b' ');
+                }
+                self.print_expr_at_with_usage_and_new_target(
+                    &new.target,
+                    Precedence::New,
+                    false,
+                    true,
+                );
+                if !self.options.minify_whitespace
+                    || !new.args.is_empty()
+                    || level >= Precedence::Postfix
+                {
+                    self.print_arguments(&new.args);
+                }
             }
             ExprData::InlinedEnum(inlined) => {
-                self.print_expr_at_with_usage(&inlined.value, level, result_is_unused);
+                self.print_expr_at_with_usage_and_new_target(
+                    &inlined.value,
+                    level,
+                    result_is_unused,
+                    is_new_target,
+                );
                 if !self.options.minify_whitespace {
                     self.output.extend_from_slice(b" /* ");
                     self.output.extend_from_slice(inlined.comment.as_bytes());
@@ -2018,7 +2084,12 @@ impl Printer<'_> {
                 }
             }
             ExprData::Annotation(annotation) => {
-                self.print_expr_at_with_usage(&annotation.value, level, result_is_unused);
+                self.print_expr_at_with_usage_and_new_target(
+                    &annotation.value,
+                    level,
+                    result_is_unused,
+                    is_new_target,
+                );
             }
             ExprData::Await(await_expression) => {
                 self.output.extend_from_slice(b"await ");
@@ -2100,7 +2171,7 @@ impl Printer<'_> {
                 }
             }
             ExprData::Class(class) => self.print_class(&class.class),
-            ExprData::Template(template) => self.print_template(template),
+            ExprData::Template(template) => self.print_template(template, is_new_target),
             ExprData::RequireString(require) => {
                 let wrap_as_target = level >= Precedence::New && !wrap;
                 if wrap_as_target {
@@ -2419,10 +2490,25 @@ impl Printer<'_> {
         }
     }
 
-    fn print_template(&mut self, template: &crate::internal::js_ast::TemplateExpr) {
+    fn print_template(
+        &mut self,
+        template: &crate::internal::js_ast::TemplateExpr,
+        is_new_target: bool,
+    ) {
         let is_tagged = template.tag_or_nil.data.is_some();
         if is_tagged {
-            self.print_expr_at(&template.tag_or_nil, Precedence::Postfix);
+            if is_optional_chain(&template.tag_or_nil) {
+                self.output.push(b'(');
+                self.print_expr_at(&template.tag_or_nil, Precedence::Lowest);
+                self.output.push(b')');
+            } else {
+                self.print_expr_at_with_usage_and_new_target(
+                    &template.tag_or_nil,
+                    Precedence::Postfix,
+                    false,
+                    is_new_target,
+                );
+            }
         } else if template.parts.is_empty() && self.options.minify_syntax {
             self.output
                 .extend(quote_utf16(&template.head_cooked, self.options, true));
@@ -2631,6 +2717,44 @@ fn can_omit_space_after_return(expression: &Expr) -> bool {
             matches!(call.target.data.as_deref(), Some(ExprData::Arrow(_)))
         }
         Some(ExprData::Binary(binary)) => can_omit_space_after_return(&binary.left),
+        _ => false,
+    }
+}
+
+fn new_target_needs_space(target: &Expr) -> bool {
+    let Some(data) = target.data.as_deref() else {
+        return false;
+    };
+    if expr_precedence(data) < Precedence::New {
+        return false;
+    }
+    match data {
+        ExprData::Boolean(_)
+        | ExprData::Super
+        | ExprData::Null
+        | ExprData::Undefined
+        | ExprData::This
+        | ExprData::New(_)
+        | ExprData::NewTarget(_)
+        | ExprData::ImportMeta(_)
+        | ExprData::Function(_)
+        | ExprData::Class(_)
+        | ExprData::Identifier(_)
+        | ExprData::ImportIdentifier(_)
+        | ExprData::NameOfSymbol(_)
+        | ExprData::Number(_)
+        | ExprData::BigInt(_) => true,
+        ExprData::Dot(dot) => {
+            dot.optional_chain == OptionalChain::None && new_target_needs_space(&dot.target)
+        }
+        ExprData::Index(index) => {
+            index.optional_chain == OptionalChain::None && new_target_needs_space(&index.target)
+        }
+        ExprData::Template(template) if template.tag_or_nil.data.is_some() => {
+            new_target_needs_space(&template.tag_or_nil)
+        }
+        ExprData::InlinedEnum(inlined) => new_target_needs_space(&inlined.value),
+        ExprData::Annotation(annotation) => new_target_needs_space(&annotation.value),
         _ => false,
     }
 }
@@ -2985,7 +3109,7 @@ mod tests {
             )
             .js,
             b"new (require_cjs())();\n\
-              (require_cjs())();\n\
+              require_cjs()();\n\
               new (require.resolve(\"./pkg\"))();\n"
         );
     }
@@ -3427,6 +3551,91 @@ mod tests {
             local.declarations[0].value_or_nil.data.as_deref(),
             Some(ExprData::Binary(_))
         ));
+    }
+
+    #[test]
+    fn omits_empty_new_parentheses_only_when_safe() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"let a=new X;\
+                  let b=(new X).y;\
+                  let c=new X()();\
+                  let d=new (f());\
+                  let e=(new X)+1;\
+                  let g=new X[0];\
+                  let h=new X`tag`;\
+                  let i=new [];\
+                  class C extends (new X){}"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "let a=new X;let b=new X().y;let c=new X()();let d=new(f());\
+             let e=new X+1;let g=new X[0];let h=new X`tag`;let i=new[];\
+             class C extends new X(){}"
+        );
+    }
+
+    #[test]
+    fn preserves_parentheses_around_completed_optional_chains() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"(f?.())();\
+                  (f?.x).y;\
+                  (f?.[x])[y];\
+                  (f?.x)`tag`;\
+                  f?.()();\
+                  f?.x.y;"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "(f?.())();(f?.x).y;(f?.[x])[y];(f?.x)`tag`;f?.()();f?.x.y;"
+        );
     }
 
     #[test]
