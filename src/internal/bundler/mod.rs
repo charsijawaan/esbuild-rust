@@ -328,10 +328,22 @@ pub fn parse_file(log: &Log, source: Source, loader: Loader, options: &Options) 
 #[allow(clippy::too_many_lines)]
 pub fn parse_file_with_unique_key_prefix(
     log: &Log,
+    source: Source,
+    loader: Loader,
+    options: &Options,
+    unique_key_prefix: &str,
+) -> ParseResult {
+    parse_file_with_cache(log, source, loader, options, unique_key_prefix, None)
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_file_with_cache(
+    log: &Log,
     mut source: Source,
     mut loader: Loader,
     options: &Options,
     unique_key_prefix: &str,
+    caches: Option<&CacheSet>,
 ) -> ParseResult {
     let (_, base, extension) =
         logger::platform_independent_path_dir_base_ext(&source.key_path.text);
@@ -403,7 +415,11 @@ pub fn parse_file_with_unique_key_prefix(
                 Loader::Ts | Loader::TsNoAmbiguousLessThan | Loader::Tsx
             );
             parser_options.ts.no_ambiguous_less_than = loader == Loader::TsNoAmbiguousLessThan;
-            let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
+            let (ast, ok) = if let Some(caches) = caches {
+                caches.js_cache.parse(log, source.clone(), parser_options)
+            } else {
+                js_parser::parse(log.clone(), source.clone(), parser_options)
+            };
             if ast.parts.len() <= 1 {
                 result.file.input_file.side_effects.kind = SideEffectsKind::NoSideEffectsEmptyAst;
             }
@@ -414,20 +430,21 @@ pub fn parse_file_with_unique_key_prefix(
             result.ok = ok;
         }
         Loader::Css | Loader::GlobalCss | Loader::LocalCss => {
-            let ast = css_parser::parse(
-                log.clone(),
-                source,
-                css_parser::Options {
-                    minify_syntax: options.minify_syntax,
-                    minify_whitespace: options.minify_whitespace,
-                    minify_identifiers: options.minify_identifiers,
-                    symbol_mode: match loader {
-                        Loader::LocalCss => css_parser::SymbolMode::Local,
-                        Loader::GlobalCss => css_parser::SymbolMode::Global,
-                        _ => css_parser::SymbolMode::Disabled,
-                    },
+            let parser_options = css_parser::Options {
+                minify_syntax: options.minify_syntax,
+                minify_whitespace: options.minify_whitespace,
+                minify_identifiers: options.minify_identifiers,
+                symbol_mode: match loader {
+                    Loader::LocalCss => css_parser::SymbolMode::Local,
+                    Loader::GlobalCss => css_parser::SymbolMode::Global,
+                    _ => css_parser::SymbolMode::Disabled,
                 },
-            );
+            };
+            let ast = if let Some(caches) = caches {
+                caches.css_cache.parse(log, source.clone(), parser_options)
+            } else {
+                css_parser::parse(log.clone(), source.clone(), parser_options)
+            };
             result.file.input_file.repr = Some(InputFileRepr::Css(Box::new(CssRepr {
                 ast,
                 ..CssRepr::default()
@@ -435,14 +452,15 @@ pub fn parse_file_with_unique_key_prefix(
             result.ok = true;
         }
         Loader::Json | Loader::WithTypeJson => {
-            let (expression, ok) = js_parser::parse_json(
-                log.clone(),
-                source.clone(),
-                js_parser::JsonOptions {
-                    unsupported_js_features: options.unsupported_js_features,
-                    ..js_parser::JsonOptions::default()
-                },
-            );
+            let parser_options = js_parser::JsonOptions {
+                unsupported_js_features: options.unsupported_js_features,
+                ..js_parser::JsonOptions::default()
+            };
+            let (expression, ok) = if let Some(caches) = caches {
+                caches.json_cache.parse(log, source.clone(), parser_options)
+            } else {
+                js_parser::parse_json(log.clone(), source.clone(), parser_options)
+            };
             let mut ast = js_parser::lazy_export_ast(
                 log.clone(),
                 &source,
@@ -816,7 +834,14 @@ pub fn scan_bundle(
     let mut bundle = ScannedBundle::default();
 
     let runtime_source = runtime::source(options.unsupported_js_features);
-    let runtime_result = parse_file(log, runtime_source, Loader::Js, options);
+    let runtime_result = parse_file_with_cache(
+        log,
+        runtime_source,
+        Loader::Js,
+        options,
+        unique_key_prefix,
+        Some(caches),
+    );
     if runtime_result.ok {
         let mut runtime_file = runtime_result.file;
         runtime_file.input_file.omit_from_source_maps_and_metafile = true;
@@ -894,12 +919,13 @@ pub fn scan_bundle(
         } else {
             stdin.loader
         };
-        let mut result = parse_file_with_unique_key_prefix(
+        let mut result = parse_file_with_cache(
             log,
             source,
             loader,
             &file_options,
             unique_key_prefix,
+            Some(caches),
         );
         resolve_import_records_from_directory(
             log,
@@ -1080,12 +1106,13 @@ pub fn scan_bundle(
         } else {
             ModuleType::Unknown
         };
-        let mut result = parse_file_with_unique_key_prefix(
+        let mut result = parse_file_with_cache(
             log,
             source,
             loader,
             &file_options,
             unique_key_prefix,
+            Some(caches),
         );
         if result.file.input_file.side_effects.kind == SideEffectsKind::HasSideEffects
             && let Some(side_effects_data) = &resolve_metadata.primary_side_effects_data

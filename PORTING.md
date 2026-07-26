@@ -14,7 +14,7 @@ Status values:
 | `internal/api_helpers` | ported |
 | `internal/ast` | ported |
 | `internal/bundler` | in progress |
-| `internal/cache` | in progress |
+| `internal/cache` | ported |
 | `internal/cli_helpers` | ported |
 | `internal/compat` | ported |
 | `internal/config` | ported |

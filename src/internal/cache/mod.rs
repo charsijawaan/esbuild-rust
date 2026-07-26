@@ -6,6 +6,8 @@ use std::{
 };
 
 use crate::internal::{
+    css_ast::Ast as CssAst,
+    css_parser,
     fs::{Fs, ModKey, ReadFileResult},
     js_ast::{Ast, Expr},
     js_parser::{JsonOptions, Options},
@@ -15,6 +17,7 @@ use crate::internal::{
 
 #[derive(Default)]
 pub struct CacheSet {
+    pub css_cache: CssCache,
     pub fs_cache: FsCache,
     pub json_cache: JsonCache,
     pub js_cache: JsCache,
@@ -24,10 +27,59 @@ pub struct CacheSet {
 #[must_use]
 pub fn make_cache_set() -> CacheSet {
     CacheSet {
+        css_cache: CssCache::default(),
         fs_cache: FsCache::default(),
         json_cache: JsonCache::default(),
         js_cache: JsCache::default(),
         source_index_cache: SourceIndexCache::new(),
+    }
+}
+
+#[derive(Default)]
+pub struct CssCache {
+    entries: Mutex<HashMap<Path, CssCacheEntry>>,
+}
+
+#[derive(Clone)]
+struct CssCacheEntry {
+    source: Source,
+    messages: Vec<Msg>,
+    ast: CssAst,
+    options: css_parser::Options,
+}
+
+impl CssCache {
+    #[must_use]
+    pub fn parse(&self, log: &Log, source: Source, options: css_parser::Options) -> CssAst {
+        if let Some(entry) = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&source.key_path)
+            .filter(|entry| entry.source == source && entry.options == options)
+            .cloned()
+        {
+            replay_messages(log, &entry.messages);
+            return entry.ast;
+        }
+
+        let temporary_log = Log::new_defer(DeferLogKind::All, log.overrides.as_ref().clone());
+        let ast = css_parser::parse(temporary_log.clone(), source.clone(), options);
+        let messages = temporary_log.done();
+        replay_messages(log, &messages);
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                source.key_path.clone(),
+                CssCacheEntry {
+                    source,
+                    messages,
+                    ast: ast.clone(),
+                    options,
+                },
+            );
+        ast
     }
 }
 
@@ -281,7 +333,7 @@ mod tests {
         },
     };
 
-    use super::{FsCache, SourceIndexCache, SourceIndexKind};
+    use super::{CssCache, FsCache, SourceIndexCache, SourceIndexKind};
     use crate::internal::{
         fs::{
             EntryKind, Fs, MockFs, MockKind, ModKey, OpenFileResult, ReadDirectoryResult,
@@ -407,6 +459,33 @@ mod tests {
 
     #[test]
     fn syntax_caches_replay_messages_and_return_independent_asts() {
+        let css_cache = CssCache::default();
+        let css_source = Source {
+            contents: Arc::from(&b".entry { color: red }"[..]),
+            key_path: Path {
+                text: "/entry.css".into(),
+                ..Path::default()
+            },
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut first = css_cache.parse(
+            &log,
+            css_source.clone(),
+            crate::internal::css_parser::Options::default(),
+        );
+        assert!(log.done().is_empty());
+        first.rules.clear();
+
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let second = css_cache.parse(
+            &log,
+            css_source,
+            crate::internal::css_parser::Options::default(),
+        );
+        assert!(log.done().is_empty());
+        assert!(!second.rules.is_empty());
+
         let json_cache = super::JsonCache::default();
         let json_source = Source {
             contents: Arc::from(&b"{"[..]),
