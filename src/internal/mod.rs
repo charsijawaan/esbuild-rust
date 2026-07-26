@@ -18,6 +18,7 @@ pub mod js_ast;
 pub mod js_lexer;
 pub mod js_parser;
 pub mod js_printer;
+pub mod linker;
 pub mod logger;
 pub mod renamer;
 pub mod resolver;

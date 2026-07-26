@@ -29,7 +29,7 @@ Status values:
 | `internal/js_lexer` | ported |
 | `internal/js_parser` | in progress |
 | `internal/js_printer` | in progress |
-| `internal/linker` | not started |
+| `internal/linker` | in progress |
 | `internal/logger` | ported |
 | `internal/renamer` | ported |
 | `internal/resolver` | in progress |
