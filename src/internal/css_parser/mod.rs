@@ -143,12 +143,7 @@ impl Parser {
             }
         }
         if self.minify_syntax {
-            rules.retain(|rule| {
-                !matches!(
-                    &rule.data,
-                    RuleData::Selector(selector) if selector.rules.is_empty()
-                )
-            });
+            mangle_empty_and_nested_rules(&mut rules);
             merge_adjacent_selector_rules(&mut rules);
         }
         rules
@@ -1128,6 +1123,74 @@ fn merge_adjacent_selector_rules(rules: &mut Vec<Rule>) {
         previous_selector_index = Some(index);
         index += 1;
     }
+}
+
+fn mangle_empty_and_nested_rules(rules: &mut Vec<Rule>) {
+    let mut index = 0;
+    while index < rules.len() {
+        let remove = match &mut rules[index].data {
+            RuleData::Selector(selector) => selector.rules.is_empty(),
+            RuleData::AtMedia(media) => media.rules.is_empty(),
+            RuleData::KnownAt(rule) => {
+                rule.rules.is_empty() && known_at_rule_can_be_removed_if_empty(&rule.at_token)
+            }
+            RuleData::AtLayer(layer) => {
+                let inner = match layer.rules.as_slice() {
+                    [
+                        Rule {
+                            data: RuleData::AtLayer(inner),
+                            ..
+                        },
+                    ] => Some(inner.clone()),
+                    _ => None,
+                };
+                if layer.names.len() == 1
+                    && let Some(inner) = inner
+                    && inner.names.len() == 1
+                {
+                    let mut name = layer.names[0].clone();
+                    name.extend(inner.names[0].iter().cloned());
+                    layer.names[0] = name;
+                    layer.rules = inner.rules;
+                }
+                false
+            }
+            _ => false,
+        };
+        if remove {
+            rules.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn known_at_rule_can_be_removed_if_empty(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "supports"
+            | "font-face"
+            | "page"
+            | "font-palette-values"
+            | "container"
+            | "bottom-center"
+            | "bottom-left-corner"
+            | "bottom-left"
+            | "bottom-right-corner"
+            | "bottom-right"
+            | "left-bottom"
+            | "left-middle"
+            | "left-top"
+            | "right-bottom"
+            | "right-middle"
+            | "right-top"
+            | "top-center"
+            | "top-left-corner"
+            | "top-left"
+            | "top-right-corner"
+            | "top-right"
+            | "scope"
+    )
 }
 
 fn selectors_are_safe_to_merge(selectors: &[ComplexSelector]) -> bool {

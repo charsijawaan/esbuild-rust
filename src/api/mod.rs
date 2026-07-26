@@ -702,6 +702,22 @@ mod tests {
     }
 
     #[test]
+    fn mangles_empty_and_nested_css_at_rules() {
+        assert_eq!(
+            code(transform(
+                "@media screen {} @supports (display: grid) {} @layer foo {} @layer {} @layer a { @layer b { c { color: red } } } @keyframes x {} @container x {} @starting-style {} @font-face {} @page {}",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "@layer foo;@layer{}@layer a.b{c{color:red}}@keyframes x{}@starting-style{}\n"
+        );
+    }
+
+    #[test]
     fn scopes_and_minifies_local_css_names() {
         let input = ".card { color: red } #root .card { color: blue }";
         assert_eq!(

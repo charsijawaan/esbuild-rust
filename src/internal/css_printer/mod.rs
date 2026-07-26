@@ -143,12 +143,8 @@ impl Printer<'_> {
                 self.css.push(b'@');
                 self.print_ident(&rule.at_token);
                 self.print_token_group(&rule.prelude, true);
-                if rule.rules.is_empty() {
-                    self.css.push(b';');
-                } else {
-                    self.print_space();
-                    self.print_rule_block(&rule.rules);
-                }
+                self.print_space();
+                self.print_rule_block(&rule.rules);
             }
             RuleData::UnknownAt(rule) => {
                 self.css.push(b'@');
@@ -216,7 +212,11 @@ impl Printer<'_> {
                     self.css.extend_from_slice(name.join(".").as_bytes());
                 }
                 if rule.rules.is_empty() {
-                    self.css.push(b';');
+                    if rule.names.is_empty() {
+                        self.print_rule_block(&rule.rules);
+                    } else {
+                        self.css.push(b';');
+                    }
                 } else {
                     self.print_space();
                     self.print_rule_block(&rule.rules);
