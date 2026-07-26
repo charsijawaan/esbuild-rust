@@ -11,20 +11,26 @@ use crate::internal::{
     ast::{ImportKind, ImportRecordFlags, Index32},
     cache::{CacheSet, SourceIndexCache, SourceIndexKind},
     compat::{CssFeature, JsFeature},
-    config::{Loader, Mode, Options, PathPlaceholder, PathTemplate, Platform, PluginData},
+    config::{
+        Loader, Mode, Options, PathPlaceholder, PathPlaceholders, PathTemplate, Platform,
+        PluginData, has_placeholder, substitute_template, template_to_string,
+    },
     css_parser,
     fs::Fs,
     graph::{
-        CssRepr, EntryPoint as GraphEntryPoint, InputFile, InputFileRepr, JsRepr, SideEffects,
-        SideEffectsKind,
+        CssRepr, EntryPoint as GraphEntryPoint, InputFile, InputFileRepr, JsRepr, OutputFile,
+        SideEffects, SideEffectsKind,
     },
-    helpers::{encode_string_as_shortest_data_url, mime_type_by_extension, string_to_utf16},
+    helpers::{
+        encode_string_as_shortest_data_url, mime_type_by_extension, quote_for_json, string_to_utf16,
+    },
     js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
     js_parser::{self, HelperCall},
     logger::{self, LineColumnTracker, Log, Range, Source},
     resolver::{self, ResolveResult, ResolverContext},
     runtime,
     sourcemap::LineOffsetTable,
+    xxhash,
 };
 
 #[derive(Clone, Default)]
@@ -588,6 +594,12 @@ pub fn scan_bundle(
         }
     }
     finalize_scan_import_records(log, caches, options, &mut bundle.files, &resolution_slots);
+    generate_additional_files(
+        file_system,
+        options,
+        &bundle.entry_points,
+        &mut bundle.files,
+    );
     bundle
 }
 
@@ -641,6 +653,8 @@ fn finalize_scan_import_records(
             }
         }
     }
+
+    validate_scan_imports(log, options, files);
 
     let mut css_edges = Vec::new();
     for (importer_index, file) in files.iter().enumerate() {
@@ -752,6 +766,176 @@ fn finalize_scan_import_records(
                 [usize::try_from(record_index).expect("import record index fits usize")]
             .source_index = Index32::new(stub_source_index);
         }
+    }
+}
+
+fn validate_scan_imports(log: &Log, options: &Options, files: &[ScannerFile]) {
+    for file in files {
+        let Some(records) = file
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+        else {
+            continue;
+        };
+        for record in records {
+            if !record.source_index.is_valid() {
+                continue;
+            }
+            let Some(target) = files
+                .get(usize::try_from(record.source_index.get_index()).expect("source index fits"))
+            else {
+                continue;
+            };
+            let target_path = target
+                .input_file
+                .source
+                .pretty_paths
+                .select(options.log_path_style);
+            match record.kind {
+                ImportKind::ComposesFrom
+                    if matches!(target.input_file.repr, Some(InputFileRepr::Js(_)))
+                        && target.input_file.loader != Loader::Empty =>
+                {
+                    log.add_error(
+                        None,
+                        record.range,
+                        format!("Cannot use \"composes\" with {target_path:?}"),
+                    );
+                }
+                ImportKind::At
+                    if matches!(target.input_file.repr, Some(InputFileRepr::Js(_)))
+                        && target.input_file.loader != Loader::Empty =>
+                {
+                    log.add_error(
+                        None,
+                        record.range,
+                        format!("Cannot import {target_path:?} into a CSS file"),
+                    );
+                }
+                ImportKind::Url => match &target.input_file.repr {
+                    Some(InputFileRepr::Css(_)) => {
+                        log.add_error(
+                            None,
+                            record.range,
+                            format!("Cannot use {target_path:?} as a URL"),
+                        );
+                    }
+                    Some(InputFileRepr::Js(repr))
+                        if repr.ast.url_for_css.is_empty()
+                            && target.input_file.loader != Loader::Empty =>
+                    {
+                        log.add_error(
+                            None,
+                            record.range,
+                            format!("Cannot use {target_path:?} as a URL"),
+                        );
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+}
+
+fn generate_additional_files(
+    file_system: &dyn Fs,
+    options: &Options,
+    entry_points: &[GraphEntryPoint],
+    files: &mut [ScannerFile],
+) {
+    for file in files {
+        if file.input_file.unique_key_for_additional_file.is_empty() {
+            continue;
+        }
+        let bytes = file.input_file.source.contents.to_vec();
+        let entry_point = entry_points
+            .iter()
+            .find(|entry_point| entry_point.source_index == file.input_file.source.index);
+        let is_copy_entry = file.input_file.loader == Loader::Copy && entry_point.is_some();
+        let template = if is_copy_entry {
+            &options.entry_path_template
+        } else {
+            &options.asset_path_template
+        };
+        let custom_file_path = if is_copy_entry {
+            entry_point
+                .map(|entry_point| entry_point.output_path.as_str())
+                .unwrap_or_default()
+        } else {
+            ""
+        };
+        let use_output_file = is_copy_entry && !options.abs_output_file.is_empty();
+
+        let hash = if has_placeholder(template, PathPlaceholder::Hash) {
+            let mut digest = xxhash::Digest::new();
+            digest.write(&bytes);
+            hash_for_file_name(&digest.sum(&[]))
+        } else {
+            String::new()
+        };
+        let (directory, base, extension) = if use_output_file {
+            let base_with_extension = file_system.base(&options.abs_output_file);
+            let extension = file_system.ext(&base_with_extension);
+            let base = base_with_extension[..base_with_extension.len() - extension.len()].into();
+            ("/".into(), base, extension)
+        } else {
+            let (_, _, extension) = logger::platform_independent_path_dir_base_ext(
+                &file.input_file.source.key_path.text,
+            );
+            let (directory, base) = path_relative_to_outbase(
+                &file.input_file,
+                options,
+                file_system,
+                false,
+                custom_file_path,
+            );
+            (directory, base, extension)
+        };
+        let extension_without_dot = extension.strip_prefix('.').unwrap_or(&extension);
+        let relative_path = format!(
+            "{}{extension}",
+            template_to_string(&substitute_template(
+                template,
+                &PathPlaceholders {
+                    dir: Some(directory),
+                    name: Some(base),
+                    hash: Some(hash),
+                    ext: Some(extension_without_dot.into()),
+                },
+            ))
+        );
+        let json_metadata_chunk = if options.needs_metafile {
+            let input_path = String::from_utf8(quote_for_json(
+                file.input_file
+                    .source
+                    .pretty_paths
+                    .select(options.metafile_path_style)
+                    .as_bytes(),
+                options.ascii_only,
+            ))
+            .expect("quoted JSON is UTF-8");
+            let entry_point_json = if is_copy_entry {
+                format!("\"entryPoint\": {input_path},\n      ")
+            } else {
+                String::new()
+            };
+            options.metafile_format.maybe_remove_whitespace(&format!(
+                "{{\n      \"imports\": [],\n      \"exports\": [],\n      {entry_point_json}\"inputs\": {{\n        {input_path}: {{\n          \"bytesInOutput\": {}\n        }}\n      }},\n      \"bytes\": {}\n    }}",
+                bytes.len(),
+                bytes.len()
+            ))
+        } else {
+            String::new()
+        };
+        file.input_file.additional_files = vec![OutputFile {
+            abs_path: file_system.join(&[&options.abs_output_dir, &relative_path]),
+            contents: bytes,
+            json_metadata_chunk,
+            ..OutputFile::default()
+        }];
     }
 }
 
@@ -1873,13 +2057,17 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::case_sensitive_file_extension_comparisons,
+        clippy::too_many_lines
+    )]
     fn scan_avoids_dual_package_hazards_and_relocates_copy_imports() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let file_system = mock_fs(
             &HashMap::from([
                 (
                     "/project/entry.js".into(),
-                    "import value from 'dual'; require('dual'); import './asset.txt'".into(),
+                    "import value from 'dual'; require('dual'); import './asset.txt'; import logo from './logo.png'; console.log(logo)".into(),
                 ),
                 (
                     "/project/node_modules/dual/package.json".into(),
@@ -1894,6 +2082,7 @@ mod tests {
                     "export default 1".into(),
                 ),
                 ("/project/asset.txt".into(), "asset".into()),
+                ("/project/logo.png".into(), "png".into()),
             ]),
             MockKind::Unix,
             "/project",
@@ -1902,9 +2091,13 @@ mod tests {
             mode: Mode::Bundle,
             extension_order: vec![".js".into()],
             platform: Platform::Browser,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            needs_metafile: true,
             extension_to_loader: HashMap::from([
                 (".js".into(), Loader::Js),
                 (".txt".into(), Loader::Copy),
+                (".png".into(), Loader::File),
             ]),
             ..Options::default()
         };
@@ -1959,6 +2152,24 @@ mod tests {
             copied.input_file.repr,
             Some(InputFileRepr::Copy(_))
         ));
+        assert_eq!(copied.input_file.additional_files.len(), 1);
+        let copied_output = &copied.input_file.additional_files[0];
+        assert!(copied_output.abs_path.starts_with("/out/asset-"));
+        assert!(copied_output.abs_path.ends_with(".txt"));
+        assert_eq!(copied_output.contents, b"asset");
+        assert!(copied_output.json_metadata_chunk.contains("\"bytes\": 5"));
+
+        let logo_record = records
+            .iter()
+            .find(|record| record.path.text == "./logo.png")
+            .expect("file loader import");
+        let logo = &bundle.files[logo_record.source_index.get_index() as usize];
+        assert_eq!(logo.input_file.loader, Loader::File);
+        assert_eq!(logo.input_file.additional_files.len(), 1);
+        let logo_output = &logo.input_file.additional_files[0];
+        assert!(logo_output.abs_path.starts_with("/out/logo-"));
+        assert!(logo_output.abs_path.ends_with(".png"));
+        assert_eq!(logo_output.contents, b"png");
         assert!(log.done().is_empty());
     }
 
@@ -2006,6 +2217,106 @@ mod tests {
         assert_eq!(
             log.done()[0].data.text,
             "Cannot import \"style.css\" into a JavaScript file without an output path configured"
+        );
+    }
+
+    #[test]
+    fn copy_loader_entries_honor_explicit_output_files() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([("/project/asset.txt".into(), "entry asset".into())]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".txt".into()],
+            extension_to_loader: HashMap::from([(".txt".into(), Loader::Copy)]),
+            abs_output_base: "/project".into(),
+            abs_output_dir: "/out".into(),
+            abs_output_file: "/out/single.bin".into(),
+            ..Options::default()
+        };
+        let bundle = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "asset.txt".into(),
+                output_path: "ignored/custom-name".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        let asset = bundle
+            .files
+            .iter()
+            .find(|file| file.input_file.loader == Loader::Copy)
+            .expect("copy entry");
+        assert_eq!(asset.input_file.additional_files.len(), 1);
+        assert_eq!(
+            asset.input_file.additional_files[0].abs_path,
+            "/out/single.bin"
+        );
+        assert_eq!(
+            asset.input_file.additional_files[0].contents,
+            b"entry asset"
+        );
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn scan_validates_css_import_target_types() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/style.module.css".into(),
+                    "@import './script.js'; .foo { composes: bar from './script.js' } .image { background: url(./other.css) }".into(),
+                ),
+                (
+                    "/project/script.js".into(),
+                    "export const value = 1".into(),
+                ),
+                (
+                    "/project/other.css".into(),
+                    ".other { color: red }".into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".css".into(), ".js".into()],
+            ..Options::default()
+        };
+        let bundle = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "style.module.css".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        assert_eq!(bundle.files.len(), 4);
+        let messages = log.done();
+        assert_eq!(messages.len(), 3);
+        let texts = messages
+            .iter()
+            .map(|message| message.data.text.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            texts,
+            HashSet::from([
+                "Cannot import \"script.js\" into a CSS file",
+                "Cannot use \"composes\" with \"script.js\"",
+                "Cannot use \"other.css\" as a URL",
+            ])
         );
     }
 }
