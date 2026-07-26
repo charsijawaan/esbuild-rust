@@ -25,6 +25,33 @@ pub struct PrintResult {
     pub css: Vec<u8>,
 }
 
+fn function_multiline_comma_period(token: &Token) -> usize {
+    if token.kind != TokenKind::Function {
+        return 0;
+    }
+    let comma_count = token.children.as_ref().map_or(0, |children| {
+        children
+            .iter()
+            .filter(|child| child.kind == TokenKind::Comma)
+            .count()
+    });
+    match token.text.to_ascii_lowercase().as_str() {
+        "linear-gradient"
+        | "radial-gradient"
+        | "conic-gradient"
+        | "repeating-linear-gradient"
+        | "repeating-radial-gradient"
+        | "repeating-conic-gradient"
+            if comma_count >= 2 =>
+        {
+            1
+        }
+        "matrix" if comma_count == 5 => 2,
+        "matrix3d" if comma_count == 15 => 4,
+        _ => 0,
+    }
+}
+
 #[must_use]
 pub fn print(tree: &Ast, symbols: &SymbolMap, options: Options) -> PrintResult {
     let mut printer = Printer {
@@ -172,6 +199,13 @@ impl Printer<'_> {
             RuleData::Declaration(rule) => {
                 self.print_ident(&rule.key_text);
                 self.css.push(b':');
+                let multiline_function_period =
+                    if rule.value.len() == 1 && !self.options.minify_whitespace {
+                        function_multiline_comma_period(&rule.value[0])
+                    } else {
+                        0
+                    };
+                let multiline_function = multiline_function_period > 0;
                 let multiline = !self.options.minify_whitespace
                     && rule
                         .value
@@ -181,12 +215,20 @@ impl Printer<'_> {
                         >= 2;
                 if !self.options.minify_whitespace
                     && !multiline
+                    && !multiline_function
                     && !rule.value.is_empty()
                     && !rule.value[0].whitespace.contains(WhitespaceFlags::BEFORE)
                 {
                     self.css.push(b' ');
                 }
-                let has_whitespace_after = self.print_declaration_tokens(&rule.value);
+                let has_whitespace_after = if multiline_function {
+                    self.css.push(b'\n');
+                    self.print_indent_levels(self.indent + 1);
+                    self.print_multiline_function(&rule.value[0], multiline_function_period);
+                    false
+                } else {
+                    self.print_declaration_tokens(&rule.value)
+                };
                 if rule.important {
                     if !self.options.minify_whitespace
                         && !rule.value.is_empty()
@@ -367,6 +409,48 @@ impl Printer<'_> {
             self.css.push(b' ');
         }
         has_whitespace
+    }
+
+    fn print_multiline_function(&mut self, token: &Token, comma_period: usize) {
+        self.print_ident(&token.text);
+        self.css.push(b'(');
+        let Some(children) = &token.children else {
+            self.css.push(b')');
+            return;
+        };
+        if !children.is_empty() {
+            self.css.push(b'\n');
+            self.print_indent_levels(self.indent + 2);
+        }
+        let mut comma_count = 0;
+        for (index, child) in children.iter().enumerate() {
+            self.print_token(child);
+            if index + 1 == children.len() {
+                continue;
+            }
+            if child.kind == TokenKind::Comma {
+                comma_count += 1;
+                if comma_count % comma_period == 0 {
+                    self.css.push(b'\n');
+                    self.print_indent_levels(self.indent + 2);
+                } else {
+                    self.css.push(b' ');
+                }
+            } else if child.whitespace.contains(WhitespaceFlags::AFTER)
+                || children[index + 1]
+                    .whitespace
+                    .contains(WhitespaceFlags::BEFORE)
+            {
+                self.css.push(b' ');
+            }
+        }
+        self.css.push(b')');
+    }
+
+    fn print_indent_levels(&mut self, levels: usize) {
+        for _ in 0..levels {
+            self.css.extend_from_slice(b"  ");
+        }
     }
 
     fn print_token(&mut self, token: &Token) {

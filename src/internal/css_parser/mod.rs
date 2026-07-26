@@ -1952,6 +1952,259 @@ fn rounded_byte(value: f64) -> Option<u8> {
     value.round().clamp(0.0, 255.0).to_string().parse().ok()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GradientKind {
+    Linear,
+    Radial,
+    Conic,
+}
+
+#[derive(Clone, Debug)]
+struct GradientStop {
+    color: Token,
+    positions: Vec<Token>,
+    midpoint: Option<Token>,
+}
+
+fn minify_gradient(token: &mut Token, minify_whitespace: bool) {
+    let Some((kind, mut leading, mut stops)) = parse_gradient(token) else {
+        return;
+    };
+    for stop in &mut stops {
+        minify_single_color(std::slice::from_mut(&mut stop.color));
+    }
+    merge_duplicate_gradient_stops(&mut stops);
+    remove_implied_gradient_positions(kind, &mut stops);
+
+    let mut children = Vec::new();
+    children.append(&mut leading);
+    for mut stop in stops {
+        if !children.is_empty() {
+            children.push(gradient_comma(token.loc, minify_whitespace));
+        }
+        if stop.positions.is_empty() && stop.midpoint.is_none() {
+            stop.color.whitespace.remove(WhitespaceFlags::AFTER);
+        }
+        children.push(stop.color);
+        children.append(&mut stop.positions);
+        if let Some(midpoint) = stop.midpoint {
+            children.push(gradient_comma(token.loc, minify_whitespace));
+            children.push(midpoint);
+        }
+    }
+    token.children = Some(children);
+}
+
+fn parse_gradient(token: &Token) -> Option<(GradientKind, Vec<Token>, Vec<GradientStop>)> {
+    if token.kind != TokenKind::Function {
+        return None;
+    }
+    let kind = match token.text.to_ascii_lowercase().as_str() {
+        "linear-gradient" | "repeating-linear-gradient" => GradientKind::Linear,
+        "radial-gradient" | "repeating-radial-gradient" => GradientKind::Radial,
+        "conic-gradient" | "repeating-conic-gradient" => GradientKind::Conic,
+        _ => return None,
+    };
+    let children = token.children.as_deref()?;
+    if children
+        .iter()
+        .any(|child| child.kind == TokenKind::Function && child.text.eq_ignore_ascii_case("var"))
+    {
+        return None;
+    }
+
+    let mut position = 0;
+    let mut leading = Vec::new();
+    if children
+        .first()
+        .is_some_and(|child| !token_looks_like_color(child))
+    {
+        while position < children.len() && children[position].kind != TokenKind::Comma {
+            leading.push(children[position].clone());
+            position += 1;
+        }
+        if position == children.len() {
+            return None;
+        }
+        position += 1;
+    }
+
+    let mut stops = Vec::new();
+    while position < children.len() {
+        if !token_looks_like_color(&children[position]) {
+            return None;
+        }
+        let color = children[position].clone();
+        position += 1;
+        let mut positions = Vec::new();
+        while positions.len() < 2
+            && position < children.len()
+            && (children[position].kind.is_numeric()
+                || children[position].kind == TokenKind::Function
+                    && children[position].text.eq_ignore_ascii_case("calc"))
+        {
+            positions.push(children[position].clone());
+            position += 1;
+        }
+
+        let mut midpoint = None;
+        if position < children.len() {
+            if children[position].kind != TokenKind::Comma {
+                return None;
+            }
+            position += 1;
+            if position == children.len() {
+                return None;
+            }
+            if children[position].kind.is_numeric() {
+                midpoint = Some(children[position].clone());
+                position += 1;
+                if position == children.len() || children[position].kind != TokenKind::Comma {
+                    return None;
+                }
+                position += 1;
+            }
+        }
+        stops.push(GradientStop {
+            color,
+            positions,
+            midpoint,
+        });
+    }
+    Some((kind, leading, stops))
+}
+
+fn gradient_comma(loc: Loc, minify_whitespace: bool) -> Token {
+    Token {
+        kind: TokenKind::Comma,
+        text: ",".into(),
+        loc,
+        whitespace: if minify_whitespace {
+            WhitespaceFlags::default()
+        } else {
+            WhitespaceFlags::AFTER
+        },
+        ..Token::default()
+    }
+}
+
+fn merge_duplicate_gradient_stops(stops: &mut Vec<GradientStop>) {
+    let mut result = Vec::with_capacity(stops.len());
+    let mut position = 0;
+    while position < stops.len() {
+        let stop = &stops[position];
+        if position + 1 < stops.len()
+            && stop.positions.len() == 1
+            && stop.midpoint.is_none()
+            && stops[position + 1].positions.len() == 1
+            && stop
+                .color
+                .equal_ignoring_whitespace(&stops[position + 1].color)
+        {
+            result.push(GradientStop {
+                color: stop.color.clone(),
+                positions: vec![
+                    stop.positions[0].clone(),
+                    stops[position + 1].positions[0].clone(),
+                ],
+                midpoint: stops[position + 1].midpoint.clone(),
+            });
+            position += 2;
+        } else {
+            result.push(stop.clone());
+            position += 1;
+        }
+    }
+    *stops = result;
+}
+
+fn remove_implied_gradient_positions(kind: GradientKind, stops: &mut [GradientStop]) {
+    let positions = stops
+        .iter()
+        .map(|stop| {
+            (stop.positions.len() == 1)
+                .then(|| parse_gradient_position(&stop.positions[0], kind))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    let mut start = 0;
+    while start < stops.len() {
+        if let Some((start_value, start_unit)) = &positions[start] {
+            let mut end = start + 1;
+            'run: while end < stops.len() && stops[end - 1].midpoint.is_none() {
+                let Some((end_value, end_unit)) = &positions[end] else {
+                    break;
+                };
+                if end_unit != start_unit {
+                    break;
+                }
+                for (index, position) in positions.iter().enumerate().take(end).skip(start + 1) {
+                    let Some((value, unit)) = position else {
+                        break 'run;
+                    };
+                    if unit != start_unit {
+                        break 'run;
+                    }
+                    let numerator = u32::try_from(index - start).ok().map(f64::from);
+                    let denominator = u32::try_from(end - start).ok().map(f64::from);
+                    let (Some(numerator), Some(denominator)) = (numerator, denominator) else {
+                        break 'run;
+                    };
+                    let implied =
+                        start_value + (end_value - start_value) * (numerator / denominator);
+                    if (value - implied).abs() > 0.01 {
+                        break 'run;
+                    }
+                }
+                end += 1;
+            }
+            if end - start > 1 {
+                for stop in stops.iter_mut().take(end - 1).skip(start + 1) {
+                    stop.positions.clear();
+                }
+                start = end - 1;
+                continue;
+            }
+        }
+        start += 1;
+    }
+    if let Some(first) = stops.first_mut()
+        && first.positions.len() == 1
+        && ((first.positions[0].kind == TokenKind::Percentage
+            && first.positions[0].percentage_value() == "0")
+            || first.positions[0].kind == TokenKind::Dimension
+                && first.positions[0].dimension_value() == "0")
+    {
+        first.positions.clear();
+    }
+    if let Some(last) = stops.last_mut()
+        && last.positions.len() == 1
+        && last.positions[0].kind == TokenKind::Percentage
+        && last.positions[0].percentage_value() == "100"
+    {
+        last.positions.clear();
+    }
+}
+
+fn parse_gradient_position(token: &Token, kind: GradientKind) -> Option<(f64, String)> {
+    if kind == GradientKind::Conic {
+        return match token.kind {
+            TokenKind::Dimension => Some((degrees_for_angle(token)? * (100.0 / 360.0), "%".into())),
+            TokenKind::Percentage => Some((token.percentage_value().parse().ok()?, "%".into())),
+            _ => None,
+        };
+    }
+    match token.kind {
+        TokenKind::Number if token.text.parse::<f64>().ok()? == 0.0 => Some((0.0, "%".into())),
+        TokenKind::Dimension => Some((
+            token.dimension_value().parse().ok()?,
+            token.dimension_unit().into(),
+        )),
+        TokenKind::Percentage => Some((token.percentage_value().parse().ok()?, "%".into())),
+        _ => None,
+    }
+}
+
 fn set_color_token(token: &mut Token, red: u8, green: u8, blue: u8, alpha: u8) {
     token.children = None;
     if alpha == 255 {
@@ -2179,6 +2432,14 @@ fn minify_declaration(key: &str, value: &mut Vec<Token>, minify_whitespace: bool
     } else if key == "background" {
         for token in value.iter_mut() {
             minify_single_color(std::slice::from_mut(token));
+        }
+    }
+    if matches!(
+        key.as_str(),
+        "background" | "background-image" | "border-image" | "mask-image"
+    ) {
+        for token in value.iter_mut() {
+            minify_gradient(token, minify_whitespace);
         }
     }
     if matches!(key.as_str(), "margin" | "inset") && is_box_quad(value, true)

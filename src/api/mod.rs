@@ -781,6 +781,33 @@ mod tests {
     }
 
     #[test]
+    fn minifies_css_gradient_syntax() {
+        assert_eq!(
+            code(transform(
+                "a { background: linear-gradient(yellow, #11223344) } b { background-image: radial-gradient(yellow 10%, #11223344 90%) } c { border-image: conic-gradient(yellow, 25%, #11223344) } d { mask-image: repeating-linear-gradient(green, red 10%, red 20%, yellow 70% 80%, black) } e { background: repeating-radial-gradient(red 0%, green 25%, blue 50%, white 100%) } f { background: repeating-conic-gradient(red 0deg, green 90deg, blue 180deg, white 1turn) } g { background: linear-gradient(to right, red 0%, green 50%, blue 100%) } h { background: linear-gradient(var(--stops)) }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{background:linear-gradient(#ff0,#1234)}b{background-image:radial-gradient(#ff0 10%,#1234 90%)}c{border-image:conic-gradient(#ff0,25%,#1234)}d{mask-image:repeating-linear-gradient(green,red 10% 20%,#ff0 70% 80%,#000)}e{background:repeating-radial-gradient(red,green,#00f 50%,#fff)}f{background:repeating-conic-gradient(red,green,#00f 180deg,#fff 1turn)}g{background:linear-gradient(to right,red,green,#00f)}h{background:linear-gradient(var(--stops))}\n"
+        );
+        assert_eq!(
+            code(transform(
+                "a { background: linear-gradient(to right, red 0%, green 50%, blue 100%) }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a {\n  background:\n    linear-gradient(\n      to right,\n      red,\n      green,\n      #00f);\n}\n"
+        );
+    }
+
+    #[test]
     fn merges_safe_adjacent_css_selector_rules() {
         assert_eq!(
             code(transform(
