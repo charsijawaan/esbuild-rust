@@ -2502,6 +2502,39 @@ pub fn print_cross_chunk_bindings(
     PrintedCrossChunkBindings { prefix, suffix }
 }
 
+/// Merge adjacent variable declarations of the same kind and export status.
+#[must_use]
+pub fn merge_adjacent_local_stmts(statements: Vec<js_ast::Stmt>) -> Vec<js_ast::Stmt> {
+    let mut result: Vec<js_ast::Stmt> = Vec::with_capacity(statements.len());
+    for statement in statements {
+        let can_merge = matches!(
+            (
+                result.last().and_then(|statement| statement.data.as_deref()),
+                statement.data.as_deref(),
+            ),
+            (
+                Some(js_ast::StmtData::Local(before)),
+                Some(js_ast::StmtData::Local(after)),
+            ) if before.kind == after.kind && before.is_export == after.is_export
+        );
+        if can_merge {
+            let Some(js_ast::StmtData::Local(before)) = result
+                .last_mut()
+                .and_then(|statement| statement.data.as_deref_mut())
+            else {
+                unreachable!("merge predicate checked the previous statement");
+            };
+            let Some(js_ast::StmtData::Local(after)) = statement.data.as_deref() else {
+                unreachable!("merge predicate checked the next statement");
+            };
+            before.declarations.extend(after.declarations.clone());
+        } else {
+            result.push(statement);
+        }
+    }
+    result
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -2904,10 +2937,10 @@ mod tests {
         generate_isolated_hash, has_dynamic_exports_due_to_export_star,
         import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
         join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
-        path_between_chunks, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
-        tree_shaking_and_code_splitting,
+        merge_adjacent_local_stmts, path_between_chunks, print_cross_chunk_bindings,
+        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, tree_shaking_and_code_splitting,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -3363,6 +3396,39 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn adjacent_local_statements_merge_by_kind_and_export_status() {
+        let local = |kind, count, is_export| {
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::Local(js_ast::LocalStmt {
+                    declarations: vec![js_ast::Decl::default(); count],
+                    kind,
+                    is_export,
+                    ..js_ast::LocalStmt::default()
+                }),
+            )
+        };
+        let statements = merge_adjacent_local_stmts(vec![
+            local(js_ast::LocalKind::Var, 1, false),
+            local(js_ast::LocalKind::Var, 2, false),
+            local(js_ast::LocalKind::Var, 1, true),
+            local(js_ast::LocalKind::Let, 1, false),
+            local(js_ast::LocalKind::Let, 2, false),
+        ]);
+        assert_eq!(statements.len(), 3);
+        let declaration_counts = statements
+            .iter()
+            .map(|statement| {
+                let Some(js_ast::StmtData::Local(local)) = statement.data.as_deref() else {
+                    panic!("local statement");
+                };
+                local.declarations.len()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(declaration_counts, [3, 1, 3]);
     }
 
     #[test]
