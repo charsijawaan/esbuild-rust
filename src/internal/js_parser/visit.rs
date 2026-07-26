@@ -261,6 +261,7 @@ fn visit_block(
 fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identifiers: bool) {
     let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
     let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
+    let old_new_target_allowed = std::mem::replace(&mut core.visit_new_target_allowed, true);
     if let Some(name) = function.name
         && !ParserCore::is_stored_name_ref(name.reference)
     {
@@ -313,6 +314,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     core.pop_scope();
     core.visit_loop_depth = old_loop_depth;
     core.visit_switch_depth = old_switch_depth;
+    core.visit_new_target_allowed = old_new_target_allowed;
 }
 
 fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bool) {
@@ -369,12 +371,34 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
         for decorator in &mut property.decorators {
             visit_expr(core, &mut decorator.value, resolve_identifiers);
         }
+        core.current_scope
+            .as_ref()
+            .expect("class body scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forbid_arguments = true;
+        let old_new_target_allowed = std::mem::replace(&mut core.visit_new_target_allowed, true);
         visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
         visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
+        core.visit_new_target_allowed = old_new_target_allowed;
+        core.current_scope
+            .as_ref()
+            .expect("class body scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forbid_arguments = false;
         if let Some(static_block) = &mut property.class_static_block {
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
+            let old_new_target_allowed =
+                std::mem::replace(&mut core.visit_new_target_allowed, true);
             core.push_scope_for_visit_pass(ScopeKind::ClassStaticInit, static_block.loc);
+            core.current_scope
+                .as_ref()
+                .expect("class static block scope")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forbid_arguments = true;
             visit_statements(
                 core,
                 &mut static_block.block.statements,
@@ -383,6 +407,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;
             core.visit_switch_depth = old_switch_depth;
+            core.visit_new_target_allowed = old_new_target_allowed;
         }
     }
     core.pop_scope();
@@ -819,7 +844,6 @@ fn visit_expr_with_target(
         | ExprData::Null
         | ExprData::Undefined
         | ExprData::This
-        | ExprData::NewTarget(_)
         | ExprData::ImportMeta(_)
         | ExprData::PrivateIdentifier(_)
         | ExprData::NameOfSymbol(_)
@@ -854,6 +878,11 @@ fn visit_expr_with_target(
                 && let Some(range) = core.legacy_octal_literals.get(&expression.loc).copied()
             {
                 core.add_error_range(range, "Legacy octal literals cannot be used in strict mode");
+            }
+        }
+        ExprData::NewTarget(new_target) => {
+            if !core.visit_new_target_allowed {
+                core.add_error_range(new_target.range, "Cannot use \"new.target\" here:");
             }
         }
     }

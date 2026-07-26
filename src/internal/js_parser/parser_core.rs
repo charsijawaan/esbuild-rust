@@ -34,6 +34,7 @@ pub(crate) struct ScopeOrder {
     loc: Loc,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ParserCore {
     pub(crate) options: Options,
     pub(crate) log: Option<Log>,
@@ -68,6 +69,7 @@ pub(crate) struct ParserCore {
     pub(crate) lower_all_of_these_private_names: HashMap<String, bool>,
     pub(crate) visit_loop_depth: usize,
     pub(crate) visit_switch_depth: usize,
+    pub(crate) visit_new_target_allowed: bool,
     pub(crate) has_top_level_return: bool,
 }
 
@@ -108,6 +110,7 @@ impl ParserCore {
             lower_all_of_these_private_names: HashMap::new(),
             visit_loop_depth: 0,
             visit_switch_depth: 0,
+            visit_new_target_allowed: false,
             has_top_level_return: false,
         }
     }

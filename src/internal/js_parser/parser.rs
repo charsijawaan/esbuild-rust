@@ -1234,6 +1234,33 @@ mod tests {
     }
 
     #[test]
+    fn validates_new_target_and_class_arguments_contexts() {
+        let (_, ok, log) = parse_source("new.target; const arrow = () => new.target;");
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
+
+        let (_, ok, log) = parse_source(
+            "function outer(value = new.target) {\
+               new.target;\
+               return () => new.target;\
+             }",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+
+        let (_, ok, log) = parse_source(
+            "class Item {\
+               field = new.target;\
+               invalid = arguments;\
+               method() { return arguments; }\
+               static { new.target; arguments; }\
+             }",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
+    }
+
+    #[test]
     fn direct_eval_pins_the_containing_scope_chain() {
         let (ast, ok, log) =
             parse_source("let top; function run(param) { let local; eval(code); }");
