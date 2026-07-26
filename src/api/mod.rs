@@ -766,6 +766,22 @@ mod tests {
     }
 
     #[test]
+    fn merges_css_border_radius_declarations() {
+        assert_eq!(
+            code(transform(
+                "a { border-top-left-radius: 0 0px } b { border-radius: 1px 2px; border-top-left-radius: 3px } c { border-radius: 0 / 1px 2px; border-top-left-radius: 3px } d { border-radius: 1px 2px 3px 4px; border-top-right-radius: 5px 6px } e { border-radius: 1px; border-top-left-radius: 2px !important } f { border-radius: 1px !important; border-top-left-radius: 2px } g { border-radius: 1rem; border-top-left-radius: 1vw } h { border-radius: 0; border-top-left-radius: 2rem } i { border-top-left-radius: 1px; border-radius: 2px } j { border-radius: 1px; border-radius: 2px }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{border-top-left-radius:0}b{border-radius:3px 2px 1px}c{border-radius:3px 0 0/3px 2px 1px}d{border-radius:1px 5px 3px 4px/1px 6px 3px 4px}e{border-radius:1px;border-top-left-radius:2px!important}f{border-radius:1px!important;border-top-left-radius:2px}g{border-radius:1rem;border-top-left-radius:1vw}h{border-radius:0;border-top-left-radius:2rem}i{border-radius:2px}j{border-radius:2px}\n"
+        );
+    }
+
+    #[test]
     fn scopes_and_minifies_local_css_names() {
         let input = ".card { color: red } #root .card { color: blue }";
         assert_eq!(

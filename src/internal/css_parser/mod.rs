@@ -7,11 +7,12 @@ use crate::internal::{
     css_ast::{
         Ast, AtCharsetRule, AtImportRule, AtKeyframesRule, AtLayerRule, AtMediaRule,
         BadDeclarationRule, ClassSelector, Combinator, CommentRule, ComplexSelector, Composes,
-        CompoundSelector, DeclarationRule, HashSelector, ImportConditions, ImportedComposesName,
-        KeyframeBlock, KnownAtRule, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData,
-        NameToken, NamespacedName, PseudoClassSelector, QualifiedRule, Rule, RuleData,
-        SelectorRule, SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags,
-        media_queries_equal, rules_equal, tokens_are_comma_separated,
+        CompoundSelector, Declaration, DeclarationRule, HashSelector, ImportConditions,
+        ImportedComposesName, KNOWN_DECLARATIONS, KeyframeBlock, KnownAtRule,
+        MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, NameToken, NamespacedName,
+        PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule, SubclassData,
+        SubclassSelector, Token, UnknownAtRule, WhitespaceFlags, media_queries_equal, rules_equal,
+        tokens_are_comma_separated,
     },
     css_lexer::{self, TokenKind},
     logger::{Loc, Log, Path, Range, Source},
@@ -143,6 +144,7 @@ impl Parser {
             }
         }
         if self.minify_syntax {
+            mangle_border_radius_declarations(&mut rules, self.minify_whitespace);
             mangle_empty_and_nested_rules(&mut rules);
             merge_adjacent_selector_rules(&mut rules);
         }
@@ -719,11 +721,14 @@ impl Parser {
         Some(Rule {
             loc,
             data: RuleData::Declaration(DeclarationRule {
+                key: KNOWN_DECLARATIONS
+                    .get(key_text.to_ascii_lowercase().as_str())
+                    .copied()
+                    .unwrap_or_default(),
                 key_text,
                 value,
                 key_range: key_token.range,
                 important,
-                ..DeclarationRule::default()
             }),
         })
     }
@@ -2027,6 +2032,352 @@ fn tokens_equal_ignoring_whitespace(left: &[Token], right: &[Token]) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| left.equal_ignoring_whitespace(right))
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum UnitSafetyStatus {
+    #[default]
+    Safe,
+    UnsafeSingle,
+    UnsafeMixed,
+}
+
+#[derive(Clone, Debug, Default)]
+struct UnitSafety {
+    unit: String,
+    status: UnitSafetyStatus,
+}
+
+impl UnitSafety {
+    fn include_unit_of(&mut self, token: &Token) {
+        match token.kind {
+            TokenKind::Number if token.text == "0" => return,
+            TokenKind::Percentage => return,
+            TokenKind::Dimension if token.dimension_unit_is_safe_length() => return,
+            TokenKind::Dimension => {
+                let unit = token.dimension_unit();
+                if self.status == UnitSafetyStatus::Safe {
+                    self.status = UnitSafetyStatus::UnsafeSingle;
+                    self.unit = unit.into();
+                    return;
+                }
+                if self.status == UnitSafetyStatus::UnsafeSingle && self.unit == unit {
+                    return;
+                }
+            }
+            _ => {}
+        }
+        self.status = UnitSafetyStatus::UnsafeMixed;
+    }
+
+    fn is_safe_with(&self, other: &Self) -> bool {
+        self.status == other.status
+            && self.status != UnitSafetyStatus::UnsafeMixed
+            && (self.status != UnitSafetyStatus::UnsafeSingle || self.unit == other.unit)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BorderRadiusCorner {
+    first_token: Token,
+    second_token: Token,
+    unit_safety: UnitSafety,
+    rule_index: usize,
+    was_single_rule: bool,
+}
+
+#[derive(Debug, Default)]
+struct BorderRadiusTracker {
+    corners: [Option<BorderRadiusCorner>; 4],
+    important: bool,
+}
+
+impl BorderRadiusTracker {
+    fn reset_for_importance(&mut self, important: bool) {
+        if self.important != important {
+            self.corners = Default::default();
+            self.important = important;
+        }
+    }
+
+    fn update_corner(&mut self, removed: &mut [bool], corner: usize, new: BorderRadiusCorner) {
+        if let Some(old) = &self.corners[corner]
+            && (!new.was_single_rule || old.was_single_rule)
+            && old.unit_safety.status == UnitSafetyStatus::Safe
+            && new.unit_safety.status == UnitSafetyStatus::Safe
+        {
+            removed[old.rule_index] = true;
+        }
+        self.corners[corner] = Some(new);
+    }
+
+    fn mangle_shorthand(
+        &mut self,
+        rules: &mut [Rule],
+        removed: &mut [bool],
+        rule_index: usize,
+        declaration: &DeclarationRule,
+        minify_whitespace: bool,
+    ) {
+        self.reset_for_importance(declaration.important);
+        let Some((mut first_radii, mut second_radii)) =
+            expand_border_radius_tokens(&declaration.value)
+        else {
+            self.corners = Default::default();
+            return;
+        };
+
+        let mut unit_safety = UnitSafety::default();
+        for token in first_radii.iter().chain(&second_radii) {
+            unit_safety.include_unit_of(token);
+        }
+        if unit_safety.status == UnitSafetyStatus::Safe {
+            for token in first_radii.iter_mut().chain(&mut second_radii) {
+                token.turn_length_into_number_if_zero();
+            }
+        }
+
+        for corner in 0..4 {
+            self.update_corner(
+                removed,
+                corner,
+                BorderRadiusCorner {
+                    first_token: first_radii[corner].clone(),
+                    second_token: second_radii[corner].clone(),
+                    unit_safety: unit_safety.clone(),
+                    rule_index,
+                    was_single_rule: false,
+                },
+            );
+        }
+        self.compact_rules(rules, removed, declaration.key_range, minify_whitespace);
+    }
+
+    fn mangle_corner(
+        &mut self,
+        rules: &mut [Rule],
+        removed: &mut [bool],
+        rule_index: usize,
+        declaration: &DeclarationRule,
+        minify_whitespace: bool,
+        corner: usize,
+    ) {
+        self.reset_for_importance(declaration.important);
+        if !(1..=2).contains(&declaration.value.len())
+            || !declaration
+                .value
+                .iter()
+                .all(|token| token.kind.is_numeric())
+        {
+            self.corners = Default::default();
+            return;
+        }
+
+        let mut first_token = declaration.value[0].clone();
+        let mut second_token = declaration
+            .value
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| first_token.clone());
+        let mut unit_safety = UnitSafety::default();
+        unit_safety.include_unit_of(&first_token);
+        unit_safety.include_unit_of(&second_token);
+        if unit_safety.status == UnitSafetyStatus::Safe {
+            first_token.turn_length_into_number_if_zero();
+            second_token.turn_length_into_number_if_zero();
+        }
+
+        let mut value = vec![first_token.clone(), second_token.clone()];
+        if first_token.equal_ignoring_whitespace(&second_token) {
+            value.truncate(1);
+        }
+        for (index, token) in value.iter_mut().enumerate() {
+            token.whitespace = if index == 0 {
+                WhitespaceFlags::default()
+            } else {
+                WhitespaceFlags::BEFORE
+            };
+        }
+        if let RuleData::Declaration(current) = &mut rules[rule_index].data {
+            current.value = value;
+        }
+
+        self.update_corner(
+            removed,
+            corner,
+            BorderRadiusCorner {
+                first_token,
+                second_token,
+                unit_safety,
+                rule_index,
+                was_single_rule: true,
+            },
+        );
+        self.compact_rules(rules, removed, declaration.key_range, minify_whitespace);
+    }
+
+    fn compact_rules(
+        &self,
+        rules: &mut [Rule],
+        removed: &mut [bool],
+        key_range: Range,
+        minify_whitespace: bool,
+    ) {
+        let Some(corners) = self
+            .corners
+            .iter()
+            .map(Option::as_ref)
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
+        if corners[1..]
+            .iter()
+            .any(|corner| !corner.unit_safety.is_safe_with(&corners[0].unit_safety))
+        {
+            return;
+        }
+
+        let mut tokens = corners
+            .iter()
+            .map(|corner| corner.first_token.clone())
+            .collect::<Vec<_>>();
+        minify_four_side_shorthand(&mut tokens);
+        let mut second_tokens = corners
+            .iter()
+            .map(|corner| corner.second_token.clone())
+            .collect::<Vec<_>>();
+        minify_four_side_shorthand(&mut second_tokens);
+        if !tokens_equal_ignoring_whitespace(&tokens, &second_tokens) {
+            let mut slash = Token {
+                kind: TokenKind::DelimSlash,
+                text: "/".into(),
+                loc: tokens.last().map(|token| token.loc).unwrap_or_default(),
+                ..Token::default()
+            };
+            if !minify_whitespace {
+                slash.whitespace = WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER;
+            }
+            tokens.push(slash);
+            tokens.extend(second_tokens);
+        }
+
+        let target = corners[3].rule_index;
+        let min_loc = corners
+            .iter()
+            .map(|corner| rules[corner.rule_index].loc)
+            .min_by_key(|loc| loc.start)
+            .unwrap_or_default();
+        for corner in &corners {
+            removed[corner.rule_index] = true;
+        }
+        removed[target] = false;
+        rules[target] = Rule {
+            loc: min_loc,
+            data: RuleData::Declaration(DeclarationRule {
+                key_text: "border-radius".into(),
+                value: tokens,
+                key_range,
+                key: Declaration::BorderRadius,
+                important: self.important,
+            }),
+        };
+    }
+}
+
+fn expand_border_radius_tokens(tokens: &[Token]) -> Option<(Vec<Token>, Vec<Token>)> {
+    let mut slash_index = None;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind == TokenKind::DelimSlash {
+            if slash_index.is_some() {
+                return None;
+            }
+            slash_index = Some(index);
+        }
+    }
+    let split = slash_index.unwrap_or(tokens.len());
+    let first = expand_numeric_quad(&tokens[..split])?;
+    let second = if slash_index.is_some() {
+        expand_numeric_quad(&tokens[split + 1..])?
+    } else {
+        first.clone()
+    };
+    Some((first, second))
+}
+
+fn expand_numeric_quad(tokens: &[Token]) -> Option<Vec<Token>> {
+    if !is_numeric_quad(tokens) {
+        return None;
+    }
+    Some(vec![
+        tokens[0].clone(),
+        tokens.get(1).unwrap_or(&tokens[0]).clone(),
+        tokens.get(2).unwrap_or(&tokens[0]).clone(),
+        tokens
+            .get(3)
+            .or_else(|| tokens.get(1))
+            .unwrap_or(&tokens[0])
+            .clone(),
+    ])
+}
+
+fn mangle_border_radius_declarations(rules: &mut Vec<Rule>, minify_whitespace: bool) {
+    let mut tracker = BorderRadiusTracker::default();
+    let mut removed = vec![false; rules.len()];
+    for rule_index in 0..rules.len() {
+        let RuleData::Declaration(declaration) = &rules[rule_index].data else {
+            continue;
+        };
+        let declaration = declaration.clone();
+        match declaration.key {
+            Declaration::BorderRadius => tracker.mangle_shorthand(
+                rules,
+                &mut removed,
+                rule_index,
+                &declaration,
+                minify_whitespace,
+            ),
+            Declaration::BorderTopLeftRadius => tracker.mangle_corner(
+                rules,
+                &mut removed,
+                rule_index,
+                &declaration,
+                minify_whitespace,
+                0,
+            ),
+            Declaration::BorderTopRightRadius => tracker.mangle_corner(
+                rules,
+                &mut removed,
+                rule_index,
+                &declaration,
+                minify_whitespace,
+                1,
+            ),
+            Declaration::BorderBottomRightRadius => tracker.mangle_corner(
+                rules,
+                &mut removed,
+                rule_index,
+                &declaration,
+                minify_whitespace,
+                2,
+            ),
+            Declaration::BorderBottomLeftRadius => tracker.mangle_corner(
+                rules,
+                &mut removed,
+                rule_index,
+                &declaration,
+                minify_whitespace,
+                3,
+            ),
+            _ => {}
+        }
+    }
+    let mut index = 0;
+    rules.retain(|_| {
+        let keep = !removed[index];
+        index += 1;
+        keep
+    });
 }
 
 fn minify_box_shadows(tokens: &mut Vec<Token>, minify_whitespace: bool) {
