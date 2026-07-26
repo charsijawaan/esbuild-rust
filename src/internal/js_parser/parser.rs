@@ -2181,6 +2181,58 @@ mod tests {
     }
 
     #[test]
+    fn parses_type_script_import_and_export_assignments() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        options.mode = crate::internal::config::Mode::Bundle;
+        let (ast, ok, log) = parse_source_with_options(
+            "import fs = require('fs');\
+             import Path = Library.Path;\
+             export = { fs, Path };",
+            options.clone(),
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Local(fs)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected import-equals local");
+        };
+        assert!(fs.was_ts_import_equals);
+        assert!(matches!(
+            fs.declarations[0].value_or_nil.data.as_deref(),
+            Some(ExprData::RequireString(_))
+        ));
+        let Some(StmtData::Local(path)) = ast.parts[1].statements[1].data.as_deref() else {
+            panic!("expected qualified import-equals local");
+        };
+        assert!(path.was_ts_import_equals);
+        assert!(matches!(
+            path.declarations[0].value_or_nil.data.as_deref(),
+            Some(ExprData::Dot(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[2].data.as_deref(),
+            Some(StmtData::ExportEquals(export))
+                if matches!(export.value.data.as_deref(), Some(ExprData::Object(_)))
+        ));
+        assert_eq!(
+            ast.exports_kind,
+            crate::internal::js_ast::ExportsKind::CommonJs
+        );
+        assert!(ast.uses_module_ref);
+
+        let (ast, ok, log) =
+            parse_source_with_options("export import api = require('./api');", options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Local(api)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected exported import-equals local");
+        };
+        assert!(api.was_ts_import_equals);
+        assert!(api.is_export);
+        assert!(ast.named_exports.contains_key("api"));
+    }
+
+    #[test]
     fn validates_class_constructor_and_prototype_names() {
         let (_, ok, log) = parse_source(
             "class Getter { get constructor() {} }\

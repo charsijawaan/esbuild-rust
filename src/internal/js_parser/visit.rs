@@ -26,6 +26,10 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             Some(StmtData::Expr(expression)) => {
                 visit_expr(core, &mut expression.value, resolve_identifiers);
             }
+            Some(StmtData::ExportEquals(export)) => {
+                core.record_usage(core.module_ref);
+                visit_expr(core, &mut export.value, resolve_identifiers);
+            }
             Some(StmtData::Local(local)) => {
                 for declaration in &mut local.declarations {
                     record_binding(core, &mut declaration.binding);
