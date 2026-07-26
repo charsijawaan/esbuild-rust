@@ -3850,6 +3850,31 @@ mod tests {
     }
 
     #[test]
+    fn coalesces_adjacent_local_declarations_when_minifying_syntax() {
+        assert_eq!(
+            code(transform(
+                "const first = `hello ${name}!`; const second = tag`a${value}c`;",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const first = `hello ${name}!`, second = tag`a${value}c`;\n"
+        );
+        assert_eq!(
+            code(transform(
+                "let first = 1; let second = 2; const third = 3;",
+                TransformOptions {
+                    minify_whitespace: true,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "let first=1,second=2;const third=3;\n"
+        );
+    }
+
+    #[test]
     fn minifies_transform_identifiers_by_frequency() {
         assert_eq!(
             code(transform(

@@ -547,10 +547,38 @@ fn print_internal<'a>(
         printer.output.push(b';');
         printer.print_newline();
     }
-    for part in &tree.parts {
-        for statement in &part.statements {
-            printer.print_stmt(statement);
+    let statements = tree
+        .parts
+        .iter()
+        .flat_map(|part| &part.statements)
+        .collect::<Vec<_>>();
+    let mut statement_index = 0;
+    while statement_index < statements.len() {
+        let statement = statements[statement_index];
+        if options.minify_syntax
+            && let Some(StmtData::Local(first)) = statement.data.as_deref()
+        {
+            let mut merged = first.clone();
+            let mut next_index = statement_index + 1;
+            while let Some(next) = statements.get(next_index)
+                && let Some(StmtData::Local(next)) = next.data.as_deref()
+                && next.kind == merged.kind
+                && next.is_export == merged.is_export
+                && next.was_ts_import_equals == merged.was_ts_import_equals
+            {
+                merged
+                    .declarations
+                    .extend(next.declarations.iter().cloned());
+                next_index += 1;
+            }
+            if next_index > statement_index + 1 {
+                printer.print_stmt(&Stmt::new(statement.loc, StmtData::Local(merged)));
+                statement_index = next_index;
+                continue;
+            }
         }
+        printer.print_stmt(statement);
+        statement_index += 1;
     }
     let source_map_chunk = printer
         .source_map_builder
