@@ -671,15 +671,17 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
 
 #[allow(clippy::too_many_lines)]
 fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bool) {
-    if let Some(name) = class.name
-        && !ParserCore::is_stored_name_ref(name.reference)
-    {
-        core.record_declared_symbol(name.reference);
+    let outer_class_name = class.name.and_then(|name| {
+        (!ParserCore::is_stored_name_ref(name.reference)).then_some(name.reference)
+    });
+    if let Some(reference) = outer_class_name {
+        core.record_declared_symbol(reference);
     }
     for decorator in &mut class.decorators {
         visit_expr(core, &mut decorator.value, resolve_identifiers);
     }
     core.push_scope_for_visit_pass(ScopeKind::ClassName, class.class_keyword.loc);
+    let mut inner_class_name = None;
     if let Some(name) = &mut class.name {
         let text = if ParserCore::is_stored_name_ref(name.reference) {
             String::from_utf8_lossy(core.load_name_from_ref(name.reference)).into_owned()
@@ -690,6 +692,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
         };
         let inner_reference =
             core.new_symbol(crate::internal::ast::SymbolKind::Const, text.clone());
+        inner_class_name = Some(inner_reference);
         core.record_declared_symbol(inner_reference);
         core.current_scope
             .as_ref()
@@ -788,6 +791,9 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
     }
     core.pop_scope();
     core.pop_scope();
+    if let (Some(inner), Some(outer)) = (inner_class_name, outer_class_name) {
+        core.merge_symbols(inner, outer);
+    }
 }
 
 fn visit_binding_initializers(

@@ -2939,7 +2939,7 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("create test directory");
         std::fs::write(
             directory.join("entry.js"),
-            "function DeadFunction() {} function LongFunctionName() {} class LongClassName {} const LongArrowName = () => {}; console.log(LongFunctionName.name, LongClassName.name, LongArrowName.name)",
+            "function DeadFunction() {} function LongFunctionName() {} class LongClassName { static observed = LongClassName.name } const LongArrowName = () => {}; console.log(LongFunctionName.name, LongClassName.observed, LongArrowName.name)",
         )
         .expect("write entry file");
         let result = build(BuildOptions {
@@ -2956,6 +2956,13 @@ mod tests {
         assert!(output.contains("\"LongClassName\""));
         assert!(output.contains("\"LongArrowName\""));
         assert!(!output.contains("DeadFunction"));
+        let class_start = output.find("class ").expect("minified class declaration") + 6;
+        let class_end = output[class_start..]
+            .find(' ')
+            .map(|offset| class_start + offset)
+            .expect("class name terminator");
+        let class_name = &output[class_start..class_end];
+        assert!(output.contains(&format!("static observed = {class_name}.name;")));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
