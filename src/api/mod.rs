@@ -14,14 +14,14 @@ use crate::internal::{
     cache::CacheSet,
     config::{self, Mode},
     css_parser, css_printer,
-    fs::{Fs, RealFsOptions, real_fs},
+    fs::{Fs, MockKind, RealFsOptions, mock_fs, real_fs},
     helpers::{
         encode_string_as_shortest_data_url, escape_closing_tag, mime_type_by_extension,
         quote_for_json, string_to_utf16,
     },
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
-    logger::{DeferLogKind, Log, Msg, MsgKind, PrettyPaths, Source},
+    logger::{DeferLogKind, Log, Msg, MsgKind, Path, PrettyPaths, Source},
     renamer::{Renamer, new_no_op_renamer},
     resolver,
     sourcemap::{Chunk as SourceMapChunk, LineColumnOffset, generate_line_offset_tables},
@@ -190,6 +190,7 @@ pub struct TransformOptions {
     pub sourcemap: BuildSourceMap,
     pub source_root: String,
     pub sources_content: BuildSourcesContent,
+    pub tsconfig_raw: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -308,6 +309,7 @@ pub struct BuildOptions {
     pub outbase: String,
     pub abs_working_dir: String,
     pub tsconfig: String,
+    pub tsconfig_raw: String,
     pub metafile: bool,
     pub format: BuildFormat,
     pub platform: BuildPlatform,
@@ -390,6 +392,36 @@ pub struct BuildResult {
 
 fn output_file_hash(contents: &[u8]) -> String {
     STANDARD_NO_PAD.encode(xxhash::sum64(contents).to_le_bytes())
+}
+
+fn parse_tsconfig_raw(
+    log: &Log,
+    file_system: &dyn Fs,
+    directory: &str,
+    contents: &str,
+) -> Option<resolver::TsConfigJson> {
+    if contents.is_empty() {
+        return None;
+    }
+    resolver::parse_tsconfig_json(
+        log,
+        &Source {
+            key_path: Path {
+                text: "<tsconfig.json>".into(),
+                ..Path::default()
+            },
+            pretty_paths: PrettyPaths {
+                abs: "<tsconfig.json>".into(),
+                rel: "<tsconfig.json>".into(),
+            },
+            contents: Arc::from(contents.as_bytes()),
+            ..Source::default()
+        },
+        file_system,
+        directory,
+        directory,
+        None,
+    )
 }
 
 fn write_build_output_files(
@@ -977,6 +1009,36 @@ pub fn build(options: BuildOptions) -> BuildResult {
     );
     let jsx_factory = validate_jsx_define(&log, &options.jsx_factory, "jsx factory", false);
     let jsx_fragment = validate_jsx_define(&log, &options.jsx_fragment, "jsx fragment", true);
+    if !options.tsconfig.is_empty() && !options.tsconfig_raw.is_empty() {
+        log.add_error(
+            None,
+            crate::internal::logger::Range::default(),
+            "Cannot provide \"tsconfig\" as both a raw string and a path",
+        );
+    }
+    let raw_tsconfig = parse_tsconfig_raw(
+        &log,
+        file_system.as_ref(),
+        file_system.cwd(),
+        &options.tsconfig_raw,
+    );
+    let mut jsx_options = config::JsxOptions {
+        factory: jsx_factory,
+        fragment: jsx_fragment,
+        preserve: options.jsx == BuildJsx::Preserve,
+        automatic_runtime: options.jsx == BuildJsx::Automatic,
+        import_source: options.jsx_import_source,
+        development: options.jsx_development,
+        side_effects: options.jsx_side_effects,
+        ..config::JsxOptions::default()
+    };
+    let mut ts_options = config::TsOptions::default();
+    let mut ts_always_strict = None;
+    if let Some(tsconfig) = raw_tsconfig {
+        tsconfig.jsx_settings.apply_to(&mut jsx_options);
+        ts_options.config = tsconfig.settings;
+        ts_always_strict = tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
+    }
     if log.has_errors() {
         let (errors, warnings) = public_messages(log.done());
         return BuildResult {
@@ -1060,16 +1122,9 @@ pub fn build(options: BuildOptions) -> BuildResult {
         preserve_symlinks: options.preserve_symlinks,
         allow_overwrite: options.allow_overwrite,
         tree_shaking: options.tree_shaking != BuildTreeShaking::Disabled,
-        jsx: config::JsxOptions {
-            factory: jsx_factory,
-            fragment: jsx_fragment,
-            preserve: options.jsx == BuildJsx::Preserve,
-            automatic_runtime: options.jsx == BuildJsx::Automatic,
-            import_source: options.jsx_import_source,
-            development: options.jsx_development,
-            side_effects: options.jsx_side_effects,
-            ..config::JsxOptions::default()
-        },
+        jsx: jsx_options,
+        ts: ts_options,
+        ts_always_strict,
         minify_whitespace: options.minify_whitespace,
         minify_identifiers: options.minify_identifiers,
         minify_syntax: options.minify_syntax,
@@ -1103,6 +1158,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         abs_output_file: output_file,
         abs_output_base,
         tsconfig_path,
+        tsconfig_raw: options.tsconfig_raw,
         stdin,
         needs_metafile: options.metafile,
         ..config::Options::default()
@@ -1543,6 +1599,15 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
         .clone_from(&options.jsx_import_source);
     parser_options.jsx.development = options.jsx_development;
     parser_options.jsx.side_effects = options.jsx_side_effects;
+    if !options.tsconfig_raw.is_empty() {
+        let file_system = mock_fs(&HashMap::<String, String>::new(), MockKind::Unix, "/");
+        if let Some(tsconfig) = parse_tsconfig_raw(log, &file_system, "/", &options.tsconfig_raw) {
+            tsconfig.jsx_settings.apply_to(&mut parser_options.jsx);
+            parser_options.ts.config = tsconfig.settings;
+            parser_options.ts_always_strict =
+                tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
+        }
+    }
     parser_options.defines = Some(validate_defines(
         log,
         &options.define,
@@ -3172,6 +3237,92 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| error.text.contains("Cannot find tsconfig file"))
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn applies_raw_tsconfig_to_builds_and_transforms() {
+        let strict = transform(
+            "console.log(123)",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"alwaysStrict":true}}"#.into(),
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(code(strict), "\"use strict\";\nconsole.log(123);\n");
+
+        let automatic_jsx = code(transform(
+            "<><div /></>",
+            TransformOptions {
+                loader: Loader::Tsx,
+                tsconfig_raw:
+                    r#"{"compilerOptions":{"jsx":"react-jsx","jsxImportSource":"preact"}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            automatic_jsx.contains("from \"preact/jsx-runtime\""),
+            "{automatic_jsx}"
+        );
+        assert!(
+            automatic_jsx.contains("jsx(\"div\", {})"),
+            "{automatic_jsx}"
+        );
+
+        let invalid = transform(
+            "console.log(123)",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: "{".into(),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(!invalid.errors.is_empty());
+        assert!(invalid.code.is_empty());
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-tsconfig-raw-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("tsconfig.json"),
+            r#"{"compilerOptions":{"jsxFactory":"nearest"}}"#,
+        )
+        .expect("write nearest tsconfig");
+        std::fs::write(directory.join("entry.tsx"), "console.log(<div />)").expect("write entry");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.tsx".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::EsModule,
+            tsconfig_raw: r#"{"compilerOptions":{"jsxFactory":"raw"}}"#.into(),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("raw(\"div\", null)"), "{output}");
+        assert!(!output.contains("nearest("), "{output}");
+
+        let conflicting = build(BuildOptions {
+            entry_points: vec!["entry.tsx".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            tsconfig: "tsconfig.json".into(),
+            tsconfig_raw: "{}".into(),
+            ..BuildOptions::default()
+        });
+        assert_eq!(
+            conflicting
+                .errors
+                .first()
+                .map(|message| message.text.as_str()),
+            Some("Cannot provide \"tsconfig\" as both a raw string and a path")
         );
 
         std::fs::remove_dir_all(directory).expect("remove test directory");

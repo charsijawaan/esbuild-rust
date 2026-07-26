@@ -67,6 +67,7 @@ fn run_with_stdin_and_node_paths(
     let mut outfile = String::new();
     let mut outbase = String::new();
     let mut tsconfig = String::new();
+    let mut tsconfig_raw = String::new();
     let mut metafile_path = String::new();
     let mut format = BuildFormat::Iife;
     let mut platform = BuildPlatform::Browser;
@@ -249,6 +250,10 @@ fn run_with_stdin_and_node_paths(
         }
         if let Some(value) = argument.strip_prefix("--tsconfig=") {
             tsconfig = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--tsconfig-raw=") {
+            tsconfig_raw = value.into();
             continue;
         }
         if let Some(value) = argument.strip_prefix("--metafile=") {
@@ -502,6 +507,7 @@ fn run_with_stdin_and_node_paths(
             outfile: outfile.clone(),
             outbase,
             tsconfig,
+            tsconfig_raw,
             metafile: !metafile_path.is_empty(),
             format,
             platform,
@@ -641,6 +647,7 @@ fn run_with_stdin_and_node_paths(
     options.sourcemap = sourcemap;
     options.source_root = source_root;
     options.sources_content = sources_content;
+    options.tsconfig_raw = tsconfig_raw;
     if matches!(
         options.legal_comments,
         BuildLegalComments::Linked | BuildLegalComments::External
@@ -712,6 +719,7 @@ fn help_text() -> String {
          \x20\x20--outfile=FILE\n\
          \x20\x20--outbase=DIR\n\
          \x20\x20--tsconfig=FILE\n\
+         \x20\x20--tsconfig-raw=JSON\n\
          \x20\x20--metafile=FILE\n\
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--platform=browser|node|neutral\n\
@@ -1089,6 +1097,24 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn applies_raw_tsconfig_for_transforms() {
+        let Output::Code(output) = run_with_stdin(
+            &[
+                "--loader=ts".into(),
+                r#"--tsconfig-raw={"compilerOptions":{"alwaysStrict":true}}"#.into(),
+            ],
+            Some(b"console.log(123)"),
+        )
+        .expect("raw tsconfig transform succeeds") else {
+            panic!("expected transformed code");
+        };
+        assert_eq!(
+            String::from_utf8(output).expect("transform output is UTF-8"),
+            "\"use strict\";\nconsole.log(123);\n"
+        );
     }
 
     #[test]

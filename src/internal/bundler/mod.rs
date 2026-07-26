@@ -869,16 +869,20 @@ pub fn scan_bundle(
             ..Source::default()
         };
         let mut file_options = options.clone();
-        let tsconfig = find_nearest_tsconfig(
-            log,
-            file_system,
-            if stdin.abs_resolve_dir.is_empty() {
-                file_system.cwd()
-            } else {
-                &stdin.abs_resolve_dir
-            },
-            (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
-        );
+        let tsconfig = if options.tsconfig_raw.is_empty() {
+            find_nearest_tsconfig(
+                log,
+                file_system,
+                if stdin.abs_resolve_dir.is_empty() {
+                    file_system.cwd()
+                } else {
+                    &stdin.abs_resolve_dir
+                },
+                (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
+            )
+        } else {
+            None
+        };
         if let Some(tsconfig) = &tsconfig {
             tsconfig.jsx_settings.apply_to(&mut file_options.jsx);
             file_options.ts.config = tsconfig.settings;
@@ -1033,26 +1037,32 @@ pub fn scan_bundle(
             ..Source::default()
         };
         let mut file_options = options.clone();
-        let tsconfig = find_nearest_tsconfig(
-            log,
-            file_system,
-            &file_system.dir(&source.key_path.text),
-            (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
-        );
+        let tsconfig = if options.tsconfig_raw.is_empty() {
+            find_nearest_tsconfig(
+                log,
+                file_system,
+                &file_system.dir(&source.key_path.text),
+                (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
+            )
+        } else {
+            None
+        };
         if let Some(tsconfig) = &tsconfig {
             tsconfig.jsx_settings.apply_to(&mut file_options.jsx);
             file_options.ts.config = tsconfig.settings;
             file_options.ts_always_strict =
                 tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
         }
-        resolve_metadata
-            .ts_config_jsx
-            .apply_to(&mut file_options.jsx);
-        if let Some(ts_config) = &resolve_metadata.ts_config {
-            file_options.ts.config = *ts_config;
-        }
-        if let Some(ts_always_strict) = &resolve_metadata.ts_always_strict {
-            file_options.ts_always_strict = Some(Arc::new(ts_always_strict.clone()));
+        if options.tsconfig_raw.is_empty() {
+            resolve_metadata
+                .ts_config_jsx
+                .apply_to(&mut file_options.jsx);
+            if let Some(ts_config) = &resolve_metadata.ts_config {
+                file_options.ts.config = *ts_config;
+            }
+            if let Some(ts_always_strict) = &resolve_metadata.ts_always_strict {
+                file_options.ts_always_strict = Some(Arc::new(ts_always_strict.clone()));
+            }
         }
         file_options.module_type_data.module_type = if source.key_path.text.ends_with(".mjs") {
             ModuleType::EsmMjs
