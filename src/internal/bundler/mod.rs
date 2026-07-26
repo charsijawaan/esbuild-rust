@@ -640,13 +640,24 @@ fn find_nearest_tsconfig(
             ..Source::default()
         };
         let mut extends = |text: &str, _range: Range| {
-            if !text.starts_with('.') && !file_system.is_abs(text) {
-                return None;
-            }
             let mut extended = if file_system.is_abs(text) {
                 text.to_string()
-            } else {
+            } else if text.starts_with('.') {
                 file_system.join(&[&directory, text])
+            } else {
+                resolver::resolve_file_or_package(
+                    log,
+                    file_system,
+                    &directory,
+                    text,
+                    &[".json".into()],
+                    Platform::Neutral,
+                    None,
+                    false,
+                )?
+                .paths
+                .primary
+                .text
             };
             if !std::path::Path::new(&extended)
                 .extension()
@@ -3052,11 +3063,11 @@ mod tests {
             &HashMap::from([
                 (
                     "/project/tsconfig.json".into(),
-                    r#"{"extends":"./config/base"}"#.into(),
+                    r#"{"extends":"config-base/base.json"}"#.into(),
                 ),
                 (
-                    "/project/config/base.json".into(),
-                    r#"{"compilerOptions":{"baseUrl":"..","paths":{"@lib/*":["src/lib/*"]}}}"#
+                    "/project/node_modules/config-base/base.json".into(),
+                    r#"{"compilerOptions":{"baseUrl":"../..","paths":{"@lib/*":["src/lib/*"]}}}"#
                         .into(),
                 ),
                 (
