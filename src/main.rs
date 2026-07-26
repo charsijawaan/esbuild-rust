@@ -473,6 +473,13 @@ fn run_with_stdin_and_node_paths(
         input_paths.push(argument.clone());
     }
 
+    if !input_paths.is_empty() && !options.sourcefile.is_empty() {
+        return Err("\"sourcefile\" only applies when reading from stdin".into());
+    }
+    if !input_paths.is_empty() && options.loader != Loader::None {
+        return Err("\"loader\" without extension only applies when reading from stdin".into());
+    }
+
     let use_build_api = bundle
         || !outdir.is_empty()
         || !outfile.is_empty()
@@ -483,9 +490,6 @@ fn run_with_stdin_and_node_paths(
     if use_build_api {
         if !outdir.is_empty() && !outfile.is_empty() {
             return Err("Cannot use both \"--outfile\" and \"--outdir\"".into());
-        }
-        if !input_paths.is_empty() && options.loader != Loader::None {
-            return Err("\"loader\" without extension only applies when reading from stdin".into());
         }
         if !metafile_path.is_empty() && outdir.is_empty() && outfile.is_empty() {
             return Err("Cannot use \"--metafile\" without an output path".into());
@@ -882,6 +886,22 @@ mod tests {
         assert!(run(&["--drop-labels=".into()]).is_err());
         assert!(run(&["--drop-labels=DEV,".into()]).is_err());
         assert!(run(&["--pure:".into()]).is_err());
+    }
+
+    #[test]
+    fn rejects_stdin_only_options_for_input_files() {
+        assert_eq!(
+            run(&["--sourcefile=virtual.js".into(), "entry.js".into()])
+                .err()
+                .expect("sourcefile should be rejected"),
+            "\"sourcefile\" only applies when reading from stdin"
+        );
+        assert_eq!(
+            run(&["--loader=js".into(), "entry.js".into()])
+                .err()
+                .expect("loader should be rejected"),
+            "\"loader\" without extension only applies when reading from stdin"
+        );
     }
 
     #[test]
