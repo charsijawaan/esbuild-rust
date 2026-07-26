@@ -111,6 +111,7 @@ pub struct BuildOptions {
     pub entry_points: Vec<String>,
     pub outdir: String,
     pub outfile: String,
+    pub outbase: String,
     pub abs_working_dir: String,
     pub format: BuildFormat,
     pub sourcemap: BuildSourceMap,
@@ -292,7 +293,13 @@ pub fn build(options: BuildOptions) -> BuildResult {
             };
         }
     };
-    let abs_output_base = default_abs_output_base(file_system.as_ref(), &options.entry_points);
+    let abs_output_base = if options.outbase.is_empty() {
+        default_abs_output_base(file_system.as_ref(), &options.entry_points)
+    } else if file_system.is_abs(&options.outbase) {
+        options.outbase.clone()
+    } else {
+        file_system.join(&[file_system.cwd(), &options.outbase])
+    };
     let extension_to_loader = match validate_build_loaders(&options.loader) {
         Ok(loaders) => loaders,
         Err(errors) => {
@@ -801,6 +808,48 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("console.log(\"api build\");"));
         assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn preserves_entry_directories_relative_to_outbase() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-outbase-{unique}"));
+        std::fs::create_dir_all(directory.join("src/pages")).expect("create pages directory");
+        std::fs::create_dir_all(directory.join("src/admin")).expect("create admin directory");
+        std::fs::write(directory.join("src/pages/home.js"), "console.log('home')")
+            .expect("write home entry");
+        std::fs::write(directory.join("src/admin/panel.js"), "console.log('panel')")
+            .expect("write panel entry");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["src/pages/home.js".into(), "src/admin/panel.js".into()],
+            outdir: "out".into(),
+            outbase: "src".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::EsModule,
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let paths = result
+            .output_files
+            .iter()
+            .map(|output| output.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.ends_with("/out/pages/home.js"))
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.ends_with("/out/admin/panel.js"))
+        );
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

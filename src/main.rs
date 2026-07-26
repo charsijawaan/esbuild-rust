@@ -43,6 +43,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut bundle = false;
     let mut outdir = String::new();
     let mut outfile = String::new();
+    let mut outbase = String::new();
     let mut format = BuildFormat::Iife;
     let mut splitting = false;
     let mut sourcemap = BuildSourceMap::None;
@@ -90,6 +91,10 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         }
         if let Some(value) = argument.strip_prefix("--outfile=") {
             outfile = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--outbase=") {
+            outbase = value.into();
             continue;
         }
         if let Some(value) = argument.strip_prefix("--format=") {
@@ -189,6 +194,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             entry_points: input_paths,
             outdir: outdir.clone(),
             outfile: outfile.clone(),
+            outbase,
             format,
             sourcemap,
             splitting,
@@ -299,6 +305,7 @@ fn help_text() -> String {
          \x20\x20--bundle\n\
          \x20\x20--outdir=DIR\n\
          \x20\x20--outfile=FILE\n\
+         \x20\x20--outbase=DIR\n\
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--splitting\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
