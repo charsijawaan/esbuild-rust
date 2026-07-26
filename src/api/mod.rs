@@ -765,6 +765,22 @@ mod tests {
     }
 
     #[test]
+    fn minifies_modern_css_color_functions() {
+        assert_eq!(
+            code(transform(
+                "a { color: rgb(1 2 3) } b { color: rgba(1 2 3 / .5) } c { color: rgb(1% 2% 3% / 50%) } d { color: hsl(0, 100%, 50%) } e { color: hsl(30deg, 100%, 50%) } f { color: hsl(60 100% 50%) } g { color: hsl(200grad, 100%, 50%) } h { color: hsl(.75turn 100% 50%) } i { color: hsl(30 25% 50% / 50%) } j { color: hwb(90deg 20% 40%) } k { color: hwb(.75turn 20% 40% / .75) } l { color: hwb(1deg 40% 80%) } m { color: hwb(90deg, 20%, 40%) } n { color: hsl(var(--x) var(--y) var(--z)) }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{color:#010203}b{color:#01020380}c{color:#0305087f}d{color:red}e{color:#ff8000}f{color:#ff0}g{color:#0ff}h{color:#7f00ff}i{color:#9f80607f}j{color:#693}k{color:#663399bf}l{color:#555}m{color:hwb(90deg,20%,40%)}n{color:hsl(var(--x) var(--y) var(--z))}\n"
+        );
+    }
+
+    #[test]
     fn merges_safe_adjacent_css_selector_rules() {
         assert_eq!(
             code(transform(

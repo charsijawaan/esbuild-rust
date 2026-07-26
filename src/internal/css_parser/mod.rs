@@ -1695,11 +1695,22 @@ fn minify_single_color(tokens: &mut [Token]) {
         }
         return;
     }
-    if token.kind == TokenKind::Function
-        && (token.text.eq_ignore_ascii_case("rgb") || token.text.eq_ignore_ascii_case("rgba"))
-        && let Some((red, green, blue, alpha)) = parse_rgb(token)
-    {
-        set_color_token(token, red, green, blue, alpha);
+    if token.kind == TokenKind::Function {
+        let color = if token.text.eq_ignore_ascii_case("rgb")
+            || token.text.eq_ignore_ascii_case("rgba")
+        {
+            parse_rgb(token)
+        } else if token.text.eq_ignore_ascii_case("hsl") || token.text.eq_ignore_ascii_case("hsla")
+        {
+            parse_hsl(token)
+        } else if token.text.eq_ignore_ascii_case("hwb") {
+            parse_hwb(token)
+        } else {
+            None
+        };
+        if let Some((red, green, blue, alpha)) = color {
+            set_color_token(token, red, green, blue, alpha);
+        }
     }
 }
 
@@ -1766,47 +1777,179 @@ fn parse_hex_color(text: &str) -> Option<(u8, u8, u8, u8)> {
 
 fn parse_rgb(token: &Token) -> Option<(u8, u8, u8, u8)> {
     let children = token.children.as_deref()?;
-    let (red, green, blue, alpha) = if token.text.eq_ignore_ascii_case("rgb") {
-        let [red, comma_one, green, comma_two, blue] = children else {
-            return None;
-        };
-        if comma_one.kind != TokenKind::Comma || comma_two.kind != TokenKind::Comma {
-            return None;
-        }
-        (red, green, blue, None)
-    } else {
-        let [red, comma_one, green, comma_two, blue, comma_three, alpha] = children else {
-            return None;
-        };
-        if comma_one.kind != TokenKind::Comma
-            || comma_two.kind != TokenKind::Comma
-            || comma_three.kind != TokenKind::Comma
+    let (red, green, blue, alpha) = match children {
+        [red, green, blue] => (red, green, blue, None),
+        [red, comma_one, green, comma_two, blue]
+            if comma_one.kind == TokenKind::Comma && comma_two.kind == TokenKind::Comma =>
         {
-            return None;
+            (red, green, blue, None)
         }
-        (red, green, blue, Some(alpha))
-    };
-    let parse_byte = |token: &Token, number_scale: f64| {
-        let value = match token.kind {
-            TokenKind::Number => token.text.parse::<f64>().ok()? * number_scale,
-            TokenKind::Percentage => {
-                token.percentage_value().parse::<f64>().ok()? * (255.0 / 100.0)
-            }
-            _ => return None,
-        };
-        value
-            .round()
-            .clamp(0.0, 255.0)
-            .to_string()
-            .parse::<u8>()
-            .ok()
+        [red, green, blue, slash, alpha] if slash.kind == TokenKind::DelimSlash => {
+            (red, green, blue, Some(alpha))
+        }
+        [red, comma_one, green, comma_two, blue, comma_three, alpha]
+            if comma_one.kind == TokenKind::Comma
+                && comma_two.kind == TokenKind::Comma
+                && comma_three.kind == TokenKind::Comma =>
+        {
+            (red, green, blue, Some(alpha))
+        }
+        _ => return None,
     };
     Some((
-        parse_byte(red, 1.0)?,
-        parse_byte(green, 1.0)?,
-        parse_byte(blue, 1.0)?,
-        alpha.map_or(Some(255), |alpha| parse_byte(alpha, 255.0))?,
+        parse_color_byte(red, 1.0)?,
+        parse_color_byte(green, 1.0)?,
+        parse_color_byte(blue, 1.0)?,
+        parse_alpha_byte(alpha)?,
     ))
+}
+
+fn parse_hsl(token: &Token) -> Option<(u8, u8, u8, u8)> {
+    let children = token.children.as_deref()?;
+    let (hue, saturation, lightness, alpha) = parse_color_function_components(children, true)?;
+    let hue = degrees_for_angle(hue)?;
+    let saturation = saturation.clamped_fraction_for_percentage()?;
+    let lightness = lightness.clamped_fraction_for_percentage()?;
+    let (red, green, blue) = hsl_to_rgb(hue, saturation, lightness);
+    Some((
+        float_to_byte(red),
+        float_to_byte(green),
+        float_to_byte(blue),
+        parse_alpha_byte(alpha)?,
+    ))
+}
+
+fn parse_hwb(token: &Token) -> Option<(u8, u8, u8, u8)> {
+    let children = token.children.as_deref()?;
+    let (hue, white, black, alpha) = parse_color_function_components(children, false)?;
+    let hue = degrees_for_angle(hue)?;
+    let white = white.clamped_fraction_for_percentage()?;
+    let black = black.clamped_fraction_for_percentage()?;
+    let (red, green, blue) = hwb_to_rgb(hue, white, black);
+    Some((
+        float_to_byte(red),
+        float_to_byte(green),
+        float_to_byte(blue),
+        parse_alpha_byte(alpha)?,
+    ))
+}
+
+fn parse_color_function_components(
+    children: &[Token],
+    allow_legacy_commas: bool,
+) -> Option<(&Token, &Token, &Token, Option<&Token>)> {
+    Some(match children {
+        [first, second, third] => (first, second, third, None),
+        [first, comma_one, second, comma_two, third]
+            if allow_legacy_commas
+                && comma_one.kind == TokenKind::Comma
+                && comma_two.kind == TokenKind::Comma =>
+        {
+            (first, second, third, None)
+        }
+        [first, second, third, slash, alpha] if slash.kind == TokenKind::DelimSlash => {
+            (first, second, third, Some(alpha))
+        }
+        [
+            first,
+            comma_one,
+            second,
+            comma_two,
+            third,
+            comma_three,
+            alpha,
+        ] if allow_legacy_commas
+            && comma_one.kind == TokenKind::Comma
+            && comma_two.kind == TokenKind::Comma
+            && comma_three.kind == TokenKind::Comma =>
+        {
+            (first, second, third, Some(alpha))
+        }
+        _ => return None,
+    })
+}
+
+fn parse_color_byte(token: &Token, number_scale: f64) -> Option<u8> {
+    let value = match token.kind {
+        TokenKind::Number => token.text.parse::<f64>().ok()? * number_scale,
+        TokenKind::Percentage => token.percentage_value().parse::<f64>().ok()? * (255.0 / 100.0),
+        _ => return None,
+    };
+    rounded_byte(value)
+}
+
+fn parse_alpha_byte(token: Option<&Token>) -> Option<u8> {
+    token.map_or(Some(255), |token| parse_color_byte(token, 255.0))
+}
+
+fn degrees_for_angle(token: &Token) -> Option<f64> {
+    if token.kind == TokenKind::Number {
+        return token.text.parse().ok();
+    }
+    if token.kind != TokenKind::Dimension {
+        return None;
+    }
+    let value = token.dimension_value().parse::<f64>().ok()?;
+    Some(
+        value
+            * match token.dimension_unit().to_ascii_lowercase().as_str() {
+                "deg" => 1.0,
+                "grad" => 0.9,
+                "rad" => 180.0 / std::f64::consts::PI,
+                "turn" => 360.0,
+                _ => return None,
+            },
+    )
+}
+
+fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> (f64, f64, f64) {
+    let hue = hue / 360.0;
+    let t2 = if lightness <= 0.5 {
+        (saturation + 1.0) * lightness
+    } else {
+        lightness + saturation - lightness * saturation
+    };
+    let t1 = lightness * 2.0 - t2;
+    (
+        hue_to_rgb(t1, t2, hue + 1.0 / 3.0),
+        hue_to_rgb(t1, t2, hue),
+        hue_to_rgb(t1, t2, hue - 1.0 / 3.0),
+    )
+}
+
+fn hue_to_rgb(t1: f64, t2: f64, hue: f64) -> f64 {
+    let hue = (hue - hue.floor()) * 6.0;
+    if hue < 1.0 {
+        t1 + (t2 - t1) * hue
+    } else if hue < 3.0 {
+        t2
+    } else if hue < 4.0 {
+        t1 + (t2 - t1) * (4.0 - hue)
+    } else {
+        t1
+    }
+}
+
+fn hwb_to_rgb(hue: f64, white: f64, black: f64) -> (f64, f64, f64) {
+    if white + black >= 1.0 {
+        let gray = white / (white + black);
+        return (gray, gray, gray);
+    }
+    let delta = 1.0 - white - black;
+    let (red, green, blue) = hsl_to_rgb(hue, 1.0, 0.5);
+    (
+        delta * red + white,
+        delta * green + white,
+        delta * blue + white,
+    )
+}
+
+fn float_to_byte(value: f64) -> u8 {
+    rounded_byte(value * 255.0).expect("computed color channels are finite")
+}
+
+fn rounded_byte(value: f64) -> Option<u8> {
+    value.round().clamp(0.0, 255.0).to_string().parse().ok()
 }
 
 fn set_color_token(token: &mut Token, red: u8, green: u8, blue: u8, alpha: u8) {
