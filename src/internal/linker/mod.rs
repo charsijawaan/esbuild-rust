@@ -220,6 +220,15 @@ pub struct ScanRuntimeRefs {
 pub struct ScanImportsAndExportsResult {
     pub import_issues: Vec<(u32, ImportMatchIssue)>,
     pub ambiguous_re_exports: Vec<(u32, AmbiguousReExport)>,
+    pub arbitrary_namespace_issues: Vec<ArbitraryNamespaceIssue>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ArbitraryNamespaceIssue {
+    pub kind: String,
+    pub source_index: u32,
+    pub name_loc: crate::internal::logger::Loc,
+    pub alias: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1410,6 +1419,41 @@ pub fn maybe_correct_export_typo(
         .as_ref()
         .and_then(|detector| detector.maybe_correct_typo(name))
         .map(str::to_owned)
+}
+
+/// Validate entry-point export aliases against the configured target.
+#[must_use]
+pub fn arbitrary_namespace_export_issues(
+    graph: &LinkerGraph,
+    source_index: u32,
+    options: &Options,
+) -> Vec<ArbitraryNamespaceIssue> {
+    if options.output_format != Format::EsModule
+        || !options
+            .unsupported_js_features
+            .contains(crate::internal::compat::JsFeature::ARBITRARY_MODULE_NAMESPACE_NAMES)
+        || !graph.files[source_index as usize].is_entry_point()
+    {
+        return Vec::new();
+    }
+    let Some(InputFileRepr::Js(repr)) = graph.files[source_index as usize].input_file.repr.as_ref()
+    else {
+        return Vec::new();
+    };
+    repr.meta
+        .sorted_and_filtered_export_aliases
+        .iter()
+        .filter(|alias| !js_ast::is_identifier(alias))
+        .map(|alias| {
+            let export = &repr.meta.resolved_exports[alias];
+            ArbitraryNamespaceIssue {
+                kind: "export".into(),
+                source_index: export.source_index,
+                name_loc: export.name_loc,
+                alias: alias.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Match and bind all named imports in one file in deterministic symbol order.
@@ -2605,6 +2649,13 @@ pub fn scan_imports_and_exports<S: BuildHasher>(
                 .into_iter()
                 .map(|issue| (source_index, issue)),
         );
+        result
+            .arbitrary_namespace_issues
+            .extend(arbitrary_namespace_export_issues(
+                graph,
+                source_index,
+                options,
+            ));
         create_exports_for_file(
             graph,
             source_index,
@@ -8291,8 +8342,8 @@ mod tests {
         CssImportKind, EntryPointTailRefs, ImportStatus, ImportTracker, MatchImportKind,
         OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, PreparedCssAst,
         RuntimeReExportContext, StableRef, add_exports_for_export_star, advance_import_tracker,
-        append_or_extend_part_range, assemble_css_chunk, assemble_javascript_chunk,
-        assign_chunk_path_templates, bind_imports_to_exports_for_file,
+        append_or_extend_part_range, arbitrary_namespace_export_issues, assemble_css_chunk,
+        assemble_javascript_chunk, assign_chunk_path_templates, bind_imports_to_exports_for_file,
         bind_imports_to_parts_for_file, classify_module_wrappers, compile_part_range_for_chunk,
         compile_prepared_css_asts, compute_chunks, compute_cross_chunk_dependencies,
         compute_js_chunks, configure_entry_point_exports, convert_import_for_chunk,
@@ -13088,6 +13139,41 @@ mod tests {
         );
         assert_eq!(maybe_correct_export_typo(&mut graph, 0, "other"), None);
         assert!(js_repr(&graph, 0).meta.resolved_export_typos.is_some());
+    }
+
+    #[test]
+    fn rejects_arbitrary_entry_export_names_for_unsupported_targets() {
+        let exported_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let input_files = [js_file(js_ast::Ast {
+            symbols: vec![Symbol::new(SymbolKind::Other, "value")],
+            named_exports: HashMap::from([(
+                "not-valid".into(),
+                NamedExport {
+                    reference: exported_ref,
+                    alias_loc: Loc { start: 7 },
+                },
+            )]),
+            ..js_ast::Ast::default()
+        })];
+        let mut graph = clone_linker_graph(&input_files, &[0], &[EntryPoint::default()], false);
+        assert!(sort_and_filter_export_aliases(&mut graph, 0).is_empty());
+
+        let issues = arbitrary_namespace_export_issues(
+            &graph,
+            0,
+            &Options {
+                output_format: Format::EsModule,
+                unsupported_js_features:
+                    crate::internal::compat::JsFeature::ARBITRARY_MODULE_NAMESPACE_NAMES,
+                ..Options::default()
+            },
+        );
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].alias, "not-valid");
+        assert_eq!(issues[0].name_loc, Loc { start: 7 });
     }
 
     #[test]
