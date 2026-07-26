@@ -2756,6 +2756,7 @@ pub fn prepare_linker_graph<S: BuildHasher>(
     }
     let mut chunks = compute_chunks(&mut graph, options, unique_key_prefix);
     compute_cross_chunk_dependencies(&mut graph, &mut chunks, options);
+    rewrite_external_dynamic_imports(&mut graph, &chunks, options);
     if options.code_splitting {
         generate_cross_chunk_stmts(&graph, &mut chunks, options);
     }
@@ -5376,6 +5377,56 @@ pub fn compute_cross_chunk_dependencies(
                         import_kind: ImportKind::Stmt,
                     }),
             );
+    }
+}
+
+/// Rewrite live cross-chunk dynamic imports to temporary chunk keys before
+/// JavaScript printing. Cross-chunk dependency discovery must run first while
+/// the original source indices are still available.
+pub fn rewrite_external_dynamic_imports(
+    graph: &mut LinkerGraph,
+    chunks: &[ChunkInfo],
+    options: &Options,
+) {
+    let mut rewrites = Vec::new();
+    for chunk in chunks {
+        for &source_index in &chunk.files_with_parts_in_chunk {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_ref()
+            else {
+                continue;
+            };
+            for part in repr.ast.parts.iter().filter(|part| part.is_live) {
+                for &import_record_index in &part.import_record_indices {
+                    let record = &repr.ast.import_records[import_record_index as usize];
+                    if record.source_index.is_valid()
+                        && is_external_dynamic_import(graph, options, record, source_index)
+                    {
+                        rewrites.push((
+                            source_index,
+                            import_record_index,
+                            graph.files[record.source_index.get_index() as usize]
+                                .entry_point_chunk_index,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for (source_index, import_record_index, target_chunk) in rewrites {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_mut()
+        else {
+            unreachable!("dynamic import source was checked above");
+        };
+        let record = &mut repr.ast.import_records[import_record_index as usize];
+        record
+            .path
+            .text
+            .clone_from(&chunks[target_chunk as usize].unique_key);
+        record.source_index = Index32::default();
+        record.flags |= ImportRecordFlags::SHOULD_NOT_BE_EXTERNAL_IN_METAFILE
+            | ImportRecordFlags::CONTAINS_UNIQUE_KEY;
     }
 }
 

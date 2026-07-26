@@ -1637,7 +1637,7 @@ impl Printer<'_> {
                     self.print_expr_at(&dot.target, Precedence::Lowest);
                     self.output.push(b')');
                 } else {
-                    self.print_expr_at(&dot.target, Precedence::New);
+                    self.print_expr_at(&dot.target, Precedence::Postfix);
                 }
                 if is_identifier_es5_and_es_next(&dot.name) {
                     if dot.optional_chain == OptionalChain::Start {
@@ -1660,7 +1660,7 @@ impl Printer<'_> {
                 }
             }
             ExprData::Index(index) => {
-                self.print_expr_at(&index.target, Precedence::New);
+                self.print_expr_at(&index.target, Precedence::Postfix);
                 if index.optional_chain == OptionalChain::Start {
                     self.output.extend_from_slice(b"?.");
                 }
