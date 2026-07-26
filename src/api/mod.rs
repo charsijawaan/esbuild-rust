@@ -18,9 +18,12 @@ use crate::internal::{
     js_parser, js_printer,
     logger::{DeferLogKind, Log, Msg, MsgKind, PrettyPaths, Source},
     renamer::{Renamer, new_no_op_renamer},
-    resolver,
+    resolver, xxhash,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 
 struct TransformRenamer {
     symbols: SymbolMap,
@@ -338,6 +341,7 @@ pub struct BuildStdin {
 pub struct BuildOutputFile {
     pub path: String,
     pub contents: Vec<u8>,
+    pub hash: String,
     pub executable: bool,
 }
 
@@ -347,6 +351,10 @@ pub struct BuildResult {
     pub warnings: Vec<Message>,
     pub metafile: String,
     pub output_files: Vec<BuildOutputFile>,
+}
+
+fn output_file_hash(contents: &[u8]) -> String {
+    STANDARD_NO_PAD.encode(xxhash::sum64(contents).to_le_bytes())
 }
 
 fn validate_externals(
@@ -1011,6 +1019,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             .into_iter()
             .map(|output| BuildOutputFile {
                 path: output.abs_path,
+                hash: output_file_hash(&output.contents),
                 contents: output.contents,
                 executable: output.is_executable,
             })
@@ -1431,6 +1440,24 @@ mod tests {
     fn code(result: super::TransformResult) -> String {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         String::from_utf8(result.code).expect("transform output is UTF-8")
+    }
+
+    #[test]
+    fn hashes_in_memory_output_files() {
+        assert_eq!(super::output_file_hash(b"hello"), "o22fiH2CxyY");
+        let result = build(BuildOptions {
+            stdin: Some(BuildStdin {
+                contents: "console.log('hash')".into(),
+                sourcefile: "input.js".into(),
+                ..BuildStdin::default()
+            }),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 1);
+        let output = &result.output_files[0];
+        assert_eq!(output.hash, super::output_file_hash(&output.contents));
+        assert_eq!(output.hash.len(), 11);
     }
 
     #[test]
