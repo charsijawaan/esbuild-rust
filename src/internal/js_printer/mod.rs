@@ -1,6 +1,6 @@
 //! Port of upstream `internal/js_printer`.
 
-use crate::internal::ast::ImportRecord;
+use crate::internal::ast::{ImportPhase, ImportRecord};
 use crate::internal::compat::JsFeature;
 use crate::internal::js_ast::{
     Ast, Binding, BindingData, BlockStmt, Expr, ExprData, LocalKind, OpCode, OptionalChain,
@@ -758,6 +758,7 @@ impl Printer<'_> {
                     self.output.push(b' ');
                 }
                 self.print_import_path(import.import_record_index);
+                self.print_import_attributes(import.import_record_index, false);
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -774,6 +775,7 @@ impl Printer<'_> {
                 self.print_export_from_items(&export.items);
                 self.output.extend_from_slice(b" from ");
                 self.print_import_path(export.import_record_index);
+                self.print_import_attributes(export.import_record_index, false);
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -786,6 +788,7 @@ impl Printer<'_> {
                 }
                 self.output.extend_from_slice(b" from ");
                 self.print_import_path(export.import_record_index);
+                self.print_import_attributes(export.import_record_index, false);
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -1006,6 +1009,58 @@ impl Printer<'_> {
             self.options,
             false,
         ));
+    }
+
+    fn print_import_attributes(&mut self, index: u32, is_dynamic: bool) {
+        let record = &self.import_records[usize::try_from(index).expect("import record index")];
+        let Some(attributes) = &record.assert_or_with else {
+            return;
+        };
+        if is_dynamic {
+            self.output.push(b',');
+            self.print_optional_space();
+            self.output.push(b'{');
+            self.print_optional_space();
+        } else {
+            self.output.push(b' ');
+        }
+        self.output
+            .extend_from_slice(attributes.keyword.as_str().as_bytes());
+        if is_dynamic {
+            self.output.push(b':');
+            self.print_optional_space();
+        } else {
+            self.output.push(b' ');
+        }
+        self.output.push(b'{');
+        if !attributes.entries.is_empty() {
+            self.print_optional_space();
+        }
+        for (entry_index, entry) in attributes.entries.iter().enumerate() {
+            if entry_index > 0 {
+                self.output.push(b',');
+                self.print_optional_space();
+            }
+            let key = String::from_utf16_lossy(&entry.key);
+            if !entry.prefer_quoted_key && is_identifier_es5_and_es_next(&key) {
+                self.print_identifier(&key);
+            } else {
+                self.output
+                    .extend(quote_utf16(&entry.key, self.options, false));
+            }
+            self.output.push(b':');
+            self.print_optional_space();
+            self.output
+                .extend(quote_utf16(&entry.value, self.options, false));
+        }
+        if !attributes.entries.is_empty() {
+            self.print_optional_space();
+        }
+        self.output.push(b'}');
+        if is_dynamic {
+            self.print_optional_space();
+            self.output.push(b'}');
+        }
     }
 
     fn print_function(&mut self, function: &crate::internal::js_ast::Function) {
@@ -1402,13 +1457,37 @@ impl Printer<'_> {
                 }
             }
             ExprData::Class(class) => self.print_class(&class.class),
-            ExprData::Template(_)
-            | ExprData::JsxElement(_)
-            | ExprData::JsxText(_)
-            | ExprData::RequireString(_)
-            | ExprData::RequireResolveString(_)
-            | ExprData::ImportString(_)
-            | ExprData::ImportCall(_) => {
+            ExprData::Template(template) => self.print_template(template),
+            ExprData::RequireString(require) => {
+                self.output.extend_from_slice(b"require(");
+                self.print_import_path(require.import_record_index);
+                self.output.push(b')');
+            }
+            ExprData::RequireResolveString(require) => {
+                self.output.extend_from_slice(b"require.resolve(");
+                self.print_import_path(require.import_record_index);
+                self.output.push(b')');
+            }
+            ExprData::ImportString(import) => {
+                let phase = self.import_records
+                    [usize::try_from(import.import_record_index).expect("import record index")]
+                .phase;
+                self.print_import_start(phase);
+                self.print_import_path(import.import_record_index);
+                self.print_import_attributes(import.import_record_index, true);
+                self.output.push(b')');
+            }
+            ExprData::ImportCall(import) => {
+                self.print_import_start(import.phase);
+                self.print_expr_at(&import.expr, Precedence::Comma);
+                if import.options_or_nil.data.is_some() {
+                    self.output.push(b',');
+                    self.print_optional_space();
+                    self.print_expr_at(&import.options_or_nil, Precedence::Comma);
+                }
+                self.output.push(b')');
+            }
+            ExprData::JsxElement(_) | ExprData::JsxText(_) => {
                 panic!("Internal error: expression printer case has not been ported yet")
             }
         }
@@ -1441,6 +1520,42 @@ impl Printer<'_> {
         } else {
             self.print_expr_at(key, Precedence::Lowest);
         }
+    }
+
+    fn print_template(&mut self, template: &crate::internal::js_ast::TemplateExpr) {
+        let is_tagged = template.tag_or_nil.data.is_some();
+        if is_tagged {
+            self.print_expr_at(&template.tag_or_nil, Precedence::Postfix);
+        } else if template.parts.is_empty() && self.options.minify_syntax {
+            self.output
+                .extend(quote_utf16(&template.head_cooked, self.options, true));
+            return;
+        }
+        self.output.push(b'`');
+        if is_tagged {
+            self.output.extend_from_slice(template.head_raw.as_bytes());
+        } else {
+            print_unquoted_utf16(&mut self.output, &template.head_cooked, b'`', self.options);
+        }
+        for part in &template.parts {
+            self.output.extend_from_slice(b"${");
+            self.print_expr_at(&part.value, Precedence::Lowest);
+            self.output.push(b'}');
+            if is_tagged {
+                self.output.extend_from_slice(part.tail_raw.as_bytes());
+            } else {
+                print_unquoted_utf16(&mut self.output, &part.tail_cooked, b'`', self.options);
+            }
+        }
+        self.output.push(b'`');
+    }
+
+    fn print_import_start(&mut self, phase: ImportPhase) {
+        self.output.extend_from_slice(match phase {
+            ImportPhase::Evaluation => b"import(",
+            ImportPhase::Defer => b"import.defer(",
+            ImportPhase::Source => b"import.source(",
+        });
     }
 
     fn print_identifier(&mut self, name: &str) {
@@ -1483,7 +1598,11 @@ fn expr_precedence(data: &ExprData) -> Precedence {
         ExprData::Await(_) => Precedence::Prefix,
         ExprData::Arrow(_) => Precedence::Assign,
         ExprData::New(_) => Precedence::New,
-        ExprData::Call(_) => Precedence::Call,
+        ExprData::Call(_)
+        | ExprData::RequireString(_)
+        | ExprData::RequireResolveString(_)
+        | ExprData::ImportString(_)
+        | ExprData::ImportCall(_) => Precedence::Call,
         ExprData::InlinedEnum(inlined) => inlined
             .value
             .data
@@ -1908,6 +2027,36 @@ mod tests {
              export { external as out } from \"third\";\n\
              export * from \"all\";\n\
              export default value;\n"
+        );
+    }
+
+    #[test]
+    fn prints_templates_and_import_expressions() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"const greeting = `hello ${name}!`;\
+                  const lazy = import('./lazy', {with: {type: 'json'}});\
+                  const loaded = require('./dep');\
+                  const resolved = require.resolve('./dep');"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "const greeting = `hello ${name}!`;\n\
+             const lazy = import(\"./lazy\", { with: { type: \"json\" } });\n\
+             const loaded = require(\"./dep\");\n\
+             const resolved = require.resolve(\"./dep\");\n"
         );
     }
 }

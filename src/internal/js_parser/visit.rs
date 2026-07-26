@@ -1160,7 +1160,9 @@ fn visit_expr_with_target(
         ExprData::ImportCall(import) => {
             visit_expr(core, &mut import.expr, resolve_identifiers);
             visit_expr(core, &mut import.options_or_nil, resolve_identifiers);
-            if let Some(ExprData::String(path)) = import.expr.data.as_deref() {
+            if import.options_or_nil.data.is_none()
+                && let Some(ExprData::String(path)) = import.expr.data.as_deref()
+            {
                 let import_record_index = core.add_import_record(
                     crate::internal::ast::ImportKind::Dynamic,
                     import.phase,
