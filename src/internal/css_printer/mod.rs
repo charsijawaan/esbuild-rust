@@ -1,14 +1,16 @@
 //! Port of upstream `internal/css_printer`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::internal::{
-    ast::{Ref, SymbolMap},
+    ast::{ImportRecordFlags, Ref, SymbolMap},
+    config::{LegalComments, MetafileFormat},
     css_ast::{
         Ast, ComplexSelector, MediaBinaryOp, MediaCmp, MediaQuery, MediaQueryData, MediaTypeOp,
         NamespacedName, NthIndex, Rule, RuleData, SubclassData, Token, WhitespaceFlags,
     },
     css_lexer::{TokenKind, is_name_continue, would_start_identifier_without_escapes},
+    helpers::quote_for_json,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -18,11 +20,16 @@ pub struct Options {
     pub input_source_index: u32,
     pub minify_whitespace: bool,
     pub ascii_only: bool,
+    pub legal_comments: LegalComments,
+    pub needs_metafile: bool,
+    pub metafile_format: MetafileFormat,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PrintResult {
     pub css: Vec<u8>,
+    pub extracted_legal_comments: Vec<String>,
+    pub json_metadata_imports: Vec<String>,
 }
 
 fn function_multiline_comma_period(token: &Token) -> usize {
@@ -60,11 +67,18 @@ pub fn print(tree: &Ast, symbols: &SymbolMap, options: Options) -> PrintResult {
         symbols,
         options,
         indent: 0,
+        legal_comments: HashSet::new(),
+        extracted_legal_comments: Vec::new(),
+        json_metadata_imports: Vec::new(),
     };
     for rule in &tree.rules {
         printer.print_rule(rule, false);
     }
-    PrintResult { css: printer.css }
+    PrintResult {
+        css: printer.css,
+        extracted_legal_comments: printer.extracted_legal_comments,
+        json_metadata_imports: printer.json_metadata_imports,
+    }
 }
 
 fn best_quote_char(text: &str, for_url: bool) -> Option<char> {
@@ -105,11 +119,70 @@ struct Printer<'a> {
     symbols: &'a SymbolMap,
     options: Options,
     indent: usize,
+    legal_comments: HashSet<String>,
+    extracted_legal_comments: Vec<String>,
+    json_metadata_imports: Vec<String>,
 }
 
 impl Printer<'_> {
+    fn record_import_path_for_metafile(&mut self, import_record_index: u32) {
+        if !self.options.needs_metafile {
+            return;
+        }
+        let record = &self.import_records[import_record_index as usize];
+        let external = if record
+            .flags
+            .contains(ImportRecordFlags::SHOULD_NOT_BE_EXTERNAL_IN_METAFILE)
+        {
+            String::new()
+        } else {
+            self.options
+                .metafile_format
+                .maybe_remove_whitespace(",\n          \"external\": true")
+        };
+        let layout = self.options.metafile_format.maybe_remove_whitespace(
+            "\n        {\n          \"path\": PATH,\n          \"kind\": KIND_EXTERNAL\n        }",
+        );
+        self.json_metadata_imports.push(
+            layout
+                .replace(
+                    "PATH",
+                    &String::from_utf8(quote_for_json(
+                        record.path.text.as_bytes(),
+                        self.options.ascii_only,
+                    ))
+                    .expect("quoted metadata path is UTF-8"),
+                )
+                .replace(
+                    "KIND_EXTERNAL",
+                    &format!(
+                        "{}{external}",
+                        String::from_utf8(quote_for_json(
+                            record.kind.string_for_metafile().as_bytes(),
+                            self.options.ascii_only,
+                        ))
+                        .expect("quoted metadata import kind is UTF-8")
+                    ),
+                ),
+        );
+    }
+
     #[allow(clippy::too_many_lines)]
     fn print_rule(&mut self, rule: &Rule, omit_trailing_semicolon: bool) {
+        if let RuleData::Comment(comment) = &rule.data {
+            match self.options.legal_comments {
+                LegalComments::None => return,
+                LegalComments::EndOfFile
+                | LegalComments::LinkedWithComment
+                | LegalComments::ExternalWithoutComment => {
+                    if self.legal_comments.insert(comment.text.clone()) {
+                        self.extracted_legal_comments.push(comment.text.clone());
+                    }
+                    return;
+                }
+                LegalComments::Inline => {}
+            }
+        }
         if !self.options.minify_whitespace {
             self.print_indent();
         }
@@ -128,6 +201,7 @@ impl Printer<'_> {
                     });
                 let record = &self.import_records[rule.import_record_index as usize];
                 self.print_quoted(&record.path.text, None);
+                self.record_import_path_for_metafile(rule.import_record_index);
                 if let Some(conditions) = &rule.import_conditions {
                     self.print_token_group(&conditions.layers, true);
                     self.print_token_group(&conditions.supports, true);
@@ -483,6 +557,7 @@ impl Printer<'_> {
                 self.css.extend_from_slice(b"url(");
                 self.print_url_value(&record.path.text);
                 self.css.push(b')');
+                self.record_import_path_for_metafile(token.payload_index);
             }
             _ => self.css.extend_from_slice(token.text.as_bytes()),
         }
@@ -832,13 +907,15 @@ impl Printer<'_> {
 mod tests {
     use super::{Options, Printer, best_quote_char, print};
     use crate::internal::{
-        ast::SymbolMap,
+        ast::{ImportKind, ImportRecord, SymbolMap},
+        config::{LegalComments, MetafileFormat},
         css_ast::{
-            Ast, Combinator, ComplexSelector, CompoundSelector, DeclarationRule, NameToken,
-            NamespacedName, QualifiedRule, Rule, RuleData, SelectorRule, Token, WhitespaceFlags,
+            Ast, AtImportRule, Combinator, CommentRule, ComplexSelector, CompoundSelector,
+            DeclarationRule, NameToken, NamespacedName, QualifiedRule, Rule, RuleData,
+            SelectorRule, Token, WhitespaceFlags,
         },
         css_lexer::TokenKind,
-        logger::Loc,
+        logger::{Loc, Path},
     };
 
     fn token(kind: TokenKind, text: &str) -> Token {
@@ -922,6 +999,9 @@ mod tests {
                 ..Options::default()
             },
             indent: 0,
+            legal_comments: std::collections::HashSet::new(),
+            extracted_legal_comments: Vec::new(),
+            json_metadata_imports: Vec::new(),
         };
         printer.print_quoted(text, None);
         String::from_utf8(printer.css).expect("CSS output is UTF-8")
@@ -935,6 +1015,9 @@ mod tests {
             symbols: &symbols,
             options: Options::default(),
             indent: 0,
+            legal_comments: std::collections::HashSet::new(),
+            extracted_legal_comments: Vec::new(),
+            json_metadata_imports: Vec::new(),
         };
         printer.print_url_value(text);
         String::from_utf8(printer.css).expect("CSS output is UTF-8")
@@ -993,6 +1076,74 @@ mod tests {
             String::from_utf8(print(&tree, &SymbolMap::default(), Options::default()).css)
                 .expect("CSS output is UTF-8"),
             "> item {\n}\n"
+        );
+    }
+
+    #[test]
+    fn extracts_and_deduplicates_css_legal_comments() {
+        let comment = Rule {
+            loc: Loc::default(),
+            data: RuleData::Comment(CommentRule {
+                text: "/*! license */".into(),
+            }),
+        };
+        let tree = Ast {
+            rules: vec![comment.clone(), comment],
+            ..Ast::default()
+        };
+        let result = print(
+            &tree,
+            &SymbolMap::default(),
+            Options {
+                legal_comments: LegalComments::EndOfFile,
+                ..Options::default()
+            },
+        );
+        assert!(result.css.is_empty());
+        assert_eq!(result.extracted_legal_comments, ["/*! license */"]);
+
+        let result = print(
+            &tree,
+            &SymbolMap::default(),
+            Options {
+                legal_comments: LegalComments::None,
+                ..Options::default()
+            },
+        );
+        assert!(result.css.is_empty());
+        assert!(result.extracted_legal_comments.is_empty());
+    }
+
+    #[test]
+    fn records_css_imports_for_the_metafile() {
+        let tree = Ast {
+            import_records: vec![ImportRecord {
+                path: Path {
+                    text: "theme.css".into(),
+                    ..Path::default()
+                },
+                kind: ImportKind::At,
+                ..ImportRecord::default()
+            }],
+            rules: vec![Rule {
+                loc: Loc::default(),
+                data: RuleData::AtImport(AtImportRule::default()),
+            }],
+            ..Ast::default()
+        };
+        let result = print(
+            &tree,
+            &SymbolMap::default(),
+            Options {
+                needs_metafile: true,
+                metafile_format: MetafileFormat::Minified,
+                ..Options::default()
+            },
+        );
+        assert_eq!(result.json_metadata_imports.len(), 1);
+        assert_eq!(
+            result.json_metadata_imports[0],
+            "{\"path\":\"theme.css\",\"kind\":\"import-rule\",\"external\":true}"
         );
     }
 }

@@ -2821,6 +2821,8 @@ pub struct PreparedCssAst {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompiledCssAst {
     pub css: Vec<u8>,
+    pub extracted_legal_comments: Vec<String>,
+    pub json_metadata_imports: Vec<String>,
     pub source_index: Index32,
     pub has_charset: bool,
 }
@@ -3012,11 +3014,16 @@ pub fn compile_prepared_css_asts(
                     input_source_index,
                     minify_whitespace: options.minify_whitespace,
                     ascii_only: options.ascii_only,
+                    legal_comments: options.legal_comments,
+                    needs_metafile: options.needs_metafile,
+                    metafile_format: options.metafile_format,
                     ..css_printer::Options::default()
                 },
             );
             CompiledCssAst {
                 css: printed.css,
+                extracted_legal_comments: printed.extracted_legal_comments,
+                json_metadata_imports: printed.json_metadata_imports,
                 source_index: item.source_index,
                 has_charset: item.has_charset,
             }
@@ -3026,6 +3033,7 @@ pub fn compile_prepared_css_asts(
 
 /// Concatenate printed CSS files into one chunk and split temporary output
 /// paths into intermediate pieces.
+#[allow(clippy::too_many_lines)]
 pub fn assemble_css_chunk(
     graph: &LinkerGraph,
     chunk: &mut ChunkInfo,
@@ -3036,6 +3044,10 @@ pub fn assemble_css_chunk(
     let mut joiner = Joiner::default();
     let mut newline_before_comment = false;
     let mut metadata_inputs = Vec::new();
+    let mut metadata_imports = Vec::new();
+    let mut legal_comment_list = Vec::new();
+    chunk.external_legal_comments.clear();
+    chunk.metadata_imports.clear();
     chunk.metadata_inputs.clear();
 
     if !options.css_banner.is_empty() {
@@ -3069,6 +3081,19 @@ pub fn assemble_css_chunk(
     }
 
     for item in compiled {
+        if options.needs_metafile {
+            metadata_imports.extend(
+                item.json_metadata_imports
+                    .iter()
+                    .map(|json| output_paths.break_output_into_pieces(json.as_bytes().to_vec())),
+            );
+        }
+        if item.source_index.is_valid() && !item.extracted_legal_comments.is_empty() {
+            legal_comment_list.push(LegalCommentEntry {
+                source_index: item.source_index.get_index(),
+                comments: item.extracted_legal_comments.clone(),
+            });
+        }
         if options.needs_metafile
             && item.source_index.is_valid()
             && !graph.files[item.source_index.get_index() as usize]
@@ -3102,11 +3127,28 @@ pub fn assemble_css_chunk(
     }
 
     joiner.ensure_newline_at_end();
+    let slash_tag = if options
+        .unsupported_css_features
+        .contains(crate::internal::compat::CssFeature::INLINE_STYLE)
+    {
+        ""
+    } else {
+        "/style"
+    };
+    append_legal_comments(
+        graph,
+        options.legal_comments,
+        &legal_comment_list,
+        chunk,
+        &mut joiner,
+        slash_tag,
+    );
     if !options.css_footer.is_empty() {
         joiner.add_string(options.css_footer.clone());
         joiner.add_string("\n");
     }
     chunk.intermediate_output = output_paths.break_joiner_into_pieces(joiner);
+    chunk.metadata_imports = metadata_imports;
     chunk.metadata_inputs = metadata_inputs;
 }
 
@@ -9191,6 +9233,59 @@ mod tests {
     }
 
     #[test]
+    fn carries_css_legal_comments_and_metafile_imports_through_assembly() {
+        let mut source = css_file(vec![], vec![], vec![]);
+        source.source.pretty_paths = PrettyPaths {
+            abs: "/project/input.css".into(),
+            rel: "input.css".into(),
+        };
+        let input_files = [css_file(vec![], vec![], vec![]), source];
+        let graph = clone_linker_graph(&input_files, &[0, 1], &[], false);
+        let options = Options {
+            legal_comments: LegalComments::EndOfFile,
+            needs_metafile: true,
+            ..Options::default()
+        };
+        let prepared = [PreparedCssAst {
+            ast: crate::internal::css_ast::Ast {
+                import_records: vec![ImportRecord {
+                    path: Path {
+                        text: "theme.css".into(),
+                        ..Path::default()
+                    },
+                    kind: ImportKind::At,
+                    ..ImportRecord::default()
+                }],
+                rules: vec![
+                    Rule {
+                        data: RuleData::Comment(crate::internal::css_ast::CommentRule {
+                            text: "/*! license */".into(),
+                        }),
+                        loc: Loc::default(),
+                    },
+                    Rule {
+                        data: RuleData::AtImport(AtImportRule::default()),
+                        loc: Loc::default(),
+                    },
+                ],
+                ..crate::internal::css_ast::Ast::default()
+            },
+            source_index: Index32::new(1),
+            ..PreparedCssAst::default()
+        }];
+        let compiled = compile_prepared_css_asts(&graph, &prepared, &options);
+        assert_eq!(compiled[0].extracted_legal_comments, ["/*! license */"]);
+        assert_eq!(compiled[0].json_metadata_imports.len(), 1);
+
+        let mut chunk = ChunkInfo::default();
+        assemble_css_chunk(&graph, &mut chunk, &compiled, &options, &context(&[], &[]));
+        assert_eq!(chunk.metadata_imports.len(), 1);
+        let (joiner, _) =
+            context(&[], &[]).substitute_final_paths(chunk.intermediate_output, str::to_owned);
+        assert_eq!(joiner.done(), b"@import \"theme.css\";\n/*! license */\n");
+    }
+
+    #[test]
     fn assembles_css_chunks_with_charset_boundaries_and_banners() {
         let mut source = css_file(vec![], vec![], vec![]);
         source.source.pretty_paths = PrettyPaths {
@@ -9212,6 +9307,7 @@ mod tests {
                     css: b".a { color: red }\n".to_vec(),
                     source_index: Index32::new(1),
                     has_charset: true,
+                    ..CompiledCssAst::default()
                 },
             ],
             &Options {
