@@ -335,10 +335,9 @@ fn validate_path_template(template: &str) -> Vec<config::PathTemplate> {
 fn validate_defines(
     log: &Log,
     defines: &HashMap<String, String>,
-) -> Option<Arc<config::ProcessedDefines>> {
-    if defines.is_empty() {
-        return None;
-    }
+    platform: BuildPlatform,
+    minify: bool,
+) -> Arc<config::ProcessedDefines> {
     let mut keys = defines.keys().collect::<Vec<_>>();
     keys.sort();
     let mut raw = Vec::with_capacity(keys.len());
@@ -378,7 +377,31 @@ fn validate_defines(
             );
         }
     }
-    Some(Arc::new(config::process_defines(&raw)))
+    if platform == BuildPlatform::Browser
+        && !raw.iter().any(|define| {
+            let parts = define
+                .key_parts
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            matches!(
+                parts.as_slice(),
+                ["process"] | ["process", "env"] | ["process", "env", "NODE_ENV"]
+            )
+        })
+    {
+        let (define_expr, _) = js_parser::parse_define_expr(if minify {
+            r#""production""#
+        } else {
+            r#""development""#
+        });
+        raw.push(config::DefineData {
+            key_parts: vec!["process".into(), "env".into(), "NODE_ENV".into()],
+            define_expr: Some(define_expr),
+            ..config::DefineData::default()
+        });
+    }
+    Arc::new(config::process_defines(&raw))
 }
 
 #[must_use]
@@ -456,7 +479,12 @@ pub fn build(options: BuildOptions) -> BuildResult {
             .map(|part| String::from_utf8_lossy(&part).into_owned())
             .collect()
     };
-    let defines = validate_defines(&log, &options.define);
+    let defines = validate_defines(
+        &log,
+        &options.define,
+        options.platform,
+        options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
+    );
     if log.has_errors() {
         let (errors, warnings) = public_messages(log.done());
         return BuildResult {
@@ -521,7 +549,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         entry_path_template: validate_path_template(&options.entry_names),
         chunk_path_template: validate_path_template(&options.chunk_names),
         asset_path_template: validate_path_template(&options.asset_names),
-        defines,
+        defines: Some(defines),
         abs_output_dir: output_dir,
         abs_output_file: output_file,
         abs_output_base,
@@ -1417,6 +1445,47 @@ mod tests {
             "{output}"
         );
         assert!(!output.contains("process.env.NODE_ENV"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn defaults_node_env_for_browser_builds() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-node-env-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "console.log(process.env.NODE_ENV)",
+        )
+        .expect("write entry file");
+
+        let build_with = |minify: bool| {
+            build(BuildOptions {
+                entry_points: vec!["entry.js".into()],
+                outdir: "out".into(),
+                abs_working_dir: directory.to_string_lossy().into_owned(),
+                format: BuildFormat::Iife,
+                minify_whitespace: minify,
+                minify_identifiers: minify,
+                minify_syntax: minify,
+                ..BuildOptions::default()
+            })
+        };
+        let development = build_with(false);
+        let production = build_with(true);
+        assert!(development.errors.is_empty(), "{:?}", development.errors);
+        assert!(production.errors.is_empty(), "{:?}", production.errors);
+        assert!(
+            String::from_utf8_lossy(&development.output_files[0].contents)
+                .contains("\"development\"")
+        );
+        assert!(
+            String::from_utf8_lossy(&production.output_files[0].contents)
+                .contains("\"production\"")
+        );
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
