@@ -639,6 +639,7 @@ pub fn resolve_import_records(
                 tsconfig,
                 external_settings: Some(&options.external_settings),
                 external_packages: options.external_packages,
+                preserve_symlinks: options.preserve_symlinks,
                 conditions: Some(&options.conditions),
                 package_aliases: Some(&options.package_aliases),
                 ..ResolverContext::default()
@@ -826,6 +827,7 @@ pub fn scan_bundle(
             ResolverContext {
                 external_settings: Some(&options.external_settings),
                 external_packages: options.external_packages,
+                preserve_symlinks: options.preserve_symlinks,
                 conditions: Some(&options.conditions),
                 package_aliases: Some(&options.package_aliases),
                 ..ResolverContext::default()

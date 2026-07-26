@@ -374,11 +374,13 @@ pub fn is_node_builtin(path: &str) -> bool {
 }
 
 #[derive(Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ResolverContext<'a> {
     pub tsconfig: Option<&'a TsConfigJson>,
     pub pnp: Option<&'a PnpData>,
     pub external_settings: Option<&'a ExternalSettings>,
     pub external_packages: bool,
+    pub preserve_symlinks: bool,
     pub conditions: Option<&'a [String]>,
     pub package_aliases: Option<&'a HashMap<String, String>>,
     pub strip_node_prefix_for_import: bool,
@@ -803,6 +805,16 @@ pub fn resolve_with_metadata(
         || result.path_pair.primary.namespace != "file"
     {
         return Some(result);
+    }
+    if !context.preserve_symlinks {
+        if let Some(path) = file_system.eval_symlinks(&result.path_pair.primary.text) {
+            result.path_pair.primary.text = path;
+        }
+        if result.path_pair.has_secondary()
+            && let Some(path) = file_system.eval_symlinks(&result.path_pair.secondary.text)
+        {
+            result.path_pair.secondary.text = path;
+        }
     }
 
     let resolved_path = result.path_pair.primary.text.replace('\\', "/");

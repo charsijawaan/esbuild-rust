@@ -54,6 +54,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut chunk_names = String::new();
     let mut asset_names = String::new();
     let mut splitting = false;
+    let mut preserve_symlinks = false;
     let mut sourcemap = BuildSourceMap::None;
     let mut legal_comments = BuildLegalComments::Inline;
     let mut tree_shaking = BuildTreeShaking::Default;
@@ -92,6 +93,10 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         }
         if argument == "--splitting" {
             splitting = true;
+            continue;
+        }
+        if argument == "--preserve-symlinks" {
+            preserve_symlinks = true;
             continue;
         }
         if argument == "--drop:debugger" {
@@ -404,6 +409,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             jsx_development,
             jsx_side_effects,
             splitting,
+            preserve_symlinks,
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
             minify_syntax: options.minify_syntax,
@@ -557,6 +563,7 @@ fn help_text() -> String {
          \x20\x20--chunk-names=TEMPLATE\n\
          \x20\x20--asset-names=TEMPLATE\n\
          \x20\x20--splitting\n\
+         \x20\x20--preserve-symlinks\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
          \x20\x20--legal-comments=none|inline|eof|linked|external\n\
          \x20\x20--tree-shaking=true|false\n\

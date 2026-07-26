@@ -177,6 +177,7 @@ pub struct BuildOptions {
     pub jsx_development: bool,
     pub jsx_side_effects: bool,
     pub splitting: bool,
+    pub preserve_symlinks: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
     pub minify_syntax: bool,
@@ -270,13 +271,20 @@ fn validate_externals(
     }
 }
 
-fn default_abs_output_base(file_system: &dyn Fs, entry_points: &[String]) -> String {
+fn default_abs_output_base(
+    file_system: &dyn Fs,
+    entry_points: &[String],
+    preserve_symlinks: bool,
+) -> String {
     let mut directories = entry_points.iter().map(|entry_point| {
-        let absolute = if file_system.is_abs(entry_point) {
+        let mut absolute = if file_system.is_abs(entry_point) {
             entry_point.clone()
         } else {
             file_system.join(&[file_system.cwd(), entry_point])
         };
+        if !preserve_symlinks && let Some(real_path) = file_system.eval_symlinks(&absolute) {
+            absolute = real_path;
+        }
         PathBuf::from(file_system.dir(&absolute))
     });
     let Some(mut common) = directories.next() else {
@@ -601,7 +609,11 @@ pub fn build(options: BuildOptions) -> BuildResult {
         }
     };
     let abs_output_base = if options.outbase.is_empty() {
-        default_abs_output_base(file_system.as_ref(), &options.entry_points)
+        default_abs_output_base(
+            file_system.as_ref(),
+            &options.entry_points,
+            options.preserve_symlinks,
+        )
     } else if file_system.is_abs(&options.outbase) {
         options.outbase.clone()
     } else {
@@ -729,6 +741,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         },
         line_limit: options.line_limit,
         code_splitting: options.splitting,
+        preserve_symlinks: options.preserve_symlinks,
         tree_shaking: options.tree_shaking != BuildTreeShaking::Disabled,
         jsx: config::JsxOptions {
             factory: jsx_factory,
@@ -1254,6 +1267,43 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("console.log(\"api build\");"));
         assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn controls_symlink_identity_during_resolution() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-symlinks-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import './real.js'; import './alias.js'",
+        )
+        .expect("write entry file");
+        std::fs::write(directory.join("real.js"), "console.log('dependency')")
+            .expect("write dependency file");
+        std::os::unix::fs::symlink(directory.join("real.js"), directory.join("alias.js"))
+            .expect("create symlink");
+
+        for (preserve_symlinks, expected_count) in [(false, 1), (true, 2)] {
+            let result = build(BuildOptions {
+                entry_points: vec!["entry.js".into()],
+                outdir: "out".into(),
+                abs_working_dir: directory.to_string_lossy().into_owned(),
+                preserve_symlinks,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            let output = String::from_utf8_lossy(&result.output_files[0].contents);
+            assert_eq!(
+                output.matches("console.log(\"dependency\")").count(),
+                expected_count
+            );
+        }
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
