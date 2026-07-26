@@ -200,7 +200,11 @@ impl Parser {
 
         let prelude_start = self.index;
         let end = self.scan_to_rule_delimiter();
-        let mut prelude = self.convert_tokens(prelude_start, end);
+        let mut prelude = if name.eq_ignore_ascii_case("container") {
+            self.convert_tokens_preserving_whitespace(prelude_start, end)
+        } else {
+            self.convert_tokens(prelude_start, end)
+        };
         trim_token_boundary_whitespace(&mut prelude);
         self.index = end;
         if self.current_kind() == TokenKind::OpenBrace {
@@ -227,14 +231,7 @@ impl Parser {
                 };
             }
             if is_known_block_at_rule(&name) {
-                if name.eq_ignore_ascii_case("counter-style")
-                    && let [token] = prelude.as_mut_slice()
-                    && token.kind == TokenKind::Ident
-                {
-                    let reference = self.new_css_symbol(&token.text, token.loc);
-                    token.kind = TokenKind::Symbol;
-                    token.payload_index = reference.inner_index;
-                }
+                self.process_at_rule_symbols(&name, &mut prelude);
                 self.index += 1;
                 let preserve_legal_comments =
                     preserve_legal_comments && known_at_rule_preserves_legal_comments(&name);
@@ -383,6 +380,30 @@ impl Parser {
             self.global_scope.insert(name.into(), loc_ref);
         }
         reference
+    }
+
+    fn process_at_rule_symbols(&mut self, name: &str, prelude: &mut [Token]) {
+        let token = if name.eq_ignore_ascii_case("counter-style") {
+            let [token] = prelude else {
+                return;
+            };
+            token
+        } else if name.eq_ignore_ascii_case("container") {
+            let Some(token) = prelude.first_mut() else {
+                return;
+            };
+            if token.text.eq_ignore_ascii_case("not") {
+                return;
+            }
+            token
+        } else {
+            return;
+        };
+        if token.kind == TokenKind::Ident {
+            let reference = self.new_css_symbol(&token.text, token.loc);
+            token.kind = TokenKind::Symbol;
+            token.payload_index = reference.inner_index;
+        }
     }
 
     fn parse_at_import(&mut self, loc: Loc) -> Rule {

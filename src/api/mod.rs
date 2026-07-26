@@ -751,6 +751,24 @@ mod tests {
     }
 
     #[test]
+    fn links_local_container_queries_and_names() {
+        assert_eq!(
+            code(transform(
+                "a { container-name: foo bar } @container foo (width > 1px) { b { color: red } } @container bar style(--x: true) { c { color: blue } } @container not (width > 1px) { d { color: black } }",
+                TransformOptions {
+                    sourcefile: "entry.module.css".into(),
+                    loader: Loader::LocalCss,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{container-name:o n}@container o (width > 1px){b{color:red}}@container n style(--x: true){c{color:#00f}}@container not (width > 1px){d{color:#000}}\n"
+        );
+    }
+
+    #[test]
     fn minifies_css_transforms() {
         assert_eq!(
             code(transform(
