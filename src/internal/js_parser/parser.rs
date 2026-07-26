@@ -1172,6 +1172,7 @@ mod tests {
                 crate::internal::js_ast::ScopeKind::Entry,
                 crate::internal::js_ast::ScopeKind::Label,
                 crate::internal::js_ast::ScopeKind::Block,
+                crate::internal::js_ast::ScopeKind::Block,
             ]
         );
         let Some(StmtData::Label(label)) = ast.parts[1].statements[0].data.as_deref() else {
@@ -1316,6 +1317,59 @@ mod tests {
         );
         assert!(ok);
         assert_eq!(log.done().len(), 4);
+    }
+
+    #[test]
+    fn for_loops_keep_lexical_bindings_in_a_loop_scope() {
+        let (ast, ok, log) =
+            parse_source("for (let item of items) { item; } item; for (let i = 0; i < 1; i++) {}");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(
+            ast.parts[1]
+                .scopes
+                .iter()
+                .map(|scope| scope.lock().expect("scope lock").kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::internal::js_ast::ScopeKind::Entry,
+                crate::internal::js_ast::ScopeKind::Block,
+                crate::internal::js_ast::ScopeKind::Block,
+                crate::internal::js_ast::ScopeKind::Block,
+                crate::internal::js_ast::ScopeKind::Block,
+            ]
+        );
+
+        let Some(StmtData::ForOf(loop_statement)) = ast.parts[1].statements[0].data.as_deref()
+        else {
+            panic!("expected for-of statement");
+        };
+        let Some(StmtData::Local(local)) = loop_statement.init.data.as_deref() else {
+            panic!("expected loop declaration");
+        };
+        let Some(crate::internal::js_ast::BindingData::Identifier(binding)) =
+            local.declarations[0].binding.data.as_deref()
+        else {
+            panic!("expected identifier binding");
+        };
+        let item_ref = binding.reference;
+        let Some(StmtData::Block(body)) = loop_statement.body.data.as_deref() else {
+            panic!("expected loop body");
+        };
+        let Some(StmtData::Expr(inner_use)) = body.statements[0].data.as_deref() else {
+            panic!("expected inner use");
+        };
+        assert!(matches!(
+            inner_use.value.data.as_deref(),
+            Some(ExprData::Identifier(identifier)) if identifier.reference == item_ref
+        ));
+        let Some(StmtData::Expr(outer_use)) = ast.parts[1].statements[1].data.as_deref() else {
+            panic!("expected outer use");
+        };
+        assert!(matches!(
+            outer_use.value.data.as_deref(),
+            Some(ExprData::Identifier(identifier)) if identifier.reference != item_ref
+        ));
     }
 
     #[test]

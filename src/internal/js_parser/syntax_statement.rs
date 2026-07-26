@@ -607,6 +607,7 @@ fn parse_label_statement(
 
 #[allow(clippy::too_many_lines)]
 fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Stmt {
+    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Block, loc);
     lexer.expect(Token::For);
     let mut await_range = Range::default();
     if lexer.is_contextual_keyword(b"await") {
@@ -684,7 +685,7 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
         lexer.expect(Token::CloseParen);
         let is_single_line_body = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
         let body = parse_statement(core, lexer);
-        return Stmt::new(
+        let statement = Stmt::new(
             loc,
             StmtData::ForOf(ForOfStmt {
                 init: init_or_nil,
@@ -694,6 +695,8 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
                 is_single_line_body,
             }),
         );
+        core.pop_scope();
+        return statement;
     }
 
     if lexer.token == Token::In {
@@ -707,7 +710,7 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
         lexer.expect(Token::CloseParen);
         let is_single_line_body = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
         let body = parse_statement(core, lexer);
-        return Stmt::new(
+        let statement = Stmt::new(
             loc,
             StmtData::ForIn(ForInStmt {
                 init: init_or_nil,
@@ -716,6 +719,8 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
                 is_single_line_body,
             }),
         );
+        core.pop_scope();
+        return statement;
     }
 
     lexer.expect(Token::Semicolon);
@@ -734,7 +739,7 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
     lexer.expect(Token::CloseParen);
     let is_single_line_body = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
     let body = parse_statement(core, lexer);
-    Stmt::new(
+    let statement = Stmt::new(
         loc,
         StmtData::For(ForStmt {
             init_or_nil,
@@ -744,7 +749,9 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
             is_single_line_body,
             ..ForStmt::default()
         }),
-    )
+    );
+    core.pop_scope();
+    statement
 }
 
 fn validate_loop_declaration(

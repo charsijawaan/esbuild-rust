@@ -98,26 +98,32 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 );
             }
             Some(StmtData::For(loop_statement)) => {
+                core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
                 visit_statement(core, &mut loop_statement.init_or_nil, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.test_or_nil, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.update_or_nil, resolve_identifiers);
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
+                core.pop_scope();
             }
             Some(StmtData::ForIn(loop_statement)) => {
+                core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
                 visit_statement(core, &mut loop_statement.init, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
+                core.pop_scope();
             }
             Some(StmtData::ForOf(loop_statement)) => {
+                core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
                 visit_statement(core, &mut loop_statement.init, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
+                core.pop_scope();
             }
             Some(StmtData::Label(label)) => {
                 core.push_scope_for_visit_pass(ScopeKind::Label, statement.loc);
