@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet};
 use crate::internal::{
     compat::{CssFeature, JsFeature},
     config::{Loader, Options, PathPlaceholder, PathTemplate, Platform},
+    fs::Fs,
     graph::{EntryPoint as GraphEntryPoint, InputFile, InputFileRepr},
-    runtime,
+    logger, runtime,
     sourcemap::LineOffsetTable,
 };
 
@@ -223,16 +224,122 @@ pub fn hash_for_file_name(bytes: &[u8]) -> String {
     output
 }
 
+#[must_use]
+pub fn is_ascii_only(text: &str) -> bool {
+    text.chars()
+        .all(|character| (' '..='~').contains(&character))
+}
+
+#[must_use]
+pub fn path_relative_to_outbase(
+    input_file: &InputFile,
+    options: &Options,
+    file_system: &dyn Fs,
+    avoid_index: bool,
+    custom_file_path: &str,
+) -> (String, String) {
+    let mut relative_directory = "/".to_string();
+    let mut absolute_path = input_file.source.key_path.text.clone();
+
+    if !custom_file_path.is_empty() {
+        absolute_path = custom_file_path.to_string();
+        if !file_system.is_abs(&absolute_path) {
+            absolute_path = file_system.join(&[&options.abs_output_base, &absolute_path]);
+        }
+    } else if input_file.source.key_path.namespace != "file" {
+        let (directory, mut base, _) =
+            logger::platform_independent_path_dir_base_ext(&absolute_path);
+        if avoid_index && base == "index" {
+            (_, base, _) = logger::platform_independent_path_dir_base_ext(&directory);
+        }
+        return (
+            relative_directory,
+            sanitize_file_path_for_virtual_module_path(&base),
+        );
+    } else if avoid_index {
+        let base = file_system.base(&absolute_path);
+        let extension = file_system.ext(&base);
+        let without_extension = &base[..base.len() - extension.len()];
+        if without_extension == "index" {
+            absolute_path = file_system.dir(&absolute_path);
+        }
+    }
+
+    let mut base_name;
+    if let Some(relative_path) = file_system.rel(&options.abs_output_base, &absolute_path) {
+        relative_directory = format!("{}/", file_system.dir(&relative_path)).replace('\\', "/");
+        base_name = file_system.base(&relative_path);
+        let mut dot_dot_count = 0;
+        while relative_directory
+            .get(dot_dot_count * 3..)
+            .is_some_and(|path| path.starts_with("../"))
+        {
+            dot_dot_count += 1;
+        }
+        if dot_dot_count > 0 {
+            relative_directory = format!(
+                "{}{}",
+                "_.._/".repeat(dot_dot_count),
+                &relative_directory[dot_dot_count * 3..]
+            );
+        }
+        while relative_directory.ends_with('/') {
+            relative_directory.pop();
+        }
+        relative_directory.insert(0, '/');
+        if relative_directory.ends_with("/.") {
+            relative_directory.pop();
+        }
+    } else {
+        base_name = file_system.base(&absolute_path);
+    }
+    if custom_file_path.is_empty() {
+        let extension = file_system.ext(&base_name);
+        base_name.truncate(base_name.len() - extension.len());
+    }
+    (relative_directory, base_name)
+}
+
+#[must_use]
+pub fn sanitize_file_path_for_virtual_module_path(path: &str) -> String {
+    let mut result = String::new();
+    let mut needs_gap = false;
+    for character in path.chars() {
+        let invalid = character == '\0'
+            || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+            || character < ' ';
+        if invalid {
+            if !result.is_empty() {
+                needs_gap = true;
+            }
+            continue;
+        }
+        if needs_gap {
+            result.push('_');
+            needs_gap = false;
+        }
+        result.push(character);
+    }
+    if result.is_empty() {
+        "_".into()
+    } else {
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         apply_option_defaults, default_extension_to_loader_map, find_reachable_files,
-        hash_for_file_name,
+        hash_for_file_name, is_ascii_only, path_relative_to_outbase,
+        sanitize_file_path_for_virtual_module_path,
     };
     use crate::internal::{
         ast::{ImportRecord, Index32},
         config::{Loader, Options, PathPlaceholder, Platform},
+        fs::{MockKind, mock_fs},
         graph::{EntryPoint, InputFile, InputFileRepr, JsRepr},
+        logger::{Path, Source},
     };
 
     #[test]
@@ -308,5 +415,69 @@ mod tests {
     fn filename_hash_uses_upstream_base32_prefix() {
         assert_eq!(hash_for_file_name(b"hello"), "NBSWY3DP");
         assert_eq!(hash_for_file_name(b""), "");
+    }
+
+    #[test]
+    fn sanitizes_virtual_paths_and_checks_printable_ascii() {
+        assert_eq!(
+            sanitize_file_path_for_virtual_module_path("a<:?>b\0c"),
+            "a_b_c"
+        );
+        assert_eq!(sanitize_file_path_for_virtual_module_path("<>"), "_");
+        assert!(is_ascii_only("hello ~"));
+        assert!(!is_ascii_only("line\nbreak"));
+        assert!(!is_ascii_only("λ"));
+    }
+
+    #[test]
+    fn computes_paths_relative_to_outbase() {
+        let file_system = mock_fs(
+            &std::collections::HashMap::new(),
+            MockKind::Unix,
+            "/project",
+        );
+        let options = Options {
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let input = InputFile {
+            source: Source {
+                key_path: Path {
+                    text: "/project/src/index.js".into(),
+                    namespace: "file".into(),
+                    ..Path::default()
+                },
+                ..Source::default()
+            },
+            ..InputFile::default()
+        };
+        assert_eq!(
+            path_relative_to_outbase(&input, &options, &file_system, false, ""),
+            ("/src".into(), "index".into())
+        );
+        assert_eq!(
+            path_relative_to_outbase(&input, &options, &file_system, true, ""),
+            ("/".into(), "src".into())
+        );
+
+        let virtual_input = InputFile {
+            source: Source {
+                key_path: Path {
+                    text: "namespace/<bad>/index.js".into(),
+                    namespace: "plugin".into(),
+                    ..Path::default()
+                },
+                ..Source::default()
+            },
+            ..InputFile::default()
+        };
+        assert_eq!(
+            path_relative_to_outbase(&virtual_input, &options, &file_system, true, ""),
+            ("/".into(), "bad".into())
+        );
+        assert_eq!(
+            path_relative_to_outbase(&input, &options, &file_system, false, "custom/name.js"),
+            ("/custom".into(), "name.js".into())
+        );
     }
 }
