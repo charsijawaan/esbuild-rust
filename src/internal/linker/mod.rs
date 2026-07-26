@@ -12,8 +12,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
     ast::{
-        INVALID_REF, ImportItemStatus, ImportKind, ImportRecordFlags, Index32, LocRef,
-        NamespaceAlias, Ref, SymbolKind,
+        INVALID_REF, ImportItemStatus, ImportKind, ImportRecord, ImportRecordFlags, Index32,
+        LocRef, NamespaceAlias, Ref, SymbolKind,
     },
     bundler::{hash_for_file_name, path_relative_to_outbase},
     config::{
@@ -28,9 +28,12 @@ use crate::internal::{
     graph::{
         ExportData, ImportData, InputFileRepr, LinkerGraph, OutputFile, SideEffectsKind, WrapKind,
     },
-    helpers::{BitSet, Joiner, escape_closing_tag, quote_for_json, utf16_to_string},
+    helpers::{
+        BitSet, Joiner, escape_closing_tag, quote_for_json, string_array_arrays_equal,
+        utf16_to_string,
+    },
     js_ast::{self, ExportsKind},
-    logger::{Log, Range},
+    logger::{Log, Path, Range},
     sourcemap::{
         Chunk as SourceMapChunk, LineColumnOffset, MappingsBuffer, SourceMapPieces, SourceMapShift,
         SourceMapState, append_source_map_chunk,
@@ -2213,6 +2216,353 @@ pub fn find_imported_css_files_in_js_order(graph: &LinkerGraph, entry_point: u32
     let mut order = Vec::new();
     visit(graph, entry_point, &mut visited, &mut order);
     order
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CssImportKind {
+    #[default]
+    None,
+    SourceIndex,
+    ExternalPath,
+    Layers,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CssImportOrder {
+    pub conditions: Vec<ImportConditions>,
+    pub condition_import_records: Vec<ImportRecord>,
+    pub layers: Vec<Vec<String>>,
+    pub external_path: Path,
+    pub source_index: u32,
+    pub kind: CssImportKind,
+}
+
+/// Find CSS files reachable from one or more CSS entry points in browser
+/// evaluation order.
+///
+/// Unlike JavaScript, CSS may evaluate the same file more than once. The last
+/// evaluation supplies declarations, while the first evaluation supplies
+/// cascade-layer ordering. This traversal preserves those two distinct effects,
+/// hoists external imports, and carries nested import conditions.
+///
+/// # Panics
+///
+/// Panics if a reachable internal CSS dependency is not represented as CSS.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn find_imported_files_in_css_order(
+    graph: &LinkerGraph,
+    entry_points: &[u32],
+) -> Vec<CssImportOrder> {
+    fn visit(
+        graph: &LinkerGraph,
+        source_index: u32,
+        visited: &[u32],
+        wrapping_conditions: &[ImportConditions],
+        wrapping_import_records: &[ImportRecord],
+        order: &mut Vec<CssImportOrder>,
+        has_external_import: &mut bool,
+    ) {
+        if visited.contains(&source_index) {
+            return;
+        }
+        let mut visited = visited.to_vec();
+        visited.push(source_index);
+
+        let Some(InputFileRepr::Css(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            panic!("CSS import traversal reached a non-CSS file");
+        };
+
+        if !repr.ast.layers_pre_import.is_empty() {
+            order.push(CssImportOrder {
+                kind: CssImportKind::Layers,
+                layers: repr.ast.layers_pre_import.clone(),
+                conditions: wrapping_conditions.to_vec(),
+                condition_import_records: wrapping_import_records.to_vec(),
+                ..CssImportOrder::default()
+            });
+        }
+
+        for rule in &repr.ast.rules {
+            let crate::internal::css_ast::RuleData::AtImport(at_import) = &rule.data else {
+                continue;
+            };
+            let record = &repr.ast.import_records[at_import.import_record_index as usize];
+
+            if record.source_index.is_valid() {
+                let mut nested_conditions = wrapping_conditions.to_vec();
+                let mut nested_import_records = wrapping_import_records.to_vec();
+                if let Some(import_conditions) = &at_import.import_conditions {
+                    nested_conditions.push(import_conditions.clone_with_import_records(
+                        &repr.ast.import_records,
+                        &mut nested_import_records,
+                    ));
+                }
+                visit(
+                    graph,
+                    record.source_index.get_index(),
+                    &visited,
+                    &nested_conditions,
+                    &nested_import_records,
+                    order,
+                    has_external_import,
+                );
+                continue;
+            }
+
+            if !record
+                .flags
+                .contains(ImportRecordFlags::WAS_LOADED_WITH_EMPTY_LOADER)
+            {
+                let mut conditions = wrapping_conditions.to_vec();
+                let mut condition_import_records = wrapping_import_records.to_vec();
+                if let Some(import_conditions) = &at_import.import_conditions {
+                    conditions.push(import_conditions.clone_with_import_records(
+                        &repr.ast.import_records,
+                        &mut condition_import_records,
+                    ));
+                }
+                order.push(CssImportOrder {
+                    kind: CssImportKind::ExternalPath,
+                    external_path: record.path.clone(),
+                    conditions,
+                    condition_import_records,
+                    ..CssImportOrder::default()
+                });
+                *has_external_import = true;
+            }
+        }
+
+        for record in &repr.ast.import_records {
+            if record.kind == ImportKind::ComposesFrom && record.source_index.is_valid() {
+                visit(
+                    graph,
+                    record.source_index.get_index(),
+                    &visited,
+                    wrapping_conditions,
+                    wrapping_import_records,
+                    order,
+                    has_external_import,
+                );
+            }
+        }
+
+        order.push(CssImportOrder {
+            kind: CssImportKind::SourceIndex,
+            source_index,
+            conditions: wrapping_conditions.to_vec(),
+            condition_import_records: wrapping_import_records.to_vec(),
+            ..CssImportOrder::default()
+        });
+    }
+
+    let mut order = Vec::new();
+    let mut has_external_import = false;
+    let visited = [crate::internal::runtime::SOURCE_INDEX; 16];
+    for &source_index in entry_points {
+        visit(
+            graph,
+            source_index,
+            &visited,
+            &[],
+            &[],
+            &mut order,
+            &mut has_external_import,
+        );
+    }
+
+    if has_external_import {
+        let mut reordered = Vec::with_capacity(order.len());
+        let mut is_at_layer_prefix = true;
+        for entry in &order {
+            if (entry.kind == CssImportKind::Layers && is_at_layer_prefix)
+                || entry.kind == CssImportKind::ExternalPath
+            {
+                reordered.push(entry.clone());
+            }
+            if entry.kind != CssImportKind::Layers {
+                is_at_layer_prefix = false;
+            }
+        }
+        is_at_layer_prefix = true;
+        for entry in order {
+            let kind = entry.kind;
+            if (entry.kind != CssImportKind::Layers || !is_at_layer_prefix)
+                && entry.kind != CssImportKind::ExternalPath
+            {
+                reordered.push(entry);
+            }
+            if kind != CssImportKind::Layers {
+                is_at_layer_prefix = false;
+            }
+        }
+        order = reordered;
+    }
+
+    optimize_css_import_order(graph, order)
+}
+
+fn css_layers_post_import(graph: &LinkerGraph, source_index: u32) -> Vec<Vec<String>> {
+    let Some(InputFileRepr::Css(repr)) =
+        graph.files[source_index as usize].input_file.repr.as_ref()
+    else {
+        panic!("CSS import optimization reached a non-CSS file");
+    };
+    repr.ast.layers_post_import.clone()
+}
+
+#[derive(Default)]
+struct CssLayerDuplicate {
+    layers: Vec<Vec<String>>,
+    indices: Vec<usize>,
+}
+
+#[allow(clippy::too_many_lines)]
+fn optimize_css_import_order(
+    graph: &LinkerGraph,
+    mut order: Vec<CssImportOrder>,
+) -> Vec<CssImportOrder> {
+    let mut source_duplicates: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut external_duplicates: HashMap<Path, Vec<usize>> = HashMap::new();
+
+    for index in (0..order.len()).rev() {
+        match order[index].kind {
+            CssImportKind::SourceIndex => {
+                let source_index = order[index].source_index;
+                let duplicates = source_duplicates
+                    .get(&source_index)
+                    .cloned()
+                    .unwrap_or_default();
+                if duplicates.iter().any(|&duplicate| {
+                    is_conditional_import_redundant(
+                        &order[index].conditions,
+                        &order[duplicate].conditions,
+                    )
+                }) {
+                    order[index].kind = CssImportKind::Layers;
+                    order[index].layers = css_layers_post_import(graph, source_index);
+                } else {
+                    source_duplicates
+                        .entry(source_index)
+                        .or_default()
+                        .push(index);
+                }
+            }
+            CssImportKind::ExternalPath => {
+                let external_path = order[index].external_path.clone();
+                let duplicates = external_duplicates
+                    .get(&external_path)
+                    .cloned()
+                    .unwrap_or_default();
+                if duplicates.iter().any(|&duplicate| {
+                    is_conditional_import_redundant(
+                        &order[index].conditions,
+                        &order[duplicate].conditions,
+                    )
+                }) {
+                    order[index].kind = CssImportKind::Layers;
+                } else {
+                    external_duplicates
+                        .entry(external_path)
+                        .or_default()
+                        .push(index);
+                }
+            }
+            CssImportKind::None | CssImportKind::Layers => {}
+        }
+    }
+
+    let mut optimized = Vec::<CssImportOrder>::with_capacity(order.len());
+    let mut layer_duplicates = Vec::<CssLayerDuplicate>::new();
+
+    'next_entry: for mut entry in order {
+        if entry.kind == CssImportKind::Layers {
+            if let Some(anonymous_layer_index) = entry.conditions.iter().position(|condition| {
+                condition.layers.len() == 1 && condition.layers[0].children.is_none()
+            }) {
+                entry.conditions.truncate(anonymous_layer_index);
+                entry.layers.clear();
+            }
+
+            if entry.layers.is_empty() {
+                while entry
+                    .conditions
+                    .last()
+                    .is_some_and(|condition| condition.layers.is_empty())
+                {
+                    entry.conditions.pop();
+                }
+            }
+
+            if entry.conditions.is_empty() && entry.layers.is_empty() {
+                continue;
+            }
+        }
+
+        let layers_key = if entry.kind == CssImportKind::SourceIndex {
+            css_layers_post_import(graph, entry.source_index)
+        } else {
+            entry.layers.clone()
+        };
+        let duplicate_set_index = layer_duplicates
+            .iter()
+            .position(|duplicate| string_array_arrays_equal(&layers_key, &duplicate.layers))
+            .unwrap_or_else(|| {
+                layer_duplicates.push(CssLayerDuplicate {
+                    layers: layers_key,
+                    indices: Vec::new(),
+                });
+                layer_duplicates.len() - 1
+            });
+
+        let mut duplicates = layer_duplicates[duplicate_set_index].indices.clone();
+        for (reverse_index, &optimized_index) in duplicates.iter().enumerate().rev() {
+            if !is_conditional_import_redundant(
+                &entry.conditions,
+                &optimized[optimized_index].conditions,
+            ) {
+                continue;
+            }
+
+            if entry.kind != CssImportKind::Layers {
+                if reverse_index + 1 == duplicates.len()
+                    && optimized_index + 1 == optimized.len()
+                    && optimized[optimized_index].kind == CssImportKind::Layers
+                    && import_conditions_are_equal(
+                        &entry.conditions,
+                        &optimized[optimized_index].conditions,
+                    )
+                {
+                    duplicates.truncate(reverse_index);
+                    optimized.truncate(optimized_index);
+                } else {
+                    optimized.push(entry);
+                }
+            }
+            layer_duplicates[duplicate_set_index].indices = duplicates;
+            continue 'next_entry;
+        }
+
+        duplicates.push(optimized.len());
+        layer_duplicates[duplicate_set_index].indices = duplicates;
+        optimized.push(entry);
+    }
+
+    let mut merged = Vec::<CssImportOrder>::with_capacity(optimized.len());
+    for entry in optimized {
+        if entry.kind == CssImportKind::Layers
+            && let Some(previous) = merged.last_mut()
+            && previous.kind == CssImportKind::Layers
+            && import_conditions_are_equal(&previous.conditions, &entry.conditions)
+        {
+            previous.layers.extend(entry.layers);
+        } else {
+            merged.push(entry);
+        }
+    }
+    merged
 }
 
 /// Discover symbol edges that cross JavaScript chunk boundaries and assign
@@ -5409,17 +5759,17 @@ mod tests {
 
     use super::{
         AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, ChunkRuntimeRefs,
-        CompileResultForSourceMap, CrossChunkImport, CrossChunkImportItem, EntryPointTailRefs,
-        ImportStatus, ImportTracker, MatchImportKind, OutputPathContext, OutputPiece,
-        OutputPieceIndexKind, PartRange, RuntimeReExportContext, StableRef,
+        CompileResultForSourceMap, CrossChunkImport, CrossChunkImportItem, CssImportKind,
+        EntryPointTailRefs, ImportStatus, ImportTracker, MatchImportKind, OutputPathContext,
+        OutputPiece, OutputPieceIndexKind, PartRange, RuntimeReExportContext, StableRef,
         add_exports_for_export_star, advance_import_tracker, append_or_extend_part_range,
         assemble_javascript_chunk, assign_chunk_path_templates, bind_imports_to_exports_for_file,
         classify_module_wrappers, compile_part_range_for_chunk, compute_cross_chunk_dependencies,
         compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
         create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
         finalize_javascript_chunk_outputs, find_imported_css_files_in_js_order,
-        generate_cross_chunk_stmts, generate_entry_point_tail, generate_global_name_prefix,
-        generate_isolated_hash, generate_source_map_for_chunk,
+        find_imported_files_in_css_order, generate_cross_chunk_stmts, generate_entry_point_tail,
+        generate_global_name_prefix, generate_isolated_hash, generate_source_map_for_chunk,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
         match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
@@ -5435,8 +5785,8 @@ mod tests {
             PathTemplate, SourceMap as SourceMapMode, template_to_string,
         },
         css_ast::{
-            ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
-            WhitespaceFlags,
+            AtImportRule, ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData,
+            Rule, RuleData, Token, WhitespaceFlags,
         },
         css_lexer::TokenKind,
         fs::{MockKind, mock_fs},
@@ -7706,6 +8056,141 @@ mod tests {
         ];
         let graph = clone_linker_graph(&input_files, &[0, 1, 2, 3, 4, 5, 6, 7], &[], false);
         assert_eq!(find_imported_css_files_in_js_order(&graph, 0), [7, 5, 6, 4]);
+    }
+
+    fn css_file(
+        imports: Vec<(ImportRecord, Option<ImportConditions>)>,
+        layers_pre_import: Vec<Vec<String>>,
+        layers_post_import: Vec<Vec<String>>,
+    ) -> InputFile {
+        let rules = imports
+            .iter()
+            .enumerate()
+            .map(|(index, (_, import_conditions))| Rule {
+                data: RuleData::AtImport(AtImportRule {
+                    import_conditions: import_conditions.clone(),
+                    import_record_index: u32::try_from(index).expect("import index fits in u32"),
+                }),
+                loc: Loc::default(),
+            })
+            .collect();
+        InputFile {
+            repr: Some(InputFileRepr::Css(Box::new(CssRepr {
+                ast: crate::internal::css_ast::Ast {
+                    import_records: imports.into_iter().map(|(record, _)| record).collect(),
+                    rules,
+                    layers_pre_import,
+                    layers_post_import,
+                    ..crate::internal::css_ast::Ast::default()
+                },
+                ..CssRepr::default()
+            }))),
+            loader: Loader::Css,
+            ..InputFile::default()
+        }
+    }
+
+    fn internal_css_import(source_index: u32) -> (ImportRecord, Option<ImportConditions>) {
+        (
+            ImportRecord {
+                source_index: Index32::new(source_index),
+                kind: ImportKind::At,
+                ..ImportRecord::default()
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn css_order_uses_last_declaration_copy_and_stops_cycles() {
+        let input_files = [
+            css_file(vec![], vec![], vec![]),
+            css_file(
+                vec![internal_css_import(2), internal_css_import(3)],
+                vec![],
+                vec![],
+            ),
+            css_file(vec![internal_css_import(4)], vec![], vec![]),
+            css_file(vec![internal_css_import(4)], vec![], vec![]),
+            css_file(vec![internal_css_import(1)], vec![], vec![]),
+        ];
+        let graph = clone_linker_graph(&input_files, &[0, 1, 2, 3, 4], &[], false);
+        let order = find_imported_files_in_css_order(&graph, &[1]);
+        assert_eq!(
+            order
+                .iter()
+                .map(|entry| (entry.kind, entry.source_index))
+                .collect::<Vec<_>>(),
+            [
+                (CssImportKind::SourceIndex, 2),
+                (CssImportKind::SourceIndex, 4),
+                (CssImportKind::SourceIndex, 3),
+                (CssImportKind::SourceIndex, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn css_order_hoists_external_imports() {
+        let input_files = [
+            css_file(vec![], vec![], vec![]),
+            css_file(
+                vec![
+                    internal_css_import(2),
+                    (
+                        ImportRecord {
+                            path: Path {
+                                text: "https://example.com/theme.css".into(),
+                                ..Path::default()
+                            },
+                            kind: ImportKind::At,
+                            ..ImportRecord::default()
+                        },
+                        None,
+                    ),
+                ],
+                vec![],
+                vec![],
+            ),
+            css_file(vec![], vec![], vec![]),
+        ];
+        let graph = clone_linker_graph(&input_files, &[0, 1, 2], &[], false);
+        let order = find_imported_files_in_css_order(&graph, &[1]);
+        assert_eq!(order[0].kind, CssImportKind::ExternalPath);
+        assert_eq!(order[0].external_path.text, "https://example.com/theme.css");
+        assert_eq!(
+            order[1..]
+                .iter()
+                .map(|entry| entry.source_index)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+    }
+
+    #[test]
+    fn css_order_keeps_first_cascade_layer_effect_for_duplicate_files() {
+        let input_files = [
+            css_file(vec![], vec![], vec![]),
+            css_file(
+                vec![internal_css_import(2), internal_css_import(3)],
+                vec![],
+                vec![],
+            ),
+            css_file(vec![internal_css_import(4)], vec![], vec![]),
+            css_file(vec![internal_css_import(4)], vec![], vec![]),
+            css_file(vec![], vec![], vec![vec!["base".into()]]),
+        ];
+        let graph = clone_linker_graph(&input_files, &[0, 1, 2, 3, 4], &[], false);
+        let order = find_imported_files_in_css_order(&graph, &[1]);
+        assert_eq!(order[0].kind, CssImportKind::Layers);
+        assert_eq!(order[0].layers, [vec!["base"]]);
+        assert_eq!(
+            order[1..]
+                .iter()
+                .map(|entry| entry.source_index)
+                .collect::<Vec<_>>(),
+            [2, 4, 3, 1]
+        );
     }
 
     fn js_repr(graph: &crate::internal::graph::LinkerGraph, source_index: usize) -> &JsRepr {
