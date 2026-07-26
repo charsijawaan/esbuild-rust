@@ -3726,4 +3726,51 @@ mod tests {
             "Duplicate import attribute \"type\""
         );
     }
+
+    #[test]
+    fn extracts_dynamic_import_attributes_into_import_records() {
+        let (ast, ok, log) = parse_source(
+            "const data = import('./data.txt', { with: { type: 'json' } });\
+             const legacy = import('./legacy.json', { assert: { type: 'json' } });\
+             const runtime = import('./runtime.js', { with: { type: getType() } });",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 2);
+        assert_eq!(
+            ast.import_records[0]
+                .assert_or_with
+                .as_ref()
+                .expect("dynamic import attributes")
+                .keyword,
+            crate::internal::ast::AssertOrWithKeyword::With
+        );
+        assert_eq!(
+            ast.import_records[1]
+                .assert_or_with
+                .as_ref()
+                .expect("dynamic import assertion")
+                .keyword,
+            crate::internal::ast::AssertOrWithKeyword::Assert
+        );
+        assert!(
+            ast.import_records[1]
+                .flags
+                .contains(crate::internal::ast::ImportRecordFlags::ASSERT_TYPE_JSON)
+        );
+
+        let dynamic_values = ast.parts[1]
+            .statements
+            .iter()
+            .map(|statement| {
+                let Some(StmtData::Local(local)) = statement.data.as_deref() else {
+                    panic!("expected local declaration");
+                };
+                local.declarations[0].value_or_nil.data.as_deref()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(dynamic_values[0], Some(ExprData::ImportString(_))));
+        assert!(matches!(dynamic_values[1], Some(ExprData::ImportString(_))));
+        assert!(matches!(dynamic_values[2], Some(ExprData::ImportCall(_))));
+    }
 }

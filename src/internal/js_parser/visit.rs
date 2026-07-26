@@ -2,12 +2,16 @@
 
 use std::collections::HashMap;
 
-use crate::internal::js_ast::{
-    AssignTarget, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class, DotExpr, Expr,
-    ExprData, Function, IdentifierExpr, ObjectExpr, OpCode, PropertyFlags, PropertyKind, ScopeKind,
-    Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
-};
 use crate::internal::logger::{Loc, Range};
+use crate::internal::{
+    ast::{AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportRecordFlags},
+    helpers::utf16_to_string,
+    js_ast::{
+        AssignTarget, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class, DotExpr, Expr,
+        ExprData, Function, IdentifierExpr, ObjectExpr, OpCode, PropertyFlags, PropertyKind,
+        ScopeKind, Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
+    },
+};
 
 use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properties};
 use super::{parser_core::ParserCore, standalone_helpers::is_simple_parameter_list};
@@ -1160,9 +1164,11 @@ fn visit_expr_with_target(
         ExprData::ImportCall(import) => {
             visit_expr(core, &mut import.expr, resolve_identifiers);
             visit_expr(core, &mut import.options_or_nil, resolve_identifiers);
-            if import.options_or_nil.data.is_none()
+            let options = import_options(&import.options_or_nil);
+            if (import.options_or_nil.data.is_none() || options.is_some())
                 && let Some(ExprData::String(path)) = import.expr.data.as_deref()
             {
+                let (assert_or_with, flags) = options.unwrap_or_default();
                 let import_record_index = core.add_import_record(
                     crate::internal::ast::ImportKind::Dynamic,
                     import.phase,
@@ -1171,8 +1177,9 @@ fn visit_expr_with_target(
                         &path.value,
                     ))
                     .into_owned(),
-                    crate::internal::ast::ImportRecordFlags::default(),
+                    flags,
                 );
+                core.import_records[import_record_index as usize].assert_or_with = assert_or_with;
                 *data = ExprData::ImportString(crate::internal::js_ast::ImportStringExpr {
                     import_record_index,
                     close_paren_loc: import.close_paren_loc,
@@ -1507,6 +1514,70 @@ fn visit_expr_with_target(
             }
         }
     }
+}
+
+fn import_options(expression: &Expr) -> Option<(Option<ImportAssertOrWith>, ImportRecordFlags)> {
+    let ExprData::Object(outer) = expression.data.as_deref()? else {
+        return None;
+    };
+    let [property] = outer.properties.as_slice() else {
+        return None;
+    };
+    if property.kind != PropertyKind::Field || property.flags.contains(PropertyFlags::IS_COMPUTED) {
+        return None;
+    }
+    let ExprData::String(keyword_string) = property.key.data.as_deref()? else {
+        return None;
+    };
+    let keyword_text = utf16_to_string(&keyword_string.value);
+    let keyword = match keyword_text.as_slice() {
+        b"assert" => AssertOrWithKeyword::Assert,
+        b"with" => AssertOrWithKeyword::With,
+        _ => return None,
+    };
+    let ExprData::Object(inner) = property.value_or_nil.data.as_deref()? else {
+        return None;
+    };
+    let mut entries = Vec::with_capacity(inner.properties.len());
+    let mut flags = ImportRecordFlags::default();
+    for property in &inner.properties {
+        if property.kind != PropertyKind::Field
+            || property.flags.contains(PropertyFlags::IS_COMPUTED)
+        {
+            return None;
+        }
+        let ExprData::String(key) = property.key.data.as_deref()? else {
+            return None;
+        };
+        let ExprData::String(value) = property.value_or_nil.data.as_deref()? else {
+            return None;
+        };
+        if keyword == AssertOrWithKeyword::Assert
+            && utf16_to_string(&key.value) == b"type"
+            && utf16_to_string(&value.value) == b"json"
+        {
+            flags |= ImportRecordFlags::ASSERT_TYPE_JSON;
+        }
+        entries.push(AssertOrWithEntry {
+            key: key.value.clone(),
+            value: value.value.clone(),
+            key_loc: property.key.loc,
+            value_loc: property.value_or_nil.loc,
+            prefer_quoted_key: property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY),
+        });
+    }
+    Some((
+        Some(ImportAssertOrWith {
+            entries,
+            keyword,
+            keyword_loc: property.key.loc,
+            inner_open_brace_loc: property.value_or_nil.loc,
+            inner_close_brace_loc: inner.close_brace_loc,
+            outer_open_brace_loc: expression.loc,
+            outer_close_brace_loc: outer.close_brace_loc,
+        }),
+        flags,
+    ))
 }
 
 fn property_name(property: &crate::internal::js_ast::Property) -> Option<String> {

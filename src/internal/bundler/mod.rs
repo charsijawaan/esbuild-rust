@@ -2391,6 +2391,7 @@ mod tests {
                 (
                     "/project/entry.js".into(),
                     "import textJson from './data.txt' with { type: 'json' };\
+                     import('./data.txt', { with: { type: 'json' } });\
                      import json from './data.json' assert { type: 'json' };\
                      import bad from './code.js' assert { type: 'json' };\
                      console.log(textJson, json, bad)"
@@ -2440,6 +2441,24 @@ mod tests {
             panic!("expected lazy JSON JavaScript representation");
         };
         assert_eq!(text_json_repr.ast.exports_kind, ExportsKind::Esm);
+        let entry = bundle
+            .files
+            .iter()
+            .find(|file| file.input_file.source.key_path.text == "/project/entry.js")
+            .expect("entry input");
+        let dynamic_record = entry
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+            .expect("entry import records")
+            .iter()
+            .find(|record| record.kind == ImportKind::Dynamic)
+            .expect("dynamic import attribute record");
+        assert_eq!(
+            dynamic_record.source_index.get_index(),
+            text_json.input_file.source.index
+        );
 
         let ordinary_json = bundle
             .files
