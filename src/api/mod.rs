@@ -734,6 +734,22 @@ mod tests {
     }
 
     #[test]
+    fn minifies_css_box_shadows() {
+        assert_eq!(
+            code(transform(
+                "a { box-shadow: 0px 0em 0rem 0cm black, inset 0px 1px 0px 0px rgb(255, 0, 0), 1px 2px 3px 4px aliceblue } b { box-shadow: var(--x) 0px 0px 0px black } c { text-shadow: 0px 0px 0px blue }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{box-shadow:0 0 #000,inset 0 1px red,1px 2px 3px 4px #f0f8ff}b{box-shadow:var(--x) 0 0 0 #000}c{text-shadow:0px 0px 0px blue}\n"
+        );
+    }
+
+    #[test]
     fn scopes_and_minifies_local_css_names() {
         let input = ".card { color: red } #root .card { color: blue }";
         assert_eq!(

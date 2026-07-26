@@ -689,6 +689,9 @@ impl Parser {
             if key_lower == "transform" {
                 minify_transforms(&mut value);
             }
+            if key_lower == "box-shadow" {
+                minify_box_shadows(&mut value, self.minify_whitespace);
+            }
         }
         let important = take_important(&mut value);
         if !important && let Some(last) = value.last_mut() {
@@ -1948,6 +1951,100 @@ fn minify_four_side_shorthand(tokens: &mut Vec<Token>) {
         } else {
             WhitespaceFlags::BEFORE
         };
+    }
+}
+
+fn minify_box_shadows(tokens: &mut Vec<Token>, minify_whitespace: bool) {
+    let original = std::mem::take(tokens);
+    let mut start = 0;
+    for index in 0..=original.len() {
+        if index == original.len() || original[index].kind == TokenKind::Comma {
+            let mut shadow = original[start..index].to_vec();
+            minify_box_shadow(&mut shadow, minify_whitespace);
+            tokens.extend(shadow);
+            if index < original.len() {
+                tokens.push(original[index].clone());
+            }
+            start = index + 1;
+        }
+    }
+}
+
+fn minify_box_shadow(tokens: &mut Vec<Token>, minify_whitespace: bool) {
+    let mut inset_count = 0;
+    let mut color_count = 0;
+    let mut numbers_begin = 0;
+    let mut numbers_count = 0;
+    let mut numbers_done = false;
+    let mut found_unexpected_token = false;
+    for (index, token) in tokens.iter_mut().enumerate() {
+        if matches!(token.kind, TokenKind::Number | TokenKind::Dimension) {
+            if numbers_done {
+                found_unexpected_token = true;
+            }
+            token.turn_length_into_number_if_zero();
+            if numbers_count == 0 {
+                numbers_begin = index;
+            }
+            numbers_count += 1;
+        } else {
+            if numbers_count != 0 {
+                numbers_done = true;
+            }
+            if token_looks_like_color(token) {
+                color_count += 1;
+                minify_single_color(std::slice::from_mut(token));
+            } else if token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("inset") {
+                inset_count += 1;
+            } else {
+                found_unexpected_token = true;
+            }
+        }
+    }
+    if inset_count <= 1
+        && color_count <= 1
+        && numbers_count > 2
+        && numbers_count <= 4
+        && !found_unexpected_token
+    {
+        let numbers_end = numbers_begin + numbers_count;
+        while numbers_count > 2 && tokens[numbers_begin + numbers_count - 1].is_zero() {
+            numbers_count -= 1;
+        }
+        tokens.drain(numbers_begin + numbers_count..numbers_end);
+    }
+    let token_count = tokens.len();
+    for (index, token) in tokens.iter_mut().enumerate() {
+        token.whitespace = WhitespaceFlags::default();
+        if index > 0 || !minify_whitespace {
+            token.whitespace |= WhitespaceFlags::BEFORE;
+        }
+        if index + 1 < token_count {
+            token.whitespace |= WhitespaceFlags::AFTER;
+        }
+    }
+}
+
+fn token_looks_like_color(token: &Token) -> bool {
+    match token.kind {
+        TokenKind::Hash => true,
+        TokenKind::Ident => named_color_hex(&token.text.to_ascii_lowercase()).is_some(),
+        TokenKind::Function => matches!(
+            token.text.to_ascii_lowercase().as_str(),
+            "color"
+                | "color-mix"
+                | "hsl"
+                | "hsla"
+                | "hwb"
+                | "lab"
+                | "lch"
+                | "light-dark"
+                | "oklab"
+                | "oklch"
+                | "rgb"
+                | "rgba"
+        ),
+        _ => false,
     }
 }
 
