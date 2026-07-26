@@ -44,6 +44,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
     let mut parser = Parser {
         source,
         tokens: result.tokens,
+        minify_syntax: options.minify_syntax,
         minify_whitespace: options.minify_whitespace,
         index: 0,
         import_records: Vec::new(),
@@ -95,6 +96,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
 struct Parser {
     source: Source,
     tokens: Vec<css_lexer::Token>,
+    minify_syntax: bool,
     minify_whitespace: bool,
     index: usize,
     import_records: Vec<ImportRecord>,
@@ -127,6 +129,14 @@ impl Parser {
                 }
                 _ => rules.push(self.parse_qualified_rule()),
             }
+        }
+        if self.minify_syntax {
+            rules.retain(|rule| {
+                !matches!(
+                    &rule.data,
+                    RuleData::Selector(selector) if selector.rules.is_empty()
+                )
+            });
         }
         rules
     }
@@ -262,8 +272,16 @@ impl Parser {
             }
             self.index += 1;
             let rules = self.parse_rule_list(true);
+            let mut selectors = keyframe_selectors(&selector_tokens);
+            if self.minify_syntax {
+                for selector in &mut selectors {
+                    if selector.eq_ignore_ascii_case("from") {
+                        "0%".clone_into(selector);
+                    }
+                }
+            }
             blocks.push(KeyframeBlock {
-                selectors: keyframe_selectors(&selector_tokens),
+                selectors,
                 rules,
                 loc: selector_loc,
                 ..KeyframeBlock::default()
@@ -584,6 +602,9 @@ impl Parser {
         let value_start = self.index;
         let value_end = self.scan_declaration_end();
         let mut value = self.convert_tokens(value_start, value_end);
+        if self.minify_syntax {
+            reduce_calc_expressions(&mut value);
+        }
         if self.make_local_symbols && key_text.eq_ignore_ascii_case("composes") {
             self.process_composes(&value);
             self.index = value_end;
@@ -598,6 +619,14 @@ impl Parser {
                 self.process_animation_names(&mut value);
             }
             _ => {}
+        }
+        if self.minify_syntax
+            && matches!(
+                key_text.to_ascii_lowercase().as_str(),
+                "color" | "background" | "background-color"
+            )
+        {
+            minify_single_color(&mut value);
         }
         let important = take_important(&mut value);
         if !important && let Some(last) = value.last_mut() {
@@ -854,18 +883,22 @@ impl Parser {
         while index < end {
             let token = self.tokens[index];
             if token.kind == TokenKind::Whitespace {
-                if !self.minify_whitespace {
-                    if let Some(previous) = result.last_mut() {
-                        previous.whitespace |= WhitespaceFlags::AFTER;
-                    }
-                    pending_whitespace = true;
-                }
+                pending_whitespace = true;
                 index += 1;
                 continue;
             }
             let mut converted = self.convert_token(token);
             if pending_whitespace {
-                converted.whitespace |= WhitespaceFlags::BEFORE;
+                let keep_whitespace = !self.minify_whitespace
+                    || result
+                        .last()
+                        .is_some_and(|previous| whitespace_is_required(previous, &converted));
+                if keep_whitespace {
+                    if let Some(previous) = result.last_mut() {
+                        previous.whitespace |= WhitespaceFlags::AFTER;
+                    }
+                    converted.whitespace |= WhitespaceFlags::BEFORE;
+                }
                 pending_whitespace = false;
             }
             if let Some(close) = matching_close(token.kind) {
@@ -1096,6 +1129,190 @@ fn trim_token_boundary_whitespace(tokens: &mut [Token]) {
     } else {
         WhitespaceFlags::default()
     };
+}
+
+fn whitespace_is_required(left: &Token, right: &Token) -> bool {
+    if matches!(left.kind, TokenKind::DelimPlus | TokenKind::DelimMinus)
+        || matches!(right.kind, TokenKind::DelimPlus | TokenKind::DelimMinus)
+    {
+        return true;
+    }
+    let can_end_word = matches!(
+        left.kind,
+        TokenKind::Ident
+            | TokenKind::Symbol
+            | TokenKind::Number
+            | TokenKind::Dimension
+            | TokenKind::Percentage
+            | TokenKind::Hash
+            | TokenKind::String
+            | TokenKind::Url
+            | TokenKind::Function
+    );
+    let can_start_word = matches!(
+        right.kind,
+        TokenKind::Ident
+            | TokenKind::Symbol
+            | TokenKind::Number
+            | TokenKind::Dimension
+            | TokenKind::Percentage
+            | TokenKind::Hash
+            | TokenKind::String
+            | TokenKind::Url
+            | TokenKind::Function
+    );
+    can_end_word && can_start_word
+}
+
+fn minify_single_color(tokens: &mut [Token]) {
+    if let [token] = tokens
+        && token.kind == TokenKind::Ident
+    {
+        let hex = match token.text.to_ascii_lowercase().as_str() {
+            "black" => "000",
+            "white" => "fff",
+            "blue" => "00f",
+            "yellow" => "ff0",
+            "fuchsia" => "f0f",
+            "aqua" => "0ff",
+            _ => return,
+        };
+        token.kind = TokenKind::Hash;
+        hex.clone_into(&mut token.text);
+    }
+}
+
+fn reduce_calc_expressions(tokens: &mut [Token]) {
+    for token in tokens.iter_mut() {
+        if let Some(children) = &mut token.children {
+            reduce_calc_expressions(children);
+        }
+        if token.kind != TokenKind::Function || !token.text.eq_ignore_ascii_case("calc") {
+            continue;
+        }
+        let Some(children) = &token.children else {
+            continue;
+        };
+        let replacement = match children.as_slice() {
+            [value] if numeric_token(value).is_some() => Some(value.clone()),
+            [left, operator, right] => reduce_calc_binary(left, operator, right),
+            _ => None,
+        };
+        if let Some(mut replacement) = replacement {
+            replacement.loc = token.loc;
+            replacement.whitespace = token.whitespace;
+            *token = replacement;
+        }
+    }
+}
+
+fn reduce_calc_binary(left: &Token, operator: &Token, right: &Token) -> Option<Token> {
+    let left_number = numeric_token(left)?;
+    let right_number = numeric_token(right)?;
+    let (number, kind, unit) = match operator.kind {
+        TokenKind::DelimPlus | TokenKind::DelimMinus
+            if operator.whitespace.contains(WhitespaceFlags::BEFORE)
+                && operator.whitespace.contains(WhitespaceFlags::AFTER)
+                && left_number.kind == right_number.kind
+                && left_number.unit.eq_ignore_ascii_case(right_number.unit) =>
+        {
+            let number = if operator.kind == TokenKind::DelimPlus {
+                left_number.number + right_number.number
+            } else {
+                left_number.number - right_number.number
+            };
+            (number, left_number.kind, left_number.unit)
+        }
+        TokenKind::DelimAsterisk if left_number.kind == TokenKind::Number => (
+            left_number.number * right_number.number,
+            right_number.kind,
+            right_number.unit,
+        ),
+        TokenKind::DelimAsterisk if right_number.kind == TokenKind::Number => (
+            left_number.number * right_number.number,
+            left_number.kind,
+            left_number.unit,
+        ),
+        TokenKind::DelimSlash
+            if right_number.kind == TokenKind::Number && right_number.number != 0.0 =>
+        {
+            (
+                left_number.number / right_number.number,
+                left_number.kind,
+                left_number.unit,
+            )
+        }
+        _ => return None,
+    };
+    numeric_token_from_parts(left, number, kind, unit)
+}
+
+#[derive(Clone, Copy)]
+struct NumericToken<'a> {
+    number: f64,
+    kind: TokenKind,
+    unit: &'a str,
+}
+
+fn numeric_token(token: &Token) -> Option<NumericToken<'_>> {
+    let (number, unit) = match token.kind {
+        TokenKind::Number => (token.text.parse::<f64>().ok()?, ""),
+        TokenKind::Percentage => (token.percentage_value().parse::<f64>().ok()?, "%"),
+        TokenKind::Dimension => (
+            token.dimension_value().parse::<f64>().ok()?,
+            token.dimension_unit(),
+        ),
+        _ => return None,
+    };
+    number.is_finite().then_some(NumericToken {
+        number,
+        kind: token.kind,
+        unit,
+    })
+}
+
+fn numeric_token_from_parts(
+    original: &Token,
+    number: f64,
+    kind: TokenKind,
+    unit: &str,
+) -> Option<Token> {
+    let number = float_to_string_for_calc(number)?;
+    let mut result = original.clone();
+    result.kind = kind;
+    result.children = None;
+    result.payload_index = 0;
+    result.unit_offset = 0;
+    result.text = match kind {
+        TokenKind::Number => number,
+        TokenKind::Percentage => format!("{number}%"),
+        TokenKind::Dimension => {
+            result.unit_offset = u16::try_from(number.len()).ok()?;
+            format!("{number}{unit}")
+        }
+        _ => return None,
+    };
+    Some(result)
+}
+
+fn float_to_string_for_calc(number: f64) -> Option<String> {
+    if !number.is_finite() {
+        return None;
+    }
+    let mut text = format!("{number:.5}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    if let Some(fraction) = text.strip_prefix("0.") {
+        text = format!(".{fraction}");
+    } else if let Some(fraction) = text.strip_prefix("-0.") {
+        text = format!("-.{fraction}");
+    }
+    (text.parse::<f64>().ok()?.partial_cmp(&number) == Some(std::cmp::Ordering::Equal))
+        .then_some(text)
 }
 
 fn parse_layer_names(tokens: &[Token]) -> Vec<Vec<String>> {

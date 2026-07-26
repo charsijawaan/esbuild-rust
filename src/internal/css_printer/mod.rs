@@ -377,7 +377,7 @@ impl Printer<'_> {
             }
             TokenKind::Hash => {
                 self.css.push(b'#');
-                self.print_ident(&token.text);
+                self.css.extend_from_slice(token.text.as_bytes());
             }
             TokenKind::String => self.print_quoted(&token.text, None),
             TokenKind::Url => {

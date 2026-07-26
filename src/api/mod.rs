@@ -320,7 +320,7 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u
     } else {
         HashMap::new()
     };
-    css_printer::print(
+    let mut css = css_printer::print(
         &tree,
         &symbols,
         css_printer::Options {
@@ -331,7 +331,11 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u
             ..css_printer::Options::default()
         },
     )
-    .css
+    .css;
+    if !css.is_empty() && css.last() != Some(&b'\n') {
+        css.push(b'\n');
+    }
+    css
 }
 
 fn local_css_names(
@@ -541,7 +545,47 @@ mod tests {
                     ..TransformOptions::default()
                 }
             )),
-            ".card{color:red;margin:0!important}"
+            ".card{color:red;margin:0!important}\n"
+        );
+    }
+
+    #[test]
+    fn minifies_core_css_syntax() {
+        assert_eq!(
+            code(transform(
+                ".a {} .b { color: blue }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            ".b{color:#00f}\n"
+        );
+        assert_eq!(
+            code(transform(
+                "@keyframes fade { from { opacity: 0 } to { opacity: 1 } } .fade { animation: fade 1s }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "@keyframes fade{0%{opacity:0}to{opacity:1}}.fade{animation:fade 1s}\n"
+        );
+        assert_eq!(
+            code(transform(
+                ".a { width: calc(1px + 2px); height: calc(2 * 3px); opacity: calc(1 / 2) }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            ".a{width:3px;height:6px;opacity:.5}\n"
         );
     }
 
