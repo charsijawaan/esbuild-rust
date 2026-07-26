@@ -3183,6 +3183,179 @@ fn identifier_binding(reference: Ref) -> js_ast::Binding {
     }
 }
 
+/// Wrap an ESM module in the generated `__esm` initializer.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn wrap_esm_stmts(
+    ast: &js_ast::Ast,
+    body: Vec<js_ast::Stmt>,
+    mut outside_wrapper_prefix: Vec<js_ast::Stmt>,
+    esm_runtime_ref: Ref,
+    options: &Options,
+    pretty_path: &str,
+    is_async: bool,
+) -> Vec<js_ast::Stmt> {
+    let hoisted = std::cell::RefCell::new(Vec::new());
+    let wrap_identifier = |location, reference| {
+        hoisted.borrow_mut().push(js_ast::Decl {
+            binding: js_ast::Binding {
+                loc: location,
+                ..identifier_binding(reference)
+            },
+            ..js_ast::Decl::default()
+        });
+        js_ast::Expr::new(
+            location,
+            js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                reference,
+                ..js_ast::IdentifierExpr::default()
+            }),
+        )
+    };
+    let mut wrapped_body = Vec::with_capacity(body.len());
+    for mut statement in body {
+        match statement.data.as_deref() {
+            Some(js_ast::StmtData::Local(local)) => {
+                let mut value = js_ast::Expr::default();
+                for declaration in &local.declarations {
+                    let binding = js_ast::convert_binding_to_expr(
+                        &declaration.binding,
+                        Some(&wrap_identifier),
+                    );
+                    if declaration.value_or_nil.data.is_some() {
+                        value = js_ast::join_with_comma(
+                            value,
+                            js_ast::assign(binding, declaration.value_or_nil.clone()),
+                        );
+                    }
+                }
+                if value.data.is_none() {
+                    continue;
+                }
+                statement.data = Some(Box::new(js_ast::StmtData::Expr(js_ast::ExprStmt {
+                    value,
+                    ..js_ast::ExprStmt::default()
+                })));
+            }
+            Some(js_ast::StmtData::Function(_)) => {
+                outside_wrapper_prefix.push(statement);
+                continue;
+            }
+            _ => {}
+        }
+        wrapped_body.push(statement);
+    }
+    let mut declarations = hoisted.into_inner();
+    let function_body = js_ast::FunctionBody {
+        block: js_ast::BlockStmt {
+            statements: wrapped_body,
+            ..js_ast::BlockStmt::default()
+        },
+        ..js_ast::FunctionBody::default()
+    };
+    let initializer = if options.profiler_names {
+        let kind = if options
+            .unsupported_js_features
+            .contains(crate::internal::compat::JsFeature::OBJECT_EXTENSIONS)
+        {
+            js_ast::PropertyKind::Field
+        } else {
+            js_ast::PropertyKind::Method
+        };
+        js_ast::Expr::new(
+            crate::internal::logger::Loc::default(),
+            js_ast::ExprData::Object(js_ast::ObjectExpr {
+                properties: vec![js_ast::Property {
+                    kind,
+                    key: js_ast::Expr::new(
+                        crate::internal::logger::Loc::default(),
+                        js_ast::ExprData::String(js_ast::StringExpr {
+                            value: crate::internal::helpers::string_to_utf16(
+                                pretty_path.as_bytes(),
+                            ),
+                            ..js_ast::StringExpr::default()
+                        }),
+                    ),
+                    value_or_nil: js_ast::Expr::new(
+                        crate::internal::logger::Loc::default(),
+                        js_ast::ExprData::Function(js_ast::FunctionExpr {
+                            function: js_ast::Function {
+                                body: function_body,
+                                is_async,
+                                ..js_ast::Function::default()
+                            },
+                            ..js_ast::FunctionExpr::default()
+                        }),
+                    ),
+                    ..js_ast::Property::default()
+                }],
+                ..js_ast::ObjectExpr::default()
+            }),
+        )
+    } else if options
+        .unsupported_js_features
+        .contains(crate::internal::compat::JsFeature::ARROW)
+    {
+        js_ast::Expr::new(
+            crate::internal::logger::Loc::default(),
+            js_ast::ExprData::Function(js_ast::FunctionExpr {
+                function: js_ast::Function {
+                    body: function_body,
+                    is_async,
+                    ..js_ast::Function::default()
+                },
+                ..js_ast::FunctionExpr::default()
+            }),
+        )
+    } else {
+        js_ast::Expr::new(
+            crate::internal::logger::Loc::default(),
+            js_ast::ExprData::Arrow(js_ast::ArrowExpr {
+                body: function_body,
+                is_async,
+                ..js_ast::ArrowExpr::default()
+            }),
+        )
+    };
+    let value = js_ast::Expr::new(
+        crate::internal::logger::Loc::default(),
+        js_ast::ExprData::Call(js_ast::CallExpr {
+            target: js_ast::Expr::new(
+                crate::internal::logger::Loc::default(),
+                js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                    reference: esm_runtime_ref,
+                    ..js_ast::IdentifierExpr::default()
+                }),
+            ),
+            args: vec![initializer],
+            ..js_ast::CallExpr::default()
+        }),
+    );
+
+    if !options.minify_syntax && !declarations.is_empty() {
+        outside_wrapper_prefix.push(js_ast::Stmt::new(
+            crate::internal::logger::Loc::default(),
+            js_ast::StmtData::Local(js_ast::LocalStmt {
+                declarations,
+                ..js_ast::LocalStmt::default()
+            }),
+        ));
+        declarations = Vec::new();
+    }
+    declarations.push(js_ast::Decl {
+        binding: identifier_binding(ast.wrapper_ref),
+        value_or_nil: value,
+    });
+    outside_wrapper_prefix.push(js_ast::Stmt::new(
+        crate::internal::logger::Loc::default(),
+        js_ast::StmtData::Local(js_ast::LocalStmt {
+            declarations,
+            ..js_ast::LocalStmt::default()
+        }),
+    ));
+    outside_wrapper_prefix
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -3589,7 +3762,7 @@ mod tests {
         print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
         recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
         sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
-        tree_shaking_and_code_splitting, wrap_common_js_stmts,
+        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -4561,6 +4734,105 @@ mod tests {
             object.properties[0].value_or_nil.data.as_deref(),
             Some(js_ast::ExprData::Function(function)) if function.function.args.len() == 2
         ));
+    }
+
+    #[test]
+    fn esm_wrapper_hoists_declarations_and_preserves_async() {
+        let local_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let wrapper_ref = Ref {
+            source_index: 0,
+            inner_index: 1,
+        };
+        let ast = js_ast::Ast {
+            wrapper_ref,
+            ..js_ast::Ast::default()
+        };
+        let body = vec![
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::Function(js_ast::FunctionStmt::default()),
+            ),
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::Local(js_ast::LocalStmt {
+                    declarations: vec![js_ast::Decl {
+                        binding: js_ast::Binding {
+                            data: Some(Box::new(js_ast::BindingData::Identifier(
+                                js_ast::IdentifierBinding {
+                                    reference: local_ref,
+                                },
+                            ))),
+                            ..js_ast::Binding::default()
+                        },
+                        value_or_nil: js_ast::Expr::new(
+                            Loc::default(),
+                            js_ast::ExprData::Number(1.0),
+                        ),
+                    }],
+                    ..js_ast::LocalStmt::default()
+                }),
+            ),
+        ];
+        let runtime_ref = Ref {
+            source_index: 0,
+            inner_index: 2,
+        };
+        let wrapped = wrap_esm_stmts(
+            &ast,
+            body.clone(),
+            Vec::new(),
+            runtime_ref,
+            &Options::default(),
+            "src/file.js",
+            true,
+        );
+        assert_eq!(wrapped.len(), 3);
+        assert!(matches!(
+            wrapped[0].data.as_deref(),
+            Some(js_ast::StmtData::Function(_))
+        ));
+        let Some(js_ast::StmtData::Local(hoisted)) = wrapped[1].data.as_deref() else {
+            panic!("hoisted declarations");
+        };
+        assert_eq!(hoisted.declarations.len(), 1);
+        let Some(js_ast::StmtData::Local(initializer)) = wrapped[2].data.as_deref() else {
+            panic!("initializer declaration");
+        };
+        let Some(js_ast::ExprData::Call(call)) =
+            initializer.declarations[0].value_or_nil.data.as_deref()
+        else {
+            panic!("initializer call");
+        };
+        assert!(matches!(
+            call.args[0].data.as_deref(),
+            Some(js_ast::ExprData::Arrow(arrow))
+                if arrow.is_async
+                    && matches!(
+                        arrow.body.block.statements[0].data.as_deref(),
+                        Some(js_ast::StmtData::Expr(_))
+                    )
+        ));
+
+        let minified = wrap_esm_stmts(
+            &ast,
+            body,
+            Vec::new(),
+            runtime_ref,
+            &Options {
+                minify_syntax: true,
+                ..Options::default()
+            },
+            "src/file.js",
+            false,
+        );
+        assert_eq!(minified.len(), 2);
+        let Some(js_ast::StmtData::Local(combined)) = minified[1].data.as_deref() else {
+            panic!("combined declaration");
+        };
+        assert_eq!(combined.declarations.len(), 2);
     }
 
     #[test]
