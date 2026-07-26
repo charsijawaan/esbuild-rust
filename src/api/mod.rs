@@ -4206,6 +4206,43 @@ mod tests {
     }
 
     #[test]
+    fn lowers_type_script_constructor_parameter_properties() {
+        let defined = code(transform(
+            "class Box { constructor(public id: string, readonly size = 1) {} }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(defined.contains("id;\n  size;"), "{defined}");
+        assert!(defined.contains("this.id = id;"), "{defined}");
+        assert!(defined.contains("this.size = size;"), "{defined}");
+
+        let assigned = code(transform(
+            "class Box { constructor(public id: string) {} }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(!assigned.contains("\n  id;"), "{assigned}");
+        assert!(assigned.contains("this.id = id;"), "{assigned}");
+
+        let derived = code(transform(
+            "class Box extends Base { constructor(public id: string) { before(); super(); after() } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        let super_index = derived.find("super();").expect("super call");
+        let assignment_index = derived.find("this.id = id;").expect("assignment");
+        let after_index = derived.find("after();").expect("following statement");
+        assert!(super_index < assignment_index && assignment_index < after_index);
+    }
+
+    #[test]
     fn drops_debugger_statements_in_transforms_and_builds() {
         let transformed = code(transform(
             "debugger; function run() { debugger; return 1 }",

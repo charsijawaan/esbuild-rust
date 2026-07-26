@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use crate::internal::logger::{Loc, Range};
 use crate::internal::{
     ast::{AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportRecordFlags},
-    helpers::utf16_to_string,
+    helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
-        AssignTarget, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class, DotExpr, Expr,
-        ExprData, Function, IdentifierExpr, ObjectExpr, OpCode, PropertyFlags, PropertyKind,
-        ScopeKind, Stmt, StmtData, StrictModeKind, StringExpr, for_each_identifier_binding,
+        AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
+        DotExpr, Expr, ExprData, ExprStmt, Function, IdentifierExpr, ObjectExpr, OpCode, Property,
+        PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData, StrictModeKind, StringExpr,
+        for_each_identifier_binding,
     },
 };
 
@@ -680,6 +681,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
 
 #[allow(clippy::too_many_lines)]
 fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bool) {
+    lower_type_script_constructor_parameter_fields(core, class);
     let outer_class_name = class.name.and_then(|name| {
         (!ParserCore::is_stored_name_ref(name.reference)).then_some(name.reference)
     });
@@ -816,6 +818,112 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
     if let (Some(inner), Some(outer)) = (inner_class_name, outer_class_name) {
         core.merge_symbols(inner, outer);
     }
+}
+
+#[allow(clippy::too_many_lines)]
+fn lower_type_script_constructor_parameter_fields(core: &ParserCore, class: &mut Class) {
+    if !core.options.ts.parse {
+        return;
+    }
+    let Some(constructor_index) = class.properties.iter().position(|property| {
+        property.kind == PropertyKind::Method
+            && matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::String(name))
+                    if utf16_to_string(&name.value) == b"constructor"
+            )
+    }) else {
+        return;
+    };
+    let is_derived = class.extends_or_nil.data.is_some();
+    let use_define = class.use_define_for_class_fields;
+    let mut assignments = Vec::new();
+    let mut field_properties = Vec::new();
+    {
+        let constructor = &mut class.properties[constructor_index];
+        let Some(ExprData::Function(function)) = constructor.value_or_nil.data.as_deref_mut()
+        else {
+            return;
+        };
+        for argument in &mut function.function.args {
+            if !argument.is_typescript_ctor_field {
+                continue;
+            }
+            let Some(BindingData::Identifier(identifier)) = argument.binding.data.as_deref() else {
+                continue;
+            };
+            let loc = argument.binding.loc;
+            let name = symbol_name(core, identifier.reference);
+            assignments.push(Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value: Expr::new(
+                        loc,
+                        ExprData::Binary(BinaryExpr {
+                            left: Expr::new(
+                                loc,
+                                ExprData::Dot(DotExpr {
+                                    target: Expr::new(loc, ExprData::This),
+                                    name: name.clone(),
+                                    name_loc: loc,
+                                    ..DotExpr::default()
+                                }),
+                            ),
+                            right: Expr::new(
+                                loc,
+                                ExprData::Identifier(IdentifierExpr {
+                                    reference: identifier.reference,
+                                    ..IdentifierExpr::default()
+                                }),
+                            ),
+                            op: OpCode::BinaryAssign,
+                        }),
+                    ),
+                    ..ExprStmt::default()
+                }),
+            ));
+            if use_define {
+                field_properties.push(Property {
+                    kind: PropertyKind::Field,
+                    key: Expr::new(
+                        loc,
+                        ExprData::String(StringExpr {
+                            value: string_to_utf16(name.as_bytes()),
+                            ..StringExpr::default()
+                        }),
+                    ),
+                    ..Property::default()
+                });
+            }
+        }
+        if assignments.is_empty() {
+            return;
+        }
+        let statements = &mut function.function.body.block.statements;
+        if is_derived {
+            let Some(super_index) = statements.iter().position(|statement| {
+                matches!(
+                    statement.data.as_deref(),
+                    Some(StmtData::Expr(expression))
+                        if matches!(
+                            expression.value.data.as_deref(),
+                            Some(ExprData::Call(call))
+                                if matches!(call.target.data.as_deref(), Some(ExprData::Super))
+                        )
+                )
+            }) else {
+                return;
+            };
+            let insertion_index = super_index + 1;
+            statements.splice(insertion_index..insertion_index, assignments);
+        } else {
+            statements.splice(0..0, assignments);
+        }
+        for argument in &mut function.function.args {
+            argument.is_typescript_ctor_field = false;
+        }
+    }
+    class.properties.splice(0..0, field_properties);
 }
 
 fn visit_binding_initializers(
