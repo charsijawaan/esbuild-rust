@@ -815,7 +815,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
         }
     }
     lower_type_script_static_field_assignments(class);
-    lower_type_script_class_field_assignments(class);
+    lower_type_script_class_field_assignments(core, class);
     core.pop_scope();
     core.pop_scope();
     if let (Some(inner), Some(outer)) = (inner_class_name, outer_class_name) {
@@ -823,15 +823,11 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
     }
 }
 
-fn lower_type_script_class_field_assignments(class: &mut Class) {
+fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut Class) {
     if class.use_define_for_class_fields {
         return;
     }
-    let has_constructor = class_constructor_index(class).is_some();
     let is_derived = class.extends_or_nil.data.is_some();
-    if is_derived && !has_constructor {
-        return;
-    }
 
     let mut assignments = Vec::new();
     class.properties.retain_mut(|property| {
@@ -869,6 +865,39 @@ fn lower_type_script_class_field_assignments(class: &mut Class) {
         let mut function = Function::default();
         function.body.loc = loc;
         function.body.block.statements = assignments;
+        if is_derived {
+            let arguments_ref =
+                core.new_symbol(crate::internal::ast::SymbolKind::Unbound, "arguments");
+            core.record_usage(arguments_ref);
+            function.body.block.statements.insert(
+                0,
+                Stmt::new(
+                    loc,
+                    StmtData::Expr(ExprStmt {
+                        value: Expr::new(
+                            loc,
+                            ExprData::Call(CallExpr {
+                                target: Expr::new(loc, ExprData::Super),
+                                args: vec![Expr::new(
+                                    loc,
+                                    ExprData::Spread(crate::internal::js_ast::SpreadExpr {
+                                        value: Expr::new(
+                                            loc,
+                                            ExprData::Identifier(IdentifierExpr {
+                                                reference: arguments_ref,
+                                                ..IdentifierExpr::default()
+                                            }),
+                                        ),
+                                    }),
+                                )],
+                                ..CallExpr::default()
+                            }),
+                        ),
+                        ..ExprStmt::default()
+                    }),
+                ),
+            );
+        }
         class.properties.push(Property {
             key: Expr::new(
                 loc,

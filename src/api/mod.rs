@@ -4220,6 +4220,20 @@ mod tests {
             "{derived}"
         );
 
+        let generated_derived = code(transform(
+            "class Foo extends Base { initialized = 1 }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            generated_derived
+                .contains("constructor() {\n    super(...arguments);\n    this.initialized = 1;"),
+            "{generated_derived}"
+        );
+
         let define_fields = code(transform(
             "class Foo { foo }",
             TransformOptions {
