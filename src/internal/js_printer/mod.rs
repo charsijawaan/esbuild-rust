@@ -1628,13 +1628,28 @@ impl Printer<'_> {
                         self.print_expr_at(&property.value_or_nil, Precedence::Spread);
                         continue;
                     }
-                    if property.flags.contains(PropertyFlags::IS_COMPUTED) {
-                        self.output.push(b'[');
-                        self.print_expr_at(&property.key, Precedence::Lowest);
-                        self.output.push(b']');
-                    } else {
-                        self.print_property_key(&property.key);
+                    if property.kind.is_method_definition()
+                        && let Some(ExprData::Function(function)) =
+                            property.value_or_nil.data.as_deref()
+                    {
+                        match property.kind {
+                            PropertyKind::Getter => self.output.extend_from_slice(b"get "),
+                            PropertyKind::Setter => self.output.extend_from_slice(b"set "),
+                            _ => {}
+                        }
+                        if function.function.is_async {
+                            self.output.extend_from_slice(b"async ");
+                        }
+                        if function.function.is_generator {
+                            self.output.push(b'*');
+                        }
+                        self.print_class_key(property);
+                        self.print_function_arguments(&function.function);
+                        self.print_optional_space();
+                        self.print_block(&function.function.body.block, false);
+                        continue;
                     }
+                    self.print_class_key(property);
                     let is_shorthand = property.flags.contains(PropertyFlags::WAS_SHORTHAND)
                         && property.initializer_or_nil.data.is_none();
                     if !is_shorthand {
@@ -3165,7 +3180,8 @@ mod tests {
         let source = Source {
             contents: Arc::from(
                 b"const value = 1, rest = {};\
-                  const config = {name: 'demo', ['x']: value, value, ...rest};"
+                  const config = {name: 'demo', ['x']: value, value, ...rest,\
+                    method(){}, get current(){return value}, set current(next){}};"
                     .as_slice(),
             ),
             identifier_name: "entry".into(),
@@ -3181,7 +3197,26 @@ mod tests {
             String::from_utf8(print(&ast, &renamer, Options::default()).js)
                 .expect("printer output is UTF-8"),
             "const value = 1, rest = {};\n\
-             const config = { name: \"demo\", [\"x\"]: value, value, ...rest };\n"
+             const config = { name: \"demo\", [\"x\"]: value, value, ...rest, method() {\n\
+             }, get current() {\n\
+             \x20\x20return value;\n\
+             }, set current(next) {\n\
+             } };\n"
+        );
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "const value=1,rest={};const config={name:\"demo\",[\"x\"]:value,value,...rest,method(){},get current(){return value},set current(next){}};"
         );
     }
 
