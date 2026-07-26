@@ -13,6 +13,7 @@ use super::{
     parser_core::ParserCore,
     parser_types::{AwaitOrYield, FnOrArrowDataParse},
     syntax_arrow::parse_arrow_body,
+    syntax_binding::parse_binding,
     syntax_expression::parse_expression,
     syntax_statement::parse_block,
 };
@@ -158,17 +159,7 @@ pub(crate) fn parse_function_tail(
             has_rest_arg = true;
         }
 
-        let arg_loc = lexer.loc();
-        if lexer.token != Token::Identifier {
-            lexer.expected(Token::Identifier);
-        }
-        let binding = Binding {
-            loc: arg_loc,
-            data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
-                reference: core.store_name_in_ref(lexer.identifier.clone()),
-            }))),
-        };
-        lexer.next();
+        let binding = parse_binding(core, lexer);
 
         let default_or_nil = if !has_rest_arg && lexer.token == Token::Equals {
             lexer.next();

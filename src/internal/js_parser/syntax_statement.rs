@@ -14,6 +14,7 @@ use crate::internal::{
 
 use super::{
     parser_core::ParserCore,
+    syntax_binding::parse_binding,
     syntax_class::parse_class_prefix,
     syntax_expression::{parse_expression, parse_expression_suffix},
     syntax_function::{parse_async_prefix, parse_function_prefix},
@@ -260,17 +261,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                     }
                 } else {
                     lexer.expect(Token::OpenParen);
-                    let binding_loc = lexer.loc();
-                    if lexer.token != Token::Identifier {
-                        lexer.expected(Token::Identifier);
-                    }
-                    let binding = Binding {
-                        loc: binding_loc,
-                        data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
-                            reference: core.store_name_in_ref(lexer.identifier.clone()),
-                        }))),
-                    };
-                    lexer.next();
+                    let binding = parse_binding(core, lexer);
                     lexer.expect(Token::CloseParen);
                     binding
                 };
@@ -425,24 +416,19 @@ fn parse_local_declarations(
 ) -> Stmt {
     let mut declarations = Vec::new();
     loop {
-        if lexer.token != Token::Identifier {
-            lexer.expected(Token::Identifier);
-        }
-        let binding_loc = lexer.loc();
         let binding_range = lexer.range();
-        let name = lexer.identifier.clone();
-        let name_text = String::from_utf8(name.string.clone())
-            .expect("binding identifiers must be valid UTF-8");
-        if kind != LocalKind::Var && name_text == "let" {
+        let name_text = if lexer.token == Token::Identifier {
+            Some(
+                String::from_utf8(lexer.identifier.string.clone())
+                    .expect("binding identifiers must be valid UTF-8"),
+            )
+        } else {
+            None
+        };
+        if kind != LocalKind::Var && name_text.as_deref() == Some("let") {
             core.add_error_range(binding_range, "Cannot use \"let\" as an identifier here:");
         }
-        let binding = Binding {
-            loc: binding_loc,
-            data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
-                reference: core.store_name_in_ref(name),
-            }))),
-        };
-        lexer.next();
+        let binding = parse_binding(core, lexer);
         let value_or_nil = if lexer.token == Token::Equals {
             lexer.next();
             parse_expression(core, lexer, Precedence::Comma, allow_in)
@@ -452,7 +438,10 @@ fn parse_local_declarations(
         if require_const_initializer && kind == LocalKind::Const && value_or_nil.data.is_none() {
             core.add_error_range(
                 binding_range,
-                format!("The constant \"{name_text}\" must be initialized"),
+                name_text.as_ref().map_or_else(
+                    || "The constant must be initialized".into(),
+                    |name| format!("The constant \"{name}\" must be initialized"),
+                ),
             );
         }
         declarations.push(Decl {
@@ -759,7 +748,7 @@ mod tests {
     use super::parse_block;
     use crate::internal::{
         config::TsOptions,
-        js_ast::StmtData,
+        js_ast::{BindingData, StmtData},
         js_lexer::{Lexer, Token},
         js_parser::Options,
         logger::{DeferLogKind, Log, Source},
@@ -1050,6 +1039,49 @@ mod tests {
             Some(StmtData::Class(class))
                 if class.class.name.is_some()
                     && class.class.extends_or_nil.data.is_some()
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn integrates_destructuring_bindings_in_declarations_and_parameters() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"{const {a: renamed, b = 2, ...rest} = object; let [first, , ...tail] = items; function fn({x}, [y = 1]) { return x + y }}"[..],
+            ),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        assert!(matches!(
+            block.statements[0].data.as_deref(),
+            Some(StmtData::Local(local))
+                if matches!(
+                    local.declarations[0].binding.data.as_deref(),
+                    Some(BindingData::Object(_))
+                )
+        ));
+        assert!(matches!(
+            block.statements[1].data.as_deref(),
+            Some(StmtData::Local(local))
+                if matches!(
+                    local.declarations[0].binding.data.as_deref(),
+                    Some(BindingData::Array(_))
+                )
+        ));
+        assert!(matches!(
+            block.statements[2].data.as_deref(),
+            Some(StmtData::Function(function))
+                if matches!(
+                    function.function.args[0].binding.data.as_deref(),
+                    Some(BindingData::Object(_))
+                )
+                    && matches!(
+                        function.function.args[1].binding.data.as_deref(),
+                        Some(BindingData::Array(_))
+                    )
         ));
         assert_eq!(lexer.token, Token::EndOfFile);
     }
