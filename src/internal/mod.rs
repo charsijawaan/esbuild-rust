@@ -2,6 +2,7 @@
 
 pub mod api_helpers;
 pub mod ast;
+pub mod bundler;
 pub mod cache;
 pub mod cli_helpers;
 pub mod compat;

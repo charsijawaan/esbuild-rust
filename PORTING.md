@@ -13,7 +13,7 @@ Status values:
 | `cmd/esbuild` | in progress |
 | `internal/api_helpers` | ported |
 | `internal/ast` | ported |
-| `internal/bundler` | not started |
+| `internal/bundler` | in progress |
 | `internal/cache` | in progress |
 | `internal/cli_helpers` | ported |
 | `internal/compat` | ported |
