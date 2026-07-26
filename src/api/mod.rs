@@ -1388,6 +1388,16 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
             ..TransformResult::default()
         };
     }
+    if options.sourcemap != BuildSourceMap::None && options.sourcefile.is_empty() {
+        return TransformResult {
+            errors: vec![Message {
+                text: "Must use \"sourcefile\" with \"sourcemap\" to set the original file name"
+                    .into(),
+                kind: MessageKind::Error,
+            }],
+            ..TransformResult::default()
+        };
+    }
     let sourcefile = if options.sourcefile.is_empty() {
         "<stdin>".to_string()
     } else {
@@ -4902,22 +4912,22 @@ mod tests {
 
     #[test]
     fn generates_transform_source_maps() {
-        let external = transform(
+        let missing_sourcefile = transform(
             "1+2",
             TransformOptions {
                 sourcemap: BuildSourceMap::External,
                 ..TransformOptions::default()
             },
         );
-        assert!(external.errors.is_empty(), "{:?}", external.errors);
         assert_eq!(
-            String::from_utf8(external.code).expect("transform output is UTF-8"),
-            "1 + 2;\n"
+            missing_sourcefile
+                .errors
+                .first()
+                .map(|message| message.text.as_str()),
+            Some("Must use \"sourcefile\" with \"sourcemap\" to set the original file name")
         );
-        assert_eq!(
-            String::from_utf8(external.map).expect("source map is UTF-8"),
-            "{\n  \"version\": 3,\n  \"sources\": [\"<stdin>\"],\n  \"sourcesContent\": [\"1+2\"],\n  \"mappings\": \"AAAA,IAAE;\",\n  \"names\": []\n}\n"
-        );
+        assert!(missing_sourcefile.code.is_empty());
+        assert!(missing_sourcefile.map.is_empty());
 
         let configured = transform(
             "let       x",
@@ -4940,6 +4950,7 @@ mod tests {
         let inline = transform(
             "1+2",
             TransformOptions {
+                sourcefile: "inline.js".into(),
                 sourcemap: BuildSourceMap::Inline,
                 ..TransformOptions::default()
             },
@@ -4955,6 +4966,7 @@ mod tests {
         let both = transform(
             "a{b:c}",
             TransformOptions {
+                sourcefile: "style.css".into(),
                 loader: Loader::Css,
                 sourcemap: BuildSourceMap::InlineAndExternal,
                 ..TransformOptions::default()

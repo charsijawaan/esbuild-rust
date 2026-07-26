@@ -1136,7 +1136,8 @@ mod tests {
     fn generates_inline_source_maps_for_transforms() {
         for flag in ["--sourcemap", "--sourcemap=inline"] {
             let Output::Code(output) =
-                run_with_stdin(&[flag.into()], Some(b"1+2")).expect("inline source map succeeds")
+                run_with_stdin(&[flag.into(), "--sourcefile=stdin.js".into()], Some(b"1+2"))
+                    .expect("inline source map succeeds")
             else {
                 panic!("expected transformed code");
             };
@@ -1146,6 +1147,14 @@ mod tests {
                 "{output}"
             );
         }
+
+        let Err(error) = run_with_stdin(&["--sourcemap".into()], Some(b"1+2")) else {
+            panic!("source maps need a source file");
+        };
+        assert_eq!(
+            error,
+            "error: Must use \"sourcefile\" with \"sourcemap\" to set the original file name"
+        );
 
         for mode in ["linked", "external", "both"] {
             let Err(error) = run_with_stdin(&[format!("--sourcemap={mode}")], Some(b"1+2")) else {
