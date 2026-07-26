@@ -49,9 +49,56 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             Some(StmtData::Enum(enumeration)) => {
                 core.record_declared_symbol(enumeration.name.reference);
                 core.record_declared_symbol(enumeration.argument);
+                let mut next_numeric_value = 0.0;
+                let mut has_numeric_value = true;
+                let mut constants = HashMap::new();
                 for value in &mut enumeration.values {
                     visit_expr(core, &mut value.value_or_nil, resolve_identifiers);
+                    let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                        &value.name,
+                    ))
+                    .into_owned();
+                    match value.value_or_nil.data.as_deref() {
+                        Some(ExprData::Number(number)) => {
+                            constants.insert(
+                                name,
+                                crate::internal::js_ast::TsEnumValue {
+                                    number: *number,
+                                    ..crate::internal::js_ast::TsEnumValue::default()
+                                },
+                            );
+                            next_numeric_value = *number + 1.0;
+                            has_numeric_value = true;
+                        }
+                        Some(ExprData::String(string)) => {
+                            constants.insert(
+                                name,
+                                crate::internal::js_ast::TsEnumValue {
+                                    string: string.value.clone(),
+                                    ..crate::internal::js_ast::TsEnumValue::default()
+                                },
+                            );
+                            has_numeric_value = false;
+                        }
+                        Some(_) => has_numeric_value = false,
+                        None if has_numeric_value => {
+                            value.value_or_nil =
+                                Expr::new(value.loc, ExprData::Number(next_numeric_value));
+                            constants.insert(
+                                name,
+                                crate::internal::js_ast::TsEnumValue {
+                                    number: next_numeric_value,
+                                    ..crate::internal::js_ast::TsEnumValue::default()
+                                },
+                            );
+                            next_numeric_value += 1.0;
+                        }
+                        None => {
+                            value.value_or_nil = Expr::new(value.loc, ExprData::Undefined);
+                        }
+                    }
                 }
+                core.ts_enums.insert(enumeration.name.reference, constants);
             }
             Some(StmtData::Namespace(namespace)) => {
                 core.record_declared_symbol(namespace.name.reference);

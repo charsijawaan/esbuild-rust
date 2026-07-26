@@ -198,6 +198,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             hashbang,
             directives,
             top_level_symbol_to_parts_from_parser,
+            ts_enums: core.ts_enums,
             mangled_props: core.mangled_props,
             reserved_props: core.reserved_props,
             import_records: core.import_records,
@@ -3213,7 +3214,10 @@ mod tests {
             panic!("expected enum declaration");
         };
         assert_eq!(color.values.len(), 4);
-        assert!(color.values[0].value_or_nil.data.is_none());
+        assert!(matches!(
+            color.values[0].value_or_nil.data.as_deref(),
+            Some(ExprData::Number(0.0))
+        ));
         assert!(matches!(
             color.values[1].value_or_nil.data.as_deref(),
             Some(ExprData::Number(2.0))
@@ -3231,10 +3235,22 @@ mod tests {
                 .kind,
             crate::internal::ast::SymbolKind::TsEnum
         );
+        assert!(ast.ts_enums[&color.name.reference]["Red"].number.abs() < f64::EPSILON);
+        assert!((ast.ts_enums[&color.name.reference]["Green"].number - 2.0).abs() < f64::EPSILON);
+        assert_eq!(
+            crate::internal::helpers::utf16_to_string(
+                &ast.ts_enums[&color.name.reference]["Blue"].string
+            ),
+            b"blue"
+        );
         let Some(StmtData::Enum(flags)) = ast.parts[1].statements[1].data.as_deref() else {
             panic!("expected exported const enum");
         };
         assert!(flags.is_export);
+        assert!(matches!(
+            flags.values[1].value_or_nil.data.as_deref(),
+            Some(ExprData::Number(2.0))
+        ));
         assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
         assert!(ast.named_exports.contains_key("Flags"));
         assert!(
