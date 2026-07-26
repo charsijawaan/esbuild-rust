@@ -1675,12 +1675,26 @@ impl Printer<'_> {
             }
             ExprData::Index(index) => {
                 self.print_expr_at(&index.target, Precedence::Postfix);
-                if index.optional_chain == OptionalChain::Start {
-                    self.output.extend_from_slice(b"?.");
+                if matches!(
+                    index.index.data.as_deref(),
+                    Some(ExprData::PrivateIdentifier(_))
+                ) {
+                    self.output.extend_from_slice(
+                        if index.optional_chain == OptionalChain::Start {
+                            b"?."
+                        } else {
+                            b"."
+                        },
+                    );
+                    self.print_expr_at(&index.index, Precedence::Member);
+                } else {
+                    if index.optional_chain == OptionalChain::Start {
+                        self.output.extend_from_slice(b"?.");
+                    }
+                    self.output.push(b'[');
+                    self.print_expr_at(&index.index, Precedence::Lowest);
+                    self.output.push(b']');
                 }
-                self.output.push(b'[');
-                self.print_expr_at(&index.index, Precedence::Lowest);
-                self.output.push(b']');
             }
             ExprData::Call(call) => {
                 if has_pure_comment {

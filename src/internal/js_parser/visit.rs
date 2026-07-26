@@ -828,13 +828,25 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
         return;
     }
     let is_derived = class.extends_or_nil.data.is_some();
+    let lower_private_fields = class.properties.iter().any(|property| {
+        !matches!(
+            property.key.data.as_deref(),
+            Some(ExprData::PrivateIdentifier(_))
+        ) && class_field_can_be_moved(property)
+    });
 
     let mut assignments = Vec::new();
+    let mut private_declarations = Vec::new();
     class.properties.retain_mut(|property| {
-        let Some(assignment) = take_class_field_assignment(property) else {
+        let Some((assignment, keep_private_declaration)) =
+            take_class_field_assignment(property, lower_private_fields)
+        else {
             return true;
         };
         assignments.push(assignment);
+        if keep_private_declaration {
+            private_declarations.push(std::mem::take(property));
+        }
         false
     });
     if assignments.is_empty() {
@@ -861,63 +873,72 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
                 .splice(0..0, assignments);
         }
     } else {
-        let loc = class.body_loc;
-        let mut function = Function::default();
-        function.body.loc = loc;
-        function.body.block.statements = assignments;
-        if is_derived {
-            let arguments_ref =
-                core.new_symbol(crate::internal::ast::SymbolKind::Unbound, "arguments");
-            core.record_usage(arguments_ref);
-            function.body.block.statements.insert(
-                0,
-                Stmt::new(
-                    loc,
-                    StmtData::Expr(ExprStmt {
-                        value: Expr::new(
-                            loc,
-                            ExprData::Call(CallExpr {
-                                target: Expr::new(loc, ExprData::Super),
-                                args: vec![Expr::new(
-                                    loc,
-                                    ExprData::Spread(crate::internal::js_ast::SpreadExpr {
-                                        value: Expr::new(
-                                            loc,
-                                            ExprData::Identifier(IdentifierExpr {
-                                                reference: arguments_ref,
-                                                ..IdentifierExpr::default()
-                                            }),
-                                        ),
-                                    }),
-                                )],
-                                ..CallExpr::default()
-                            }),
-                        ),
-                        ..ExprStmt::default()
-                    }),
-                ),
-            );
-        }
-        class.properties.push(Property {
-            key: Expr::new(
-                loc,
-                ExprData::String(StringExpr {
-                    value: string_to_utf16(b"constructor"),
-                    ..StringExpr::default()
-                }),
-            ),
-            value_or_nil: Expr::new(
-                loc,
-                ExprData::Function(FunctionExpr {
-                    function,
-                    ..FunctionExpr::default()
-                }),
-            ),
-            loc,
-            kind: PropertyKind::Method,
-            ..Property::default()
-        });
+        append_class_field_constructor(core, class, assignments, is_derived);
     }
+    class.properties.extend(private_declarations);
+}
+
+fn append_class_field_constructor(
+    core: &mut ParserCore,
+    class: &mut Class,
+    assignments: Vec<Stmt>,
+    is_derived: bool,
+) {
+    let loc = class.body_loc;
+    let mut function = Function::default();
+    function.body.loc = loc;
+    function.body.block.statements = assignments;
+    if is_derived {
+        let arguments_ref = core.new_symbol(crate::internal::ast::SymbolKind::Unbound, "arguments");
+        core.record_usage(arguments_ref);
+        function.body.block.statements.insert(
+            0,
+            Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value: Expr::new(
+                        loc,
+                        ExprData::Call(CallExpr {
+                            target: Expr::new(loc, ExprData::Super),
+                            args: vec![Expr::new(
+                                loc,
+                                ExprData::Spread(crate::internal::js_ast::SpreadExpr {
+                                    value: Expr::new(
+                                        loc,
+                                        ExprData::Identifier(IdentifierExpr {
+                                            reference: arguments_ref,
+                                            ..IdentifierExpr::default()
+                                        }),
+                                    ),
+                                }),
+                            )],
+                            ..CallExpr::default()
+                        }),
+                    ),
+                    ..ExprStmt::default()
+                }),
+            ),
+        );
+    }
+    class.properties.push(Property {
+        key: Expr::new(
+            loc,
+            ExprData::String(StringExpr {
+                value: string_to_utf16(b"constructor"),
+                ..StringExpr::default()
+            }),
+        ),
+        value_or_nil: Expr::new(
+            loc,
+            ExprData::Function(FunctionExpr {
+                function,
+                ..FunctionExpr::default()
+            }),
+        ),
+        loc,
+        kind: PropertyKind::Method,
+        ..Property::default()
+    });
 }
 
 fn class_constructor_index(class: &Class) -> Option<usize> {
@@ -931,28 +952,47 @@ fn class_constructor_index(class: &Class) -> Option<usize> {
     })
 }
 
-fn take_class_field_assignment(property: &mut Property) -> Option<Stmt> {
+fn class_field_can_be_moved(property: &Property) -> bool {
     if property.kind != PropertyKind::Field
         || property.flags.contains(PropertyFlags::IS_STATIC)
         || !property.decorators.is_empty()
     {
-        return None;
+        return false;
     }
-    let target = class_field_assignment_target(property)?;
     let initializer = if property.initializer_or_nil.data.is_some() {
         &property.initializer_or_nil
     } else {
         &property.value_or_nil
     };
-    if !class_field_initializer_is_safe_to_move(initializer) {
+    initializer.data.is_some()
+        && class_field_initializer_is_safe_to_move(initializer)
+        && class_field_assignment_target(property).is_some()
+}
+
+fn take_class_field_assignment(
+    property: &mut Property,
+    lower_private_fields: bool,
+) -> Option<(Stmt, bool)> {
+    let is_private = matches!(
+        property.key.data.as_deref(),
+        Some(ExprData::PrivateIdentifier(_))
+    );
+    if is_private && !lower_private_fields {
         return None;
     }
+    if !class_field_can_be_moved(property) {
+        return None;
+    }
+    let target = class_field_assignment_target(property)?;
     let initializer = if property.initializer_or_nil.data.is_some() {
         std::mem::take(&mut property.initializer_or_nil)
     } else {
         std::mem::take(&mut property.value_or_nil)
     };
-    Some(class_field_assignment(property.loc, target, initializer))
+    Some((
+        class_field_assignment(property.loc, target, initializer),
+        is_private,
+    ))
 }
 
 fn class_field_assignment_target(property: &Property) -> Option<Expr> {
@@ -972,7 +1012,7 @@ fn class_field_assignment_target(property: &Property) -> Option<Expr> {
                 }),
             )
         }
-        ExprData::String(_) | ExprData::Number(_) => Expr::new(
+        ExprData::String(_) | ExprData::Number(_) | ExprData::PrivateIdentifier(_) => Expr::new(
             property.loc,
             ExprData::Index(crate::internal::js_ast::IndexExpr {
                 target: Expr::new(property.loc, ExprData::This),
@@ -1010,6 +1050,10 @@ fn lower_type_script_static_field_assignments(class: &mut Class) {
         if property.kind != PropertyKind::Field
             || !property.flags.contains(PropertyFlags::IS_STATIC)
             || !property.decorators.is_empty()
+            || matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::PrivateIdentifier(_))
+            )
         {
             continue;
         }

@@ -4206,6 +4206,19 @@ mod tests {
             "{ordered}"
         );
 
+        let define_fields = code(transform(
+            "class Foo { foo }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":true}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(define_fields.contains("foo;"), "{define_fields}");
+    }
+
+    #[test]
+    fn lowers_derived_type_script_class_fields() {
         let derived = code(transform(
             "class Foo extends Base { initialized = this.init(); constructor() { before(); super(); after() } }",
             TransformOptions {
@@ -4238,15 +4251,23 @@ mod tests {
             "{generated_derived}"
         );
 
-        let define_fields = code(transform(
-            "class Foo { foo }",
+        let private = code(transform(
+            "class Foo extends Base { #secret = 1; initialized = 2; constructor() { super() } }",
             TransformOptions {
                 loader: Loader::Ts,
-                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":true}}"#.into(),
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
                 ..TransformOptions::default()
             },
         ));
-        assert!(define_fields.contains("foo;"), "{define_fields}");
+        assert!(
+            private.contains("super();\n    this.#secret = 1;\n    this.initialized = 2;"),
+            "{private}"
+        );
+        assert!(
+            private.find("constructor()").expect("constructor")
+                < private.rfind("#secret;").expect("private declaration"),
+            "{private}"
+        );
     }
 
     #[test]
@@ -4284,6 +4305,25 @@ mod tests {
              const x = (a, b);\n\
              const y = [(a, b)];\n\
              const {\"z\": z = (a, b)} = obj;\n"
+        );
+    }
+
+    #[test]
+    fn preserves_private_property_accesses() {
+        assert_eq!(
+            code(transform(
+                "class Foo { #x; get() { return this.#x } set(value) { this.#x = value } }",
+                TransformOptions::default()
+            )),
+            "class Foo {\n\
+             \x20 #x;\n\
+             \x20 get() {\n\
+             \x20\x20\x20 return this.#x;\n\
+             \x20 }\n\
+             \x20 set(value) {\n\
+             \x20\x20\x20 this.#x = value;\n\
+             \x20 }\n\
+             }\n"
         );
     }
 
