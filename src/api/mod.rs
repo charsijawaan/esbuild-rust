@@ -158,6 +158,7 @@ pub struct BuildOptions {
     pub asset_names: String,
     pub sourcemap: BuildSourceMap,
     pub legal_comments: BuildLegalComments,
+    pub line_limit: usize,
     pub tree_shaking: BuildTreeShaking,
     pub jsx: BuildJsx,
     pub jsx_factory: String,
@@ -637,6 +638,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             BuildLegalComments::Linked => config::LegalComments::LinkedWithComment,
             BuildLegalComments::External => config::LegalComments::ExternalWithoutComment,
         },
+        line_limit: options.line_limit,
         code_splitting: options.splitting,
         tree_shaking: options.tree_shaking != BuildTreeShaking::Disabled,
         jsx: config::JsxOptions {
@@ -1948,6 +1950,44 @@ mod tests {
             assert_eq!(output.contains("removable()"), should_keep_call);
             assert!(output.contains("console.log(\"live\")"));
         }
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn exposes_build_line_limits() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-line-limit-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(
+            &entry,
+            "console.log('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+        )
+        .expect("write entry file");
+
+        let build_with_limit = |line_limit| {
+            build(BuildOptions {
+                entry_points: vec![entry.to_string_lossy().into_owned()],
+                outdir: directory.join("out").to_string_lossy().into_owned(),
+                line_limit,
+                ..BuildOptions::default()
+            })
+        };
+        let unlimited = build_with_limit(0);
+        let limited = build_with_limit(24);
+        assert!(unlimited.errors.is_empty(), "{:?}", unlimited.errors);
+        assert!(limited.errors.is_empty(), "{:?}", limited.errors);
+        let unlimited = String::from_utf8_lossy(&unlimited.output_files[0].contents);
+        let limited = String::from_utf8_lossy(&limited.output_files[0].contents);
+        assert!(
+            limited.lines().count() > unlimited.lines().count(),
+            "{limited}"
+        );
+        assert!(limited.contains("console.log("));
 
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }

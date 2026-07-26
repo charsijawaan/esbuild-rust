@@ -333,6 +333,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             asset_names,
             sourcemap,
             legal_comments,
+            line_limit: options.line_limit,
             tree_shaking,
             jsx,
             jsx_factory,
