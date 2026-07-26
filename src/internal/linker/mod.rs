@@ -2448,6 +2448,7 @@ pub fn generate_cross_chunk_stmts(
 pub struct PrintedCrossChunkBindings {
     pub prefix: Vec<u8>,
     pub suffix: Vec<u8>,
+    pub json_metadata_imports: Vec<String>,
 }
 
 /// Print the generated cross-chunk import/export statements using temporary
@@ -2487,8 +2488,10 @@ pub fn print_cross_chunk_bindings(
         minify_whitespace: options.minify_whitespace,
         ascii_only: options.ascii_only,
         legal_comments: options.legal_comments,
+        needs_metafile: options.needs_metafile,
+        metafile_format: options.metafile_format,
     };
-    let prefix = crate::internal::js_printer::print(
+    let prefix_result = crate::internal::js_printer::print(
         &js_ast::Ast {
             import_records,
             parts: vec![js_ast::Part {
@@ -2499,8 +2502,7 @@ pub fn print_cross_chunk_bindings(
         },
         renamer,
         print_options,
-    )
-    .js;
+    );
     let suffix = crate::internal::js_printer::print(
         &js_ast::Ast {
             parts: vec![js_ast::Part {
@@ -2513,7 +2515,11 @@ pub fn print_cross_chunk_bindings(
         print_options,
     )
     .js;
-    PrintedCrossChunkBindings { prefix, suffix }
+    PrintedCrossChunkBindings {
+        prefix: prefix_result.js,
+        suffix,
+        json_metadata_imports: prefix_result.json_metadata_imports,
+    }
 }
 
 /// Merge adjacent variable declarations of the same kind and export status.
@@ -3382,6 +3388,7 @@ pub struct CompiledPartRange {
     pub source_index: u32,
     pub js: Vec<u8>,
     pub extracted_legal_comments: Vec<String>,
+    pub json_metadata_imports: Vec<String>,
     pub source_map_chunk: SourceMapChunk,
 }
 
@@ -3532,6 +3539,8 @@ pub fn compile_part_range_for_chunk(
         minify_whitespace: options.minify_whitespace,
         ascii_only: options.ascii_only,
         legal_comments: options.legal_comments,
+        needs_metafile: options.needs_metafile,
+        metafile_format: options.metafile_format,
     };
     let printed = if options.source_map == crate::internal::config::SourceMap::None {
         crate::internal::js_printer::print(&tree, renamer, print_options)
@@ -3554,6 +3563,7 @@ pub fn compile_part_range_for_chunk(
         source_index: part_range.source_index,
         js: printed.js,
         extracted_legal_comments: printed.extracted_legal_comments,
+        json_metadata_imports: printed.json_metadata_imports,
         source_map_chunk: printed.source_map_chunk,
     }
 }
@@ -3757,6 +3767,8 @@ pub fn generate_entry_point_tail(
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
             legal_comments: options.legal_comments,
+            needs_metafile: options.needs_metafile,
+            metafile_format: options.metafile_format,
         },
     )
     .js
@@ -6542,6 +6554,7 @@ mod tests {
                 source_index: 0,
                 js: b"  work();\n".to_vec(),
                 extracted_legal_comments: Vec::new(),
+                json_metadata_imports: Vec::new(),
                 source_map_chunk: super::SourceMapChunk::default(),
             }],
             &super::PrintedCrossChunkBindings::default(),

@@ -4,8 +4,8 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::internal::ast::{ImportPhase, ImportRecord};
 use crate::internal::compat::JsFeature;
-use crate::internal::config::LegalComments;
-use crate::internal::helpers::escape_closing_tag;
+use crate::internal::config::{LegalComments, MetafileFormat};
+use crate::internal::helpers::{escape_closing_tag, quote_for_json};
 use crate::internal::js_ast::{
     Ast, Binding, BindingData, BlockStmt, Expr, ExprData, LocalKind, OpCode, OptionalChain,
     Precedence, PropertyFlags, PropertyKind, Stmt, StmtData, is_identifier_es5_and_es_next,
@@ -23,6 +23,7 @@ const LAST_HIGH_SURROGATE: u16 = 0xdbff;
 const FIRST_LOW_SURROGATE: u16 = 0xdc00;
 const LAST_LOW_SURROGATE: u16 = 0xdfff;
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     pub unsupported_features: JsFeature,
@@ -32,6 +33,8 @@ pub struct Options {
     pub minify_whitespace: bool,
     pub ascii_only: bool,
     pub legal_comments: LegalComments,
+    pub needs_metafile: bool,
+    pub metafile_format: MetafileFormat,
 }
 
 #[must_use]
@@ -394,6 +397,7 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
         import_records: &[],
         has_legal_comment: HashSet::new(),
         extracted_legal_comments: Vec::new(),
+        json_metadata_imports: Vec::new(),
         source_map_builder: None,
     };
     printer.print_expr_at(expr, Precedence::Lowest);
@@ -404,6 +408,7 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
 pub struct PrintResult {
     pub js: Vec<u8>,
     pub extracted_legal_comments: Vec<String>,
+    pub json_metadata_imports: Vec<String>,
     pub source_map_chunk: SourceMapChunk,
 }
 
@@ -457,6 +462,7 @@ fn print_internal(
         import_records: &tree.import_records,
         has_legal_comment: HashSet::new(),
         extracted_legal_comments: Vec::new(),
+        json_metadata_imports: Vec::new(),
         source_map_builder,
     };
     if !tree.hashbang.is_empty() {
@@ -488,6 +494,7 @@ fn print_internal(
     PrintResult {
         js: printer.output,
         extracted_legal_comments: printer.extracted_legal_comments,
+        json_metadata_imports: printer.json_metadata_imports,
         source_map_chunk,
     }
 }
@@ -500,6 +507,7 @@ struct Printer<'a> {
     import_records: &'a [ImportRecord],
     has_legal_comment: HashSet<String>,
     extracted_legal_comments: Vec<String>,
+    json_metadata_imports: Vec<String>,
     source_map_builder: Option<ChunkBuilder>,
 }
 
@@ -879,7 +887,7 @@ impl Printer<'_> {
                 } else {
                     self.output.push(b' ');
                 }
-                self.print_import_path(import.import_record_index);
+                self.print_import_path(import.import_record_index, false);
                 self.print_import_attributes(import.import_record_index, false);
                 self.output.push(b';');
                 self.print_newline();
@@ -896,7 +904,7 @@ impl Printer<'_> {
                 self.output.extend_from_slice(b"export ");
                 self.print_export_from_items(&export.items);
                 self.output.extend_from_slice(b" from ");
-                self.print_import_path(export.import_record_index);
+                self.print_import_path(export.import_record_index, false);
                 self.print_import_attributes(export.import_record_index, false);
                 self.output.push(b';');
                 self.print_newline();
@@ -909,7 +917,7 @@ impl Printer<'_> {
                     self.print_identifier(&alias.original_name);
                 }
                 self.output.extend_from_slice(b" from ");
-                self.print_import_path(export.import_record_index);
+                self.print_import_path(export.import_record_index, false);
                 self.print_import_attributes(export.import_record_index, false);
                 self.output.push(b';');
                 self.print_newline();
@@ -1131,13 +1139,50 @@ impl Printer<'_> {
         }
     }
 
-    fn print_import_path(&mut self, index: u32) {
+    fn print_import_path(&mut self, index: u32, is_require: bool) {
         let record = &self.import_records[usize::try_from(index).expect("import record index")];
         self.output.extend(quote_utf16(
             &record.path.text.encode_utf16().collect::<Vec<_>>(),
             self.options,
             false,
         ));
+        if self.options.needs_metafile {
+            let kind = if is_require {
+                if record.kind == crate::internal::ast::ImportKind::RequireResolve {
+                    crate::internal::ast::ImportKind::RequireResolve
+                } else {
+                    crate::internal::ast::ImportKind::Require
+                }
+            } else if record.kind == crate::internal::ast::ImportKind::Dynamic {
+                crate::internal::ast::ImportKind::Dynamic
+            } else {
+                crate::internal::ast::ImportKind::Stmt
+            };
+            let external = if record.flags.contains(
+                crate::internal::ast::ImportRecordFlags::SHOULD_NOT_BE_EXTERNAL_IN_METAFILE,
+            ) {
+                String::new()
+            } else {
+                self.options
+                    .metafile_format
+                    .maybe_remove_whitespace(",\n          \"external\": true")
+            };
+            let path = String::from_utf8(quote_for_json(
+                record.path.text.as_bytes(),
+                self.options.ascii_only,
+            ))
+            .expect("quoted import path is UTF-8");
+            let kind = String::from_utf8(quote_for_json(
+                kind.string_for_metafile().as_bytes(),
+                self.options.ascii_only,
+            ))
+            .expect("quoted import kind is UTF-8");
+            self.json_metadata_imports.push(
+                self.options.metafile_format.maybe_remove_whitespace(&format!(
+                    "\n        {{\n          \"path\": {path},\n          \"kind\": {kind}{external}\n        }}"
+                )),
+            );
+        }
     }
 
     fn print_import_attributes(&mut self, index: u32, is_dynamic: bool) {
@@ -1608,12 +1653,12 @@ impl Printer<'_> {
             ExprData::Template(template) => self.print_template(template),
             ExprData::RequireString(require) => {
                 self.output.extend_from_slice(b"require(");
-                self.print_import_path(require.import_record_index);
+                self.print_import_path(require.import_record_index, true);
                 self.output.push(b')');
             }
             ExprData::RequireResolveString(require) => {
                 self.output.extend_from_slice(b"require.resolve(");
-                self.print_import_path(require.import_record_index);
+                self.print_import_path(require.import_record_index, true);
                 self.output.push(b')');
             }
             ExprData::ImportString(import) => {
@@ -1621,7 +1666,7 @@ impl Printer<'_> {
                     [usize::try_from(import.import_record_index).expect("import record index")]
                 .phase;
                 self.print_import_start(phase);
-                self.print_import_path(import.import_record_index);
+                self.print_import_path(import.import_record_index, false);
                 self.print_import_attributes(import.import_record_index, true);
                 self.output.push(b')');
             }
@@ -2450,6 +2495,19 @@ mod tests {
              export * from \"all\";\n\
              export default value;\n"
         );
+        let metadata = print(
+            &ast,
+            &renamer,
+            Options {
+                needs_metafile: true,
+                ..Options::default()
+            },
+        )
+        .json_metadata_imports;
+        assert_eq!(metadata.len(), 5);
+        assert!(metadata[0].contains("\"path\": \"pkg\""));
+        assert!(metadata[0].contains("\"kind\": \"import-statement\""));
+        assert!(metadata[0].contains("\"external\": true"));
     }
 
     #[test]
@@ -2480,6 +2538,19 @@ mod tests {
              const loaded = require(\"./dep\");\n\
              const resolved = require.resolve(\"./dep\");\n"
         );
+        let metadata = print(
+            &ast,
+            &renamer,
+            Options {
+                needs_metafile: true,
+                ..Options::default()
+            },
+        )
+        .json_metadata_imports;
+        assert_eq!(metadata.len(), 3);
+        assert!(metadata[0].contains("\"kind\": \"dynamic-import\""));
+        assert!(metadata[1].contains("\"kind\": \"require-call\""));
+        assert!(metadata[2].contains("\"kind\": \"require-resolve\""));
     }
 
     #[test]
