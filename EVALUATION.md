@@ -1,4 +1,4 @@
-# Experimental compatibility evaluation
+# Experimental closeout evaluation
 
 This is a bounded functional evaluation of an experimental, unaudited,
 AI-generated Rust port. It is not an upstream conformance suite, a security
