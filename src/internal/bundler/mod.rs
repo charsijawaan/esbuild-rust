@@ -2374,6 +2374,88 @@ mod tests {
     }
 
     #[test]
+    fn splits_shared_dependencies_between_esm_entries() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/a.js".into(),
+                    "import {value} from './shared.js'; console.log('a', value)".into(),
+                ),
+                (
+                    "/project/b.js".into(),
+                    "import {value} from './shared.js'; console.log('b', value)".into(),
+                ),
+                (
+                    "/project/shared.js".into(),
+                    "export const value = 123".into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::EsModule,
+            code_splitting: true,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[
+                super::EntryPoint {
+                    input_path: "a.js".into(),
+                    ..super::EntryPoint::default()
+                },
+                super::EntryPoint {
+                    input_path: "b.js".into(),
+                    ..super::EntryPoint::default()
+                },
+            ],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert!(
+            compiled.scan_result.import_issues.is_empty(),
+            "{:?}",
+            compiled.scan_result.import_issues
+        );
+        assert_eq!(compiled.output_files.len(), 3);
+        let shared = compiled
+            .output_files
+            .iter()
+            .find(|output| output.abs_path.contains("/chunk-"))
+            .expect("shared chunk");
+        let shared_name = shared
+            .abs_path
+            .rsplit('/')
+            .next()
+            .expect("shared chunk basename");
+        let shared_code = String::from_utf8_lossy(&shared.contents);
+        assert!(shared_code.contains("const value = 123;"));
+        assert!(shared_code.contains("export {"));
+        for entry_name in ["a.js", "b.js"] {
+            let entry = compiled
+                .output_files
+                .iter()
+                .find(|output| output.abs_path.ends_with(entry_name))
+                .expect("entry output");
+            let entry_code = String::from_utf8_lossy(&entry.contents);
+            assert!(
+                entry_code.contains(&format!("from \"./{shared_name}\"")),
+                "{entry_name}:\n{entry_code}\nshared:\n{shared_code}"
+            );
+            assert!(!entry_code.contains("TESTC"));
+        }
+    }
+
+    #[test]
     fn converts_esm_entry_exports_to_common_js() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let file_system = mock_fs(
