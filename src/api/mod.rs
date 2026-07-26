@@ -309,6 +309,8 @@ pub struct BuildOptions {
     pub ignore_annotations: bool,
     pub banner: String,
     pub footer: String,
+    pub css_banner: String,
+    pub css_footer: String,
     pub external: Vec<String>,
     pub alias: HashMap<String, String>,
     pub packages: Packages,
@@ -947,6 +949,8 @@ pub fn build(options: BuildOptions) -> BuildResult {
         keep_names: options.keep_names,
         js_banner: options.banner,
         js_footer: options.footer,
+        css_banner: options.css_banner,
+        css_footer: options.css_footer,
         external_settings,
         external_packages: options.packages == Packages::External,
         package_aliases: options.alias,
@@ -2630,6 +2634,32 @@ mod tests {
             ..BuildOptions::default()
         });
         assert!(!invalid.errors.is_empty());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn applies_css_build_banners_and_footers() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-css-banner-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(directory.join("entry.css"), ".entry { color: red }")
+            .expect("write CSS entry");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.css".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            css_banner: "/* css before */".into(),
+            css_footer: "/* css after */".into(),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.starts_with("/* css before */\n"));
+        assert!(output.contains(".entry"));
+        assert!(output.ends_with("/* css after */\n"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

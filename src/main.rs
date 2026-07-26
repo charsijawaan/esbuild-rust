@@ -81,6 +81,8 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
     let mut defines = HashMap::new();
     let mut pure = Vec::new();
     let mut keep_names = false;
+    let mut css_banner = String::new();
+    let mut css_footer = String::new();
     let mut main_fields = Vec::new();
     let mut resolve_extensions = Vec::new();
     let mut conditions = Vec::new();
@@ -387,8 +389,24 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
             options.sourcefile = sourcefile.into();
             continue;
         }
+        if let Some(banner) = argument.strip_prefix("--banner:js=") {
+            options.banner = banner.into();
+            continue;
+        }
+        if let Some(banner) = argument.strip_prefix("--banner:css=") {
+            css_banner = banner.into();
+            continue;
+        }
         if let Some(banner) = argument.strip_prefix("--banner=") {
             options.banner = banner.into();
+            continue;
+        }
+        if let Some(footer) = argument.strip_prefix("--footer:js=") {
+            options.footer = footer.into();
+            continue;
+        }
+        if let Some(footer) = argument.strip_prefix("--footer:css=") {
+            css_footer = footer.into();
             continue;
         }
         if let Some(footer) = argument.strip_prefix("--footer=") {
@@ -493,6 +511,8 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
             ignore_annotations: options.ignore_annotations,
             banner: options.banner,
             footer: options.footer,
+            css_banner,
+            css_footer,
             external,
             alias: aliases,
             packages,
@@ -690,7 +710,11 @@ fn help_text() -> String {
          \x20\x20--line-limit=N\n\
          \x20\x20--sourcefile=PATH\n\
          \x20\x20--banner=TEXT\n\
+         \x20\x20--banner:js=TEXT\n\
+         \x20\x20--banner:css=TEXT\n\
          \x20\x20--footer=TEXT\n\
+         \x20\x20--footer:js=TEXT\n\
+         \x20\x20--footer:css=TEXT\n\
          \x20\x20--version\n",
         env!("CARGO_PKG_VERSION")
     )
@@ -986,6 +1010,32 @@ mod tests {
         assert!(output.contains("Object.defineProperty"));
         assert!(output.contains("\"PreservedArrow\""));
         assert!(output.contains("console.log(PreservedArrow.name)"));
+    }
+
+    #[test]
+    fn applies_css_bundle_banners_and_footers() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-css-banner-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.css");
+        std::fs::write(&entry, ".entry { color: red }").expect("write CSS entry");
+        let Output::Code(output) = run(&[
+            "--bundle".into(),
+            "--banner:css=/* before */".into(),
+            "--footer:css=/* after */".into(),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("CSS bundle succeeds") else {
+            panic!("expected bundled CSS");
+        };
+        let output = String::from_utf8(output).expect("CSS output is UTF-8");
+        assert!(output.starts_with("/* before */\n"));
+        assert!(output.contains(".entry"));
+        assert!(output.ends_with("/* after */\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
