@@ -2830,6 +2830,44 @@ pub fn lower_esm_lazy_export<S: BuildHasher>(
     )];
 }
 
+/// Generate code for all expression-style loaders in linker scan phase 3.
+///
+/// This must run after module wrapper classification finalizes each file's
+/// export kind and before export-star resolution or import binding.
+///
+/// # Panics
+///
+/// Panics if a reachable lazy-export file violates JavaScript linker graph
+/// invariants.
+pub fn generate_code_for_lazy_exports<S: BuildHasher>(
+    graph: &mut LinkerGraph,
+    options: &Options,
+    local_names: &HashMap<Ref, String, S>,
+) {
+    let lazy_exports = graph
+        .reachable_files
+        .iter()
+        .filter_map(|&source_index| {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_ref()
+            else {
+                return None;
+            };
+            repr.ast
+                .has_lazy_export
+                .then_some((source_index, repr.ast.exports_kind))
+        })
+        .collect::<Vec<_>>();
+
+    for (source_index, exports_kind) in lazy_exports {
+        if exports_kind == ExportsKind::CommonJs {
+            lower_common_js_lazy_export(graph, source_index, local_names);
+        } else {
+            lower_esm_lazy_export(graph, source_index, options, local_names);
+        }
+    }
+}
+
 /// Find CSS companion files reachable from a JavaScript entry point.
 ///
 /// JavaScript dependencies are traversed once in depth-first postorder, which
@@ -6986,18 +7024,18 @@ mod tests {
         convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
         finalize_chunk_paths, finalize_javascript_chunk_outputs,
         find_imported_css_files_in_js_order, find_imported_files_in_css_order,
-        generate_cross_chunk_stmts, generate_css_chunk, generate_css_module_exports,
-        generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
-        generate_source_map_for_chunk, has_dynamic_exports_due_to_export_star,
-        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, lower_common_js_lazy_export, lower_esm_lazy_export,
-        mangle_local_css, mark_file_live_for_tree_shaking, match_import_with_export,
-        merge_adjacent_local_stmts, path_between_chunks, populate_css_stub_lazy_export,
-        prepare_css_asts, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
-        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
-        wrap_rules_with_conditions,
+        generate_code_for_lazy_exports, generate_cross_chunk_stmts, generate_css_chunk,
+        generate_css_module_exports, generate_entry_point_tail, generate_global_name_prefix,
+        generate_isolated_hash, generate_source_map_for_chunk,
+        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
+        is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
+        lower_esm_lazy_export, mangle_local_css, mark_file_live_for_tree_shaking,
+        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
+        populate_css_stub_lazy_export, prepare_css_asts, print_cross_chunk_bindings,
+        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
+        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -9873,7 +9911,7 @@ mod tests {
             ..Options::default()
         };
 
-        lower_esm_lazy_export(&mut graph, 1, &options, &HashMap::new());
+        generate_code_for_lazy_exports(&mut graph, &options, &HashMap::new());
 
         let Some(InputFileRepr::Js(repr)) = graph.files[1].input_file.repr.as_ref() else {
             panic!("expected JavaScript");
