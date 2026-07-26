@@ -2171,6 +2171,50 @@ pub fn compute_js_chunks(
     chunks
 }
 
+/// Find CSS companion files reachable from a JavaScript entry point.
+///
+/// JavaScript dependencies are traversed once in depth-first postorder, which
+/// mirrors JavaScript module evaluation order before top-level await.
+///
+/// # Panics
+///
+/// Panics when a reachable file in the JavaScript dependency graph is not
+/// represented as JavaScript or an import source index is out of bounds.
+#[must_use]
+pub fn find_imported_css_files_in_js_order(graph: &LinkerGraph, entry_point: u32) -> Vec<u32> {
+    fn visit(
+        graph: &LinkerGraph,
+        source_index: u32,
+        visited: &mut HashSet<u32>,
+        order: &mut Vec<u32>,
+    ) {
+        if !visited.insert(source_index) {
+            return;
+        }
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            panic!("JavaScript CSS discovery reached a non-JavaScript file");
+        };
+        for part in &repr.ast.parts {
+            for &import_record_index in &part.import_record_indices {
+                let record = &repr.ast.import_records[import_record_index as usize];
+                if record.source_index.is_valid() {
+                    visit(graph, record.source_index.get_index(), visited, order);
+                }
+            }
+        }
+        if repr.css_source_index.is_valid() {
+            order.push(repr.css_source_index.get_index());
+        }
+    }
+
+    let mut visited = HashSet::new();
+    let mut order = Vec::new();
+    visit(graph, entry_point, &mut visited, &mut order);
+    order
+}
+
 /// Discover symbol edges that cross JavaScript chunk boundaries and assign
 /// deterministic export aliases.
 ///
@@ -5373,8 +5417,9 @@ mod tests {
         classify_module_wrappers, compile_part_range_for_chunk, compute_cross_chunk_dependencies,
         compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
         create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
-        finalize_javascript_chunk_outputs, generate_cross_chunk_stmts, generate_entry_point_tail,
-        generate_global_name_prefix, generate_isolated_hash, generate_source_map_for_chunk,
+        finalize_javascript_chunk_outputs, find_imported_css_files_in_js_order,
+        generate_cross_chunk_stmts, generate_entry_point_tail, generate_global_name_prefix,
+        generate_isolated_hash, generate_source_map_for_chunk,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
         match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
@@ -7617,6 +7662,50 @@ mod tests {
             loader: Loader::Js,
             ..InputFile::default()
         }
+    }
+
+    #[test]
+    fn discovers_css_companions_in_javascript_postorder() {
+        let js_with_dependencies = |dependencies: &[u32], css_source_index: u32| {
+            let mut file = js_file(js_ast::Ast {
+                import_records: dependencies
+                    .iter()
+                    .map(|&source_index| ImportRecord {
+                        source_index: Index32::new(source_index),
+                        ..ImportRecord::default()
+                    })
+                    .collect(),
+                parts: vec![js_ast::Part {
+                    import_record_indices: (0..dependencies.len())
+                        .map(|index| u32::try_from(index).expect("import index fits in u32"))
+                        .collect(),
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            });
+            let Some(InputFileRepr::Js(repr)) = file.repr.as_mut() else {
+                panic!("JavaScript");
+            };
+            repr.css_source_index = Index32::new(css_source_index);
+            file
+        };
+        let css_file = || InputFile {
+            repr: Some(InputFileRepr::Css(Box::<CssRepr>::default())),
+            loader: Loader::Css,
+            ..InputFile::default()
+        };
+        let input_files = [
+            js_with_dependencies(&[1, 2], 4),
+            js_with_dependencies(&[3], 5),
+            js_with_dependencies(&[3], 6),
+            js_with_dependencies(&[], 7),
+            css_file(),
+            css_file(),
+            css_file(),
+            css_file(),
+        ];
+        let graph = clone_linker_graph(&input_files, &[0, 1, 2, 3, 4, 5, 6, 7], &[], false);
+        assert_eq!(find_imported_css_files_in_js_order(&graph, 0), [7, 5, 6, 4]);
     }
 
     fn js_repr(graph: &crate::internal::graph::LinkerGraph, source_index: usize) -> &JsRepr {
