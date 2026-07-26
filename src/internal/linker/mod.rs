@@ -8,7 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
 
 use crate::internal::{
-    ast::{INVALID_REF, ImportKind, ImportRecordFlags, Index32, NamespaceAlias, Ref},
+    ast::{
+        INVALID_REF, ImportItemStatus, ImportKind, ImportRecordFlags, Index32, NamespaceAlias, Ref,
+        SymbolKind,
+    },
     config::{Format, Loader, Options},
     css_ast::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
@@ -43,6 +46,9 @@ pub struct ChunkInfo {
     pub files_with_parts_in_chunk: HashSet<u32>,
     pub entry_bits: BitSet,
     pub cross_chunk_imports: Vec<ChunkImport>,
+    pub exports_to_other_chunks: HashMap<Ref, String>,
+    pub imports_from_other_chunks: HashMap<u32, Vec<CrossChunkImportItem>>,
+    pub sorted_cross_chunk_imports: Vec<CrossChunkImport>,
     pub files_in_chunk_in_order: Vec<u32>,
     pub parts_in_chunk_in_order: Vec<PartRange>,
     pub final_rel_path: String,
@@ -2135,6 +2141,183 @@ pub fn compute_js_chunks(
     chunks
 }
 
+/// Discover symbol edges that cross JavaScript chunk boundaries and assign
+/// deterministic export aliases.
+///
+/// # Panics
+///
+/// Panics when live parts, symbols, entry bits, or chunk ownership violate
+/// linker graph invariants.
+#[allow(clippy::too_many_lines)]
+pub fn compute_cross_chunk_dependencies(
+    graph: &mut LinkerGraph,
+    chunks: &mut [ChunkInfo],
+    options: &Options,
+) {
+    if !options.code_splitting {
+        return;
+    }
+
+    let mut imports_by_chunk = vec![HashSet::<Ref>::new(); chunks.len()];
+    let mut exports_by_chunk = vec![HashSet::<Ref>::new(); chunks.len()];
+
+    for (chunk_index, chunk) in chunks.iter().enumerate() {
+        for &source_index in &chunk.files_with_parts_in_chunk {
+            let (wrap, wrapper_ref, imports_to_bind, parts) = {
+                let Some(InputFileRepr::Js(repr)) =
+                    graph.files[source_index as usize].input_file.repr.as_ref()
+                else {
+                    continue;
+                };
+                (
+                    repr.meta.wrap,
+                    repr.ast.wrapper_ref,
+                    repr.meta.imports_to_bind.clone(),
+                    repr.ast.parts.clone(),
+                )
+            };
+            for part in parts.iter().filter(|part| part.is_live) {
+                for declared in &part.declared_symbols {
+                    if declared.is_top_level {
+                        graph.symbols.get_mut(declared.reference).chunk_index = Index32::new(
+                            u32::try_from(chunk_index).expect("chunk index fits in u32"),
+                        );
+                    }
+                }
+                for &reference in part.symbol_uses.keys() {
+                    let symbol = graph.symbols.get(reference);
+                    if symbol.kind == SymbolKind::Unbound
+                        || symbol.import_item_status == ImportItemStatus::Missing
+                    {
+                        continue;
+                    }
+                    let mut target = reference;
+                    if let Some(import) = imports_to_bind.get(&reference) {
+                        target = import.reference;
+                    } else if wrap == WrapKind::Cjs && reference != wrapper_ref {
+                        continue;
+                    }
+                    if let Some(alias) = &graph.symbols.get(target).namespace_alias {
+                        target = alias.namespace_ref;
+                    }
+                    imports_by_chunk[chunk_index].insert(target);
+                }
+            }
+        }
+
+        if chunk.is_entry_point {
+            let Some(InputFileRepr::Js(repr)) = graph.files[chunk.source_index as usize]
+                .input_file
+                .repr
+                .as_ref()
+            else {
+                continue;
+            };
+            if repr.meta.wrap != WrapKind::Cjs {
+                for alias in &repr.meta.sorted_and_filtered_export_aliases {
+                    let export = &repr.meta.resolved_exports[alias];
+                    let mut target = export.reference;
+                    let Some(InputFileRepr::Js(target_repr)) = graph.files
+                        [export.source_index as usize]
+                        .input_file
+                        .repr
+                        .as_ref()
+                    else {
+                        panic!("entry export target must be JavaScript");
+                    };
+                    if let Some(import) = target_repr.meta.imports_to_bind.get(&target) {
+                        target = import.reference;
+                    }
+                    if let Some(namespace) = &graph.symbols.get(target).namespace_alias {
+                        target = namespace.namespace_ref;
+                    }
+                    imports_by_chunk[chunk_index].insert(target);
+                }
+            }
+            if repr.meta.force_include_exports_for_entry_point {
+                imports_by_chunk[chunk_index].insert(repr.ast.exports_ref);
+            }
+            if repr.meta.wrap != WrapKind::None {
+                imports_by_chunk[chunk_index].insert(repr.ast.wrapper_ref);
+            }
+        }
+    }
+
+    for chunk_index in 0..chunks.len() {
+        let chunk_index_u32 = u32::try_from(chunk_index).expect("chunk index fits in u32");
+        let mut imports_from_other_chunks = HashMap::new();
+        for &reference in &imports_by_chunk[chunk_index] {
+            let owner = graph.symbols.get(reference).chunk_index;
+            if owner.is_valid() {
+                let owner = owner.get_index();
+                if owner != chunk_index_u32 {
+                    imports_from_other_chunks
+                        .entry(owner)
+                        .or_insert_with(Vec::new)
+                        .push(CrossChunkImportItem {
+                            reference,
+                            ..CrossChunkImportItem::default()
+                        });
+                    exports_by_chunk[owner as usize].insert(reference);
+                }
+            }
+        }
+
+        if chunks[chunk_index].is_entry_point {
+            for (other_chunk_index, other_chunk) in chunks.iter().enumerate() {
+                if chunk_index != other_chunk_index
+                    && other_chunk
+                        .entry_bits
+                        .has_bit(chunks[chunk_index].entry_point_bit)
+                {
+                    imports_from_other_chunks
+                        .entry(u32::try_from(other_chunk_index).expect("chunk index fits in u32"))
+                        .or_insert_with(Vec::new);
+                }
+            }
+        }
+        chunks[chunk_index].imports_from_other_chunks = imports_from_other_chunks;
+    }
+
+    for (chunk_index, chunk) in chunks.iter_mut().enumerate() {
+        let mut renamer = crate::internal::renamer::ExportRenamer::default();
+        for export in sorted_cross_chunk_export_items(
+            &exports_by_chunk[chunk_index],
+            &graph.stable_source_indices,
+        ) {
+            let alias = if options.minify_identifiers {
+                renamer.next_minified_name()
+            } else {
+                renamer.next_renamed_name(&graph.symbols.get(export.reference).original_name)
+            };
+            chunk
+                .exports_to_other_chunks
+                .insert(export.reference, alias);
+        }
+    }
+
+    let exports_to_other_chunks: Vec<_> = chunks
+        .iter()
+        .map(|chunk| chunk.exports_to_other_chunks.clone())
+        .collect();
+    for chunk in chunks {
+        let imports = std::mem::take(&mut chunk.imports_from_other_chunks);
+        chunk.sorted_cross_chunk_imports =
+            sorted_cross_chunk_imports(imports, &exports_to_other_chunks);
+        chunk
+            .cross_chunk_imports
+            .extend(
+                chunk
+                    .sorted_cross_chunk_imports
+                    .iter()
+                    .map(|import| ChunkImport {
+                        chunk_index: import.chunk_index,
+                        import_kind: ImportKind::Stmt,
+                    }),
+            );
+    }
+}
+
 #[must_use]
 pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
     left.len() == right.len()
@@ -2303,13 +2486,14 @@ mod tests {
         CrossChunkImportItem, ImportStatus, ImportTracker, MatchImportKind, OutputPathContext,
         OutputPiece, OutputPieceIndexKind, PartRange, StableRef, add_exports_for_export_star,
         advance_import_tracker, append_or_extend_part_range, bind_imports_to_exports_for_file,
-        classify_module_wrappers, compute_js_chunks, create_wrapper_for_file,
-        enforce_no_cyclic_chunk_imports, has_dynamic_exports_due_to_export_star,
-        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
-        path_between_chunks, propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, tree_shaking_and_code_splitting,
+        classify_module_wrappers, compute_cross_chunk_dependencies, compute_js_chunks,
+        create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
+        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
+        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
+        match_import_with_export, path_between_chunks, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
+        tree_shaking_and_code_splitting,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -4737,5 +4921,102 @@ mod tests {
         assert!(chunks[0].is_entry_point);
         assert!(chunks[0].files_with_parts_in_chunk.is_empty());
         assert!(chunks[0].files_in_chunk_in_order.is_empty());
+    }
+
+    #[test]
+    fn cross_chunk_symbol_edges_get_deterministic_aliases() {
+        let shared_ref = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(2),
+                    kind: ImportKind::Stmt,
+                    ..ImportRecord::default()
+                }],
+                parts: vec![js_ast::Part {
+                    import_record_indices: vec![0],
+                    symbol_uses: HashMap::from([(
+                        shared_ref,
+                        js_ast::SymbolUse { count_estimate: 1 },
+                    )]),
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "shared")],
+                parts: vec![js_ast::Part {
+                    declared_symbols: vec![js_ast::DeclaredSymbol {
+                        reference: shared_ref,
+                        is_top_level: true,
+                    }],
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(2),
+                    kind: ImportKind::Stmt,
+                    ..ImportRecord::default()
+                }],
+                parts: vec![js_ast::Part {
+                    import_record_indices: vec![0],
+                    symbol_uses: HashMap::from([(
+                        shared_ref,
+                        js_ast::SymbolUse { count_estimate: 1 },
+                    )]),
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let entry_points = [
+            EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            },
+            EntryPoint {
+                source_index: 3,
+                ..EntryPoint::default()
+            },
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2, 3], &entry_points, true);
+        let options = Options {
+            code_splitting: true,
+            tree_shaking: true,
+            ..Options::default()
+        };
+        tree_shaking_and_code_splitting(&mut graph, &options);
+        let mut chunks = compute_js_chunks(&mut graph, &options, PREFIX);
+        compute_cross_chunk_dependencies(&mut graph, &mut chunks, &options);
+
+        assert_eq!(graph.symbols.get(shared_ref).chunk_index.get_index(), 2);
+        assert_eq!(chunks[2].exports_to_other_chunks[&shared_ref], "shared");
+        for chunk in &chunks[..2] {
+            assert_eq!(chunk.sorted_cross_chunk_imports.len(), 1);
+            assert_eq!(chunk.sorted_cross_chunk_imports[0].chunk_index, 2);
+            assert_eq!(
+                chunk.sorted_cross_chunk_imports[0].sorted_import_items,
+                vec![CrossChunkImportItem {
+                    export_alias: "shared".into(),
+                    reference: shared_ref,
+                }]
+            );
+            assert_eq!(
+                chunk.cross_chunk_imports,
+                vec![ChunkImport {
+                    chunk_index: 2,
+                    import_kind: ImportKind::Stmt,
+                }]
+            );
+        }
     }
 }
