@@ -2,8 +2,9 @@
 
 use crate::internal::{
     js_ast::{
-        Arg, ArrowExpr, Binding, BindingData, Expr, ExprData, FunctionBody, IdentifierBinding,
-        OpCode, Precedence, ReturnStmt, Stmt, StmtData,
+        Arg, ArrayBinding, ArrayBindingPattern, ArrowExpr, Binding, BindingData, Expr, ExprData,
+        FunctionBody, IdentifierBinding, ObjectBindingPattern, OpCode, Precedence, PropertyBinding,
+        PropertyFlags, PropertyKind, ReturnStmt, Stmt, StmtData,
     },
     js_lexer::{Lexer, Token},
 };
@@ -139,6 +140,16 @@ fn convert_expression_to_args(
             });
             true
         }
+        data @ (ExprData::Array(_) | ExprData::Object(_)) => {
+            let Some(binding) = expression_to_binding(Expr::new(loc, data)) else {
+                return false;
+            };
+            args.push(Arg {
+                binding,
+                ..Arg::default()
+            });
+            true
+        }
         ExprData::Spread(spread) => {
             let Some(binding) = expression_to_binding(spread.value) else {
                 return false;
@@ -156,15 +167,97 @@ fn convert_expression_to_args(
 
 fn expression_to_binding(expression: Expr) -> Option<Binding> {
     let loc = expression.loc;
-    let ExprData::Identifier(identifier) = *expression.data? else {
-        return None;
-    };
-    Some(Binding {
-        loc,
-        data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
-            reference: identifier.reference,
-        }))),
-    })
+    match *expression.data? {
+        ExprData::Identifier(identifier) => Some(Binding {
+            loc,
+            data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                reference: identifier.reference,
+            }))),
+        }),
+        ExprData::Array(array) => {
+            let mut items = Vec::with_capacity(array.items.len());
+            let mut has_spread = false;
+            for item in array.items {
+                let item_loc = item.loc;
+                let (binding, default_value_or_nil) = match item.data.as_deref() {
+                    Some(ExprData::Missing) => (
+                        Binding {
+                            loc: item_loc,
+                            data: Some(Box::new(BindingData::Missing)),
+                        },
+                        Expr::default(),
+                    ),
+                    Some(ExprData::Spread(_)) => {
+                        let ExprData::Spread(spread) = *item.data.expect("spread item has data")
+                        else {
+                            unreachable!()
+                        };
+                        has_spread = true;
+                        (expression_to_binding(spread.value)?, Expr::default())
+                    }
+                    Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryAssign => {
+                        let ExprData::Binary(binary) =
+                            *item.data.expect("assignment item has data")
+                        else {
+                            unreachable!()
+                        };
+                        (expression_to_binding(binary.left)?, binary.right)
+                    }
+                    _ => (expression_to_binding(item)?, Expr::default()),
+                };
+                items.push(ArrayBinding {
+                    binding,
+                    default_value_or_nil,
+                    loc: item_loc,
+                });
+            }
+            Some(Binding {
+                loc,
+                data: Some(Box::new(BindingData::Array(ArrayBindingPattern {
+                    items,
+                    close_bracket_loc: array.close_bracket_loc,
+                    has_spread,
+                    is_single_line: array.is_single_line,
+                }))),
+            })
+        }
+        ExprData::Object(object) => {
+            let mut properties = Vec::with_capacity(object.properties.len());
+            for property in object.properties {
+                if property.kind == PropertyKind::Spread {
+                    properties.push(PropertyBinding {
+                        value: expression_to_binding(property.value_or_nil)?,
+                        loc: property.loc,
+                        is_spread: true,
+                        ..PropertyBinding::default()
+                    });
+                    continue;
+                }
+                if property.kind != PropertyKind::Field {
+                    return None;
+                }
+                properties.push(PropertyBinding {
+                    key: property.key,
+                    value: expression_to_binding(property.value_or_nil)?,
+                    default_value_or_nil: property.initializer_or_nil,
+                    loc: property.loc,
+                    close_bracket_loc: property.close_bracket_loc,
+                    is_computed: property.flags.contains(PropertyFlags::IS_COMPUTED),
+                    prefer_quoted_key: property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY),
+                    ..PropertyBinding::default()
+                });
+            }
+            Some(Binding {
+                loc,
+                data: Some(Box::new(BindingData::Object(ObjectBindingPattern {
+                    properties,
+                    close_brace_loc: object.close_brace_loc,
+                    is_single_line: object.is_single_line,
+                }))),
+            })
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn parse_arrow_body(
@@ -290,7 +383,7 @@ mod tests {
 
     use crate::internal::{
         config::TsOptions,
-        js_ast::{ExprData, Precedence},
+        js_ast::{BindingData, ExprData, Precedence},
         js_lexer::{Lexer, Token},
         js_parser::{Options, syntax_expression::parse_expression},
         logger::{DeferLogKind, Log, Source},
@@ -362,5 +455,29 @@ mod tests {
             ));
             assert_eq!(lexer.token, Token::EndOfFile);
         }
+    }
+
+    #[test]
+    fn converts_array_and_object_expressions_to_arrow_bindings() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"([first, ...tail], {value}) => value"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        let Some(ExprData::Arrow(arrow)) = expression.data.as_deref() else {
+            panic!("expected arrow");
+        };
+        assert!(matches!(
+            arrow.args[0].binding.data.as_deref(),
+            Some(BindingData::Array(_))
+        ));
+        assert!(matches!(
+            arrow.args[1].binding.data.as_deref(),
+            Some(BindingData::Object(_))
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
     }
 }
