@@ -42,8 +42,24 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     run_with_stdin(arguments, None)
 }
 
-#[allow(clippy::too_many_lines)]
+fn node_paths_from_environment() -> Vec<String> {
+    env::var_os("NODE_PATH").map_or_else(Vec::new, |paths| {
+        env::split_paths(&paths)
+            .filter_map(|path| path.to_str().map(str::to_string))
+            .collect()
+    })
+}
+
 fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result<Output, String> {
+    run_with_stdin_and_node_paths(arguments, stdin_override, node_paths_from_environment())
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_with_stdin_and_node_paths(
+    arguments: &[String],
+    stdin_override: Option<&[u8]>,
+    node_paths: Vec<String>,
+) -> Result<Output, String> {
     let mut options = TransformOptions::default();
     let mut input_paths = Vec::new();
     let mut bundle = false;
@@ -532,6 +548,7 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
             main_fields,
             resolve_extensions,
             conditions,
+            node_paths,
             ..BuildOptions::default()
         });
         if !result.errors.is_empty() {
@@ -753,7 +770,7 @@ fn help_text() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Loader, Output, parse_loader, run, run_with_stdin};
+    use super::{Loader, Output, parse_loader, run, run_with_stdin, run_with_stdin_and_node_paths};
 
     #[test]
     fn parses_loader_flags_and_file_extensions() {
@@ -835,6 +852,43 @@ mod tests {
         assert!(output.contains("const value = 42;"));
         assert!(output.contains("console.log(value);"));
         assert!(!output.contains(": number"));
+    }
+
+    #[test]
+    fn resolves_packages_from_node_path() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-node-path-{unique}"));
+        let global_modules = directory.join("global_modules");
+        let package = global_modules.join("global-package");
+        std::fs::create_dir_all(&package).expect("create global package directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(
+            &entry,
+            "import {message} from 'global-package'; console.log(message)",
+        )
+        .expect("write entry file");
+        std::fs::write(package.join("package.json"), r#"{"main":"index.js"}"#)
+            .expect("write package metadata");
+        std::fs::write(
+            package.join("index.js"),
+            "export const message = 'from NODE_PATH'",
+        )
+        .expect("write global package");
+
+        let Output::Code(output) = run_with_stdin_and_node_paths(
+            &["--bundle".into(), entry.to_string_lossy().into_owned()],
+            None,
+            vec![global_modules.to_string_lossy().into_owned()],
+        )
+        .expect("NODE_PATH bundle succeeds") else {
+            panic!("expected bundled code");
+        };
+        let output = String::from_utf8(output).expect("bundle output is UTF-8");
+        assert!(output.contains("\"from NODE_PATH\""), "{output}");
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
