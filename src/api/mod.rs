@@ -993,6 +993,101 @@ mod tests {
     }
 
     #[test]
+    fn emits_files_for_the_file_loader() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-file-loader-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import asset from './image.asset'; console.log(asset)",
+        )
+        .expect("write entry file");
+        std::fs::write(directory.join("image.asset"), b"binary asset contents")
+            .expect("write asset");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::Iife,
+            loader: HashMap::from([(".asset".into(), Loader::File)]),
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 2);
+        let javascript = result
+            .output_files
+            .iter()
+            .find(|output| output.path.ends_with("/entry.js"))
+            .expect("JavaScript output");
+        let asset = result
+            .output_files
+            .iter()
+            .find(|output| !output.path.ends_with("/entry.js"))
+            .expect("asset output");
+        assert_eq!(asset.contents, b"binary asset contents");
+        let asset_name = std::path::Path::new(&asset.path)
+            .file_name()
+            .expect("asset file name")
+            .to_string_lossy();
+        assert!(asset_name.starts_with("image-"));
+        assert!(asset_name.ends_with(".asset"));
+        assert!(String::from_utf8_lossy(&javascript.contents).contains(asset_name.as_ref()));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn rewrites_imports_for_the_copy_loader() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-copy-loader-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import './worker.copy'; console.log('copy loader')",
+        )
+        .expect("write entry file");
+        std::fs::write(directory.join("worker.copy"), b"copied worker contents")
+            .expect("write copied input");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::EsModule,
+            loader: HashMap::from([(".copy".into(), Loader::Copy)]),
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 2);
+        let javascript = result
+            .output_files
+            .iter()
+            .find(|output| output.path.ends_with("/entry.js"))
+            .expect("JavaScript output");
+        let copied = result
+            .output_files
+            .iter()
+            .find(|output| !output.path.ends_with("/entry.js"))
+            .expect("copied output");
+        assert_eq!(copied.contents, b"copied worker contents");
+        let copied_name = std::path::Path::new(&copied.path)
+            .file_name()
+            .expect("copied file name")
+            .to_string_lossy();
+        assert!(copied_name.starts_with("worker-"));
+        assert!(String::from_utf8_lossy(&javascript.contents).contains(copied_name.as_ref()));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
     fn rejects_external_paths_with_multiple_wildcards() {
         let result = build(BuildOptions {
             external: vec!["pkg/*/bad/*".into()],
