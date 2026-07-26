@@ -92,6 +92,10 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             options.drop_debugger = true;
             continue;
         }
+        if argument == "--ignore-annotations" {
+            options.ignore_annotations = true;
+            continue;
+        }
         if argument == "--sourcemap" {
             sourcemap = BuildSourceMap::Linked;
             continue;
@@ -341,6 +345,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             minify_syntax: options.minify_syntax,
             ascii_only: options.ascii_only,
             drop_debugger: options.drop_debugger,
+            ignore_annotations: options.ignore_annotations,
             banner: options.banner,
             footer: options.footer,
             external,
@@ -477,6 +482,7 @@ fn help_text() -> String {
          \x20\x20--resolve-extensions=EXTENSIONS\n\
          \x20\x20--conditions=CONDITIONS\n\
          \x20\x20--drop:debugger\n\
+         \x20\x20--ignore-annotations\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
          \x20\x20--minify-identifiers\n\

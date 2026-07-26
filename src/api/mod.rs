@@ -58,6 +58,7 @@ pub struct TransformOptions {
     pub minify_syntax: bool,
     pub ascii_only: bool,
     pub drop_debugger: bool,
+    pub ignore_annotations: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,6 +170,7 @@ pub struct BuildOptions {
     pub minify_syntax: bool,
     pub ascii_only: bool,
     pub drop_debugger: bool,
+    pub ignore_annotations: bool,
     pub banner: String,
     pub footer: String,
     pub external: Vec<String>,
@@ -651,6 +653,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         minify_syntax: options.minify_syntax,
         ascii_only: options.ascii_only,
         drop_debugger: options.drop_debugger,
+        ignore_dce_annotations: options.ignore_annotations,
         js_banner: options.banner,
         js_footer: options.footer,
         external_settings,
@@ -928,6 +931,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     parser_options.minify_whitespace = options.minify_whitespace;
     parser_options.ascii_only = options.ascii_only;
     parser_options.drop_debugger = options.drop_debugger;
+    parser_options.ignore_dce_annotations = options.ignore_annotations;
     let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
     if !ok {
         return Vec::new();
@@ -1914,6 +1918,34 @@ mod tests {
                 should_keep_dead,
                 "{tree_shaking:?}"
             );
+            assert!(output.contains("console.log(\"live\")"));
+        }
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn exposes_build_annotation_control() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-annotations-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "/* @__PURE__ */ removable(); console.log('live')")
+            .expect("write entry file");
+
+        for (ignore_annotations, should_keep_call) in [(false, false), (true, true)] {
+            let result = build(BuildOptions {
+                entry_points: vec![entry.to_string_lossy().into_owned()],
+                outdir: directory.join("out").to_string_lossy().into_owned(),
+                ignore_annotations,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            let output = String::from_utf8_lossy(&result.output_files[0].contents);
+            assert_eq!(output.contains("removable()"), should_keep_call);
             assert!(output.contains("console.log(\"live\")"));
         }
 
