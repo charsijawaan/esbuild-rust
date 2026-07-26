@@ -22,7 +22,9 @@ use crate::internal::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
     },
     fs::Fs,
-    graph::{ExportData, ImportData, InputFileRepr, LinkerGraph, SideEffectsKind, WrapKind},
+    graph::{
+        ExportData, ImportData, InputFileRepr, LinkerGraph, OutputFile, SideEffectsKind, WrapKind,
+    },
     helpers::{BitSet, Joiner},
     js_ast::{self, ExportsKind},
     logger::{Log, Range},
@@ -67,6 +69,7 @@ pub struct ChunkInfo {
     pub entry_point_bit: usize,
     pub source_index: u32,
     pub is_entry_point: bool,
+    pub is_executable: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -4101,6 +4104,7 @@ pub fn assemble_javascript_chunk(
         joiner.add_string("\n");
     }
     chunk.intermediate_output = output_paths.break_joiner_into_pieces(joiner);
+    chunk.is_executable = is_executable;
     is_executable
 }
 
@@ -4332,6 +4336,57 @@ pub fn finalize_chunk_paths(
     }
 }
 
+/// Substitute final chunk and asset paths and emit concrete output files.
+///
+/// # Panics
+///
+/// Panics when output paths cannot be made relative, a temporary path index is
+/// invalid, or an asset marker violates linker invariants.
+#[must_use]
+pub fn finalize_javascript_chunk_outputs(
+    file_system: &dyn Fs,
+    graph: &LinkerGraph,
+    chunks: &mut [ChunkInfo],
+    assets: &[Option<AssetPath>],
+    options: &Options,
+) -> Vec<OutputFile> {
+    finalize_chunk_paths(file_system, graph, chunks, options);
+    let chunk_paths: Vec<_> = chunks
+        .iter()
+        .map(|chunk| ChunkPath {
+            unique_key: chunk.unique_key.clone(),
+            final_rel_path: chunk.final_rel_path.clone(),
+        })
+        .collect();
+    let output_paths = OutputPathContext::new("", assets, &chunk_paths);
+    chunks
+        .iter_mut()
+        .map(|chunk| {
+            let final_directory = file_system.dir(&chunk.final_rel_path);
+            let intermediate_output = std::mem::take(&mut chunk.intermediate_output);
+            let (joiner, _) =
+                output_paths.substitute_final_paths(intermediate_output, |target_path| {
+                    path_between_chunks(
+                        file_system,
+                        &options.public_path,
+                        &final_directory,
+                        target_path,
+                    )
+                    .expect("chunk output paths must have a relative path")
+                });
+            OutputFile {
+                abs_path: file_system.join(&[
+                    options.abs_output_dir.as_str(),
+                    chunk.final_rel_path.as_str(),
+                ]),
+                contents: joiner.done(),
+                is_executable: chunk.is_executable,
+                ..OutputFile::default()
+            }
+        })
+        .collect()
+}
+
 #[must_use]
 pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
     left.len() == right.len()
@@ -4504,8 +4559,8 @@ mod tests {
         bind_imports_to_exports_for_file, classify_module_wrappers, compile_part_range_for_chunk,
         compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
         convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
-        finalize_chunk_paths, generate_cross_chunk_stmts, generate_entry_point_tail,
-        generate_global_name_prefix, generate_isolated_hash,
+        finalize_chunk_paths, finalize_javascript_chunk_outputs, generate_cross_chunk_stmts,
+        generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
         match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
@@ -5865,6 +5920,65 @@ mod tests {
         ));
         assert!(output.contains("  // src/entry.js\n  work();\n  return 1;\n"));
         assert!(output.ends_with("})();\n/* footer */\n"));
+    }
+
+    #[test]
+    fn finalizes_temporary_chunk_paths_into_output_files() {
+        let graph = clone_linker_graph(&[], &[], &[], false);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let temporary_paths = [
+            ChunkPath {
+                unique_key: "UNIQUEC00000000".into(),
+                ..ChunkPath::default()
+            },
+            ChunkPath {
+                unique_key: "UNIQUEC00000001".into(),
+                ..ChunkPath::default()
+            },
+        ];
+        let mut entry_joiner = Joiner::default();
+        entry_joiner.add_string("import \"UNIQUEC00000001\";\n");
+        let mut dependency_joiner = Joiner::default();
+        dependency_joiner.add_string("console.log(1);\n");
+        let mut chunks = vec![
+            ChunkInfo {
+                unique_key: temporary_paths[0].unique_key.clone(),
+                final_template: vec![PathTemplate {
+                    data: "entry.js".into(),
+                    ..PathTemplate::default()
+                }],
+                intermediate_output: context(&[], &temporary_paths)
+                    .break_joiner_into_pieces(entry_joiner),
+                is_executable: true,
+                ..ChunkInfo::default()
+            },
+            ChunkInfo {
+                unique_key: temporary_paths[1].unique_key.clone(),
+                final_template: vec![PathTemplate {
+                    data: "chunk.js".into(),
+                    ..PathTemplate::default()
+                }],
+                intermediate_output: context(&[], &temporary_paths)
+                    .break_joiner_into_pieces(dependency_joiner),
+                ..ChunkInfo::default()
+            },
+        ];
+        let outputs = finalize_javascript_chunk_outputs(
+            &file_system,
+            &graph,
+            &mut chunks,
+            &[],
+            &Options {
+                abs_output_dir: "/out".into(),
+                ..Options::default()
+            },
+        );
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].abs_path, "/out/entry.js");
+        assert_eq!(outputs[0].contents, b"import \"./chunk.js\";\n");
+        assert!(outputs[0].is_executable);
+        assert_eq!(outputs[1].abs_path, "/out/chunk.js");
+        assert_eq!(outputs[1].contents, b"console.log(1);\n");
     }
 
     #[test]
