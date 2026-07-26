@@ -2596,6 +2596,69 @@ pub fn populate_css_stub_lazy_export<S: BuildHasher>(
     export.value = value;
 }
 
+/// Lower a `CommonJS` lazy export to `module.exports = value`.
+///
+/// CSS stubs are populated with their CSS-module object immediately before
+/// lowering.
+///
+/// # Panics
+///
+/// Panics if the source is not a `CommonJS` lazy-export JavaScript file with the
+/// expected part shape.
+pub fn lower_common_js_lazy_export<S: BuildHasher>(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    local_names: &HashMap<Ref, String, S>,
+) {
+    let should_populate_css = matches!(
+        graph.files[source_index as usize]
+            .input_file
+            .repr
+            .as_ref(),
+        Some(InputFileRepr::Js(repr)) if repr.css_source_index.is_valid()
+    );
+    if should_populate_css {
+        populate_css_stub_lazy_export(graph, source_index, local_names);
+    }
+
+    let (module_ref, value) = {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_mut()
+        else {
+            panic!("lazy export lowering requires JavaScript");
+        };
+        assert_eq!(
+            repr.ast.exports_kind,
+            ExportsKind::CommonJs,
+            "CommonJS lazy export lowering requires CommonJS exports"
+        );
+        let module_ref = repr.ast.module_ref;
+        let part = repr.ast.parts.last_mut().expect("lazy export has a part");
+        let [statement] = part.statements.as_mut_slice() else {
+            panic!("lazy export part must contain one statement");
+        };
+        let Some(js_ast::StmtData::LazyExport(export)) = statement.data.as_deref_mut() else {
+            panic!("lazy export part must contain a lazy export");
+        };
+        (module_ref, std::mem::take(&mut export.value))
+    };
+    let location = value.loc;
+    let assignment = expr_statement(js_ast::assign(
+        module_exports_expr(module_ref, location),
+        value,
+    ));
+    let Some(InputFileRepr::Js(repr)) = graph.files[source_index as usize].input_file.repr.as_mut()
+    else {
+        unreachable!("lazy export representation was checked above");
+    };
+    repr.ast
+        .parts
+        .last_mut()
+        .expect("lazy export has a part")
+        .statements = vec![assignment];
+    graph.generate_symbol_import_and_use(source_index, 0, module_ref, 1, source_index);
+}
+
 /// Find CSS companion files reachable from a JavaScript entry point.
 ///
 /// JavaScript dependencies are traversed once in depth-first postorder, which
@@ -6756,13 +6819,14 @@ mod tests {
         generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
         generate_source_map_for_chunk, has_dynamic_exports_due_to_export_star,
         import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, mangle_local_css, mark_file_live_for_tree_shaking,
-        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
-        populate_css_stub_lazy_export, prepare_css_asts, print_cross_chunk_bindings,
-        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
-        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
+        join_with_public_path, lower_common_js_lazy_export, mangle_local_css,
+        mark_file_live_for_tree_shaking, match_import_with_export, merge_adjacent_local_stmts,
+        path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts,
+        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
+        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
+        wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -9484,7 +9548,14 @@ mod tests {
             loader: Loader::LocalCss,
             ..InputFile::default()
         };
+        let module_ref = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
         let stub = js_file(js_ast::Ast {
+            symbols: vec![Symbol::new(SymbolKind::Other, "module")],
+            module_ref,
+            exports_kind: ExportsKind::CommonJs,
             parts: vec![js_ast::Part {
                 statements: vec![js_ast::Stmt::new(
                     Loc::default(),
@@ -9546,6 +9617,29 @@ mod tests {
             export.value.data.as_deref(),
             Some(js_ast::ExprData::Object(_))
         ));
+
+        lower_common_js_lazy_export(&mut graph, 2, &local_names);
+        let Some(InputFileRepr::Js(stub_repr)) = graph.files[2].input_file.repr.as_ref() else {
+            panic!("expected stub");
+        };
+        let Some(js_ast::StmtData::Expr(statement)) =
+            stub_repr.ast.parts[0].statements[0].data.as_deref()
+        else {
+            panic!("expected assignment statement");
+        };
+        let Some(js_ast::ExprData::Binary(assignment)) = statement.value.data.as_deref() else {
+            panic!("expected assignment");
+        };
+        assert_eq!(assignment.op, js_ast::OpCode::BinaryAssign);
+        assert!(matches!(
+            assignment.left.data.as_deref(),
+            Some(js_ast::ExprData::Dot(dot)) if dot.name == "exports"
+        ));
+        assert!(matches!(
+            assignment.right.data.as_deref(),
+            Some(js_ast::ExprData::Object(_))
+        ));
+        assert!(stub_repr.ast.uses_module_ref);
     }
 
     #[test]
