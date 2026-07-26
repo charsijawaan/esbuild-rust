@@ -176,6 +176,7 @@ pub enum MatchImportKind {
     Cycle,
     ProbablyTypeScriptType,
     Ambiguous,
+    NoMatch,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1249,7 +1250,13 @@ pub fn match_import_with_export(
                 }
             }
 
-            ImportStatus::NoMatch => {}
+            ImportStatus::NoMatch => {
+                result = MatchImportResult {
+                    kind: MatchImportKind::NoMatch,
+                    source_index: next_tracker.source_index,
+                    ..MatchImportResult::default()
+                };
+            }
 
             ImportStatus::ProbablyTypeScriptType => {
                 result = MatchImportResult {
@@ -1463,6 +1470,13 @@ pub fn bind_imports_to_exports_for_file(
                 repr.meta
                     .is_probably_type_script_type
                     .insert(import_ref, true);
+            }
+            MatchImportKind::NoMatch => {
+                if graph.symbols.get(import_ref).import_item_status == ImportItemStatus::Generated {
+                    graph.symbols.get_mut(import_ref).import_item_status =
+                        ImportItemStatus::Missing;
+                }
+                issues.push(ImportMatchIssue { import_ref, result });
             }
             MatchImportKind::Cycle | MatchImportKind::Ambiguous => {
                 issues.push(ImportMatchIssue { import_ref, result });
@@ -8256,7 +8270,10 @@ mod tests {
         wrap_rules_with_conditions,
     };
     use crate::internal::{
-        ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
+        ast::{
+            ImportItemStatus, ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol,
+            SymbolKind,
+        },
         config::{
             Format, LegalComments, Loader, MetafileFormat, Mode, Options, PathPlaceholder,
             PathTemplate, SourceMap as SourceMapMode, template_to_string,
@@ -12995,6 +13012,15 @@ mod tests {
         let (next, status, _) = advance_import_tracker(&graph, tracker);
         assert_eq!(status, ImportStatus::NoMatch);
         assert_eq!(next.source_index, 1);
+        let (result, _) = match_import_with_export(
+            &graph,
+            tracker,
+            Vec::new(),
+            &mut Vec::new(),
+            Format::EsModule,
+        );
+        assert_eq!(result.kind, MatchImportKind::NoMatch);
+        assert_eq!(result.source_index, 1);
     }
 
     #[test]
@@ -13339,6 +13365,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn phase_four_binder_populates_graph_metadata() {
         let export_ref = Ref {
             source_index: 1,
@@ -13433,6 +13460,39 @@ mod tests {
         );
         assert!(bind_imports_to_exports_for_file(&mut graph, 0, Format::EsModule).is_empty());
         assert!(js_repr(&graph, 0).meta.is_probably_type_script_type[&tracker.import_ref]);
+
+        let (mut graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "missing".into(),
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr {
+                ast: js_ast::Ast {
+                    export_keyword: Range {
+                        loc: Loc { start: 1 },
+                        len: 6,
+                    },
+                    exports_kind: ExportsKind::Esm,
+                    ..js_ast::Ast::default()
+                },
+                ..JsRepr::default()
+            },
+        );
+        let mut symbol = Symbol::new(SymbolKind::Import, "missing");
+        symbol.import_item_status = ImportItemStatus::Generated;
+        graph.symbols.symbols_for_source[0].push(symbol);
+        let issues = bind_imports_to_exports_for_file(&mut graph, 0, Format::EsModule);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].result.kind, MatchImportKind::NoMatch);
+        assert_eq!(
+            graph.symbols.get(tracker.import_ref).import_item_status,
+            ImportItemStatus::Missing
+        );
     }
 
     #[test]
