@@ -151,6 +151,8 @@ pub struct BuildOptions {
     pub packages: Packages,
     pub loader: HashMap<String, Loader>,
     pub define: HashMap<String, String>,
+    pub main_fields: Vec<String>,
+    pub resolve_extensions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -286,6 +288,24 @@ fn validate_build_loaders(
     }
     if errors.is_empty() {
         Ok(result)
+    } else {
+        Err(errors)
+    }
+}
+
+fn validate_resolve_extensions(extensions: &[String]) -> Result<(), Vec<Message>> {
+    let errors = extensions
+        .iter()
+        .filter(|extension| {
+            extension.len() < 2 || !extension.starts_with('.') || extension.ends_with('.')
+        })
+        .map(|extension| Message {
+            text: format!("Invalid file extension: {extension:?}"),
+            kind: MessageKind::Error,
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
     } else {
         Err(errors)
     }
@@ -448,6 +468,12 @@ pub fn build(options: BuildOptions) -> BuildResult {
             };
         }
     };
+    if let Err(errors) = validate_resolve_extensions(&options.resolve_extensions) {
+        return BuildResult {
+            errors,
+            ..BuildResult::default()
+        };
+    }
     let global_name = if options.global_name.is_empty() {
         Vec::new()
     } else {
@@ -544,6 +570,8 @@ pub fn build(options: BuildOptions) -> BuildResult {
         external_settings,
         external_packages: options.packages == Packages::External,
         extension_to_loader,
+        extension_order: options.resolve_extensions,
+        main_fields: options.main_fields,
         global_name,
         public_path: options.public_path,
         entry_path_template: validate_path_template(&options.entry_names),
@@ -1340,6 +1368,60 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("require(\"node:fs\")"));
         assert!(output.contains("readFileSync"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn configures_package_fields_and_resolve_extensions() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-resolve-options-{unique}"));
+        std::fs::create_dir_all(directory.join("node_modules/pkg"))
+            .expect("create package directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {choice} from 'pkg'; import {custom} from './local'; console.log(choice, custom)",
+        )
+        .expect("write entry file");
+        std::fs::write(
+            directory.join("node_modules/pkg/package.json"),
+            r#"{"main":"main.js","module":"module.js"}"#,
+        )
+        .expect("write package metadata");
+        std::fs::write(
+            directory.join("node_modules/pkg/main.js"),
+            "export const choice = 'main-field-choice'",
+        )
+        .expect("write main module");
+        std::fs::write(
+            directory.join("node_modules/pkg/module.js"),
+            "export const choice = 'module-field-choice'",
+        )
+        .expect("write module module");
+        std::fs::write(
+            directory.join("local.custom"),
+            "export const custom = 'custom-extension-choice'",
+        )
+        .expect("write custom module");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::Iife,
+            loader: HashMap::from([(".custom".into(), Loader::Js)]),
+            main_fields: vec!["main".into()],
+            resolve_extensions: vec![".custom".into(), ".js".into()],
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("main-field-choice"));
+        assert!(!output.contains("module-field-choice"));
+        assert!(output.contains("custom-extension-choice"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

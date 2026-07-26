@@ -1367,7 +1367,14 @@ fn detect_content_type(contents: &[u8]) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn apply_option_defaults(options: &mut Options) {
+    if options.extension_order.is_empty() {
+        options.extension_order = [".tsx", ".ts", ".jsx", ".js", ".css", ".json"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    }
     if options.extension_to_loader.is_empty() {
         options.extension_to_loader = default_extension_to_loader_map();
     }
@@ -1679,6 +1686,10 @@ mod tests {
             ..Options::default()
         };
         apply_option_defaults(&mut options);
+        assert_eq!(
+            options.extension_order,
+            [".tsx", ".ts", ".jsx", ".js", ".css", ".json"]
+        );
         assert_eq!(options.extension_to_loader.get(".tsx"), Some(&Loader::Tsx));
         assert_eq!(options.output_extension_js, ".js");
         assert_eq!(options.output_extension_css, ".css");

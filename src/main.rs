@@ -58,6 +58,8 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut packages = Packages::Bundle;
     let mut build_loaders = HashMap::new();
     let mut defines = HashMap::new();
+    let mut main_fields = Vec::new();
+    let mut resolve_extensions = Vec::new();
     for argument in arguments {
         if argument == "--help" || argument == "-h" {
             return Ok(Output::Text(help_text()));
@@ -152,6 +154,22 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         }
         if let Some(value) = argument.strip_prefix("--asset-names=") {
             asset_names = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--main-fields=") {
+            main_fields = if value.is_empty() {
+                Vec::new()
+            } else {
+                value.split(',').map(str::to_string).collect()
+            };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--resolve-extensions=") {
+            resolve_extensions = if value.is_empty() {
+                Vec::new()
+            } else {
+                value.split(',').map(str::to_string).collect()
+            };
             continue;
         }
         if let Some(value) = argument.strip_prefix("--external:") {
@@ -270,6 +288,8 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             packages,
             loader: build_loaders,
             define: defines,
+            main_fields,
+            resolve_extensions,
             ..BuildOptions::default()
         });
         if !result.errors.is_empty() {
@@ -387,6 +407,8 @@ fn help_text() -> String {
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
          \x20\x20--loader:.EXT=LOADER\n\
          \x20\x20--define:KEY=VALUE\n\
+         \x20\x20--main-fields=FIELDS\n\
+         \x20\x20--resolve-extensions=EXTENSIONS\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
          \x20\x20--minify-identifiers\n\
