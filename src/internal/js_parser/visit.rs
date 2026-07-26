@@ -52,10 +52,21 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             },
             Some(StmtData::If(if_statement)) => {
                 visit_expr(core, &mut if_statement.test, resolve_identifiers);
+                validate_single_statement(core, &if_statement.yes, SingleStatementContext::If);
                 visit_statement(core, &mut if_statement.yes, resolve_identifiers);
+                validate_single_statement(
+                    core,
+                    &if_statement.no_or_nil,
+                    SingleStatementContext::If,
+                );
                 visit_statement(core, &mut if_statement.no_or_nil, resolve_identifiers);
             }
             Some(StmtData::DoWhile(loop_statement)) => {
+                validate_single_statement(
+                    core,
+                    &loop_statement.body,
+                    SingleStatementContext::Other,
+                );
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
@@ -63,6 +74,11 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             Some(StmtData::While(loop_statement)) => {
                 visit_expr(core, &mut loop_statement.test, resolve_identifiers);
+                validate_single_statement(
+                    core,
+                    &loop_statement.body,
+                    SingleStatementContext::Other,
+                );
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
@@ -75,6 +91,11 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     );
                 }
                 visit_expr(core, &mut with_statement.value, resolve_identifiers);
+                validate_single_statement(
+                    core,
+                    &with_statement.body,
+                    SingleStatementContext::Other,
+                );
                 core.push_scope_for_visit_pass(ScopeKind::With, with_statement.body_loc);
                 visit_statement(core, &mut with_statement.body, resolve_identifiers);
                 core.pop_scope();
@@ -107,6 +128,11 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 visit_statement(core, &mut loop_statement.init_or_nil, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.test_or_nil, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.update_or_nil, resolve_identifiers);
+                validate_single_statement(
+                    core,
+                    &loop_statement.body,
+                    SingleStatementContext::Other,
+                );
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
@@ -116,6 +142,11 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
                 visit_statement(core, &mut loop_statement.init, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
+                validate_single_statement(
+                    core,
+                    &loop_statement.body,
+                    SingleStatementContext::Other,
+                );
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
@@ -125,12 +156,18 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
                 visit_statement(core, &mut loop_statement.init, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
+                validate_single_statement(
+                    core,
+                    &loop_statement.body,
+                    SingleStatementContext::Other,
+                );
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
                 core.pop_scope();
             }
             Some(StmtData::Label(label)) => {
+                validate_single_statement(core, &label.statement, SingleStatementContext::Label);
                 core.push_scope_for_visit_pass(ScopeKind::Label, statement.loc);
                 let name = String::from_utf8_lossy(core.load_name_from_ref(label.name.reference))
                     .into_owned();
@@ -242,6 +279,74 @@ fn bind_label_reference(
             format!("Cannot continue to label {name:?}"),
         );
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SingleStatementContext {
+    If,
+    Label,
+    Other,
+}
+
+fn validate_single_statement(
+    core: &mut ParserCore,
+    statement: &Stmt,
+    context: SingleStatementContext,
+) {
+    match statement.data.as_deref() {
+        Some(StmtData::Local(local)) if local.kind != crate::internal::js_ast::LocalKind::Var => {
+            report_forbidden_single_statement(core, statement.loc);
+        }
+        Some(StmtData::Class(_)) => report_forbidden_single_statement(core, statement.loc),
+        Some(StmtData::Function(function)) => {
+            let is_annex_b_function =
+                !function.function.is_async && !function.function.is_generator;
+            if is_annex_b_function
+                && matches!(
+                    context,
+                    SingleStatementContext::If | SingleStatementContext::Label
+                )
+            {
+                if core.is_strict_mode() {
+                    let place = if context == SingleStatementContext::If {
+                        "if statements"
+                    } else {
+                        "labels"
+                    };
+                    let reason = if core.is_file_considered_esm {
+                        "an ECMAScript module"
+                    } else {
+                        "strict mode"
+                    };
+                    core.add_error_range(
+                        crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
+                        format!("Function declarations inside {place} cannot be used in {reason}"),
+                    );
+                }
+            } else {
+                report_forbidden_single_statement(core, statement.loc);
+            }
+        }
+        Some(StmtData::Label(label)) => {
+            validate_single_statement(
+                core,
+                &label.statement,
+                if context == SingleStatementContext::Label {
+                    SingleStatementContext::Label
+                } else {
+                    SingleStatementContext::Other
+                },
+            );
+        }
+        _ => {}
+    }
+}
+
+fn report_forbidden_single_statement(core: &mut ParserCore, loc: Loc) {
+    core.add_error_range(
+        crate::internal::js_lexer::range_of_identifier(&core.source, loc),
+        "Cannot use a declaration in a single-statement context",
+    );
 }
 
 fn visit_statement(core: &mut ParserCore, statement: &mut Stmt, resolve_identifiers: bool) {

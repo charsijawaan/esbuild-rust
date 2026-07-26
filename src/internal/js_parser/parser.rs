@@ -1937,6 +1937,40 @@ mod tests {
     }
 
     #[test]
+    fn validates_declarations_in_single_statement_contexts() {
+        let (_, ok, log) = parse_source(
+            "if (condition) const one = 1;\
+             while (condition) let two;\
+             do class Three {} while (condition);\
+             for (;;) async function four() {}",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 4);
+
+        let (_, ok, log) =
+            parse_source("if (condition) function one() {} label: function two() {}");
+        assert!(ok);
+        assert!(log.done().is_empty());
+
+        let (_, ok, log) = parse_source(
+            "\"use strict\";\
+             if (condition) function one() {}\
+             label: function two() {}",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
+
+        let (_, ok, log) =
+            parse_source("for (;;) function one() {} if (condition) label: function two() {}");
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
+
+        let (_, ok, log) = parse_source("export {}; if (condition) function one() {}");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+    }
+
+    #[test]
     fn for_loops_keep_lexical_bindings_in_a_loop_scope() {
         let (ast, ok, log) =
             parse_source("for (let item of items) { item; } item; for (let i = 0; i < 1; i++) {}");
