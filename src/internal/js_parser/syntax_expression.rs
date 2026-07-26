@@ -26,6 +26,7 @@ pub(crate) fn parse_expression(
         parse_expression(core, lexer, Precedence::Lowest, true)
     });
 
+    let mut previous_operator = None;
     loop {
         if lexer.token == Token::Question && Precedence::Conditional > minimum_precedence {
             lexer.next();
@@ -49,6 +50,26 @@ pub(crate) fn parse_expression(
         if operator.precedence <= minimum_precedence || (lexer.token == Token::In && !allow_in) {
             return left;
         }
+        let mixes_nullish = (minimum_precedence == Precedence::NullishCoalescing
+            && matches!(
+                operator.op,
+                crate::internal::js_ast::OpCode::BinaryLogicalOr
+                    | crate::internal::js_ast::OpCode::BinaryLogicalAnd
+            ))
+            || (operator.op == crate::internal::js_ast::OpCode::BinaryNullishCoalescing
+                && matches!(
+                    previous_operator,
+                    Some(
+                        crate::internal::js_ast::OpCode::BinaryLogicalOr
+                            | crate::internal::js_ast::OpCode::BinaryLogicalAnd
+                    )
+                ));
+        if mixes_nullish {
+            core.add_error_range(
+                lexer.range(),
+                "Cannot mix \"??\" with \"||\" or \"&&\" without parentheses",
+            );
+        }
         lexer.next();
         let right_minimum = if operator.is_right_associative {
             match operator.precedence {
@@ -68,6 +89,7 @@ pub(crate) fn parse_expression(
                 op: operator.op,
             }),
         );
+        previous_operator = Some(operator.op);
     }
 }
 
@@ -162,5 +184,25 @@ mod tests {
             Some(ExprData::Number(_))
         ));
         assert_eq!(lexer.token, Token::In);
+    }
+
+    #[test]
+    fn rejects_unparenthesized_nullish_logical_mixing_only() {
+        for (text, error_count) in [
+            ("a ?? b || c", 1),
+            ("a && b ?? c", 1),
+            ("a ?? (b || c)", 0),
+            ("(a && b) ?? c", 0),
+        ] {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let source = Source {
+                contents: Arc::from(text.as_bytes()),
+                ..Source::default()
+            };
+            let mut lexer = Lexer::new(log.clone(), source.clone(), TsOptions::default());
+            let mut core = super::ParserCore::new_with_log(source, Options::default(), log.clone());
+            let _ = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+            assert_eq!(log.peek().len(), error_count, "{text}");
+        }
     }
 }

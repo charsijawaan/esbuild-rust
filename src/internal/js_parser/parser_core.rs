@@ -879,14 +879,17 @@ impl ParserCore {
         );
     }
 
-    fn add_error(&mut self, loc: Loc, text: impl Into<String>) {
+    pub(crate) fn add_error_range(&mut self, range: Range, text: impl Into<String>) {
         if let Some(log) = &self.log {
-            log.add_error(
-                Some(&mut self.tracker),
-                range_of_identifier(&self.source, loc),
-                text,
-            );
+            log.add_error(Some(&mut self.tracker), range, text);
         }
+    }
+
+    fn add_error(&mut self, loc: Loc, text: impl Into<String>) {
+        if self.log.is_none() {
+            return;
+        }
+        self.add_error_range(range_of_identifier(&self.source, loc), text);
     }
 }
 
