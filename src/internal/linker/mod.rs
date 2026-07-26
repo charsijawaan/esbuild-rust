@@ -2029,6 +2029,103 @@ pub fn bind_imports_to_parts_for_file(
     }
 }
 
+/// Create the synthetic part that keeps an entry point's public surface live.
+///
+/// # Panics
+///
+/// Panics when resolved exports, wrapper parts, or runtime references violate
+/// linker graph invariants.
+pub fn create_entry_point_part(graph: &mut LinkerGraph, source_index: u32, to_common_js_ref: Ref) {
+    assert!(
+        graph.files[source_index as usize].is_entry_point(),
+        "entry point part requires an entry point"
+    );
+    let (aliases, resolved_exports, force_exports, wrap, wrapper_part_index) = {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            panic!("entry point must be JavaScript");
+        };
+        (
+            repr.meta.sorted_and_filtered_export_aliases.clone(),
+            repr.meta.resolved_exports.clone(),
+            repr.meta.force_include_exports_for_entry_point,
+            repr.meta.wrap,
+            repr.meta.wrapper_part_index,
+        )
+    };
+    let mut dependencies = Vec::new();
+    for alias in aliases {
+        let mut export = resolved_exports[&alias].clone();
+        let import_data = {
+            let Some(InputFileRepr::Js(repr)) = graph.files[export.source_index as usize]
+                .input_file
+                .repr
+                .as_ref()
+            else {
+                panic!("entry export target must be JavaScript");
+            };
+            repr.meta.imports_to_bind.get(&export.reference).cloned()
+        };
+        if let Some(import_data) = import_data {
+            export.source_index = import_data.source_index;
+            export.reference = import_data.reference;
+            dependencies.extend(import_data.re_exports);
+        }
+        let Some(InputFileRepr::Js(repr)) = graph.files[export.source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+        else {
+            panic!("entry export target must be JavaScript");
+        };
+        dependencies.extend(
+            repr.top_level_symbol_to_parts(export.reference)
+                .unwrap_or_default()
+                .iter()
+                .map(|&part_index| js_ast::Dependency {
+                    source_index: export.source_index,
+                    part_index,
+                }),
+        );
+    }
+    if force_exports {
+        dependencies.push(js_ast::Dependency {
+            source_index,
+            part_index: js_ast::NS_EXPORT_PART_INDEX,
+        });
+    }
+    if wrap != WrapKind::None {
+        dependencies.push(js_ast::Dependency {
+            source_index,
+            part_index: wrapper_part_index.get_index(),
+        });
+    }
+
+    let part_index = graph.add_part_to_file(
+        source_index,
+        js_ast::Part {
+            dependencies,
+            can_be_removed_if_unused: false,
+            ..js_ast::Part::default()
+        },
+    );
+    let Some(InputFileRepr::Js(repr)) = graph.files[source_index as usize].input_file.repr.as_mut()
+    else {
+        unreachable!("entry point was checked above");
+    };
+    repr.meta.entry_point_part_index = Index32::new(part_index);
+    if force_exports {
+        graph.generate_symbol_import_and_use(
+            source_index,
+            part_index,
+            to_common_js_ref,
+            1,
+            crate::internal::runtime::SOURCE_INDEX,
+        );
+    }
+}
+
 /// Create the synthetic wrapper part used by wrapped `CommonJS` and ESM files.
 ///
 /// # Panics
@@ -7510,8 +7607,8 @@ mod tests {
         bind_imports_to_parts_for_file, classify_module_wrappers, compile_part_range_for_chunk,
         compile_prepared_css_asts, compute_chunks, compute_cross_chunk_dependencies,
         compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
-        create_exports_for_file, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
-        finalize_chunk_paths, finalize_javascript_chunk_outputs,
+        create_entry_point_part, create_exports_for_file, create_wrapper_for_file,
+        enforce_no_cyclic_chunk_imports, finalize_chunk_paths, finalize_javascript_chunk_outputs,
         finalize_part_dependencies_for_file, find_imported_css_files_in_js_order,
         find_imported_files_in_css_order, generate_code_for_lazy_exports,
         generate_cross_chunk_stmts, generate_css_chunk, generate_css_module_exports,
@@ -13113,6 +13210,101 @@ mod tests {
             "entry_exports"
         );
         assert_eq!(graph.symbols.get(module_ref).original_name, "entry_module");
+    }
+
+    #[test]
+    fn entry_point_part_keeps_exports_namespace_and_wrapper_live() {
+        let to_common_js_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let wrapper_ref = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let target_ref = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let input_files = [
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "__toCommonJS")],
+                parts: vec![js_ast::Part::default()],
+                top_level_symbol_to_parts_from_parser: HashMap::from([(to_common_js_ref, vec![0])]),
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "init_entry")],
+                wrapper_ref,
+                parts: vec![js_ast::Part::default(), js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "value")],
+                parts: vec![js_ast::Part {
+                    declared_symbols: vec![js_ast::DeclaredSymbol {
+                        reference: target_ref,
+                        is_top_level: true,
+                    }],
+                    ..js_ast::Part::default()
+                }],
+                top_level_symbol_to_parts_from_parser: HashMap::from([(target_ref, vec![0])]),
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(
+            &input_files,
+            &[0, 1, 2],
+            &[EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            }],
+            false,
+        );
+        let Some(InputFileRepr::Js(repr)) = graph.files[1].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta.sorted_and_filtered_export_aliases = vec!["value".into()];
+        repr.meta.resolved_exports.insert(
+            "value".into(),
+            crate::internal::graph::ExportData {
+                source_index: 2,
+                reference: target_ref,
+                ..crate::internal::graph::ExportData::default()
+            },
+        );
+        repr.meta.force_include_exports_for_entry_point = true;
+        repr.meta.wrap = WrapKind::Esm;
+        repr.meta.wrapper_part_index = Index32::new(1);
+
+        create_entry_point_part(&mut graph, 1, to_common_js_ref);
+
+        let repr = js_repr(&graph, 1);
+        assert_eq!(repr.meta.entry_point_part_index.get_index(), 2);
+        let part = &repr.ast.parts[2];
+        assert!(!part.can_be_removed_if_unused);
+        assert_eq!(
+            part.dependencies,
+            [
+                js_ast::Dependency {
+                    source_index: 2,
+                    part_index: 0,
+                },
+                js_ast::Dependency {
+                    source_index: 1,
+                    part_index: js_ast::NS_EXPORT_PART_INDEX,
+                },
+                js_ast::Dependency {
+                    source_index: 1,
+                    part_index: 1,
+                },
+                js_ast::Dependency {
+                    source_index: 0,
+                    part_index: 0,
+                },
+            ]
+        );
+        assert_eq!(part.symbol_uses[&to_common_js_ref].count_estimate, 1);
     }
 
     #[test]
