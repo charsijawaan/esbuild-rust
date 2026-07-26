@@ -5930,6 +5930,50 @@ mod tests {
     }
 
     #[test]
+    fn rejects_optional_chains_used_directly_as_template_tags() {
+        for input in [
+            "a?.b``",
+            "a?.(b)``",
+            "a?.[b]``",
+            "a?.b.c`${d}`",
+            "a?.(b).c`${d}`",
+            "a?.[b].c`${d}`",
+        ] {
+            let result = transform(input, TransformOptions::default());
+            assert_eq!(result.errors.len(), 1, "{input}: {:?}", result.errors);
+            assert_eq!(
+                result.errors[0].text,
+                "Template literals cannot have an optional chain as a tag"
+            );
+        }
+
+        for input in ["(a?.b)``", "(a?.(b))``", "(a?.[b])`${d}`"] {
+            let result = transform(input, TransformOptions::default());
+            assert!(result.errors.is_empty(), "{input}: {:?}", result.errors);
+        }
+    }
+
+    #[test]
+    fn preserves_keyword_boundaries_and_exponentiation_grammar() {
+        assert_eq!(
+            code(transform(
+                "let a=(-x)**y,b=(!x)**y,c=(typeof x)**y,d=(void 0)**y,e=(-1)**y,f=(++x)**y;\
+                 if(a)b();else e();\
+                 if(a)b();else [e];\
+                 if(a)b();else 0;\
+                 async function g(){return (await x)**y}",
+                TransformOptions {
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "let a=(-x)**y,b=(!x)**y,c=(typeof x)**y,d=(void 0)**y,e=(-1)**y,f=++x**y;\
+             if(a)b();else e();if(a)b();else[e];if(a)b();else 0;\
+             async function g(){return(await x)**y}\n"
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

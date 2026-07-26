@@ -9,9 +9,9 @@ use crate::internal::compat::JsFeature;
 use crate::internal::config::{LegalComments, MetafileFormat};
 use crate::internal::helpers::{escape_closing_tag, quote_for_json};
 use crate::internal::js_ast::{
-    Ast, Binding, BindingData, BlockStmt, Expr, ExprData, ExprStmt, IfStmt, LocalKind, OpCode,
-    OptionalChain, Precedence, PropertyFlags, PropertyKind, ReturnStmt, Stmt, StmtData,
-    is_identifier_es5_and_es_next, is_optional_chain, join_with_comma,
+    AssignTarget, Ast, Binding, BindingData, BlockStmt, Expr, ExprData, ExprStmt, IfStmt,
+    LocalKind, OpCode, OptionalChain, Precedence, PropertyFlags, PropertyKind, ReturnStmt, Stmt,
+    StmtData, is_identifier_es5_and_es_next, is_optional_chain, join_with_comma,
 };
 use crate::internal::renamer::Renamer;
 use crate::internal::sourcemap::{
@@ -794,7 +794,7 @@ impl Printer<'_> {
                 self.output.extend_from_slice(b"return");
                 if return_statement.value_or_nil.data.is_some() {
                     let can_omit_space =
-                        can_omit_space_after_return(&return_statement.value_or_nil);
+                        can_omit_space_after_return(&return_statement.value_or_nil, self.options);
                     if !self.options.minify_whitespace || !can_omit_space {
                         self.output.push(b' ');
                     }
@@ -1181,19 +1181,7 @@ impl Printer<'_> {
             return;
         }
         if self.options.minify_whitespace
-            && matches!(
-                if_statement.no_or_nil.data.as_deref(),
-                Some(
-                    StmtData::While(_)
-                        | StmtData::With(_)
-                        | StmtData::DoWhile(_)
-                        | StmtData::For(_)
-                        | StmtData::ForIn(_)
-                        | StmtData::ForOf(_)
-                        | StmtData::Try(_)
-                        | StmtData::Switch(_)
-                )
-            )
+            && statement_starts_with_identifier(&if_statement.no_or_nil, self.options)
         {
             self.output.push(b' ');
         }
@@ -1918,19 +1906,20 @@ impl Printer<'_> {
             ExprData::Binary(binary) => {
                 let operator = binary.op.table_entry();
                 let higher = higher_precedence(operator.level);
-                if binary.op.is_right_associative() {
-                    self.print_expr_at_with_usage(
-                        &binary.left,
-                        higher,
-                        binary.op == OpCode::BinaryComma,
-                    );
+                let left_level = if binary.op == OpCode::BinaryPower
+                    && power_left_requires_parentheses(&binary.left, self.options.minify_syntax)
+                {
+                    Precedence::Call
+                } else if binary.op.is_right_associative() {
+                    higher
                 } else {
-                    self.print_expr_at_with_usage(
-                        &binary.left,
-                        operator.level,
-                        binary.op == OpCode::BinaryComma,
-                    );
-                }
+                    operator.level
+                };
+                self.print_expr_at_with_usage(
+                    &binary.left,
+                    left_level,
+                    binary.op == OpCode::BinaryComma,
+                );
                 self.print_binary_operator(binary.op);
                 if binary.op.is_right_associative() {
                     self.print_expr_at_with_usage(
@@ -2701,7 +2690,7 @@ impl Printer<'_> {
     }
 }
 
-fn can_omit_space_after_return(expression: &Expr) -> bool {
+fn can_omit_space_after_return(expression: &Expr, options: Options) -> bool {
     match expression.data.as_deref() {
         Some(
             ExprData::Array(_)
@@ -2716,7 +2705,158 @@ fn can_omit_space_after_return(expression: &Expr) -> bool {
         Some(ExprData::Call(call)) => {
             matches!(call.target.data.as_deref(), Some(ExprData::Arrow(_)))
         }
-        Some(ExprData::Binary(binary)) => can_omit_space_after_return(&binary.left),
+        Some(ExprData::Binary(binary)) => {
+            (binary.op == OpCode::BinaryPower
+                && power_left_requires_parentheses(&binary.left, options.minify_syntax))
+                || can_omit_space_after_return(&binary.left, options)
+        }
+        _ => false,
+    }
+}
+
+fn power_left_requires_parentheses(left: &Expr, minify_syntax: bool) -> bool {
+    matches!(
+        left.data.as_deref(),
+        Some(ExprData::Unary(unary)) if unary.op.unary_assign_target() == AssignTarget::None
+    ) || matches!(
+        left.data.as_deref(),
+        Some(ExprData::Await(_) | ExprData::Undefined | ExprData::Number(_))
+    ) || (minify_syntax && matches!(left.data.as_deref(), Some(ExprData::Boolean(_))))
+}
+
+fn statement_starts_with_identifier(statement: &Stmt, options: Options) -> bool {
+    match statement.data.as_deref() {
+        Some(StmtData::Expr(expression)) => {
+            expression_starts_with_identifier(&expression.value, options)
+        }
+        Some(
+            StmtData::Debugger
+            | StmtData::Local(_)
+            | StmtData::Function(_)
+            | StmtData::Class(_)
+            | StmtData::Return(_)
+            | StmtData::Throw(_)
+            | StmtData::If(_)
+            | StmtData::While(_)
+            | StmtData::With(_)
+            | StmtData::DoWhile(_)
+            | StmtData::For(_)
+            | StmtData::ForIn(_)
+            | StmtData::ForOf(_)
+            | StmtData::Try(_)
+            | StmtData::Switch(_)
+            | StmtData::Break(_)
+            | StmtData::Continue(_)
+            | StmtData::Label(_)
+            | StmtData::Import(_)
+            | StmtData::ExportClause(_)
+            | StmtData::ExportFrom(_)
+            | StmtData::ExportStar(_)
+            | StmtData::ExportDefault(_)
+            | StmtData::ExportEquals(_),
+        ) => true,
+        _ => false,
+    }
+}
+
+fn expression_starts_with_identifier(expression: &Expr, options: Options) -> bool {
+    match expression.data.as_deref() {
+        Some(
+            ExprData::Boolean(_)
+            | ExprData::Super
+            | ExprData::Null
+            | ExprData::Undefined
+            | ExprData::This
+            | ExprData::New(_)
+            | ExprData::NewTarget(_)
+            | ExprData::ImportMeta(_)
+            | ExprData::Identifier(_)
+            | ExprData::ImportIdentifier(_)
+            | ExprData::NameOfSymbol(_)
+            | ExprData::BigInt(_)
+            | ExprData::Await(_)
+            | ExprData::Yield(_)
+            | ExprData::RequireString(_)
+            | ExprData::RequireResolveString(_)
+            | ExprData::ImportString(_)
+            | ExprData::ImportCall(_),
+        ) => true,
+        Some(ExprData::Number(value)) => format_number(*value, Precedence::Lowest, options, false)
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')),
+        Some(ExprData::Unary(unary)) => {
+            if matches!(
+                unary.op,
+                OpCode::UnaryPostDecrement | OpCode::UnaryPostIncrement
+            ) {
+                expression_starts_with_identifier(&unary.value, options)
+            } else {
+                unary.op.table_entry().is_keyword
+            }
+        }
+        Some(ExprData::Binary(binary)) => expression_starts_with_identifier(&binary.left, options),
+        Some(ExprData::If(conditional)) => {
+            expression_starts_with_identifier(&conditional.test, options)
+        }
+        Some(ExprData::Dot(dot)) => {
+            !(matches!(dot.target.data.as_deref(), Some(ExprData::Number(_)))
+                || dot.optional_chain == OptionalChain::None && is_optional_chain(&dot.target))
+                && expr_precedence(
+                    dot.target
+                        .data
+                        .as_deref()
+                        .expect("dot target must be present"),
+                ) >= Precedence::Postfix
+                && expression_starts_with_identifier(&dot.target, options)
+        }
+        Some(ExprData::Index(index)) => {
+            !(index.optional_chain == OptionalChain::None && is_optional_chain(&index.target))
+                && index
+                    .target
+                    .data
+                    .as_deref()
+                    .is_some_and(|target| expr_precedence(target) >= Precedence::Postfix)
+                && expression_starts_with_identifier(&index.target, options)
+        }
+        Some(ExprData::Call(call)) => {
+            !(call.optional_chain == OptionalChain::None && is_optional_chain(&call.target))
+                && call
+                    .target
+                    .data
+                    .as_deref()
+                    .is_some_and(|target| expr_precedence(target) >= Precedence::Postfix)
+                && expression_starts_with_identifier(&call.target, options)
+        }
+        Some(ExprData::Arrow(arrow)) => {
+            arrow.is_async
+                || (options.minify_whitespace
+                    && !arrow.has_rest_arg
+                    && matches!(
+                        arrow.args.as_slice(),
+                        [argument]
+                            if argument.default_or_nil.data.is_none()
+                                && matches!(
+                                    argument.binding.data.as_deref(),
+                                    Some(BindingData::Identifier(_))
+                                )
+                    ))
+        }
+        Some(ExprData::Template(template)) if template.tag_or_nil.data.is_some() => {
+            !is_optional_chain(&template.tag_or_nil)
+                && template
+                    .tag_or_nil
+                    .data
+                    .as_deref()
+                    .is_some_and(|tag| expr_precedence(tag) >= Precedence::Postfix)
+                && expression_starts_with_identifier(&template.tag_or_nil, options)
+        }
+        Some(ExprData::InlinedEnum(inlined)) => {
+            expression_starts_with_identifier(&inlined.value, options)
+        }
+        Some(ExprData::Annotation(annotation)) => {
+            expression_starts_with_identifier(&annotation.value, options)
+        }
         _ => false,
     }
 }

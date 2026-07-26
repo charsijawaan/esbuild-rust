@@ -363,6 +363,12 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                 optional_chain = old_optional_chain;
             }
             Token::NoSubstitutionTemplateLiteral | Token::TemplateHead => {
+                if old_optional_chain != OptionalChain::None {
+                    core.add_error_range(
+                        lexer.range(),
+                        "Template literals cannot have an optional chain as a tag",
+                    );
+                }
                 left = parse_tagged_template_suffix(left, lexer, |lexer| {
                     parse_nested(core, lexer, Precedence::Lowest)
                 })
