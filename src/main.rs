@@ -77,7 +77,10 @@ fn run_with_stdin_and_node_paths(
     stdin_override: Option<&[u8]>,
     node_paths: Vec<String>,
 ) -> Result<Output, String> {
-    let mut options = TransformOptions::default();
+    let mut options = TransformOptions {
+        ascii_only: true,
+        ..TransformOptions::default()
+    };
     let mut input_paths = Vec::new();
     let mut bundle = false;
     let mut outdir = String::new();
@@ -943,6 +946,31 @@ mod tests {
         assert!(output.contains("const value = 42;"));
         assert!(output.contains("console.log(value);"));
         assert!(!output.contains(": number"));
+    }
+
+    #[test]
+    fn defaults_to_ascii_and_accepts_utf8_charset() {
+        let Output::Code(ascii) = run_with_stdin(&[], Some("const π = \"😀\"".as_bytes()))
+            .expect("default charset transform succeeds")
+        else {
+            panic!("expected transformed code");
+        };
+        assert_eq!(
+            String::from_utf8(ascii).expect("ASCII output is UTF-8"),
+            "const \\u03C0 = \"\\u{1F600}\";\n"
+        );
+
+        let Output::Code(utf8) = run_with_stdin(
+            &["--charset=utf8".into()],
+            Some("const π = \"😀\"".as_bytes()),
+        )
+        .expect("UTF-8 charset transform succeeds") else {
+            panic!("expected transformed code");
+        };
+        assert_eq!(
+            String::from_utf8(utf8).expect("UTF-8 output is UTF-8"),
+            "const π = \"😀\";\n"
+        );
     }
 
     #[test]
