@@ -2233,8 +2233,12 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     let mut code = printed.js;
     let printed_len = code.len();
     prepend_keep_name_helper(&mut code, &helper_name, options.minify_whitespace);
+    let source_map_prefix_len = code.len() - printed_len;
+    if options.minify_whitespace && !code.is_empty() && code.last() != Some(&b'\n') {
+        code.push(b'\n');
+    }
     let mut source_map_prefix_offset = LineColumnOffset::default();
-    source_map_prefix_offset.advance_bytes(&code[..code.len() - printed_len]);
+    source_map_prefix_offset.advance_bytes(&code[..source_map_prefix_len]);
     let source_map_prefix_lines = usize::try_from(source_map_prefix_offset.lines)
         .expect("source-map prefix line count is non-negative");
     TransformPrint {
@@ -3748,6 +3752,30 @@ mod tests {
     }
 
     #[test]
+    fn minifies_transform_whitespace_like_upstream() {
+        assert_eq!(
+            code(transform(
+                "function f(a) { return a + 1 }",
+                TransformOptions {
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function f(a){return a+1}\n"
+        );
+        assert_eq!(
+            code(transform(
+                "function f() { foo(); let x = 1; bar(x) }",
+                TransformOptions {
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function f(){foo();let x=1;bar(x)}\n"
+        );
+    }
+
+    #[test]
     fn defaults_node_env_for_browser_builds() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4869,7 +4897,7 @@ mod tests {
                     ..TransformOptions::default()
                 }
             )),
-            "const element=React.createElement(\"div\",null);"
+            "const element=React.createElement(\"div\",null);\n"
         );
     }
 

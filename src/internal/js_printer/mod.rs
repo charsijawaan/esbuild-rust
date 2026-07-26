@@ -1024,8 +1024,15 @@ impl Printer<'_> {
         self.output.push(b'{');
         self.print_newline();
         self.indent += 1;
-        for statement in &block.statements {
+        for (index, statement) in block.statements.iter().enumerate() {
             self.print_stmt(statement);
+            if self.options.minify_whitespace
+                && index + 1 == block.statements.len()
+                && statement_can_omit_semicolon_before_close_brace(statement)
+                && self.output.last() == Some(&b';')
+            {
+                self.output.pop();
+            }
         }
         self.indent -= 1;
         self.print_indent();
@@ -2287,6 +2294,22 @@ impl Printer<'_> {
             self.output.push(b' ');
         }
     }
+}
+
+fn statement_can_omit_semicolon_before_close_brace(statement: &Stmt) -> bool {
+    matches!(
+        statement.data.as_deref(),
+        Some(
+            StmtData::Debugger
+                | StmtData::Directive(_)
+                | StmtData::Expr(_)
+                | StmtData::Local(_)
+                | StmtData::Return(_)
+                | StmtData::Throw(_)
+                | StmtData::Break(_)
+                | StmtData::Continue(_)
+        )
+    )
 }
 
 fn expr_precedence(data: &ExprData) -> Precedence {
