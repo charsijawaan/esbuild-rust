@@ -1270,7 +1270,7 @@ pub struct ModuleTypeData {
     pub module_type: ModuleType,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Ast {
     pub module_type_data: ModuleTypeData,
     pub parts: Vec<Part>,
@@ -1329,7 +1329,7 @@ pub struct NamedExport {
     pub alias_loc: Loc,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Part {
     pub statements: Vec<Stmt>,
     pub scopes: Vec<ScopeRef>,

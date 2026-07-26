@@ -7,13 +7,17 @@ use std::{
 
 use crate::internal::{
     fs::{Fs, ModKey, ReadFileResult},
-    logger::Path,
+    js_ast::{Ast, Expr},
+    js_parser::{JsonOptions, Options},
+    logger::{DeferLogKind, Log, Msg, Path, Source},
     runtime,
 };
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CacheSet {
     pub fs_cache: FsCache,
+    pub json_cache: JsonCache,
+    pub js_cache: JsCache,
     pub source_index_cache: SourceIndexCache,
 }
 
@@ -21,6 +25,8 @@ pub struct CacheSet {
 pub fn make_cache_set() -> CacheSet {
     CacheSet {
         fs_cache: FsCache::default(),
+        json_cache: JsonCache::default(),
+        js_cache: JsCache::default(),
         source_index_cache: SourceIndexCache::new(),
     }
 }
@@ -153,11 +159,126 @@ impl FsCache {
     }
 }
 
+#[derive(Default)]
+pub struct JsonCache {
+    entries: Mutex<HashMap<Path, JsonCacheEntry>>,
+}
+
+#[derive(Clone)]
+struct JsonCacheEntry {
+    expression: Expr,
+    messages: Vec<Msg>,
+    source: Source,
+    options: JsonOptions,
+    ok: bool,
+}
+
+impl JsonCache {
+    pub fn parse(&self, log: &Log, source: Source, options: JsonOptions) -> (Expr, bool) {
+        if let Some(entry) = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&source.key_path)
+            .filter(|entry| entry.source == source && entry.options == options)
+            .cloned()
+        {
+            replay_messages(log, &entry.messages);
+            return (entry.expression, entry.ok);
+        }
+
+        let temporary_log = Log::new_defer(DeferLogKind::All, log.overrides.as_ref().clone());
+        let (expression, ok) = crate::internal::js_parser::parse_json(
+            temporary_log.clone(),
+            source.clone(),
+            options.clone(),
+        );
+        let messages = temporary_log.done();
+        replay_messages(log, &messages);
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                source.key_path.clone(),
+                JsonCacheEntry {
+                    expression: expression.clone(),
+                    messages,
+                    source,
+                    options,
+                    ok,
+                },
+            );
+        (expression, ok)
+    }
+}
+
+#[derive(Default)]
+pub struct JsCache {
+    entries: Mutex<HashMap<Path, JsCacheEntry>>,
+}
+
+#[derive(Clone)]
+struct JsCacheEntry {
+    source: Source,
+    messages: Vec<Msg>,
+    options: Options,
+    ast: Ast,
+    ok: bool,
+}
+
+impl JsCache {
+    pub fn parse(&self, log: &Log, source: Source, options: Options) -> (Ast, bool) {
+        if let Some(entry) = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&source.key_path)
+            .filter(|entry| entry.source == source && entry.options.equal(&options))
+            .cloned()
+        {
+            replay_messages(log, &entry.messages);
+            return (entry.ast, entry.ok);
+        }
+
+        let temporary_log = Log::new_defer(DeferLogKind::All, log.overrides.as_ref().clone());
+        let (ast, ok) = crate::internal::js_parser::parse(
+            temporary_log.clone(),
+            source.clone(),
+            options.clone(),
+        );
+        let messages = temporary_log.done();
+        replay_messages(log, &messages);
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                source.key_path.clone(),
+                JsCacheEntry {
+                    source,
+                    messages,
+                    options,
+                    ast: ast.clone(),
+                    ok,
+                },
+            );
+        (ast, ok)
+    }
+}
+
+fn replay_messages(log: &Log, messages: &[Msg]) {
+    for message in messages {
+        log.add_msg(message.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         collections::HashMap,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use super::{FsCache, SourceIndexCache, SourceIndexKind};
@@ -166,7 +287,8 @@ mod tests {
             EntryKind, Fs, MockFs, MockKind, ModKey, OpenFileResult, ReadDirectoryResult,
             ReadFileResult, WatchData, mock_fs,
         },
-        logger::Path,
+        js_parser::{JsonOptions, Options},
+        logger::{DeferLogKind, Log, Path, Source},
     };
 
     struct CountingFs {
@@ -281,5 +403,45 @@ mod tests {
         assert_eq!(cache.read_file(&fs, "/entry.js").0, "value();");
         assert_eq!(cache.read_file(&fs, "/entry.js").0, "value();");
         assert_eq!(fs.reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn syntax_caches_replay_messages_and_return_independent_asts() {
+        let json_cache = super::JsonCache::default();
+        let json_source = Source {
+            contents: Arc::from(&b"{"[..]),
+            key_path: Path {
+                text: "/data.json".into(),
+                ..Path::default()
+            },
+            ..Source::default()
+        };
+        for _ in 0..2 {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let (_, ok) = json_cache.parse(&log, json_source.clone(), JsonOptions::default());
+            assert!(!ok);
+            assert_eq!(log.done().len(), 1);
+        }
+
+        let js_cache = super::JsCache::default();
+        let js_source = Source {
+            contents: Arc::from(&b"const value = 1;"[..]),
+            key_path: Path {
+                text: "/entry.js".into(),
+                ..Path::default()
+            },
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let (mut first, ok) = js_cache.parse(&log, js_source.clone(), Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        first.parts[1].statements.clear();
+
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let (second, ok) = js_cache.parse(&log, js_source, Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert!(!second.parts[1].statements.is_empty());
     }
 }

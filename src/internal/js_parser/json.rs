@@ -13,7 +13,7 @@ use crate::internal::{
     logger::{LineColumnTracker, Log, MsgId, MsgKind, Range, Source},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsonOptions {
     pub unsupported_js_features: JsFeature,
     pub flavor: JsonFlavor,
