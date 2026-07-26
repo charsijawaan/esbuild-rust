@@ -8,12 +8,15 @@ use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
 
 use crate::internal::{
-    ast::{ImportKind, Ref},
+    ast::{ImportKind, ImportRecordFlags, Index32, Ref},
+    config::{Format, Loader, Options},
     css_ast::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
     },
     fs::Fs,
+    graph::{InputFileRepr, LinkerGraph, WrapKind},
     helpers::Joiner,
+    js_ast::ExportsKind,
     logger::{Log, Range},
     sourcemap::{LineColumnOffset, SourceMapShift},
 };
@@ -355,6 +358,186 @@ pub fn enforce_no_cyclic_chunk_imports(log: &Log, chunks: &[ChunkInfo]) {
     }
 }
 
+/// Inline final asset and copy-loader URLs into import records before chunks
+/// are computed. This is the asset-rewriting portion of upstream linker scan
+/// step 1.
+///
+/// # Panics
+///
+/// Panics if a resolved CSS URL does not point to a JavaScript representation,
+/// or a copy index does not point to a copy representation. Both are linker
+/// graph invariants established by the scanner.
+pub fn inline_linked_assets(graph: &mut LinkerGraph, unique_key_prefix: &str) {
+    for source_index in graph.reachable_files.clone() {
+        let source_index = source_index as usize;
+        let mut repr = graph.files[source_index]
+            .input_file
+            .repr
+            .take()
+            .expect("reachable file must have a representation");
+        let mut additional_files =
+            std::mem::take(&mut graph.files[source_index].input_file.additional_files);
+
+        match &mut repr {
+            InputFileRepr::Css(css) => {
+                for record in &mut css.ast.import_records {
+                    if record.source_index.is_valid() {
+                        let other_source_index = record.source_index.get_index() as usize;
+                        let other_file = &graph.files[other_source_index].input_file;
+                        let InputFileRepr::Js(other) = other_file
+                            .repr
+                            .as_ref()
+                            .expect("resolved CSS URL target must have a representation")
+                        else {
+                            panic!("resolved CSS URL target must be JavaScript");
+                        };
+                        record.path.text.clone_from(&other.ast.url_for_css);
+                        record.path.namespace.clear();
+                        record.source_index = Index32::default();
+                        if other_file.loader == Loader::Empty {
+                            record.flags |= ImportRecordFlags::WAS_LOADED_WITH_EMPTY_LOADER;
+                        } else {
+                            record.flags |= ImportRecordFlags::SHOULD_NOT_BE_EXTERNAL_IN_METAFILE;
+                        }
+                        if other.ast.url_for_css.contains(unique_key_prefix) {
+                            record.flags |= ImportRecordFlags::CONTAINS_UNIQUE_KEY;
+                        }
+                        additional_files.extend(other_file.additional_files.iter().cloned());
+                    } else if record.copy_source_index.is_valid() {
+                        let other_source_index = record.copy_source_index.get_index() as usize;
+                        let other_file = &graph.files[other_source_index].input_file;
+                        let InputFileRepr::Copy(other) = other_file
+                            .repr
+                            .as_ref()
+                            .expect("copy target must have a representation")
+                        else {
+                            panic!("copy target must use the copy representation");
+                        };
+                        record.path.text.clone_from(&other.url_for_code);
+                        record.path.namespace.clear();
+                        record.copy_source_index = Index32::default();
+                        record.flags |= ImportRecordFlags::SHOULD_NOT_BE_EXTERNAL_IN_METAFILE
+                            | ImportRecordFlags::CONTAINS_UNIQUE_KEY;
+                        additional_files.extend(other_file.additional_files.iter().cloned());
+                    }
+                }
+            }
+            InputFileRepr::Js(js) => {
+                for record in &mut js.ast.import_records {
+                    if !record.source_index.is_valid() && record.copy_source_index.is_valid() {
+                        let other_source_index = record.copy_source_index.get_index() as usize;
+                        let other_file = &graph.files[other_source_index].input_file;
+                        let InputFileRepr::Copy(other) = other_file
+                            .repr
+                            .as_ref()
+                            .expect("copy target must have a representation")
+                        else {
+                            panic!("copy target must use the copy representation");
+                        };
+                        record.path.text.clone_from(&other.url_for_code);
+                        record.path.namespace.clear();
+                        record.copy_source_index = Index32::default();
+                        record.flags |= ImportRecordFlags::SHOULD_NOT_BE_EXTERNAL_IN_METAFILE
+                            | ImportRecordFlags::CONTAINS_UNIQUE_KEY;
+                        additional_files.extend(other_file.additional_files.iter().cloned());
+                    }
+                }
+            }
+            InputFileRepr::Copy(_) => {}
+        }
+
+        graph.files[source_index].input_file.additional_files = additional_files;
+        graph.files[source_index].input_file.repr = Some(repr);
+    }
+}
+
+/// Determine which JavaScript modules must receive `CommonJS` or ESM wrappers.
+/// This is the module-classification portion of upstream linker scan step 1.
+///
+/// # Panics
+///
+/// Panics if a resolved JavaScript import does not point to a JavaScript
+/// representation, matching the scanner/linker graph invariant.
+pub fn classify_module_wrappers(graph: &mut LinkerGraph, options: &Options) {
+    for source_index in graph.reachable_files.clone() {
+        let source_index = source_index as usize;
+        let is_entry_point = graph.files[source_index].is_entry_point();
+        let repr = graph.files[source_index]
+            .input_file
+            .repr
+            .take()
+            .expect("reachable file must have a representation");
+        let mut repr = match repr {
+            InputFileRepr::Js(repr) => repr,
+            other => {
+                graph.files[source_index].input_file.repr = Some(other);
+                continue;
+            }
+        };
+
+        for record_index in 0..repr.ast.import_records.len() {
+            let record = &repr.ast.import_records[record_index];
+            if !record.source_index.is_valid() {
+                continue;
+            }
+            let target_source_index = record.source_index.get_index() as usize;
+            let kind = record.kind;
+            let flags = record.flags;
+
+            let classify = |other: &mut crate::internal::graph::JsRepr| match kind {
+                ImportKind::Stmt => {
+                    if (flags.contains(ImportRecordFlags::CONTAINS_IMPORT_STAR)
+                        || flags.contains(ImportRecordFlags::CONTAINS_DEFAULT_ALIAS))
+                        && other.ast.exports_kind == ExportsKind::None
+                        && !other.ast.has_lazy_export
+                    {
+                        other.meta.wrap = WrapKind::Cjs;
+                        other.ast.exports_kind = ExportsKind::CommonJs;
+                    }
+                }
+                ImportKind::Require => {
+                    if other.ast.exports_kind == ExportsKind::Esm {
+                        other.meta.wrap = WrapKind::Esm;
+                    } else {
+                        other.meta.wrap = WrapKind::Cjs;
+                        other.ast.exports_kind = ExportsKind::CommonJs;
+                    }
+                }
+                ImportKind::Dynamic if !options.code_splitting => {
+                    if other.ast.exports_kind == ExportsKind::Esm {
+                        other.meta.wrap = WrapKind::Esm;
+                    } else {
+                        other.meta.wrap = WrapKind::Cjs;
+                        other.ast.exports_kind = ExportsKind::CommonJs;
+                    }
+                }
+                _ => {}
+            };
+
+            if target_source_index == source_index {
+                classify(&mut repr);
+            } else {
+                let InputFileRepr::Js(other) = graph.files[target_source_index]
+                    .input_file
+                    .repr
+                    .as_mut()
+                    .expect("resolved JavaScript target must have a representation")
+                else {
+                    panic!("resolved JavaScript target must be JavaScript");
+                };
+                classify(other);
+            }
+        }
+
+        if repr.ast.exports_kind == ExportsKind::CommonJs
+            && (!is_entry_point || matches!(options.output_format, Format::Iife | Format::EsModule))
+        {
+            repr.meta.wrap = WrapKind::Cjs;
+        }
+        graph.files[source_index].input_file.repr = Some(InputFileRepr::Js(repr));
+    }
+}
+
 #[must_use]
 pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
     left.len() == right.len()
@@ -521,19 +704,26 @@ mod tests {
     use super::{
         AssetPath, ChunkImport, ChunkInfo, ChunkPath, CrossChunkImport, CrossChunkImportItem,
         OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, StableRef,
-        append_or_extend_part_range, enforce_no_cyclic_chunk_imports, import_conditions_are_equal,
-        is_conditional_import_redundant, join_with_public_path, path_between_chunks,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
+        append_or_extend_part_range, classify_module_wrappers, enforce_no_cyclic_chunk_imports,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, path_between_chunks, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports,
     };
     use crate::internal::{
-        ast::{ImportKind, Ref},
+        ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref},
+        config::{Format, Loader, Options},
         css_ast::{
             ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
             WhitespaceFlags,
         },
         css_lexer::TokenKind,
         fs::{MockKind, mock_fs},
+        graph::{
+            CopyRepr, CssRepr, EntryPoint, InputFile, InputFileRepr, JsRepr, OutputFile, WrapKind,
+            clone_linker_graph,
+        },
         helpers::Joiner,
+        js_ast::{self, ExportsKind},
         logger::{DeferLogKind, Loc, Log},
         sourcemap::{LineColumnOffset, SourceMapShift},
     };
@@ -1042,6 +1232,263 @@ mod tests {
                     },
                 },
             ]
+        );
+    }
+
+    fn js_file(ast: js_ast::Ast) -> InputFile {
+        InputFile {
+            repr: Some(InputFileRepr::Js(Box::new(JsRepr {
+                ast,
+                ..JsRepr::default()
+            }))),
+            loader: Loader::Js,
+            ..InputFile::default()
+        }
+    }
+
+    fn js_repr(graph: &crate::internal::graph::LinkerGraph, source_index: usize) -> &JsRepr {
+        let InputFileRepr::Js(repr) = graph.files[source_index]
+            .input_file
+            .repr
+            .as_ref()
+            .expect("representation")
+        else {
+            panic!("JavaScript representation");
+        };
+        repr
+    }
+
+    #[test]
+    fn scan_step_one_classifies_imported_module_wrappers() {
+        let importer = js_file(js_ast::Ast {
+            import_records: vec![
+                ImportRecord {
+                    source_index: Index32::new(1),
+                    kind: ImportKind::Stmt,
+                    flags: ImportRecordFlags::CONTAINS_IMPORT_STAR,
+                    ..ImportRecord::default()
+                },
+                ImportRecord {
+                    source_index: Index32::new(2),
+                    kind: ImportKind::Require,
+                    ..ImportRecord::default()
+                },
+                ImportRecord {
+                    source_index: Index32::new(3),
+                    kind: ImportKind::Dynamic,
+                    ..ImportRecord::default()
+                },
+                ImportRecord {
+                    source_index: Index32::new(4),
+                    kind: ImportKind::Stmt,
+                    ..ImportRecord::default()
+                },
+            ],
+            ..js_ast::Ast::default()
+        });
+        let input_files = vec![
+            importer,
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast {
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast::default()),
+        ];
+        let mut graph = clone_linker_graph(
+            &input_files,
+            &[0, 1, 2, 3, 4],
+            &[EntryPoint {
+                source_index: 0,
+                ..EntryPoint::default()
+            }],
+            false,
+        );
+        classify_module_wrappers(
+            &mut graph,
+            &Options {
+                output_format: Format::CommonJs,
+                ..Options::default()
+            },
+        );
+
+        assert_eq!(js_repr(&graph, 1).meta.wrap, WrapKind::Cjs);
+        assert_eq!(js_repr(&graph, 1).ast.exports_kind, ExportsKind::CommonJs);
+        assert_eq!(js_repr(&graph, 2).meta.wrap, WrapKind::Esm);
+        assert_eq!(js_repr(&graph, 2).ast.exports_kind, ExportsKind::Esm);
+        assert_eq!(js_repr(&graph, 3).meta.wrap, WrapKind::Cjs);
+        assert_eq!(js_repr(&graph, 3).ast.exports_kind, ExportsKind::CommonJs);
+        assert_eq!(js_repr(&graph, 4).meta.wrap, WrapKind::None);
+        assert_eq!(js_repr(&graph, 4).ast.exports_kind, ExportsKind::None);
+    }
+
+    #[test]
+    fn code_splitting_keeps_dynamic_import_targets_unwrapped() {
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(1),
+                    kind: ImportKind::Dynamic,
+                    ..ImportRecord::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast::default()),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1], &[EntryPoint::default()], true);
+        classify_module_wrappers(
+            &mut graph,
+            &Options {
+                code_splitting: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(js_repr(&graph, 1).meta.wrap, WrapKind::None);
+        assert_eq!(js_repr(&graph, 1).ast.exports_kind, ExportsKind::None);
+    }
+
+    #[test]
+    fn common_js_entry_point_only_avoids_wrapper_for_common_js_output() {
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                exports_kind: ExportsKind::CommonJs,
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                exports_kind: ExportsKind::CommonJs,
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let entry_points = [EntryPoint {
+            source_index: 0,
+            ..EntryPoint::default()
+        }];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1], &entry_points, false);
+        classify_module_wrappers(
+            &mut graph,
+            &Options {
+                output_format: Format::CommonJs,
+                ..Options::default()
+            },
+        );
+        assert_eq!(js_repr(&graph, 0).meta.wrap, WrapKind::None);
+        assert_eq!(js_repr(&graph, 1).meta.wrap, WrapKind::Cjs);
+
+        let mut graph = clone_linker_graph(&input_files, &[0, 1], &entry_points, false);
+        classify_module_wrappers(
+            &mut graph,
+            &Options {
+                output_format: Format::EsModule,
+                ..Options::default()
+            },
+        );
+        assert_eq!(js_repr(&graph, 0).meta.wrap, WrapKind::Cjs);
+    }
+
+    #[test]
+    fn scan_step_one_inlines_asset_and_copy_urls() {
+        let asset_output = OutputFile {
+            abs_path: "/out/logo-123.png".into(),
+            contents: b"logo".to_vec(),
+            ..OutputFile::default()
+        };
+        let copy_output = OutputFile {
+            abs_path: "/out/copy.txt".into(),
+            contents: b"copy".to_vec(),
+            ..OutputFile::default()
+        };
+        let input_files = vec![
+            InputFile {
+                repr: Some(InputFileRepr::Css(Box::new(CssRepr {
+                    ast: crate::internal::css_ast::Ast {
+                        import_records: vec![
+                            ImportRecord {
+                                source_index: Index32::new(1),
+                                kind: ImportKind::Url,
+                                ..ImportRecord::default()
+                            },
+                            ImportRecord {
+                                copy_source_index: Index32::new(2),
+                                kind: ImportKind::Url,
+                                ..ImportRecord::default()
+                            },
+                        ],
+                        ..crate::internal::css_ast::Ast::default()
+                    },
+                    ..CssRepr::default()
+                }))),
+                loader: Loader::Css,
+                ..InputFile::default()
+            },
+            InputFile {
+                repr: Some(InputFileRepr::Js(Box::new(JsRepr {
+                    ast: js_ast::Ast {
+                        url_for_css: "UNIQUEA00000001".into(),
+                        ..js_ast::Ast::default()
+                    },
+                    ..JsRepr::default()
+                }))),
+                additional_files: vec![asset_output.clone()],
+                loader: Loader::File,
+                ..InputFile::default()
+            },
+            InputFile {
+                repr: Some(InputFileRepr::Copy(CopyRepr {
+                    url_for_code: "UNIQUEA00000002".into(),
+                })),
+                additional_files: vec![copy_output.clone()],
+                loader: Loader::Copy,
+                ..InputFile::default()
+            },
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    copy_source_index: Index32::new(2),
+                    kind: ImportKind::Stmt,
+                    ..ImportRecord::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph =
+            clone_linker_graph(&input_files, &[0, 1, 2, 3], &[EntryPoint::default()], false);
+        inline_linked_assets(&mut graph, PREFIX);
+
+        let InputFileRepr::Css(css) = graph.files[0]
+            .input_file
+            .repr
+            .as_ref()
+            .expect("CSS representation")
+        else {
+            panic!("CSS representation");
+        };
+        let asset_record = &css.ast.import_records[0];
+        assert_eq!(asset_record.path.text, "UNIQUEA00000001");
+        assert!(!asset_record.source_index.is_valid());
+        assert!(
+            asset_record
+                .flags
+                .contains(ImportRecordFlags::SHOULD_NOT_BE_EXTERNAL_IN_METAFILE)
+        );
+        assert!(
+            asset_record
+                .flags
+                .contains(ImportRecordFlags::CONTAINS_UNIQUE_KEY)
+        );
+        let copy_record = &css.ast.import_records[1];
+        assert_eq!(copy_record.path.text, "UNIQUEA00000002");
+        assert!(!copy_record.copy_source_index.is_valid());
+        assert_eq!(
+            graph.files[0].input_file.additional_files,
+            vec![asset_output, copy_output.clone()]
+        );
+
+        let js = js_repr(&graph, 3);
+        assert_eq!(js.ast.import_records[0].path.text, "UNIQUEA00000002");
+        assert!(!js.ast.import_records[0].copy_source_index.is_valid());
+        assert_eq!(
+            graph.files[3].input_file.additional_files,
+            vec![copy_output]
         );
     }
 }
