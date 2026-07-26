@@ -48,6 +48,9 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut platform = BuildPlatform::Browser;
     let mut global_name = String::new();
     let mut public_path = String::new();
+    let mut entry_names = String::new();
+    let mut chunk_names = String::new();
+    let mut asset_names = String::new();
     let mut splitting = false;
     let mut sourcemap = BuildSourceMap::None;
     let mut legal_comments = BuildLegalComments::Inline;
@@ -136,6 +139,18 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         }
         if let Some(value) = argument.strip_prefix("--public-path=") {
             public_path = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--entry-names=") {
+            entry_names = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--chunk-names=") {
+            chunk_names = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--asset-names=") {
+            asset_names = value.into();
             continue;
         }
         if let Some(value) = argument.strip_prefix("--external:") {
@@ -231,6 +246,9 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             platform,
             global_name,
             public_path,
+            entry_names,
+            chunk_names,
+            asset_names,
             sourcemap,
             legal_comments,
             splitting,
@@ -346,6 +364,9 @@ fn help_text() -> String {
          \x20\x20--platform=browser|node|neutral\n\
          \x20\x20--global-name=NAME\n\
          \x20\x20--public-path=PATH\n\
+         \x20\x20--entry-names=TEMPLATE\n\
+         \x20\x20--chunk-names=TEMPLATE\n\
+         \x20\x20--asset-names=TEMPLATE\n\
          \x20\x20--splitting\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
          \x20\x20--legal-comments=none|inline|eof|linked|external\n\

@@ -135,6 +135,9 @@ pub struct BuildOptions {
     pub platform: BuildPlatform,
     pub global_name: String,
     pub public_path: String,
+    pub entry_names: String,
+    pub chunk_names: String,
+    pub asset_names: String,
     pub sourcemap: BuildSourceMap,
     pub legal_comments: BuildLegalComments,
     pub splitting: bool,
@@ -287,6 +290,47 @@ fn validate_build_loaders(
     }
 }
 
+fn validate_path_template(template: &str) -> Vec<config::PathTemplate> {
+    if template.is_empty() {
+        return Vec::new();
+    }
+    let mut template = format!("./{}", template.replace('\\', "/"));
+    let mut parts = Vec::new();
+    let mut search = 0;
+    while search < template.len() {
+        let Some(found) = template[search..].find('[') else {
+            break;
+        };
+        search += found;
+        let tail = &template[search..];
+        let (placeholder, length) = if tail.starts_with("[dir]") {
+            (config::PathPlaceholder::Dir, "[dir]".len())
+        } else if tail.starts_with("[name]") {
+            (config::PathPlaceholder::Name, "[name]".len())
+        } else if tail.starts_with("[hash]") {
+            (config::PathPlaceholder::Hash, "[hash]".len())
+        } else if tail.starts_with("[ext]") {
+            (config::PathPlaceholder::Ext, "[ext]".len())
+        } else {
+            search += 1;
+            continue;
+        };
+        parts.push(config::PathTemplate {
+            data: template[..search].into(),
+            placeholder,
+        });
+        template = template[search + length..].into();
+        search = 0;
+    }
+    if search < template.len() {
+        parts.push(config::PathTemplate {
+            data: template,
+            ..config::PathTemplate::default()
+        });
+    }
+    parts
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn build(options: BuildOptions) -> BuildResult {
@@ -415,6 +459,9 @@ pub fn build(options: BuildOptions) -> BuildResult {
         extension_to_loader,
         global_name,
         public_path: options.public_path,
+        entry_path_template: validate_path_template(&options.entry_names),
+        chunk_path_template: validate_path_template(&options.chunk_names),
+        asset_path_template: validate_path_template(&options.asset_names),
         abs_output_dir: output_dir,
         abs_output_file: output_file,
         abs_output_base,
@@ -917,6 +964,62 @@ mod tests {
                 .iter()
                 .any(|path| path.ends_with("/out/admin/panel.js"))
         );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn applies_entry_chunk_and_asset_name_templates() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-name-templates-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import('./dep.js').then(ns => console.log(ns.image))",
+        )
+        .expect("write entry file");
+        std::fs::write(
+            directory.join("dep.js"),
+            "import image from './image.asset'; export {image}",
+        )
+        .expect("write dependency");
+        std::fs::write(directory.join("image.asset"), b"named asset").expect("write asset");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::EsModule,
+            splitting: true,
+            loader: HashMap::from([(".asset".into(), Loader::File)]),
+            entry_names: "entries/[name]-[hash]".into(),
+            chunk_names: "chunks/[name]-[hash]".into(),
+            asset_names: "assets/[name]-[hash]".into(),
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 3);
+        assert!(result.output_files.iter().any(|output| {
+            output.path.contains("/out/entries/entry-")
+                && std::path::Path::new(&output.path)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("js"))
+        }));
+        assert!(result.output_files.iter().any(|output| {
+            output.path.contains("/out/chunks/dep-")
+                && std::path::Path::new(&output.path)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("js"))
+        }));
+        assert!(result.output_files.iter().any(|output| {
+            output.path.contains("/out/assets/image-")
+                && std::path::Path::new(&output.path)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("asset"))
+        }));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
