@@ -3650,6 +3650,39 @@ mod tests {
     }
 
     #[test]
+    fn minifies_constant_if_statements() {
+        let options = TransformOptions {
+            minify_syntax: true,
+            ..TransformOptions::default()
+        };
+        assert_eq!(
+            code(transform(
+                "if (true) { console.log('yes') }",
+                options.clone()
+            )),
+            "console.log(\"yes\");\n"
+        );
+        assert_eq!(
+            code(transform(
+                "if (false) console.log('yes'); else console.log('no')",
+                options.clone()
+            )),
+            "console.log(\"no\");\n"
+        );
+        assert_eq!(
+            code(transform("if (false) console.log('never')", options)),
+            ""
+        );
+        assert_eq!(
+            code(transform(
+                "if (true) { console.log('yes') }",
+                TransformOptions::default()
+            )),
+            "if (true) {\n  console.log(\"yes\");\n}\n"
+        );
+    }
+
+    #[test]
     fn defaults_node_env_for_browser_builds() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

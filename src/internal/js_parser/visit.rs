@@ -502,6 +502,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             _ => {}
         }
+        if core.options.minify_syntax {
+            minify_constant_if_statement(statement);
+        }
         if core.options.drop_console
             && matches!(
                 statement.data.as_deref(),
@@ -511,6 +514,40 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
         {
             statement.data = None;
         }
+    }
+}
+
+fn minify_constant_if_statement(statement: &mut Stmt) {
+    let Some(StmtData::If(value)) = statement.data.as_deref() else {
+        return;
+    };
+    let Some((is_truthy, crate::internal::js_ast::SideEffects::NoSideEffects)) =
+        crate::internal::js_ast::to_boolean_with_side_effects(value.test.data.as_deref())
+    else {
+        return;
+    };
+    let (live, dead) = if is_truthy {
+        (&value.yes, &value.no_or_nil)
+    } else {
+        (&value.no_or_nil, &value.yes)
+    };
+    let mut dead = dead.clone();
+    if super::dead_control_flow::should_keep_stmt_in_dead_control_flow(&mut dead) {
+        return;
+    }
+    if live.data.is_none() {
+        statement.data = None;
+        return;
+    }
+    let mut replacements =
+        super::control_flow::append_if_or_label_body_preserving_scope(Vec::new(), live.clone());
+    if replacements.len() == 1 {
+        *statement = replacements.pop().expect("single replacement");
+    } else {
+        statement.data = Some(Box::new(StmtData::Block(BlockStmt {
+            statements: replacements,
+            ..BlockStmt::default()
+        })));
     }
 }
 
