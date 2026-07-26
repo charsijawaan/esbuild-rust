@@ -177,6 +177,21 @@ pub struct AmbiguousReExport {
     pub other_name_loc: crate::internal::logger::Loc,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScanRuntimeRefs {
+    pub export_ref: Ref,
+    pub common_js_ref: Ref,
+    pub esm_ref: Ref,
+    pub to_common_js_ref: Ref,
+    pub unbound_module_ref: Ref,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ScanImportsAndExportsResult {
+    pub import_issues: Vec<(u32, ImportMatchIssue)>,
+    pub ambiguous_re_exports: Vec<(u32, AmbiguousReExport)>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
 pub enum OutputPieceIndexKind {
@@ -2373,6 +2388,123 @@ pub fn encode_import_constraints_for_file(
             re_export_uses,
         );
     }
+}
+
+/// Run the ported linker import/export scan stages in upstream order.
+///
+/// Diagnostics are returned as structured issues for the API layer.
+///
+/// # Panics
+///
+/// Panics when the scanner-provided graph violates linker invariants.
+#[allow(clippy::too_many_lines)]
+pub fn scan_imports_and_exports<S: BuildHasher>(
+    graph: &mut LinkerGraph,
+    options: &Options,
+    unique_key_prefix: &str,
+    local_names: &HashMap<Ref, String, S>,
+    runtime_refs: ScanRuntimeRefs,
+) -> ScanImportsAndExportsResult {
+    inline_linked_assets(graph, unique_key_prefix);
+    classify_module_wrappers(graph, options);
+    propagate_wrappers_and_dynamic_exports(graph, options);
+    generate_code_for_lazy_exports(graph, options, local_names);
+    resolve_export_stars(graph);
+
+    let reachable = graph.reachable_files.clone();
+    let mut result = ScanImportsAndExportsResult::default();
+    for &source_index in &reachable {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            continue;
+        };
+        if !repr.ast.named_imports.is_empty() {
+            result.import_issues.extend(
+                bind_imports_to_exports_for_file(graph, source_index, options.output_format)
+                    .into_iter()
+                    .map(|issue| (source_index, issue)),
+            );
+        }
+
+        let (exports_kind, wrap, exports_ref, module_ref, force_exports) = {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_ref()
+            else {
+                unreachable!();
+            };
+            (
+                repr.ast.exports_kind,
+                repr.meta.wrap,
+                repr.ast.exports_ref,
+                repr.ast.module_ref,
+                repr.meta.force_include_exports_for_entry_point,
+            )
+        };
+        if graph.files[source_index as usize].is_entry_point()
+            && exports_kind == ExportsKind::CommonJs
+            && wrap == WrapKind::None
+            && matches!(options.output_format, Format::Preserve | Format::CommonJs)
+        {
+            let exports_ref = graph.symbols.follow_symbols(exports_ref);
+            let module_ref = graph.symbols.follow_symbols(module_ref);
+            graph.symbols.get_mut(exports_ref).kind = SymbolKind::Unbound;
+            graph.symbols.get_mut(module_ref).kind = SymbolKind::Unbound;
+        } else if force_exports || exports_kind != ExportsKind::CommonJs {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_mut()
+            else {
+                unreachable!();
+            };
+            repr.meta.needs_exports_variable = true;
+        }
+        create_wrapper_for_file(
+            graph,
+            source_index,
+            runtime_refs.common_js_ref,
+            runtime_refs.esm_ref,
+        );
+    }
+
+    for &source_index in &reachable {
+        if !matches!(
+            graph.files[source_index as usize].input_file.repr.as_ref(),
+            Some(InputFileRepr::Js(_))
+        ) {
+            continue;
+        }
+        result.ambiguous_re_exports.extend(
+            sort_and_filter_export_aliases(graph, source_index)
+                .into_iter()
+                .map(|issue| (source_index, issue)),
+        );
+        create_exports_for_file(
+            graph,
+            source_index,
+            runtime_refs.export_ref,
+            Some(EntryPointTailRefs {
+                to_common_js_ref: runtime_refs.to_common_js_ref,
+                unbound_module_ref: runtime_refs.unbound_module_ref,
+            }),
+            options,
+        );
+        finalize_part_dependencies_for_file(graph, source_index);
+    }
+
+    for &source_index in &reachable {
+        if !matches!(
+            graph.files[source_index as usize].input_file.repr.as_ref(),
+            Some(InputFileRepr::Js(_))
+        ) {
+            continue;
+        }
+        bind_imports_to_parts_for_file(graph, source_index, runtime_refs.export_ref);
+        if graph.files[source_index as usize].is_entry_point() {
+            create_entry_point_part(graph, source_index, runtime_refs.to_common_js_ref);
+        }
+        encode_import_constraints_for_file(graph, source_index, options);
+    }
+    result
 }
 
 /// Create the synthetic wrapper part used by wrapped `CommonJS` and ESM files.
