@@ -2012,6 +2012,56 @@ mod tests {
     }
 
     #[test]
+    fn parses_await_using_declarations() {
+        let (ast, ok, log) = parse_source("await using resource = acquire(); use(resource);");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Local(local)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected await using declaration");
+        };
+        assert_eq!(local.kind, crate::internal::js_ast::LocalKind::AwaitUsing);
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+        assert_eq!(ast.top_level_await_keyword.loc.start, 0);
+        assert_eq!(ast.top_level_await_keyword.len, 5);
+
+        let (ast, ok, log) = parse_source(
+            "async function load() {\
+               await using resource = acquire();\
+               use(resource);\
+             }",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::None);
+        assert_eq!(ast.top_level_await_keyword.len, 0);
+
+        let (_, ok, log) = parse_source("await using resource;");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+
+        let (_, ok, log) = parse_source("function load() { await using resource = acquire(); }");
+        assert!(!ok);
+        assert_eq!(log.done().len(), 1);
+
+        let (_, ok, log) =
+            parse_source("switch (kind) { case 0: await using resource = acquire(); }");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+
+        let (ast, ok, log) = parse_source("await using\nresource = acquire();");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].statements.len(), 2);
+        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected await expression statement");
+        };
+        assert!(matches!(
+            statement.value.data.as_deref(),
+            Some(ExprData::Await(_))
+        ));
+    }
+
+    #[test]
     fn for_loops_keep_lexical_bindings_in_a_loop_scope() {
         let (ast, ok, log) =
             parse_source("for (let item of items) { item; } item; for (let i = 0; i < 1; i++) {}");

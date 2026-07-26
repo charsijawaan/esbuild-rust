@@ -2,8 +2,8 @@
 
 use crate::internal::{
     js_ast::{
-        Binding, BindingData, BlockStmt, BreakStmt, Catch, ClassStmt, ContinueStmt, Decl,
-        DoWhileStmt, Expr, ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt, ForStmt,
+        AwaitExpr, Binding, BindingData, BlockStmt, BreakStmt, Catch, ClassStmt, ContinueStmt,
+        Decl, DoWhileStmt, Expr, ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt, ForStmt,
         FunctionStmt, IdentifierBinding, IdentifierExpr, IfStmt, LabelStmt, LocalKind, LocalStmt,
         Precedence, ReturnStmt, Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt, TryStmt,
         WhileStmt, WithStmt,
@@ -58,6 +58,82 @@ pub(crate) fn parse_block_with_scope(
 #[allow(clippy::too_many_lines)]
 pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
+    if lexer.is_contextual_keyword(b"await")
+        && core.fn_or_arrow_data_parse.await_policy
+            == super::parser_types::AwaitOrYield::AllowExpression
+    {
+        let await_range = lexer.range();
+        if !core.is_inside_function_scope() && core.top_level_await_keyword.len == 0 {
+            core.top_level_await_keyword = await_range;
+        }
+        lexer.next();
+        if !lexer.has_newline_before && lexer.is_contextual_keyword(b"using") {
+            let using_loc = lexer.loc();
+            let using_reference = core.store_name_in_ref(lexer.identifier.clone());
+            lexer.next();
+            if !lexer.has_newline_before && lexer.token == Token::Identifier {
+                return parse_local_declarations(
+                    core,
+                    lexer,
+                    loc,
+                    LocalKind::AwaitUsing,
+                    true,
+                    true,
+                    true,
+                );
+            }
+            let operand = parse_expression_suffix(
+                core,
+                lexer,
+                Expr::new(
+                    using_loc,
+                    ExprData::Identifier(IdentifierExpr {
+                        reference: using_reference,
+                        ..IdentifierExpr::default()
+                    }),
+                ),
+                Precedence::Prefix,
+                true,
+            );
+            if lexer.token == Token::AsteriskAsterisk {
+                lexer.unexpected();
+            }
+            let value = parse_expression_suffix(
+                core,
+                lexer,
+                Expr::new(loc, ExprData::Await(AwaitExpr { value: operand })),
+                Precedence::Lowest,
+                true,
+            );
+            lexer.expect_or_insert_semicolon();
+            return Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value,
+                    ..ExprStmt::default()
+                }),
+            );
+        }
+        let operand = parse_expression(core, lexer, Precedence::Prefix, true);
+        if lexer.token == Token::AsteriskAsterisk {
+            lexer.unexpected();
+        }
+        let value = parse_expression_suffix(
+            core,
+            lexer,
+            Expr::new(loc, ExprData::Await(AwaitExpr { value: operand })),
+            Precedence::Lowest,
+            true,
+        );
+        lexer.expect_or_insert_semicolon();
+        return Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value,
+                ..ExprStmt::default()
+            }),
+        );
+    }
     if lexer.is_contextual_keyword(b"using") {
         let reference = core.store_name_in_ref(lexer.identifier.clone());
         lexer.next();
