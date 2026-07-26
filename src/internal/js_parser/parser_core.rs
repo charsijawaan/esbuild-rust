@@ -354,6 +354,20 @@ impl ParserCore {
         false
     }
 
+    pub(crate) fn mark_current_scope_as_containing_direct_eval(&mut self) {
+        let mut scope = self.current_scope.clone();
+        while let Some(current) = scope {
+            let parent = {
+                let mut current = current
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                current.contains_direct_eval = true;
+                current.parent.as_ref().and_then(std::sync::Weak::upgrade)
+            };
+            scope = parent;
+        }
+    }
+
     pub(crate) fn prepare_for_visit_pass(
         &mut self,
         has_esm_exports: bool,

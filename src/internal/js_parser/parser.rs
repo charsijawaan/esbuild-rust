@@ -1075,6 +1075,72 @@ mod tests {
     }
 
     #[test]
+    fn direct_eval_pins_the_containing_scope_chain() {
+        let (ast, ok, log) =
+            parse_source("let top; function run(param) { let local; eval(code); }");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Function(function)) = ast.parts[1].statements[1].data.as_deref() else {
+            panic!("expected function");
+        };
+        let Some(StmtData::Expr(expression)) =
+            function.function.body.block.statements[1].data.as_deref()
+        else {
+            panic!("expected call");
+        };
+        assert!(matches!(
+            expression.value.data.as_deref(),
+            Some(ExprData::Call(call))
+                if call.kind == crate::internal::js_ast::CallKind::DirectEval
+        ));
+        for scope in &ast.parts[1].scopes {
+            let scope = scope.lock().expect("scope lock");
+            assert!(scope.contains_direct_eval, "{:?}", scope.kind);
+        }
+        for name in ["top", "run"] {
+            let reference =
+                ast.parts[1].scopes[0].lock().expect("entry scope").members[name].reference;
+            assert!(
+                ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                    .flags
+                    .contains(crate::internal::ast::SymbolFlags::MUST_NOT_BE_RENAMED)
+            );
+        }
+        for (scope_index, name) in [(1, "param"), (2, "local")] {
+            let reference = ast.parts[1].scopes[scope_index]
+                .lock()
+                .expect("function scope")
+                .members[name]
+                .reference;
+            assert!(
+                ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                    .flags
+                    .contains(crate::internal::ast::SymbolFlags::MUST_NOT_BE_RENAMED)
+            );
+        }
+
+        let (ast, ok, log) = parse_source("(0, eval)(code); eval?.(code);");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        for statement in &ast.parts[1].statements {
+            let Some(StmtData::Expr(expression)) = statement.data.as_deref() else {
+                panic!("expected expression");
+            };
+            assert!(matches!(
+                expression.value.data.as_deref(),
+                Some(ExprData::Call(call))
+                    if call.kind == crate::internal::js_ast::CallKind::Normal
+            ));
+        }
+        assert!(
+            !ast.parts[1].scopes[0]
+                .lock()
+                .expect("entry scope")
+                .contains_direct_eval
+        );
+    }
+
+    #[test]
     fn arrow_parameters_bind_without_creating_an_arguments_symbol() {
         let (ast, ok, log) =
             parse_source("let outer = 1; const fn = (outer, {x}) => outer + x + arguments;");

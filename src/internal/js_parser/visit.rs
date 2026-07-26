@@ -590,9 +590,24 @@ fn visit_expr_with_target(
             }
         }
         ExprData::Call(call) => {
+            let target_was_identifier =
+                matches!(call.target.data.as_deref(), Some(ExprData::Identifier(_)));
             visit_expr(core, &mut call.target, resolve_identifiers);
             for argument in &mut call.args {
                 visit_expr(core, argument, resolve_identifiers);
+            }
+            if target_was_identifier
+                && call.optional_chain == crate::internal::js_ast::OptionalChain::None
+                && is_identifier_named(core, &call.target, "eval")
+            {
+                call.kind = crate::internal::js_ast::CallKind::DirectEval;
+                core.mark_current_scope_as_containing_direct_eval();
+                if core.options.mode == crate::internal::config::Mode::Bundle
+                    && !core.is_file_considered_esm
+                {
+                    core.record_usage(core.module_ref);
+                    core.record_usage(core.exports_ref);
+                }
             }
             let kind = if is_identifier_named(core, &call.target, "require") {
                 Some(crate::internal::ast::ImportKind::Require)
