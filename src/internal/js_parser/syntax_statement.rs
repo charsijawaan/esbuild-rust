@@ -2,11 +2,11 @@
 
 use crate::internal::{
     js_ast::{
-        AwaitExpr, Binding, BindingData, BlockStmt, BreakStmt, Catch, ClassStmt, ContinueStmt,
-        Decl, DoWhileStmt, Expr, ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt, ForStmt,
-        FunctionStmt, IdentifierBinding, IdentifierExpr, IfStmt, LabelStmt, LocalKind, LocalStmt,
-        Precedence, ReturnStmt, Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt, TryStmt,
-        WhileStmt, WithStmt,
+        AwaitExpr, Binding, BindingData, BlockStmt, BreakStmt, Catch, ClassStmt, CommentStmt,
+        ContinueStmt, Decl, DoWhileStmt, Expr, ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt,
+        ForStmt, FunctionStmt, IdentifierBinding, IdentifierExpr, IfStmt, LabelStmt, LocalKind,
+        LocalStmt, Precedence, ReturnStmt, Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt,
+        TryStmt, WhileStmt, WithStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
@@ -30,10 +30,7 @@ pub(crate) fn parse_block(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, Blo
 fn parse_block_without_scope(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, BlockStmt) {
     let loc = lexer.loc();
     lexer.expect(Token::OpenBrace);
-    let mut statements = Vec::new();
-    while lexer.token != Token::CloseBrace {
-        statements.push(parse_statement(core, lexer));
-    }
+    let statements = parse_statements_up_to(core, lexer, Token::CloseBrace);
     let close_brace_loc = lexer.loc();
     lexer.expect(Token::CloseBrace);
     (
@@ -43,6 +40,33 @@ fn parse_block_without_scope(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, 
             close_brace_loc,
         },
     )
+}
+
+pub(crate) fn parse_statements_up_to(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    end: Token,
+) -> Vec<Stmt> {
+    let mut statements = Vec::new();
+    loop {
+        for comment in &lexer.legal_comments_before_token {
+            statements.push(Stmt::new(
+                comment.loc,
+                StmtData::Comment(CommentStmt {
+                    text: String::from_utf8_lossy(
+                        &lexer.source.comment_text_without_indent(*comment),
+                    )
+                    .into_owned(),
+                    is_legal_comment: true,
+                }),
+            ));
+        }
+        if lexer.token == end {
+            break;
+        }
+        statements.push(parse_statement(core, lexer));
+    }
+    statements
 }
 
 pub(crate) fn parse_block_with_scope(

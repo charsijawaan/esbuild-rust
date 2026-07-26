@@ -18,7 +18,7 @@ use crate::internal::{
 
 use super::{
     Options, lower_typescript::lower_type_script_statements, parser_core::ParserCore,
-    parser_types::AwaitOrYield, syntax_statement::parse_statement,
+    parser_types::AwaitOrYield, syntax_statement::parse_statements_up_to,
     visit::visit_top_level_statements,
 };
 
@@ -248,10 +248,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         // determines whether the file is an ECMAScript module.
         core.fn_or_arrow_data_parse.await_policy = AwaitOrYield::AllowExpression;
 
-        let mut statements = Vec::new();
-        while lexer.token != Token::EndOfFile {
-            statements.push(parse_statement(&mut core, &mut lexer));
-        }
+        let mut statements = parse_statements_up_to(&mut core, &mut lexer, Token::EndOfFile);
         apply_jsx_pragmas(&mut core, &lexer);
 
         let (directives, directive_legacy_octal_locs) =

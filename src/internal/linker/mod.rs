@@ -15,8 +15,8 @@ use crate::internal::{
     },
     bundler::{hash_for_file_name, path_relative_to_outbase},
     config::{
-        Format, Loader, Mode, Options, PathPlaceholder, PathPlaceholders, PathTemplate,
-        has_placeholder, substitute_template, template_to_string,
+        Format, LegalComments, Loader, Mode, Options, PathPlaceholder, PathPlaceholders,
+        PathTemplate, has_placeholder, substitute_template, template_to_string,
     },
     css_ast::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
@@ -2478,6 +2478,7 @@ pub fn print_cross_chunk_bindings(
         minify_syntax: options.minify_syntax,
         minify_whitespace: options.minify_whitespace,
         ascii_only: options.ascii_only,
+        legal_comments: LegalComments::Inline,
     };
     let prefix = crate::internal::js_printer::print(
         &js_ast::Ast {
@@ -3523,6 +3524,7 @@ pub fn compile_part_range_for_chunk(
             minify_syntax: options.minify_syntax,
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
+            legal_comments: LegalComments::Inline,
         },
     );
     CompiledPartRange {
@@ -3729,6 +3731,7 @@ pub fn generate_entry_point_tail(
             minify_syntax: options.minify_syntax,
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
+            legal_comments: LegalComments::Inline,
         },
     )
     .js

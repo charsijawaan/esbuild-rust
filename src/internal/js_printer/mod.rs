@@ -1,7 +1,11 @@
 //! Port of upstream `internal/js_printer`.
 
+use std::collections::HashSet;
+
 use crate::internal::ast::{ImportPhase, ImportRecord};
 use crate::internal::compat::JsFeature;
+use crate::internal::config::LegalComments;
+use crate::internal::helpers::escape_closing_tag;
 use crate::internal::js_ast::{
     Ast, Binding, BindingData, BlockStmt, Expr, ExprData, LocalKind, OpCode, OptionalChain,
     Precedence, PropertyFlags, PropertyKind, Stmt, StmtData, is_identifier_es5_and_es_next,
@@ -24,6 +28,7 @@ pub struct Options {
     pub minify_syntax: bool,
     pub minify_whitespace: bool,
     pub ascii_only: bool,
+    pub legal_comments: LegalComments,
 }
 
 #[must_use]
@@ -384,6 +389,8 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
         options,
         indent: options.indent,
         import_records: &[],
+        has_legal_comment: HashSet::new(),
+        extracted_legal_comments: Vec::new(),
     };
     printer.print_expr_at(expr, Precedence::Lowest);
     printer.output
@@ -392,6 +399,7 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
 #[derive(Clone, Debug, Default)]
 pub struct PrintResult {
     pub js: Vec<u8>,
+    pub extracted_legal_comments: Vec<String>,
 }
 
 /// Prints all live AST parts as JavaScript.
@@ -408,6 +416,8 @@ pub fn print(tree: &Ast, renamer: &dyn Renamer, options: Options) -> PrintResult
         options,
         indent: options.indent,
         import_records: &tree.import_records,
+        has_legal_comment: HashSet::new(),
+        extracted_legal_comments: Vec::new(),
     };
     if !tree.hashbang.is_empty() {
         printer.output.extend_from_slice(b"#!");
@@ -429,7 +439,10 @@ pub fn print(tree: &Ast, renamer: &dyn Renamer, options: Options) -> PrintResult
             printer.print_stmt(statement);
         }
     }
-    PrintResult { js: printer.output }
+    PrintResult {
+        js: printer.output,
+        extracted_legal_comments: printer.extracted_legal_comments,
+    }
 }
 
 struct Printer<'a> {
@@ -438,9 +451,38 @@ struct Printer<'a> {
     options: Options,
     indent: usize,
     import_records: &'a [ImportRecord],
+    has_legal_comment: HashSet<String>,
+    extracted_legal_comments: Vec<String>,
 }
 
 impl Printer<'_> {
+    fn print_indented_comment(&mut self, text: &str) {
+        let escaped;
+        let mut text = text;
+        if !self
+            .options
+            .unsupported_features
+            .contains(JsFeature::INLINE_SCRIPT)
+        {
+            escaped = escape_closing_tag(text, "/script");
+            text = &escaped;
+        }
+
+        if text.starts_with("/*") {
+            let mut lines = text.split_inclusive('\n').peekable();
+            while let Some(line) = lines.next() {
+                self.output.extend_from_slice(line.as_bytes());
+                if line.ends_with('\n') && lines.peek().is_some() {
+                    self.print_indent();
+                }
+            }
+            self.print_newline();
+        } else {
+            self.output.extend_from_slice(text.as_bytes());
+            self.output.push(b'\n');
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn print_stmt(&mut self, statement: &Stmt) {
         let Some(data) = statement.data.as_deref() else {
@@ -454,10 +496,22 @@ impl Printer<'_> {
                 self.print_newline();
             }
             StmtData::Comment(comment) => {
+                if comment.is_legal_comment {
+                    match self.options.legal_comments {
+                        LegalComments::None => return,
+                        LegalComments::EndOfFile
+                        | LegalComments::LinkedWithComment
+                        | LegalComments::ExternalWithoutComment => {
+                            if self.has_legal_comment.insert(comment.text.clone()) {
+                                self.extracted_legal_comments.push(comment.text.clone());
+                            }
+                            return;
+                        }
+                        LegalComments::Inline => {}
+                    }
+                }
                 self.print_indent();
-                self.output.extend_from_slice(b"//");
-                self.output.extend_from_slice(comment.text.as_bytes());
-                self.print_newline();
+                self.print_indented_comment(&comment.text);
             }
             StmtData::Debugger => {
                 self.print_indent();
@@ -1799,10 +1853,11 @@ mod tests {
     use crate::internal::{
         ast::SymbolMap,
         compat::JsFeature,
+        config::LegalComments,
         helpers::string_to_utf16,
-        js_ast::{ExprData, Precedence, StmtData},
+        js_ast::{Ast, CommentStmt, ExprData, Part, Precedence, Stmt, StmtData},
         js_parser,
-        logger::{DeferLogKind, Log, Source},
+        logger::{DeferLogKind, Loc, Log, Source},
         renamer::new_no_op_renamer,
     };
 
@@ -1840,6 +1895,93 @@ mod tests {
             )
             .js,
             b"    foo();\n"
+        );
+    }
+
+    #[test]
+    fn handles_legal_comment_modes_and_deduplicates_extracted_comments() {
+        let legal_comment = || {
+            Stmt::new(
+                Loc::default(),
+                StmtData::Comment(CommentStmt {
+                    text: "/*! first */".into(),
+                    is_legal_comment: true,
+                }),
+            )
+        };
+        let tree = Ast {
+            parts: vec![Part {
+                statements: vec![
+                    legal_comment(),
+                    legal_comment(),
+                    Stmt::new(
+                        Loc::default(),
+                        StmtData::Comment(CommentStmt {
+                            text: "// ordinary".into(),
+                            is_legal_comment: false,
+                        }),
+                    ),
+                ],
+                ..Part::default()
+            }],
+            ..Ast::default()
+        };
+        let renamer = new_no_op_renamer(SymbolMap::new(0));
+
+        let inline = print(&tree, &renamer, Options::default());
+        assert_eq!(inline.js, b"/*! first */\n/*! first */\n// ordinary\n");
+        assert!(inline.extracted_legal_comments.is_empty());
+
+        let extracted = print(
+            &tree,
+            &renamer,
+            Options {
+                legal_comments: LegalComments::EndOfFile,
+                ..Options::default()
+            },
+        );
+        assert_eq!(extracted.js, b"// ordinary\n");
+        assert_eq!(extracted.extracted_legal_comments, ["/*! first */"]);
+
+        let omitted = print(
+            &tree,
+            &renamer,
+            Options {
+                legal_comments: LegalComments::None,
+                ..Options::default()
+            },
+        );
+        assert_eq!(omitted.js, b"// ordinary\n");
+        assert!(omitted.extracted_legal_comments.is_empty());
+    }
+
+    #[test]
+    fn parser_preserves_legal_comments_before_statements_and_block_ends() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"/*! top */\nfunction f() { /* @license nested */ }\n/*! eof */".as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        let result = print(
+            &ast,
+            &renamer,
+            Options {
+                legal_comments: LegalComments::EndOfFile,
+                ..Options::default()
+            },
+        );
+        assert_eq!(
+            result.extracted_legal_comments,
+            ["/*! top */", "/* @license nested */", "/*! eof */"]
         );
     }
 
