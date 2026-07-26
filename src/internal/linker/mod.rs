@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::hash::BuildHasher;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
 use crate::internal::{
     ast::{
         INVALID_REF, ImportItemStatus, ImportKind, ImportRecordFlags, Index32, LocRef,
@@ -16,7 +18,8 @@ use crate::internal::{
     bundler::{hash_for_file_name, path_relative_to_outbase},
     config::{
         Format, LegalComments, Loader, Mode, Options, PathPlaceholder, PathPlaceholders,
-        PathTemplate, has_placeholder, substitute_template, template_to_string,
+        PathTemplate, SourceMap as SourceMapMode, has_placeholder, substitute_template,
+        template_to_string,
     },
     css_ast::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
@@ -68,6 +71,7 @@ pub struct ChunkInfo {
     pub final_rel_path: String,
     pub intermediate_output: IntermediateOutput,
     pub output_source_map: SourceMapPieces,
+    pub source_map_results: Vec<CompileResultForSourceMap>,
     pub external_legal_comments: Vec<u8>,
     pub isolated_hash: Vec<u8>,
     pub entry_point_bit: usize,
@@ -4243,6 +4247,42 @@ fn package_path_for_legal_comment(graph: &LinkerGraph, source_index: u32) -> Str
     }
 }
 
+fn escape_url_path(path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut escaped = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+                    | b'/'
+            )
+        {
+            escaped.push(char::from(byte));
+        } else {
+            escaped.push('%');
+            escaped.push(char::from(HEX[usize::from(byte >> 4)]));
+            escaped.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+    }
+    escaped
+}
+
 fn append_legal_comments(
     graph: &LinkerGraph,
     legal_comments: LegalComments,
@@ -4364,11 +4404,14 @@ pub fn assemble_javascript_chunk(
 ) -> bool {
     let mut joiner = Joiner::default();
     let mut legal_comment_list = Vec::new();
+    let mut source_map_results = Vec::new();
+    let mut previous_offset = LineColumnOffset::default();
     let newline = if options.minify_whitespace { "" } else { "\n" };
     let space = if options.minify_whitespace { "" } else { " " };
     let mut newline_before_comment = false;
     let mut is_executable = false;
     chunk.external_legal_comments.clear();
+    chunk.source_map_results.clear();
 
     if chunk.is_entry_point {
         let Some(InputFileRepr::Js(repr)) = graph.files[chunk.source_index as usize]
@@ -4379,13 +4422,17 @@ pub fn assemble_javascript_chunk(
             panic!("JavaScript entry chunk must reference JavaScript");
         };
         if !repr.ast.hashbang.is_empty() {
-            joiner.add_string(format!("#!{}\n", repr.ast.hashbang));
+            let text = format!("#!{}\n", repr.ast.hashbang);
+            previous_offset.advance_string(&text);
+            joiner.add_string(text);
             newline_before_comment = true;
             is_executable = true;
         }
     }
     if !options.js_banner.is_empty() {
+        previous_offset.advance_string(&options.js_banner);
         joiner.add_string(options.js_banner.clone());
+        previous_offset.advance_string("\n");
         joiner.add_string("\n");
         newline_before_comment = true;
     }
@@ -4399,11 +4446,15 @@ pub fn assemble_javascript_chunk(
         };
         for directive in &repr.ast.directives {
             if directive != "use strict" || options.output_format != Format::EsModule {
-                joiner.add_bytes(crate::internal::helpers::quote_for_json(
+                let quoted = crate::internal::helpers::quote_for_json(
                     directive.as_bytes(),
                     options.ascii_only,
-                ));
+                );
+                previous_offset.advance_bytes(&quoted);
+                joiner.add_bytes(quoted);
+                previous_offset.advance_string(";");
                 joiner.add_string(";");
+                previous_offset.advance_string(newline);
                 joiner.add_string(newline);
                 newline_before_comment = true;
             }
@@ -4425,10 +4476,12 @@ pub fn assemble_javascript_chunk(
             write!(opening, "((){space}=>{space}{{{newline}")
                 .expect("writing to a string cannot fail");
         }
+        previous_offset.advance_string(&opening);
         joiner.add_string(opening);
         newline_before_comment = false;
     }
     if !bindings.prefix.is_empty() {
+        previous_offset.advance_bytes(&bindings.prefix);
         joiner.add_bytes(bindings.prefix.clone());
         newline_before_comment = true;
     }
@@ -4447,6 +4500,7 @@ pub fn assemble_javascript_chunk(
             && !compiled.js.is_empty()
         {
             if newline_before_comment {
+                previous_offset.advance_string("\n");
                 joiner.add_string("\n");
             }
             let path = graph.files[compiled.source_index as usize]
@@ -4463,10 +4517,43 @@ pub fn assemble_javascript_chunk(
             } else {
                 ""
             };
-            joiner.add_string(format!("{indent}// {path}\n"));
+            let text = format!("{indent}// {path}\n");
+            previous_offset.advance_string(&text);
+            joiner.add_string(text);
             previous_source = Some(compiled.source_index);
         }
         if !compiled.js.is_empty() {
+            if options.source_map != SourceMapMode::None
+                && !graph.files[compiled.source_index as usize]
+                    .input_file
+                    .omit_from_source_maps_and_metafile
+            {
+                if compiled.source_map_chunk.should_ignore {
+                    let generated_offset = previous_offset;
+                    previous_offset.advance_bytes(&compiled.js);
+                    if source_map_results
+                        .last()
+                        .is_none_or(|result: &CompileResultForSourceMap| !result.is_null_entry)
+                    {
+                        source_map_results.push(CompileResultForSourceMap {
+                            generated_offset,
+                            source_index: compiled.source_index,
+                            is_null_entry: true,
+                            ..CompileResultForSourceMap::default()
+                        });
+                    }
+                } else {
+                    source_map_results.push(CompileResultForSourceMap {
+                        source_map_chunk: compiled.source_map_chunk.clone(),
+                        generated_offset: previous_offset,
+                        source_index: compiled.source_index,
+                        is_null_entry: false,
+                    });
+                    previous_offset = LineColumnOffset::default();
+                }
+            } else {
+                previous_offset.advance_bytes(&compiled.js);
+            }
             joiner.add_bytes(compiled.js.clone());
             newline_before_comment = true;
         }
@@ -4506,6 +4593,7 @@ pub fn assemble_javascript_chunk(
         joiner.add_string("\n");
     }
     chunk.intermediate_output = output_paths.break_joiner_into_pieces(joiner);
+    chunk.source_map_results = source_map_results;
     chunk.is_executable = is_executable;
     is_executable
 }
@@ -4738,6 +4826,65 @@ pub fn finalize_chunk_paths(
     }
 }
 
+fn append_javascript_source_map_outputs(
+    file_system: &dyn Fs,
+    chunk: &mut ChunkInfo,
+    options: &Options,
+    final_directory: &str,
+    shifts: &[SourceMapShift],
+    joiner: &mut Joiner,
+    output_files: &mut Vec<OutputFile>,
+) {
+    if options.source_map == SourceMapMode::None || !chunk.output_source_map.has_content() {
+        return;
+    }
+    let source_map = std::mem::take(&mut chunk.output_source_map).finalize(shifts);
+    let source_map_rel_path = format!("{}.map", chunk.final_rel_path);
+    match options.source_map {
+        SourceMapMode::LinkedWithComment => {
+            let import_path = path_between_chunks(
+                file_system,
+                &options.public_path,
+                final_directory,
+                &source_map_rel_path,
+            )
+            .expect("source map output path must have a relative path");
+            let import_path = import_path.strip_prefix("./").unwrap_or(&import_path);
+            joiner.ensure_newline_at_end();
+            joiner.add_string(format!(
+                "//# sourceMappingURL={}\n",
+                escape_url_path(import_path)
+            ));
+        }
+        SourceMapMode::Inline | SourceMapMode::InlineAndExternal => {
+            joiner.ensure_newline_at_end();
+            joiner.add_string("//# sourceMappingURL=data:application/json;base64,");
+            joiner.add_string(STANDARD.encode(&source_map));
+            joiner.add_string("\n");
+        }
+        SourceMapMode::ExternalWithoutComment | SourceMapMode::None => {}
+    }
+    if matches!(
+        options.source_map,
+        SourceMapMode::LinkedWithComment
+            | SourceMapMode::ExternalWithoutComment
+            | SourceMapMode::InlineAndExternal
+    ) {
+        output_files.push(OutputFile {
+            abs_path: file_system.join(&[
+                options.abs_output_dir.as_str(),
+                source_map_rel_path.as_str(),
+            ]),
+            json_metadata_chunk: options.metafile_format.maybe_remove_whitespace(&format!(
+                "{{\n      \"imports\": [],\n      \"exports\": [],\n      \"inputs\": {{}},\n      \"bytes\": {}\n    }}",
+                source_map.len()
+            )),
+            contents: source_map,
+            ..OutputFile::default()
+        });
+    }
+}
+
 /// Substitute final chunk and asset paths and emit concrete output files.
 ///
 /// # Panics
@@ -4752,6 +4899,31 @@ pub fn finalize_javascript_chunk_outputs(
     assets: &[Option<AssetPath>],
     options: &Options,
 ) -> Vec<OutputFile> {
+    if options.source_map != SourceMapMode::None {
+        for chunk in &mut *chunks {
+            if !chunk.source_map_results.is_empty() {
+                let tentative_rel_path = template_to_string(&substitute_template(
+                    &chunk.final_template,
+                    &PathPlaceholders::default(),
+                ));
+                let tentative_rel_dir = file_system.dir(&tentative_rel_path);
+                let chunk_abs_dir =
+                    file_system.join(&[&options.abs_output_dir, &tentative_rel_dir]);
+                let results = std::mem::take(&mut chunk.source_map_results);
+                chunk.output_source_map = generate_source_map_for_chunk(
+                    file_system,
+                    graph,
+                    &results,
+                    &chunk_abs_dir,
+                    options,
+                    chunk.intermediate_output.pieces.is_some(),
+                );
+            }
+            if chunk.output_source_map.has_content() {
+                generate_isolated_hash(graph, chunk, options);
+            }
+        }
+    }
     finalize_chunk_paths(file_system, graph, chunks, options);
     let chunk_paths: Vec<_> = chunks
         .iter()
@@ -4765,7 +4937,7 @@ pub fn finalize_javascript_chunk_outputs(
     for chunk in chunks {
         let final_directory = file_system.dir(&chunk.final_rel_path);
         let intermediate_output = std::mem::take(&mut chunk.intermediate_output);
-        let (mut joiner, _) =
+        let (mut joiner, shifts) =
             output_paths.substitute_final_paths(intermediate_output, |target_path| {
                 path_between_chunks(
                     file_system,
@@ -4806,6 +4978,16 @@ pub fn finalize_javascript_chunk_outputs(
                 ..OutputFile::default()
             });
         }
+
+        append_javascript_source_map_outputs(
+            file_system,
+            chunk,
+            options,
+            &final_directory,
+            &shifts,
+            &mut joiner,
+            &mut output_files,
+        );
 
         output_files.push(OutputFile {
             abs_path: file_system.join(&[
@@ -5007,7 +5189,7 @@ mod tests {
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
         config::{
             Format, LegalComments, Loader, Mode, Options, PathPlaceholder, PathTemplate,
-            template_to_string,
+            SourceMap as SourceMapMode, template_to_string,
         },
         css_ast::{
             ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
@@ -6442,6 +6624,139 @@ mod tests {
         assert!(map.contains("\"sourcesContent\": [\"let alpha = 1;\\n\"]"));
         assert!(map.contains("\"names\": [\"alpha\"]"));
         assert!(map.ends_with("]\n}\n"));
+    }
+
+    #[test]
+    fn assembles_and_emits_linked_javascript_source_maps() {
+        let mut input = js_file(js_ast::Ast::default());
+        input.source = Source {
+            contents: std::sync::Arc::from(b"run();\n".as_slice()),
+            pretty_paths: PrettyPaths {
+                rel: "src/input.js".into(),
+                ..PrettyPaths::default()
+            },
+            key_path: Path {
+                text: "/project/src/input.js".into(),
+                namespace: "file".into(),
+                ..Path::default()
+            },
+            ..Source::default()
+        };
+        let graph = clone_linker_graph(&[input], &[0], &[], false);
+        let mut builder = make_chunk_builder(
+            None,
+            generate_line_offset_tables(&graph.files[0].input_file.source.contents, 1),
+            false,
+        );
+        builder.add_source_mapping(Loc::default(), "", b"");
+        let mut chunk = ChunkInfo {
+            final_template: vec![PathTemplate {
+                data: "dist/app file.js".into(),
+                ..PathTemplate::default()
+            }],
+            ..ChunkInfo::default()
+        };
+        let options = Options {
+            abs_output_dir: "/project/out".into(),
+            mode: Mode::Bundle,
+            js_banner: "/* banner */".into(),
+            source_map: SourceMapMode::LinkedWithComment,
+            ..Options::default()
+        };
+        assemble_javascript_chunk(
+            &graph,
+            &mut chunk,
+            &[super::CompiledPartRange {
+                source_index: 0,
+                js: b"run();\n".to_vec(),
+                source_map_chunk: builder.generate_chunk(b"run();\n"),
+                ..super::CompiledPartRange::default()
+            }],
+            &super::PrintedCrossChunkBindings::default(),
+            &[],
+            &options,
+            &context(&[], &[]),
+        );
+        assert_eq!(chunk.source_map_results.len(), 1);
+        assert_eq!(
+            chunk.source_map_results[0].generated_offset,
+            LineColumnOffset {
+                lines: 3,
+                columns: 0
+            }
+        );
+
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let outputs = finalize_javascript_chunk_outputs(
+            &file_system,
+            &graph,
+            std::slice::from_mut(&mut chunk),
+            &[],
+            &options,
+        );
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].abs_path, "/project/out/dist/app file.js.map");
+        let source_map = String::from_utf8(outputs[0].contents.clone()).expect("source map UTF-8");
+        assert!(source_map.contains("\"sources\": [\"../../src/input.js\"]"));
+        assert!(!source_map.contains("\"mappings\": \"\""));
+        assert_eq!(outputs[1].abs_path, "/project/out/dist/app file.js");
+        assert!(
+            outputs[1]
+                .contents
+                .ends_with(b"//# sourceMappingURL=app%20file.js.map\n")
+        );
+    }
+
+    #[test]
+    fn emits_inline_and_external_source_map_modes() {
+        let graph = clone_linker_graph(&[], &[], &[], false);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let make_chunk = || {
+            let mut joiner = Joiner::default();
+            joiner.add_string("code();");
+            ChunkInfo {
+                final_template: vec![PathTemplate {
+                    data: "app.js".into(),
+                    ..PathTemplate::default()
+                }],
+                intermediate_output: super::IntermediateOutput::without_substitutions(joiner),
+                output_source_map: SourceMapPieces {
+                    prefix: b"{\"version\":3,\"sources\":[],\"mappings\":\"\",\"names\":[]}\n"
+                        .to_vec(),
+                    ..SourceMapPieces::default()
+                },
+                ..ChunkInfo::default()
+            }
+        };
+        for (mode, output_count, has_inline_comment) in [
+            (SourceMapMode::Inline, 1, true),
+            (SourceMapMode::InlineAndExternal, 2, true),
+            (SourceMapMode::ExternalWithoutComment, 2, false),
+        ] {
+            let mut chunk = make_chunk();
+            let outputs = finalize_javascript_chunk_outputs(
+                &file_system,
+                &graph,
+                std::slice::from_mut(&mut chunk),
+                &[],
+                &Options {
+                    abs_output_dir: "/out".into(),
+                    source_map: mode,
+                    ..Options::default()
+                },
+            );
+            assert_eq!(outputs.len(), output_count);
+            let main = outputs.last().expect("main output");
+            assert_eq!(
+                main.contents
+                    .windows(b"sourceMappingURL=data:".len())
+                    .any(|window| window == b"sourceMappingURL=data:"),
+                has_inline_comment
+            );
+            if output_count == 2 {
+                assert_eq!(outputs[0].abs_path, "/out/app.js.map");
+            }
+        }
     }
 
     #[test]
