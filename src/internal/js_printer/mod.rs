@@ -749,7 +749,10 @@ impl Printer<'_> {
                 self.print_indent();
                 let wrap = matches!(
                     expression.value.data.as_deref(),
-                    Some(ExprData::Object(_) | ExprData::Function(_) | ExprData::Class(_))
+                    Some(ExprData::Object(_) | ExprData::Class(_))
+                ) || matches!(
+                    expression.value.data.as_deref(),
+                    Some(ExprData::Function(function)) if !function.is_parenthesized
                 ) || matches!(
                     expression.value.data.as_deref(),
                     Some(ExprData::Binary(binary))
@@ -1562,11 +1565,10 @@ impl Printer<'_> {
         self.output.extend_from_slice(b"function");
         if function.is_generator {
             self.output.push(b'*');
+            self.print_optional_space();
         }
         if let Some(name) = function.name {
-            if function.is_generator {
-                self.print_optional_space();
-            } else {
+            if !function.is_generator {
                 self.output.push(b' ');
             }
             self.print_identifier(&self.renamer.name_for_symbol(name.reference));
@@ -2093,8 +2095,20 @@ impl Printer<'_> {
                 }
                 self.print_expr_at(&yield_expression.value_or_nil, Precedence::Yield);
             }
-            ExprData::Function(function) => self.print_function(&function.function),
+            ExprData::Function(function) => {
+                if function.is_parenthesized {
+                    self.output.push(b'(');
+                }
+                self.print_function(&function.function);
+                if function.is_parenthesized {
+                    self.output.push(b')');
+                }
+            }
             ExprData::Arrow(arrow) => {
+                let wrap_arrow = arrow.is_parenthesized && !wrap;
+                if wrap_arrow {
+                    self.output.push(b'(');
+                }
                 let can_omit_parameter_parentheses = self.options.minify_whitespace
                     && !arrow.has_rest_arg
                     && matches!(
@@ -2157,6 +2171,9 @@ impl Printer<'_> {
                     }
                 } else {
                     self.print_block(&arrow.body.block, false);
+                }
+                if wrap_arrow {
+                    self.output.push(b')');
                 }
             }
             ExprData::Class(class) => self.print_class(&class.class),

@@ -5974,6 +5974,52 @@ mod tests {
     }
 
     #[test]
+    fn marks_pure_iifes_and_inlines_simple_arrow_bodies() {
+        assert_eq!(
+            code(transform(
+                "(e=>e)(x);var a=(function(){})()",
+                TransformOptions::default()
+            )),
+            concat!(
+                "/* @__PURE__ */ ((e) => e)(x);\n",
+                "var a = /* @__PURE__ */ (function() {\n",
+                "})();\n",
+            )
+        );
+        assert_eq!(
+            code(transform(
+                "(e=>e)(x);(()=>a)(...[]);function f(){return (()=>x)()}",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!("x, a;\n", "function f() {\n", "  return x;\n", "}\n")
+        );
+        assert_eq!(
+            code(transform(
+                "x=(()=>1);y=(function(){})",
+                TransformOptions::default()
+            )),
+            concat!("x = (() => 1);\n", "y = (function() {\n", "});\n")
+        );
+        assert_eq!(
+            code(transform(
+                "x=(()=>1);y=(function(){})",
+                TransformOptions {
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "x=(()=>1);y=(function(){});\n"
+        );
+        assert_eq!(
+            code(transform("(function*(){})()", TransformOptions::default())),
+            concat!("(function* () {\n", "})();\n")
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

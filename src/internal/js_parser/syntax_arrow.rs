@@ -76,7 +76,7 @@ pub(crate) fn parse_empty_parenthesized_arrow(
         loc,
         Vec::new(),
         false,
-        true,
+        false,
         false,
     ))
 }
@@ -101,7 +101,7 @@ pub(crate) fn parse_arrow_after_parenthesized_expression(
         loc,
         args,
         false,
-        true,
+        false,
         has_rest_arg,
     ))
 }
@@ -393,7 +393,7 @@ pub(crate) fn parse_async_arrow_from_call(
     if !valid {
         core.add_error_range(lexer.range(), "Invalid arrow function parameter list");
     }
-    parse_arrow_body(core, lexer, loc, args, true, true, has_rest_arg)
+    parse_arrow_body(core, lexer, loc, args, true, false, has_rest_arg)
 }
 
 #[cfg(test)]

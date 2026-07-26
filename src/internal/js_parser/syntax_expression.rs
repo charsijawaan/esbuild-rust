@@ -319,6 +319,13 @@ fn parse_prefix(
                 if has_trailing_comma || has_rest {
                     lexer.unexpected();
                 }
+                match expr.data.as_deref_mut() {
+                    Some(ExprData::Array(array)) => array.is_parenthesized = true,
+                    Some(ExprData::Object(object)) => object.is_parenthesized = true,
+                    Some(ExprData::Function(function)) => function.is_parenthesized = true,
+                    Some(ExprData::Arrow(arrow)) => arrow.is_parenthesized = true,
+                    _ => {}
+                }
                 expr
             }
         }

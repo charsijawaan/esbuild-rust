@@ -9,10 +9,11 @@ use crate::internal::{
     },
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
-        AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
-        ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionExpr,
-        IdentifierExpr, IfExpr, ObjectExpr, OpCode, Property, PropertyFlags, PropertyKind,
-        ScopeKind, Stmt, StmtData, StrictModeKind, StringExpr, for_each_identifier_binding,
+        Arg, AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
+        ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody,
+        FunctionExpr, IdentifierExpr, IfExpr, ObjectExpr, OpCode, Property, PropertyFlags,
+        PropertyKind, ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind,
+        StringExpr, UnaryExpr, for_each_identifier_binding, inline_spreads_of_array_literals,
         is_identifier, is_identifier_es5_and_es_next, join_with_comma, make_helper_context,
     },
 };
@@ -2809,6 +2810,74 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
     visit_expr_with_target(core, expression, resolve_identifiers, AssignTarget::None);
 }
 
+fn iife_can_be_removed_if_unused(core: &ParserCore, args: &[Arg], body: &FunctionBody) -> bool {
+    let helpers = make_helper_context(|reference| {
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+            == SymbolKind::Unbound
+    });
+    for argument in args {
+        if argument.default_or_nil.data.is_some()
+            && !helpers.expr_can_be_removed_if_unused(&argument.default_or_nil)
+        {
+            return false;
+        }
+        if !matches!(
+            argument.binding.data.as_deref(),
+            Some(BindingData::Identifier(_))
+        ) {
+            return false;
+        }
+    }
+    helpers.stmts_can_be_removed_if_unused(
+        &body.block.statements,
+        StmtsCanBeRemovedIfUnusedFlags::RETURN_CAN_BE_REMOVED_IF_UNUSED,
+    )
+}
+
+fn maybe_inline_iife(core: &ParserCore, loc: Loc, call: &CallExpr) -> Option<ExprData> {
+    if !call.args.is_empty() {
+        return None;
+    }
+    let Some(ExprData::Arrow(arrow)) = call.target.data.as_deref() else {
+        return None;
+    };
+    if !arrow.args.is_empty() || arrow.is_async {
+        return None;
+    }
+    let replacement = match arrow.body.block.statements.as_slice() {
+        [] => Expr::new(loc, ExprData::Undefined),
+        [statement] => match statement.data.as_deref() {
+            Some(StmtData::Return(statement)) => {
+                if statement.value_or_nil.data.is_some() {
+                    statement.value_or_nil.clone()
+                } else {
+                    Expr::new(loc, ExprData::Undefined)
+                }
+            }
+            Some(StmtData::Expr(statement)) => Expr::new(
+                statement.value.loc,
+                ExprData::Unary(UnaryExpr {
+                    value: statement.value.clone(),
+                    op: OpCode::UnaryVoid,
+                    ..UnaryExpr::default()
+                }),
+            ),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if call.can_be_unwrapped_if_unused {
+        let helpers = make_helper_context(|reference| {
+            core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                == SymbolKind::Unbound
+        });
+        if !helpers.expr_can_be_removed_if_unused(&replacement) {
+            return None;
+        }
+    }
+    replacement.data.map(|data| *data)
+}
+
 fn instantiate_define_expr(
     core: &mut ParserCore,
     loc: Loc,
@@ -3175,6 +3244,9 @@ fn visit_expr_with_target(
             let target_was_identifier =
                 matches!(call.target.data.as_deref(), Some(ExprData::Identifier(_)));
             visit_expr(core, &mut call.target, resolve_identifiers);
+            if let Some(ExprData::Function(function)) = call.target.data.as_deref_mut() {
+                function.is_parenthesized = true;
+            }
             call.can_be_unwrapped_if_unused |= match call.target.data.as_deref() {
                 Some(ExprData::Identifier(identifier)) => {
                     identifier.call_can_be_unwrapped_if_unused
@@ -3185,6 +3257,32 @@ fn visit_expr_with_target(
             };
             for argument in &mut call.args {
                 visit_expr(core, argument, resolve_identifiers);
+            }
+            if core.options.minify_syntax
+                && call
+                    .args
+                    .iter()
+                    .any(|argument| matches!(argument.data.as_deref(), Some(ExprData::Spread(_))))
+            {
+                call.args = inline_spreads_of_array_literals(&call.args);
+            }
+            if !call.can_be_unwrapped_if_unused {
+                call.can_be_unwrapped_if_unused = match call.target.data.as_deref() {
+                    Some(ExprData::Arrow(arrow)) => {
+                        !arrow.is_async
+                            && iife_can_be_removed_if_unused(core, &arrow.args, &arrow.body)
+                    }
+                    Some(ExprData::Function(function)) => {
+                        !function.function.is_async
+                            && !function.function.is_generator
+                            && iife_can_be_removed_if_unused(
+                                core,
+                                &function.function.args,
+                                &function.function.body,
+                            )
+                    }
+                    _ => false,
+                };
             }
             if core.options.drop_console {
                 let mut parts = Vec::new();
@@ -3211,6 +3309,12 @@ fn visit_expr_with_target(
                     core.record_usage(core.module_ref);
                     core.record_usage(core.exports_ref);
                 }
+            }
+            if core.options.minify_syntax
+                && let Some(replacement) = maybe_inline_iife(core, expression.loc, call)
+            {
+                *data = replacement;
+                return;
             }
             let kind = if is_unbound_identifier_named(core, &call.target, "require") {
                 Some(crate::internal::ast::ImportKind::Require)
