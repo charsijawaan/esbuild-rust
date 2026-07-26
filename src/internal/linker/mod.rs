@@ -48,6 +48,33 @@ use crate::internal::{
 const CIRCULAR_CHUNK_IMPORT_ERROR: &str =
     "Internal error: generated chunks contain a circular import";
 
+/// Configure entry-point export semantics before linker scanning begins.
+pub fn configure_entry_point_exports(graph: &mut LinkerGraph, options: &Options) {
+    for entry_point in graph.entry_points().to_vec() {
+        let Some(InputFileRepr::Js(repr)) = graph.files[entry_point.source_index as usize]
+            .input_file
+            .repr
+            .as_mut()
+        else {
+            continue;
+        };
+        if repr.ast.has_lazy_export
+            && (options.mode == Mode::PassThrough
+                || (options.mode == Mode::ConvertFormat
+                    && !options.output_format.keep_esm_import_export_syntax()))
+        {
+            repr.ast.exports_kind = ExportsKind::CommonJs;
+        }
+        if repr.ast.export_keyword.len > 0
+            && (options.output_format == Format::CommonJs
+                || (options.output_format == Format::Iife && !options.global_name.is_empty()))
+        {
+            repr.ast.uses_exports_ref = true;
+            repr.meta.force_include_exports_for_entry_point = true;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PartRange {
     pub source_index: u32,
@@ -2443,6 +2470,7 @@ pub fn scan_imports_and_exports<S: BuildHasher>(
     local_names: &HashMap<Ref, String, S>,
     runtime_refs: ScanRuntimeRefs,
 ) -> ScanImportsAndExportsResult {
+    configure_entry_point_exports(graph, options);
     inline_linked_assets(graph, unique_key_prefix);
     classify_module_wrappers(graph, options);
     propagate_wrappers_and_dynamic_exports(graph, options);
@@ -8026,24 +8054,24 @@ mod tests {
         assign_chunk_path_templates, bind_imports_to_exports_for_file,
         bind_imports_to_parts_for_file, classify_module_wrappers, compile_part_range_for_chunk,
         compile_prepared_css_asts, compute_chunks, compute_cross_chunk_dependencies,
-        compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
-        create_entry_point_part, create_exports_for_file, create_wrapper_for_file,
-        encode_import_constraints_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
-        finalize_javascript_chunk_outputs, finalize_part_dependencies_for_file,
-        find_imported_css_files_in_js_order, find_imported_files_in_css_order,
-        generate_code_for_lazy_exports, generate_common_js_export_copies,
-        generate_cross_chunk_stmts, generate_css_chunk, generate_css_module_exports,
-        generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
-        generate_source_map_for_chunk, has_dynamic_exports_due_to_export_star,
-        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, lower_common_js_lazy_export, lower_esm_lazy_export,
-        mangle_local_css, mark_file_live_for_tree_shaking, match_import_with_export,
-        merge_adjacent_local_stmts, path_between_chunks, populate_css_stub_lazy_export,
-        prepare_css_asts, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
-        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
-        wrap_rules_with_conditions,
+        compute_js_chunks, configure_entry_point_exports, convert_import_for_chunk,
+        convert_stmts_for_chunk, create_entry_point_part, create_exports_for_file,
+        create_wrapper_for_file, encode_import_constraints_for_file,
+        enforce_no_cyclic_chunk_imports, finalize_chunk_paths, finalize_javascript_chunk_outputs,
+        finalize_part_dependencies_for_file, find_imported_css_files_in_js_order,
+        find_imported_files_in_css_order, generate_code_for_lazy_exports,
+        generate_common_js_export_copies, generate_cross_chunk_stmts, generate_css_chunk,
+        generate_css_module_exports, generate_entry_point_tail, generate_global_name_prefix,
+        generate_isolated_hash, generate_source_map_for_chunk,
+        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
+        is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
+        lower_esm_lazy_export, mangle_local_css, mark_file_live_for_tree_shaking,
+        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
+        populate_css_stub_lazy_export, prepare_css_asts, print_cross_chunk_bindings,
+        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
+        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -8089,6 +8117,41 @@ mod tests {
         let (joiner, shifts) = context(&[], &[]).substitute_final_paths(output, str::to_owned);
         assert_eq!(joiner.done(), b"console.log(0)");
         assert_eq!(shifts, vec![SourceMapShift::default()]);
+    }
+
+    #[test]
+    fn entry_point_export_configuration_matches_output_semantics() {
+        let input_files = [js_file(js_ast::Ast {
+            has_lazy_export: true,
+            export_keyword: Range {
+                loc: Loc::default(),
+                len: 6,
+            },
+            ..js_ast::Ast::default()
+        })];
+        let mut graph = clone_linker_graph(
+            &input_files,
+            &[0],
+            &[EntryPoint {
+                source_index: 0,
+                ..EntryPoint::default()
+            }],
+            false,
+        );
+
+        configure_entry_point_exports(
+            &mut graph,
+            &Options {
+                mode: Mode::ConvertFormat,
+                output_format: Format::CommonJs,
+                ..Options::default()
+            },
+        );
+
+        let repr = js_repr(&graph, 0);
+        assert_eq!(repr.ast.exports_kind, ExportsKind::CommonJs);
+        assert!(repr.ast.uses_exports_ref);
+        assert!(repr.meta.force_include_exports_for_entry_point);
     }
 
     #[test]
