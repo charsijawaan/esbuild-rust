@@ -2,9 +2,9 @@
 
 use crate::internal::{
     js_ast::{
-        Binding, BindingData, BlockStmt, BreakStmt, ContinueStmt, Decl, DoWhileStmt, Expr,
-        ExprData, ExprStmt, IdentifierBinding, IdentifierExpr, IfStmt, LocalKind, LocalStmt,
-        Precedence, ReturnStmt, Stmt, StmtData, ThrowStmt, WhileStmt, WithStmt,
+        Binding, BindingData, BlockStmt, BreakStmt, Catch, ContinueStmt, Decl, DoWhileStmt, Expr,
+        ExprData, ExprStmt, Finally, IdentifierBinding, IdentifierExpr, IfStmt, LocalKind,
+        LocalStmt, Precedence, ReturnStmt, Stmt, StmtData, ThrowStmt, TryStmt, WhileStmt, WithStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
@@ -165,6 +165,75 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                     body,
                     body_loc,
                     is_single_line_body,
+                }),
+            )
+        }
+        Token::Try => {
+            lexer.next();
+            let (block_loc, block) = parse_block(core, lexer);
+            let catch = if lexer.token == Token::Catch {
+                let catch_loc = lexer.loc();
+                lexer.next();
+                let binding_or_nil = if lexer.token == Token::OpenBrace {
+                    if core
+                        .options
+                        .unsupported_js_features
+                        .contains(crate::internal::compat::JsFeature::OPTIONAL_CATCH_BINDING)
+                    {
+                        Binding {
+                            loc: lexer.loc(),
+                            data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                                reference: core
+                                    .new_symbol(crate::internal::ast::SymbolKind::Other, "e"),
+                            }))),
+                        }
+                    } else {
+                        Binding::default()
+                    }
+                } else {
+                    lexer.expect(Token::OpenParen);
+                    let binding_loc = lexer.loc();
+                    if lexer.token != Token::Identifier {
+                        lexer.expected(Token::Identifier);
+                    }
+                    let binding = Binding {
+                        loc: binding_loc,
+                        data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                            reference: core.store_name_in_ref(lexer.identifier.clone()),
+                        }))),
+                    };
+                    lexer.next();
+                    lexer.expect(Token::CloseParen);
+                    binding
+                };
+                let (catch_block_loc, catch_block) = parse_block(core, lexer);
+                Some(Catch {
+                    binding_or_nil,
+                    block: catch_block,
+                    loc: catch_loc,
+                    block_loc: catch_block_loc,
+                })
+            } else {
+                None
+            };
+            let finally = if lexer.token == Token::Finally || catch.is_none() {
+                let finally_loc = lexer.loc();
+                lexer.expect(Token::Finally);
+                let (_, finally_block) = parse_block(core, lexer);
+                Some(Finally {
+                    block: finally_block,
+                    loc: finally_loc,
+                })
+            } else {
+                None
+            };
+            Stmt::new(
+                loc,
+                StmtData::Try(TryStmt {
+                    catch,
+                    finally,
+                    block,
+                    block_loc,
                 }),
             )
         }
@@ -424,6 +493,40 @@ mod tests {
             block.statements[2].data.as_deref(),
             Some(StmtData::With(_))
         ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_try_catch_finally_and_optional_catch_bindings() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"{try { work() } catch (error) { recover(error) } finally { cleanup() } try {} catch {}}"[..],
+            ),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        let Some(StmtData::Try(first)) = block.statements[0].data.as_deref() else {
+            panic!("expected try");
+        };
+        assert!(
+            first
+                .catch
+                .as_ref()
+                .is_some_and(|catch| catch.binding_or_nil.data.is_some())
+        );
+        assert!(first.finally.is_some());
+        let Some(StmtData::Try(second)) = block.statements[1].data.as_deref() else {
+            panic!("expected second try");
+        };
+        assert!(
+            second
+                .catch
+                .as_ref()
+                .is_some_and(|catch| catch.binding_or_nil.data.is_none())
+        );
         assert_eq!(lexer.token, Token::EndOfFile);
     }
 }
