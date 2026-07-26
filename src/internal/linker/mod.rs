@@ -19,7 +19,7 @@ use crate::internal::{
     bundler::{hash_for_file_name, path_relative_to_outbase},
     config::{
         Format, LegalComments, Loader, Mode, Options, PathPlaceholder, PathPlaceholders,
-        PathTemplate, SourceMap as SourceMapMode, has_placeholder, substitute_template,
+        PathTemplate, Platform, SourceMap as SourceMapMode, has_placeholder, substitute_template,
         template_to_string,
     },
     css_ast::{
@@ -6578,6 +6578,169 @@ pub fn chunk_runtime_refs_from_graph(
             unbound_module_ref,
         }),
     }
+}
+
+/// Assign collision-free symbol names for one JavaScript chunk.
+///
+/// Minified builds use frequency-ranked slots while normal builds preserve
+/// original names and append numeric suffixes only when needed.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn rename_symbols_in_chunk(
+    graph: &LinkerGraph,
+    chunk: &ChunkInfo,
+    options: &Options,
+) -> Box<dyn crate::internal::renamer::Renamer> {
+    let module_scopes = chunk
+        .files_in_chunk_in_order
+        .iter()
+        .filter_map(|&source_index| {
+            let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+                .input_file
+                .repr
+                .as_ref()?
+            else {
+                return None;
+            };
+            repr.ast.module_scope.clone()
+        })
+        .collect::<Vec<_>>();
+    let mut reserved_names =
+        crate::internal::renamer::compute_reserved_names(&module_scopes, &graph.symbols);
+    if options.output_format == Format::CommonJs && options.platform == Platform::Node {
+        reserved_names.insert("exports".into(), 1);
+        reserved_names.insert("module".into(), 1);
+    }
+    if options.mode != Mode::PassThrough {
+        reserved_names.insert("require".into(), 1);
+        reserved_names.insert("Promise".into(), 1);
+    }
+
+    let mut cross_chunk_refs = chunk
+        .imports_from_other_chunks
+        .values()
+        .flatten()
+        .map(|item| graph.symbols.follow_symbols_const(item.reference))
+        .collect::<Vec<_>>();
+    cross_chunk_refs.sort_by_key(|reference| {
+        (
+            graph.stable_source_indices[reference.source_index as usize],
+            reference.inner_index,
+        )
+    });
+    cross_chunk_refs.dedup();
+
+    if options.minify_identifiers {
+        let mut first_top_level_slots = crate::internal::ast::SlotCounts::default();
+        for &source_index in &chunk.files_in_chunk_in_order {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_ref()
+            else {
+                continue;
+            };
+            first_top_level_slots.union_max(repr.ast.nested_scope_slot_counts);
+        }
+        let mut renamer = crate::internal::renamer::MinifyRenamer::new(
+            graph.symbols.clone(),
+            first_top_level_slots,
+            reserved_names,
+        );
+        let mut top_level_symbols = Vec::new();
+        for reference in cross_chunk_refs {
+            renamer.accumulate_symbol_count(
+                &mut top_level_symbols,
+                reference,
+                1,
+                &graph.stable_source_indices,
+            );
+        }
+        for &source_index in &chunk.files_in_chunk_in_order {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_ref()
+            else {
+                continue;
+            };
+            let mut file_symbols = Vec::new();
+            if repr.ast.uses_exports_ref {
+                renamer.accumulate_symbol_count(
+                    &mut file_symbols,
+                    repr.ast.exports_ref,
+                    1,
+                    &graph.stable_source_indices,
+                );
+            }
+            if repr.ast.uses_module_ref {
+                renamer.accumulate_symbol_count(
+                    &mut file_symbols,
+                    repr.ast.module_ref,
+                    1,
+                    &graph.stable_source_indices,
+                );
+            }
+            for part in &repr.ast.parts {
+                if !part.is_live {
+                    continue;
+                }
+                renamer.accumulate_symbol_use_counts(
+                    &mut file_symbols,
+                    &part.symbol_uses,
+                    &graph.stable_source_indices,
+                );
+                for declared in &part.declared_symbols {
+                    renamer.accumulate_symbol_count(
+                        &mut file_symbols,
+                        declared.reference,
+                        1,
+                        &graph.stable_source_indices,
+                    );
+                }
+            }
+            crate::internal::renamer::sort_stable_symbol_counts(&mut file_symbols);
+            top_level_symbols.extend(file_symbols);
+        }
+        renamer.allocate_top_level_symbol_slots(&top_level_symbols);
+        renamer.assign_names_by_frequency(&DEFAULT_NAME_MINIFIER_JS);
+        return Box::new(renamer);
+    }
+
+    let mut renamer =
+        crate::internal::renamer::NumberRenamer::new(graph.symbols.clone(), reserved_names);
+    for reference in cross_chunk_refs {
+        renamer.add_top_level_symbol(reference);
+    }
+    let mut nested_scopes = HashMap::new();
+    for &source_index in &chunk.files_in_chunk_in_order {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            continue;
+        };
+        if repr.meta.wrap == WrapKind::Cjs {
+            renamer.add_top_level_symbol(repr.ast.wrapper_ref);
+            if let Some(module_scope) = &repr.ast.module_scope {
+                nested_scopes.insert(source_index, vec![module_scope.clone()]);
+            }
+            continue;
+        }
+        if repr.meta.wrap == WrapKind::Esm {
+            renamer.add_top_level_symbol(repr.ast.wrapper_ref);
+        }
+        let mut scopes = Vec::new();
+        for part in &repr.ast.parts {
+            if !part.is_live {
+                continue;
+            }
+            for declared in &part.declared_symbols {
+                if declared.is_top_level {
+                    renamer.add_top_level_symbol(declared.reference);
+                }
+            }
+            scopes.extend(part.scopes.iter().cloned());
+        }
+        nested_scopes.insert(source_index, scopes);
+    }
+    renamer.assign_names_by_scope(&nested_scopes);
+    Box::new(renamer)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

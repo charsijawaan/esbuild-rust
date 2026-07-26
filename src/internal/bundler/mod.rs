@@ -125,7 +125,6 @@ pub fn compile_javascript_bundle(
         (prepared.unbound_module_ref != crate::internal::ast::INVALID_REF)
             .then_some(prepared.unbound_module_ref),
     );
-    let renamer = crate::internal::renamer::new_no_op_renamer(prepared.graph.symbols.clone());
     let chunk_paths: Vec<_> = prepared
         .chunks
         .iter()
@@ -151,18 +150,30 @@ pub fn compile_javascript_bundle(
         })
         .collect();
     let output_paths = linker::OutputPathContext::new(unique_key_prefix, &assets, &chunk_paths);
-    let _ = linker::generate_javascript_chunks(
-        &prepared.graph,
-        &mut prepared.chunks,
-        options,
-        runtime_refs,
-        linker::EntryPointTailRefs {
-            to_common_js_ref: runtime_refs.to_common_js_ref,
-            unbound_module_ref: prepared.unbound_module_ref,
-        },
-        &renamer,
-        &output_paths,
-    );
+    let entry_point_refs = linker::EntryPointTailRefs {
+        to_common_js_ref: runtime_refs.to_common_js_ref,
+        unbound_module_ref: prepared.unbound_module_ref,
+    };
+    for chunk_index in 0..prepared.chunks.len() {
+        if prepared.chunks[chunk_index].is_css {
+            continue;
+        }
+        let renamer = linker::rename_symbols_in_chunk(
+            &prepared.graph,
+            &prepared.chunks[chunk_index],
+            options,
+        );
+        linker::generate_javascript_chunk(
+            &prepared.graph,
+            &mut prepared.chunks,
+            chunk_index,
+            options,
+            runtime_refs,
+            entry_point_refs,
+            renamer.as_ref(),
+            &output_paths,
+        );
+    }
     let output_files = linker::finalize_generated_javascript_chunks(
         file_system,
         &prepared.graph,
@@ -2275,6 +2286,92 @@ mod tests {
         assert!(output.contains("console.log(value);"));
         assert!(!output.contains("import "));
         assert!(!output.contains("export "));
+    }
+
+    #[test]
+    fn renames_colliding_top_level_symbols_across_modules() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import {value as a} from './a.js'; import {value as b} from './b.js'; console.log(a, b)".into(),
+                ),
+                (
+                    "/project/a.js".into(),
+                    "const collision = 1; export {collision as value}".into(),
+                ),
+                (
+                    "/project/b.js".into(),
+                    "const collision = 2; export {collision as value}".into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains("const collision = 1;"));
+        assert!(output.contains("const collision2 = 2;"));
+        assert!(output.contains("console.log(collision, collision2);"));
+    }
+
+    #[test]
+    fn minifies_identifiers_in_javascript_bundles() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([(
+                "/project/entry.js".into(),
+                "function longFunction(longParameter) { let longLocal = longParameter + 1; return longLocal } console.log(longFunction(2))".into(),
+            )]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            minify_identifiers: true,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(!output.contains("longFunction"));
+        assert!(!output.contains("longParameter"));
+        assert!(!output.contains("longLocal"));
+        assert!(output.contains("console.log("));
     }
 
     #[test]

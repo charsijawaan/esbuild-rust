@@ -337,6 +337,11 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             format!("require_{}", core.source.identifier_name),
         );
         core.pop_scope();
+        let nested_scope_slot_counts = if core.options.minify_identifiers {
+            crate::internal::renamer::assign_nested_scope_slots(&module_scope, &mut core.symbols)
+        } else {
+            crate::internal::ast::SlotCounts::default()
+        };
 
         let mut parts = vec![Part {
             symbol_uses: HashMap::new(),
@@ -396,6 +401,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             exports_ref: core.exports_ref,
             module_ref: core.module_ref,
             wrapper_ref,
+            nested_scope_slot_counts,
             approximate_line_count: i32::try_from(lexer.approximate_newline_count)
                 .unwrap_or(i32::MAX)
                 .saturating_add(1),
