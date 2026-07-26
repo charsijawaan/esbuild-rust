@@ -83,7 +83,7 @@ fn run_with_stdin_and_node_paths(
     let mut bare_sourcemap = false;
     let mut source_root = String::new();
     let mut sources_content = BuildSourcesContent::Include;
-    let mut legal_comments = BuildLegalComments::Inline;
+    let mut legal_comments = BuildLegalComments::Default;
     let mut tree_shaking = BuildTreeShaking::Default;
     let mut jsx = BuildJsx::Transform;
     let mut jsx_factory = String::new();
@@ -1045,6 +1045,17 @@ mod tests {
 
     #[test]
     fn configures_legal_comments_for_transforms() {
+        let Output::Code(default_output) =
+            run_with_stdin(&[], Some(b"//! default license\nkeep()"))
+                .expect("default legal comments succeed")
+        else {
+            panic!("expected transformed code");
+        };
+        assert_eq!(
+            String::from_utf8(default_output).expect("transform output is UTF-8"),
+            "//! default license\nkeep();\n"
+        );
+
         let Output::Code(output) = run_with_stdin(
             &["--legal-comments=eof".into()],
             Some(b"//! license\nkeep()"),

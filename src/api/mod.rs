@@ -258,6 +258,7 @@ pub enum BuildSourcesContent {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BuildLegalComments {
     #[default]
+    Default,
     Inline,
     None,
     EndOfFile,
@@ -265,8 +266,15 @@ pub enum BuildLegalComments {
     External,
 }
 
-const fn internal_legal_comments(value: BuildLegalComments) -> config::LegalComments {
+const fn internal_legal_comments(value: BuildLegalComments, bundle: bool) -> config::LegalComments {
     match value {
+        BuildLegalComments::Default => {
+            if bundle {
+                config::LegalComments::EndOfFile
+            } else {
+                config::LegalComments::Inline
+            }
+        }
         BuildLegalComments::Inline => config::LegalComments::Inline,
         BuildLegalComments::None => config::LegalComments::None,
         BuildLegalComments::EndOfFile => config::LegalComments::EndOfFile,
@@ -1116,7 +1124,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         },
         source_root: options.source_root,
         exclude_sources_content: options.sources_content == BuildSourcesContent::Exclude,
-        legal_comments: internal_legal_comments(options.legal_comments),
+        legal_comments: internal_legal_comments(options.legal_comments, true),
         line_limit: options.line_limit,
         code_splitting: options.splitting,
         preserve_symlinks: options.preserve_symlinks,
@@ -1343,7 +1351,10 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         match options.legal_comments {
             BuildLegalComments::EndOfFile => printed.code.extend(rendered),
             BuildLegalComments::External => legal_comments = rendered,
-            _ => {}
+            BuildLegalComments::Default
+            | BuildLegalComments::Inline
+            | BuildLegalComments::None
+            | BuildLegalComments::Linked => {}
         }
         printed.code = add_banner_and_footer(printed.code, "", &options.footer);
         if options.sourcemap != BuildSourceMap::None {
@@ -1538,7 +1549,7 @@ fn js_printer_options(options: &TransformOptions) -> js_printer::Options {
         minify_syntax: options.minify_syntax,
         minify_whitespace: options.minify_whitespace,
         ascii_only: options.ascii_only,
-        legal_comments: internal_legal_comments(options.legal_comments),
+        legal_comments: internal_legal_comments(options.legal_comments, false),
         ..js_printer::Options::default()
     }
 }
@@ -1699,7 +1710,7 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Trans
             line_limit: options.line_limit,
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
-            legal_comments: internal_legal_comments(options.legal_comments),
+            legal_comments: internal_legal_comments(options.legal_comments, false),
             line_offset_tables,
             source_map: if options.sourcemap == BuildSourceMap::None {
                 config::SourceMap::None
@@ -4516,6 +4527,42 @@ mod tests {
             },
         );
         assert_eq!(code(escaped), "keep();\n/*! <\\/script> */\nfooter()\n");
+    }
+
+    #[test]
+    fn defaults_legal_comments_by_api_context() {
+        assert_eq!(
+            code(transform(
+                "/*! transform license */\nkeep()",
+                TransformOptions::default()
+            )),
+            "/*! transform license */\nkeep();\n"
+        );
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("esbuild-rs-default-legal-comments-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "/*! build license */\nconsole.log('live')",
+        )
+        .expect("write entry file");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        let code_index = output.find("console.log").expect("build code");
+        let comment_index = output.find("/*! build license */").expect("legal comment");
+        assert!(comment_index > code_index, "{output}");
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
