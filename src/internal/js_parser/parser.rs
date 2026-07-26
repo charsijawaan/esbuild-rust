@@ -69,7 +69,8 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         let has_import_statement = statements
             .iter()
             .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))));
-        let has_esm_exports = core.top_level_await_keyword.len > 0
+        let has_esm_exports = core.esm_import_meta.len > 0
+            || core.top_level_await_keyword.len > 0
             || statements.iter().any(|statement| {
                 matches!(
                     statement.data.as_deref(),
@@ -659,6 +660,41 @@ mod tests {
             ast.live_top_level_await_keyword,
             ast.top_level_await_keyword
         );
+    }
+
+    #[test]
+    fn import_meta_and_top_level_for_await_mark_esm() {
+        let (ast, ok, log) = parse_source("import.meta.url;");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+        assert_eq!(
+            ast.module_scope
+                .as_ref()
+                .expect("module scope")
+                .lock()
+                .expect("module scope lock")
+                .strict_mode,
+            crate::internal::js_ast::StrictModeKind::ImplicitStrictEsm
+        );
+
+        let (ast, ok, log) = parse_source("for await (const item of items) {}");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+        assert_eq!(ast.top_level_await_keyword.loc.start, 4);
+        assert_eq!(ast.top_level_await_keyword.len, 5);
+
+        let (ast, ok, log) = parse_source(
+            "async function run() {\
+               for await (const item of items) {}\
+               await work();\
+             }",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::None);
+        assert_eq!(ast.top_level_await_keyword.len, 0);
     }
 
     #[test]

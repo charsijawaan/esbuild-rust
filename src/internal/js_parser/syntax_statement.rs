@@ -621,6 +621,8 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
                 "Cannot use \"await\" outside an async function",
             );
             await_range = Range::default();
+        } else if !core.is_inside_function_scope() && core.top_level_await_keyword.len == 0 {
+            core.top_level_await_keyword = await_range;
         }
         lexer.next();
     }
