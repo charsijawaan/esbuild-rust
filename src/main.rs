@@ -1,7 +1,6 @@
 use std::{
     env, fs,
     io::{self, Read, Write},
-    path::Path,
 };
 
 use esbuild_rs::{
@@ -104,7 +103,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             options.sourcefile.clone_from(&path);
         }
         if options.loader == Loader::None {
-            options.loader = loader_from_path(&path);
+            options.loader = Loader::Default;
         }
         fs::read(&path).map_err(|error| format!("Could not read {path:?}: {error}"))?
     } else {
@@ -152,19 +151,6 @@ const fn loader_name(loader: Loader) -> &'static str {
     }
 }
 
-fn loader_from_path(path: &str) -> Loader {
-    match Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-    {
-        Some("css") => Loader::Css,
-        Some("jsx") => Loader::Jsx,
-        Some("ts") => Loader::Ts,
-        Some("tsx") => Loader::Tsx,
-        _ => Loader::Js,
-    }
-}
-
 fn help_text() -> String {
     format!(
         "esbuild-rs {}\n\
@@ -187,7 +173,7 @@ fn help_text() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Loader, Output, loader_from_path, parse_loader, run};
+    use super::{Loader, Output, parse_loader, run};
 
     #[test]
     fn parses_loader_flags_and_file_extensions() {
@@ -197,9 +183,6 @@ mod tests {
         assert!(parse_loader("wat").is_err());
         assert!(parse_loader("file").is_err());
         assert!(parse_loader("copy").is_err());
-        assert_eq!(loader_from_path("entry.css"), Loader::Css);
-        assert_eq!(loader_from_path("entry.ts"), Loader::Ts);
-        assert_eq!(loader_from_path("entry.unknown"), Loader::Js);
     }
 
     #[test]

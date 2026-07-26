@@ -74,11 +74,24 @@ pub struct TransformResult {
 #[allow(clippy::needless_pass_by_value)]
 pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> TransformResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let mut options = options;
     let sourcefile = if options.sourcefile.is_empty() {
         "<stdin>".to_string()
     } else {
         options.sourcefile.clone()
     };
+    if options.loader == Loader::Default {
+        let Some(loader) = default_loader_for_sourcefile(&sourcefile) else {
+            return TransformResult {
+                errors: vec![Message {
+                    text: format!("Do not know how to load path: {sourcefile}"),
+                    kind: MessageKind::Error,
+                }],
+                ..TransformResult::default()
+            };
+        };
+        options.loader = loader;
+    }
     let source = Source {
         pretty_paths: PrettyPaths {
             abs: sourcefile.clone(),
@@ -91,7 +104,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
 
     let mut code = match options.loader {
         Loader::Css | Loader::GlobalCss | Loader::LocalCss => transform_css(&log, source, &options),
-        Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::Default | Loader::None => {
+        Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None => {
             transform_javascript(&log, source, &options)
         }
         Loader::Json => transform_json(&log, source, &options),
@@ -124,6 +137,29 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         warnings,
         code,
         ..TransformResult::default()
+    }
+}
+
+fn default_loader_for_sourcefile(sourcefile: &str) -> Option<Loader> {
+    let file_name = FsPath::new(sourcefile)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(sourcefile);
+    if file_name.ends_with(".module.css") {
+        return Some(Loader::LocalCss);
+    }
+    match FsPath::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        None | Some("js" | "mjs" | "cjs") => Some(Loader::Js),
+        Some("jsx") => Some(Loader::Jsx),
+        Some("ts" | "cts" | "mts") => Some(Loader::Ts),
+        Some("tsx") => Some(Loader::Tsx),
+        Some("css") => Some(Loader::Css),
+        Some("json") => Some(Loader::Json),
+        Some("txt") => Some(Loader::Text),
+        Some(_) => None,
     }
 }
 
@@ -468,6 +504,44 @@ mod tests {
                 }
             )),
             "module.exports={x:1};\n"
+        );
+    }
+
+    #[test]
+    fn default_loader_uses_the_sourcefile_extension() {
+        assert_eq!(
+            code(transform(
+                "const value: number = 1",
+                TransformOptions {
+                    sourcefile: "entry.ts".into(),
+                    loader: Loader::Default,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const value = 1;\n"
+        );
+        assert_eq!(
+            code(transform(
+                r#"{"x": 1}"#,
+                TransformOptions {
+                    sourcefile: "entry.json".into(),
+                    loader: Loader::Default,
+                    ..TransformOptions::default()
+                }
+            )),
+            "module.exports = { x: 1 };\n"
+        );
+        let result = transform(
+            "data",
+            TransformOptions {
+                sourcefile: "entry.unknown".into(),
+                loader: Loader::Default,
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(
+            result.errors.first().map(|message| message.text.as_str()),
+            Some("Do not know how to load path: entry.unknown")
         );
     }
 
