@@ -298,6 +298,22 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
         ExprData::ImportCall(import) => {
             visit_expr(core, &mut import.expr, resolve_identifiers);
             visit_expr(core, &mut import.options_or_nil, resolve_identifiers);
+            if let Some(ExprData::String(path)) = import.expr.data.as_deref() {
+                let import_record_index = core.add_import_record(
+                    crate::internal::ast::ImportKind::Dynamic,
+                    import.phase,
+                    core.source.range_of_string(import.expr.loc),
+                    String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                        &path.value,
+                    ))
+                    .into_owned(),
+                    crate::internal::ast::ImportRecordFlags::default(),
+                );
+                *data = ExprData::ImportString(crate::internal::js_ast::ImportStringExpr {
+                    import_record_index,
+                    close_paren_loc: import.close_paren_loc,
+                });
+            }
         }
         ExprData::Function(function) => {
             visit_function(core, &mut function.function, resolve_identifiers);

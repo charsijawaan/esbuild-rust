@@ -1036,4 +1036,45 @@ mod tests {
                 .any(|import| import.alias_is_star && import.is_exported)
         );
     }
+
+    #[test]
+    fn converts_constant_dynamic_imports_into_import_records() {
+        let (ast, ok, log) = parse_source(
+            "const literal = import('one');\
+             const runtime = import(name);\
+             const source = import.source('asset');",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 2);
+        assert_eq!(ast.parts[1].import_record_indices, [0, 1]);
+        assert_eq!(ast.import_records[0].path.text, "one");
+        assert_eq!(
+            ast.import_records[0].kind,
+            crate::internal::ast::ImportKind::Dynamic
+        );
+        assert_eq!(
+            ast.import_records[0].phase,
+            crate::internal::ast::ImportPhase::Evaluation
+        );
+        assert_eq!(ast.import_records[1].path.text, "asset");
+        assert_eq!(
+            ast.import_records[1].phase,
+            crate::internal::ast::ImportPhase::Source
+        );
+
+        let values = ast.parts[1]
+            .statements
+            .iter()
+            .map(|statement| {
+                let Some(StmtData::Local(local)) = statement.data.as_deref() else {
+                    panic!("expected local statement");
+                };
+                local.declarations[0].value_or_nil.data.as_deref()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(values[0], Some(ExprData::ImportString(_))));
+        assert!(matches!(values[1], Some(ExprData::ImportCall(_))));
+        assert!(matches!(values[2], Some(ExprData::ImportString(_))));
+    }
 }

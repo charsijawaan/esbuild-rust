@@ -7,7 +7,8 @@ use std::{
 
 use crate::internal::{
     ast::{
-        INVALID_REF, ImportRecord, LocRef, NamespaceAlias, Ref, Symbol, SymbolFlags, SymbolKind,
+        INVALID_REF, ImportKind, ImportPhase, ImportRecord, ImportRecordFlags, LocRef,
+        NamespaceAlias, Ref, Symbol, SymbolFlags, SymbolKind,
     },
     compat::JsFeature,
     config::{Mode, pretty_print_target_environment},
@@ -18,7 +19,7 @@ use crate::internal::{
         for_each_identifier_binding,
     },
     js_lexer::{MaybeSubstring, range_of_identifier},
-    logger::{LineColumnTracker, Loc, Log, Range, Source},
+    logger::{LineColumnTracker, Loc, Log, Path, Range, Source},
 };
 
 use super::{
@@ -306,6 +307,30 @@ impl ParserCore {
             .clone()
             .expect("symbol hoisting requires a module scope");
         self.hoist_symbols_in_scope(&module_scope);
+    }
+
+    pub(crate) fn add_import_record(
+        &mut self,
+        kind: ImportKind,
+        phase: ImportPhase,
+        range: Range,
+        path: String,
+        flags: ImportRecordFlags,
+    ) -> u32 {
+        let index =
+            u32::try_from(self.import_records.len()).expect("import record count fits in u32");
+        self.import_records.push(ImportRecord {
+            path: Path {
+                text: path,
+                ..Path::default()
+            },
+            range,
+            flags,
+            phase,
+            kind,
+            ..ImportRecord::default()
+        });
+        index
     }
 
     fn hoist_symbols_in_scope(&mut self, scope: &ScopeRef) {
