@@ -249,16 +249,26 @@ fn parse_property(
         lexer.expected(Token::OpenParen);
     }
 
-    let value_or_nil = if let Some(value) = shorthand {
-        value
+    let (value_or_nil, initializer_or_nil) = if let Some(value) = shorthand {
+        let initializer = if lexer.token == Token::Equals {
+            lexer.next();
+            parse_expression(core, lexer, Precedence::Comma)
+        } else {
+            Expr::default()
+        };
+        (value, initializer)
     } else {
         lexer.expect(Token::Colon);
-        parse_expression(core, lexer, Precedence::Comma)
+        (
+            parse_expression(core, lexer, Precedence::Comma),
+            Expr::default(),
+        )
     };
 
     Property {
         key,
         value_or_nil,
+        initializer_or_nil,
         loc: start_loc,
         close_bracket_loc,
         kind: PropertyKind::Field,

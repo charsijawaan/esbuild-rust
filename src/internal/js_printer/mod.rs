@@ -674,6 +674,11 @@ impl Printer<'_> {
                 let wrap = matches!(
                     expression.value.data.as_deref(),
                     Some(ExprData::Object(_) | ExprData::Function(_) | ExprData::Class(_))
+                ) || matches!(
+                    expression.value.data.as_deref(),
+                    Some(ExprData::Binary(binary))
+                        if binary.op == OpCode::BinaryAssign
+                            && matches!(binary.left.data.as_deref(), Some(ExprData::Object(_)))
                 );
                 if wrap {
                     self.output.push(b'(');

@@ -1417,6 +1417,16 @@ fn visit_expr_with_target(
                 report_duplicate_proto_properties(core, &object.properties);
             }
             for property in &mut object.properties {
+                if assign_target == AssignTarget::None && property.initializer_or_nil.data.is_some()
+                {
+                    core.add_error_range(
+                        Range {
+                            loc: property.initializer_or_nil.loc,
+                            len: 0,
+                        },
+                        "Unexpected \"=\"",
+                    );
+                }
                 if property.flags.contains(PropertyFlags::IS_COMPUTED) {
                     visit_expr(core, &mut property.key, resolve_identifiers);
                 }

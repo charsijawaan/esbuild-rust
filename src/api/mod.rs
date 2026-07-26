@@ -2954,7 +2954,8 @@ mod tests {
     #[test]
     fn keeps_inferred_names_across_expression_contexts() {
         let transformed = code(transform(
-            "let assigned; assigned = function() {}; assigned ||= () => {};\
+            "let assigned, pattern; assigned = function() {}; assigned ||= () => {};\
+             ({ pattern = function() {} } = {});\
              const object = { 'field name': function() {}, method() {} };\
              class Fields { item = () => {}; static other = function() {}; static name = 'custom' }\
              function defaults(param = function() {}, [nested = () => {}] = []) {}\
@@ -2967,6 +2968,7 @@ mod tests {
         ));
         for name in [
             "assigned",
+            "pattern",
             "field name",
             "item",
             "other",
@@ -2983,6 +2985,7 @@ mod tests {
         assert!(!transformed.contains("\"method\""));
         assert!(!transformed.contains("__name(Fields"));
         assert!(!transformed.contains("from \"<runtime>\""));
+        assert!(transformed.contains("({ pattern: pattern ="));
 
         for source in ["export default function() {}", "export default class {}"] {
             let transformed = code(transform(
@@ -2996,6 +2999,13 @@ mod tests {
             assert!(transformed.contains("stdin_default, \"default\""));
             assert!(!transformed.contains("__name(default"));
         }
+
+        let invalid = transform(
+            "({ invalid = function() {} });",
+            TransformOptions::default(),
+        );
+        assert_eq!(invalid.errors.len(), 1);
+        assert_eq!(invalid.errors[0].text, "Unexpected \"=\"");
     }
 
     #[test]
