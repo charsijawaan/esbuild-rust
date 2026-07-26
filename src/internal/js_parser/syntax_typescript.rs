@@ -198,6 +198,7 @@ pub(crate) fn skip_type_assertion(lexer: &mut Lexer) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn parse_type_script_statement(
     core: &mut ParserCore,
     lexer: &mut Lexer,
@@ -230,6 +231,9 @@ pub(crate) fn parse_type_script_statement(
             loc,
             StmtData::TypeScript(TypeScriptStmt::default()),
         ));
+    }
+    if lexer.is_contextual_keyword(b"declare") {
+        return Some(parse_declare_statement(core, lexer, loc, is_export));
     }
     if lexer.is_contextual_keyword(b"type") {
         let reference = core.store_name_in_ref(lexer.identifier.clone());
@@ -301,6 +305,79 @@ pub(crate) fn parse_type_script_statement(
         ));
     }
     None
+}
+
+fn parse_declare_statement(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    loc: crate::internal::logger::Loc,
+    is_export: bool,
+) -> Stmt {
+    let reference = core.store_name_in_ref(lexer.identifier.clone());
+    lexer.next();
+    match lexer.token {
+        Token::Class => {
+            lexer.next();
+            lexer.expect(Token::Identifier);
+            while lexer.token != Token::OpenBrace {
+                if lexer.token == Token::EndOfFile {
+                    lexer.expected(Token::OpenBrace);
+                }
+                lexer.next();
+            }
+            skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
+        }
+        Token::Function => {
+            lexer.next();
+            if lexer.token == Token::Asterisk {
+                lexer.next();
+            }
+            lexer.expect(Token::Identifier);
+            skip_type_parameters(lexer);
+            skip_type_script_method_signature(lexer);
+        }
+        Token::Var | Token::Const => {
+            lexer.next();
+            skip_type_until_statement_end(lexer);
+        }
+        Token::Enum => {
+            lexer.next();
+            lexer.expect(Token::Identifier);
+            skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
+        }
+        Token::Identifier if lexer.is_contextual_keyword(b"let") => {
+            lexer.next();
+            skip_type_until_statement_end(lexer);
+        }
+        _ if !is_export => {
+            let value = parse_expression_suffix(
+                core,
+                lexer,
+                Expr::new(
+                    loc,
+                    ExprData::Identifier(IdentifierExpr {
+                        reference,
+                        ..IdentifierExpr::default()
+                    }),
+                ),
+                Precedence::Lowest,
+                true,
+            );
+            lexer.expect_or_insert_semicolon();
+            return Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value,
+                    ..ExprStmt::default()
+                }),
+            );
+        }
+        _ => lexer.unexpected(),
+    }
+    if lexer.token == Token::Semicolon {
+        lexer.next();
+    }
+    Stmt::new(loc, StmtData::TypeScript(TypeScriptStmt::default()))
 }
 
 pub(crate) fn parse_enum_statement(

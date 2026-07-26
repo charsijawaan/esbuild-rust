@@ -2028,6 +2028,46 @@ mod tests {
     }
 
     #[test]
+    fn erases_type_script_ambient_declarations_and_abstract_modifiers() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "declare class Shape<T> extends Base { value: T; method<U>(input: U): void; }\
+             declare function load<T>(input: T): Promise<T>;\
+             declare const version: string;\
+             declare let state: number;\
+             declare enum Ambient { A, B }\
+             abstract class Runtime<T> {\
+               abstract value: T;\
+               method(): T { return this.value; }\
+             }\
+             export abstract class Public { abstract value: number; method() {} }",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].statements.len(), 7);
+        assert!(
+            ast.parts[1].statements[..5]
+                .iter()
+                .all(|statement| matches!(
+                    statement.data.as_deref(),
+                    Some(StmtData::TypeScript(_))
+                ))
+        );
+        let Some(StmtData::Class(runtime)) = ast.parts[1].statements[5].data.as_deref() else {
+            panic!("expected abstract runtime class");
+        };
+        assert_eq!(runtime.class.properties.len(), 1);
+        let Some(StmtData::Class(public)) = ast.parts[1].statements[6].data.as_deref() else {
+            panic!("expected exported abstract class");
+        };
+        assert_eq!(public.class.properties.len(), 1);
+        assert!(public.is_export);
+        assert!(ast.named_exports.contains_key("Public"));
+    }
+
+    #[test]
     fn validates_class_constructor_and_prototype_names() {
         let (_, ok, log) = parse_source(
             "class Getter { get constructor() {} }\

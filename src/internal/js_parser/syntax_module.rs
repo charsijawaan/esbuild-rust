@@ -161,6 +161,17 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
         core.has_type_script_export = true;
         return statement;
     }
+    if core.options.ts.parse && lexer.is_contextual_keyword(b"abstract") {
+        lexer.next();
+        let expression =
+            super::syntax_class::parse_class_prefix(core, lexer).unwrap_or_else(|| {
+                lexer.expected(Token::Class);
+            });
+        let mut statement =
+            super::syntax_statement::class_declaration_from_expression(core, loc, expression);
+        mark_declaration_exported(&mut statement);
+        return statement;
+    }
     match lexer.token {
         Token::Var | Token::Const | Token::Function | Token::Class | Token::Enum => {
             let mut statement = super::syntax_statement::parse_statement(core, lexer);

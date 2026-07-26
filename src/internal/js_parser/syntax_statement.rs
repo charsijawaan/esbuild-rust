@@ -224,6 +224,36 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             }),
         );
     }
+    if core.options.ts.parse && lexer.is_contextual_keyword(b"abstract") {
+        let name_loc = lexer.loc();
+        let reference = core.store_name_in_ref(lexer.identifier.clone());
+        lexer.next();
+        if !lexer.has_newline_before && lexer.token == Token::Class {
+            let expression = parse_class_prefix(core, lexer).expect("class token was checked");
+            return class_declaration_from_expression(core, loc, expression);
+        }
+        let value = parse_expression_suffix(
+            core,
+            lexer,
+            Expr::new(
+                name_loc,
+                ExprData::Identifier(IdentifierExpr {
+                    reference,
+                    ..IdentifierExpr::default()
+                }),
+            ),
+            Precedence::Lowest,
+            true,
+        );
+        lexer.expect_or_insert_semicolon();
+        return Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value,
+                ..ExprStmt::default()
+            }),
+        );
+    }
     if lexer.token == Token::Identifier && !matches!(lexer.raw(), b"await" | b"yield") {
         let name_loc = lexer.loc();
         let reference = core.store_name_in_ref(lexer.identifier.clone());
@@ -696,7 +726,11 @@ fn function_declaration_from_expression(core: &mut ParserCore, loc: Loc, express
     )
 }
 
-fn class_declaration_from_expression(core: &mut ParserCore, loc: Loc, expression: Expr) -> Stmt {
+pub(crate) fn class_declaration_from_expression(
+    core: &mut ParserCore,
+    loc: Loc,
+    expression: Expr,
+) -> Stmt {
     let Some(data) = expression.data else {
         unreachable!("class parser always returns expression data");
     };
