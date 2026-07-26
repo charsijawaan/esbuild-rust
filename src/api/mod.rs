@@ -153,6 +153,7 @@ pub struct BuildOptions {
     pub define: HashMap<String, String>,
     pub main_fields: Vec<String>,
     pub resolve_extensions: Vec<String>,
+    pub conditions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -572,6 +573,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         extension_to_loader,
         extension_order: options.resolve_extensions,
         main_fields: options.main_fields,
+        conditions: options.conditions,
         global_name,
         public_path: options.public_path,
         entry_path_template: validate_path_template(&options.entry_names),
@@ -1380,9 +1382,11 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("esbuild-rs-resolve-options-{unique}"));
         std::fs::create_dir_all(directory.join("node_modules/pkg"))
             .expect("create package directory");
+        std::fs::create_dir_all(directory.join("node_modules/conditional"))
+            .expect("create conditional package directory");
         std::fs::write(
             directory.join("entry.js"),
-            "import {choice} from 'pkg'; import {custom} from './local'; console.log(choice, custom)",
+            "import {choice} from 'pkg'; import condition from 'conditional'; import {custom} from './local'; console.log(choice, condition, custom)",
         )
         .expect("write entry file");
         std::fs::write(
@@ -1405,6 +1409,21 @@ mod tests {
             "export const custom = 'custom-extension-choice'",
         )
         .expect("write custom module");
+        std::fs::write(
+            directory.join("node_modules/conditional/package.json"),
+            r#"{"exports":{".":{"custom":"./custom.js","default":"./default.js"}}}"#,
+        )
+        .expect("write conditional package metadata");
+        std::fs::write(
+            directory.join("node_modules/conditional/custom.js"),
+            "export default 'custom-condition-choice'",
+        )
+        .expect("write custom condition module");
+        std::fs::write(
+            directory.join("node_modules/conditional/default.js"),
+            "export default 'default-condition-choice'",
+        )
+        .expect("write default condition module");
 
         let result = build(BuildOptions {
             entry_points: vec!["entry.js".into()],
@@ -1414,6 +1433,7 @@ mod tests {
             loader: HashMap::from([(".custom".into(), Loader::Js)]),
             main_fields: vec!["main".into()],
             resolve_extensions: vec![".custom".into(), ".js".into()],
+            conditions: vec!["custom".into()],
             ..BuildOptions::default()
         });
 
@@ -1422,6 +1442,8 @@ mod tests {
         assert!(output.contains("main-field-choice"));
         assert!(!output.contains("module-field-choice"));
         assert!(output.contains("custom-extension-choice"));
+        assert!(output.contains("custom-condition-choice"));
+        assert!(!output.contains("default-condition-choice"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

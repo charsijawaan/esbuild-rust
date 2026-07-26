@@ -60,6 +60,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut defines = HashMap::new();
     let mut main_fields = Vec::new();
     let mut resolve_extensions = Vec::new();
+    let mut conditions = Vec::new();
     for argument in arguments {
         if argument == "--help" || argument == "-h" {
             return Ok(Output::Text(help_text()));
@@ -170,6 +171,14 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             } else {
                 value.split(',').map(str::to_string).collect()
             };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--conditions=") {
+            conditions = value
+                .split(',')
+                .filter(|condition| !condition.is_empty())
+                .map(str::to_string)
+                .collect();
             continue;
         }
         if let Some(value) = argument.strip_prefix("--external:") {
@@ -290,6 +299,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             define: defines,
             main_fields,
             resolve_extensions,
+            conditions,
             ..BuildOptions::default()
         });
         if !result.errors.is_empty() {
@@ -409,6 +419,7 @@ fn help_text() -> String {
          \x20\x20--define:KEY=VALUE\n\
          \x20\x20--main-fields=FIELDS\n\
          \x20\x20--resolve-extensions=EXTENSIONS\n\
+         \x20\x20--conditions=CONDITIONS\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
          \x20\x20--minify-identifiers\n\

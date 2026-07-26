@@ -378,6 +378,7 @@ pub struct ResolverContext<'a> {
     pub pnp: Option<&'a PnpData>,
     pub external_settings: Option<&'a ExternalSettings>,
     pub external_packages: bool,
+    pub conditions: Option<&'a [String]>,
     pub strip_node_prefix_for_import: bool,
     pub strip_node_prefix_for_require: bool,
 }
@@ -564,7 +565,7 @@ fn resolve_file_or_package_core(
                 let resolution = handle_package_map_post_conditions(resolve_package_imports(
                     import_path,
                     &imports.root,
-                    &package_conditions(platform, is_require),
+                    &package_conditions(platform, is_require, context.conditions),
                 ));
                 if resolution.status == PackageMapStatus::PackageResolve {
                     return resolve_file_or_package_core(
@@ -619,7 +620,7 @@ fn resolve_file_or_package_core(
                     "/",
                     &format!(".{}", result.package_subpath),
                     &exports.root,
-                    &package_conditions(platform, is_require),
+                    &package_conditions(platform, is_require, context.conditions),
                 ));
                 return finalize_package_map_resolution(
                     log,
@@ -662,7 +663,7 @@ fn resolve_file_or_package_core(
                     "/",
                     &package_subpath,
                     &exports.root,
-                    &package_conditions(platform, is_require),
+                    &package_conditions(platform, is_require, context.conditions),
                 ));
                 return finalize_package_map_resolution(
                     log,
@@ -698,8 +699,12 @@ fn resolve_file_or_package_core(
     None
 }
 
-fn package_conditions(platform: Platform, is_require: bool) -> HashMap<String, bool> {
-    HashMap::from([
+fn package_conditions(
+    platform: Platform,
+    is_require: bool,
+    custom: Option<&[String]>,
+) -> HashMap<String, bool> {
+    let mut conditions = HashMap::from([
         ("default".into(), true),
         (if is_require { "require" } else { "import" }.into(), true),
         (
@@ -711,7 +716,11 @@ fn package_conditions(platform: Platform, is_require: bool) -> HashMap<String, b
             .into(),
             true,
         ),
-    ])
+    ]);
+    if let Some(custom) = custom {
+        conditions.extend(custom.iter().cloned().map(|condition| (condition, true)));
+    }
+    conditions
 }
 
 #[allow(clippy::too_many_arguments)]
