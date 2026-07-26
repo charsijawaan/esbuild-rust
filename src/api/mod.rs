@@ -8,7 +8,11 @@ use std::{
 
 use crate::internal::{
     ast::{DEFAULT_NAME_MINIFIER_CSS, Ref, SymbolKind, SymbolMap},
+    bundler,
+    cache::CacheSet,
+    config::{self, Mode},
     css_parser, css_printer,
+    fs::{RealFsOptions, real_fs},
     helpers::{encode_string_as_shortest_data_url, mime_type_by_extension, string_to_utf16},
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
@@ -73,6 +77,147 @@ pub struct TransformResult {
     pub code: Vec<u8>,
     pub map: Vec<u8>,
     pub legal_comments: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BuildFormat {
+    #[default]
+    Iife,
+    CommonJs,
+    EsModule,
+}
+
+#[derive(Clone, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct BuildOptions {
+    pub entry_points: Vec<String>,
+    pub outdir: String,
+    pub outfile: String,
+    pub abs_working_dir: String,
+    pub format: BuildFormat,
+    pub splitting: bool,
+    pub minify_whitespace: bool,
+    pub minify_identifiers: bool,
+    pub minify_syntax: bool,
+    pub ascii_only: bool,
+    pub banner: String,
+    pub footer: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BuildOutputFile {
+    pub path: String,
+    pub contents: Vec<u8>,
+    pub executable: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BuildResult {
+    pub errors: Vec<Message>,
+    pub warnings: Vec<Message>,
+    pub output_files: Vec<BuildOutputFile>,
+}
+
+#[must_use]
+pub fn build(options: BuildOptions) -> BuildResult {
+    let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let file_system = match real_fs(RealFsOptions {
+        abs_working_dir: options.abs_working_dir.clone(),
+        ..RealFsOptions::default()
+    }) {
+        Ok(file_system) => file_system,
+        Err(error) => {
+            return BuildResult {
+                errors: vec![Message {
+                    text: error.message,
+                    kind: MessageKind::Error,
+                }],
+                ..BuildResult::default()
+            };
+        }
+    };
+    let output_dir = if options.outdir.is_empty() {
+        file_system.cwd().to_string()
+    } else if file_system.is_abs(&options.outdir) {
+        options.outdir.clone()
+    } else {
+        file_system.join(&[file_system.cwd(), &options.outdir])
+    };
+    let output_file = if options.outfile.is_empty() {
+        String::new()
+    } else if file_system.is_abs(&options.outfile) {
+        options.outfile.clone()
+    } else {
+        file_system.join(&[file_system.cwd(), &options.outfile])
+    };
+    let mut internal_options = config::Options {
+        mode: Mode::Bundle,
+        output_format: match options.format {
+            BuildFormat::Iife => config::Format::Iife,
+            BuildFormat::CommonJs => config::Format::CommonJs,
+            BuildFormat::EsModule => config::Format::EsModule,
+        },
+        code_splitting: options.splitting,
+        tree_shaking: true,
+        minify_whitespace: options.minify_whitespace,
+        minify_identifiers: options.minify_identifiers,
+        minify_syntax: options.minify_syntax,
+        ascii_only: options.ascii_only,
+        js_banner: options.banner,
+        js_footer: options.footer,
+        abs_output_dir: output_dir,
+        abs_output_file: output_file,
+        abs_output_base: file_system.cwd().to_string(),
+        ..config::Options::default()
+    };
+    let entry_points: Vec<_> = options
+        .entry_points
+        .into_iter()
+        .map(|input_path| bundler::EntryPoint {
+            input_path,
+            input_path_in_file_namespace: true,
+            ..bundler::EntryPoint::default()
+        })
+        .collect();
+    let compiled = bundler::bundle_javascript(
+        &log,
+        file_system.as_ref(),
+        &CacheSet::default(),
+        &entry_points,
+        &mut internal_options,
+        "API",
+    );
+    let (mut errors, warnings) = public_messages(log.done());
+    if errors.is_empty() {
+        errors.extend(
+            compiled
+                .scan_result
+                .import_issues
+                .iter()
+                .map(|(_, issue)| Message {
+                    text: format!("Could not resolve imported symbol {:?}", issue.result.alias),
+                    kind: MessageKind::Error,
+                }),
+        );
+    }
+    let output_files = if errors.is_empty() {
+        compiled
+            .output_files
+            .into_iter()
+            .map(|output| BuildOutputFile {
+                path: output.abs_path,
+                contents: output.contents,
+                executable: output.is_executable,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    BuildResult {
+        errors,
+        warnings,
+        output_files,
+    }
 }
 
 #[must_use]
@@ -443,11 +588,39 @@ fn add_banner_and_footer(mut code: Vec<u8>, banner: &str, footer: &str) -> Vec<u
 
 #[cfg(test)]
 mod tests {
-    use super::{Loader, TransformOptions, transform};
+    use super::{BuildFormat, BuildOptions, Loader, TransformOptions, build, transform};
 
     fn code(result: super::TransformResult) -> String {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         String::from_utf8(result.code).expect("transform output is UTF-8")
+    }
+
+    #[test]
+    fn builds_filesystem_entry_points_to_memory() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-api-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(directory.join("entry.js"), "console.log('api build')")
+            .expect("write entry file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::Iife,
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 1);
+        assert!(result.output_files[0].path.ends_with("/out/entry.js"));
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("console.log(\"api build\");"));
+        assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
