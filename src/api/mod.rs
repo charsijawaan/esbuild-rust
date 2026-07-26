@@ -371,6 +371,7 @@ fn validate_defines(
     let mut keys = defines.keys().collect::<Vec<_>>();
     keys.sort();
     let mut raw = Vec::with_capacity(keys.len());
+    let mut injected_defines = Vec::new();
     for key in keys {
         let (key_parts, ok) = js_parser::parse_global_name(
             log.clone(),
@@ -384,21 +385,45 @@ fn validate_defines(
         }
         let value = &defines[key];
         let (define_expr, injected) = js_parser::parse_define_expr(value);
+        let key_parts = key_parts
+            .into_iter()
+            .map(|part| String::from_utf8_lossy(&part).into_owned())
+            .collect::<Vec<_>>();
         if define_expr.constant.data.is_some() || !define_expr.parts.is_empty() {
             raw.push(config::DefineData {
-                key_parts: key_parts
-                    .into_iter()
-                    .map(|part| String::from_utf8_lossy(&part).into_owned())
-                    .collect(),
+                key_parts,
                 define_expr: Some(define_expr),
                 ..config::DefineData::default()
             });
         } else if injected.data.is_some() {
-            log.add_error(
-                None,
-                crate::internal::logger::Range::default(),
-                format!("Complex define value is not implemented yet: {value}"),
+            let injected_define_index = crate::internal::ast::Index32::new(
+                u32::try_from(injected_defines.len()).expect("injected define count fits in u32"),
             );
+            let name = format!(
+                "define_{}",
+                key.chars()
+                    .map(|character| {
+                        if character.is_ascii_alphanumeric() || character == '_' {
+                            character
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect::<String>()
+            );
+            injected_defines.push(config::InjectedDefine {
+                data: injected,
+                name,
+                ..config::InjectedDefine::default()
+            });
+            raw.push(config::DefineData {
+                key_parts,
+                define_expr: Some(config::DefineExpr {
+                    injected_define_index,
+                    ..config::DefineExpr::default()
+                }),
+                ..config::DefineData::default()
+            });
         } else {
             log.add_error(
                 None,
@@ -431,7 +456,9 @@ fn validate_defines(
             ..config::DefineData::default()
         });
     }
-    Arc::new(config::process_defines(&raw))
+    let mut processed = config::process_defines(&raw);
+    processed.injected_defines = injected_defines;
+    Arc::new(processed)
 }
 
 #[must_use]
@@ -1558,6 +1585,42 @@ mod tests {
             "{output}"
         );
         assert!(!output.contains("process.env.NODE_ENV"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn supports_compound_build_defines() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-compound-defines-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "console.log(CONFIG === CONFIG, CONFIG.nested[1])",
+        )
+        .expect("write entry file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::Iife,
+            define: HashMap::from([("CONFIG".into(), r#"{"nested":[1,2]}"#.into())]),
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("var define_CONFIG = {"));
+        assert!(output.contains("nested: [1, 2]"));
+        assert!(
+            output
+                .contains("console.log(define_CONFIG === define_CONFIG, define_CONFIG.nested[1])"),
+            "{output}"
+        );
+        assert_eq!(output.matches("nested: [1, 2]").count(), 1);
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

@@ -7,10 +7,11 @@ use crate::internal::{
     ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, LocRef, Ref, SymbolKind},
     helpers::utf16_to_string,
     js_ast::{
-        Ast, CallExpr, CallKind, ClauseItem, DeclaredSymbol, DotExpr, ExportsKind, Expr, ExprData,
-        IdentifierExpr, ImportStmt, LazyExportStmt, LocalKind, NamedExport, NamedImport, Part,
-        Scope, ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind,
-        for_each_identifier_binding, make_helper_context,
+        Ast, Binding, BindingData, CallExpr, CallKind, ClauseItem, Decl, DeclaredSymbol, DotExpr,
+        ExportsKind, Expr, ExprData, IdentifierBinding, IdentifierExpr, ImportStmt, LazyExportStmt,
+        LocalKind, LocalStmt, NamedExport, NamedImport, Part, Scope, ScopeKind, Stmt, StmtData,
+        StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, for_each_identifier_binding,
+        make_helper_context,
     },
     js_lexer::{Lexer, LexerPanic, Token},
     logger::{Loc, Log, Path, Source},
@@ -368,6 +369,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 (parts, module_metadata, uses_exports_ref, uses_module_ref)
             };
         insert_generated_import_parts(&core, &module_metadata, &mut parts);
+        insert_generated_define_parts(&core, &mut parts);
         assert_eq!(
             core.remaining_scope_count(),
             0,
@@ -531,6 +533,49 @@ fn insert_generated_import_parts(
                 )],
                 import_record_indices: vec![import_record_index],
                 declared_symbols,
+                ..Part::default()
+            },
+        );
+    }
+}
+
+fn insert_generated_define_parts(core: &ParserCore, parts: &mut Vec<Part>) {
+    let Some(defines) = core.options.defines.as_ref() else {
+        return;
+    };
+    let mut generated = core
+        .generated_injected_defines
+        .iter()
+        .map(|(index, reference)| (*index, *reference))
+        .collect::<Vec<_>>();
+    generated.sort_unstable_by_key(|(index, _)| *index);
+
+    for (offset, (index, reference)) in generated.into_iter().enumerate() {
+        let injected = &defines.injected_defines[index as usize];
+        parts.insert(
+            1 + offset,
+            Part {
+                statements: vec![Stmt::new(
+                    Loc::default(),
+                    StmtData::Local(LocalStmt {
+                        declarations: vec![Decl {
+                            binding: Binding {
+                                data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                                    reference,
+                                }))),
+                                ..Binding::default()
+                            },
+                            value_or_nil: injected.data.clone(),
+                        }],
+                        kind: LocalKind::Var,
+                        ..LocalStmt::default()
+                    }),
+                )],
+                declared_symbols: vec![DeclaredSymbol {
+                    reference,
+                    is_top_level: true,
+                }],
+                can_be_removed_if_unused: true,
                 ..Part::default()
             },
         );

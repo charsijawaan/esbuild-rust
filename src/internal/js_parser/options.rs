@@ -186,7 +186,7 @@ fn jsx_options_equal(left: &JsxOptions, right: &JsxOptions) -> bool {
 }
 
 fn define_expr_equal(left: &config::DefineExpr, right: &config::DefineExpr) -> bool {
-    if left.parts != right.parts {
+    if left.parts != right.parts || left.injected_define_index != right.injected_define_index {
         return false;
     }
     match (

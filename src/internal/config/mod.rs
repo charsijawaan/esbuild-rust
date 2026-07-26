@@ -62,6 +62,7 @@ impl BitOrAssign for DefineFlags {
 pub struct ProcessedDefines {
     pub identifier_defines: HashMap<String, DefineData>,
     pub dot_defines: HashMap<String, Vec<DefineData>>,
+    pub injected_defines: Vec<InjectedDefine>,
 }
 
 static PROCESSED_GLOBALS: OnceLock<ProcessedDefines> = OnceLock::new();

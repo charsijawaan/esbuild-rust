@@ -757,6 +757,28 @@ fn instantiate_define_expr(
         value.loc = loc;
         return value.data.map(|data| *data);
     }
+    if define.injected_define_index.is_valid() {
+        let index = define.injected_define_index.get_index();
+        let reference =
+            if let Some(reference) = core.generated_injected_defines.get(&index).copied() {
+                reference
+            } else {
+                let name = core
+                    .options
+                    .defines
+                    .as_ref()
+                    .and_then(|defines| defines.injected_defines.get(index as usize))
+                    .map(|define| define.name.clone())?;
+                let reference = core.new_symbol(crate::internal::ast::SymbolKind::Other, name);
+                core.generated_injected_defines.insert(index, reference);
+                reference
+            };
+        core.record_usage(reference);
+        return Some(ExprData::Identifier(IdentifierExpr {
+            reference,
+            ..IdentifierExpr::default()
+        }));
+    }
     let first = define.parts.first()?;
     let result = core.find_symbol(loc, first);
     core.record_usage(result.reference);
