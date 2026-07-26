@@ -5,6 +5,7 @@
 //! used after chunks have been generated.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::hash::BuildHasher;
 
 use crate::internal::{
@@ -3856,6 +3857,109 @@ fn append_node_common_js_export_annotations(
     )));
 }
 
+/// Generate the assignment prefix for an IIFE global name.
+///
+/// # Panics
+///
+/// Panics when the configured global name is empty.
+#[must_use]
+pub fn generate_global_name_prefix(options: &Options) -> String {
+    let mut names = options.global_name.iter();
+    let mut prefix = names.next().expect("global name must not be empty").clone();
+    let mut names: Vec<_> = names.cloned().collect();
+    let space = if options.minify_whitespace { "" } else { " " };
+    let join = if options.minify_whitespace {
+        ";"
+    } else {
+        ";\n"
+    };
+    let mut text = String::new();
+    let mut is_existing_object = prefix == "this";
+    if prefix == "import" && names.first().is_some_and(|name| name == "meta") {
+        prefix = "import.meta".into();
+        names.remove(0);
+        is_existing_object = true;
+    }
+
+    if !names.is_empty()
+        && !options
+            .unsupported_js_features
+            .contains(crate::internal::compat::JsFeature::LOGICAL_ASSIGNMENT)
+    {
+        if !is_existing_object {
+            if can_use_global_name_identifier(&prefix) {
+                prefix = escaped_global_name_identifier(&prefix, options);
+                write!(text, "var {prefix}{join}").expect("writing to a string cannot fail");
+            } else {
+                prefix = format!("this[{}]", quoted_global_name(&prefix, options));
+            }
+        }
+        for name in names {
+            let accessor = global_name_accessor(&name, options);
+            if is_existing_object {
+                prefix.push_str(&accessor);
+                is_existing_object = false;
+            } else {
+                prefix = format!("({prefix}{space}||={space}{{}}){accessor}");
+            }
+        }
+        return format!("{text}{prefix}{space}={space}");
+    }
+
+    if is_existing_object {
+        text = format!("{prefix}{space}={space}");
+    } else if can_use_global_name_identifier(&prefix) {
+        prefix = escaped_global_name_identifier(&prefix, options);
+        text = format!("var {prefix}{space}={space}");
+    } else {
+        prefix = format!("this[{}]", quoted_global_name(&prefix, options));
+        text = format!("{prefix}{space}={space}");
+    }
+    for name in names {
+        let old_prefix = prefix.clone();
+        prefix.push_str(&global_name_accessor(&name, options));
+        write!(
+            text,
+            "{old_prefix}{space}||{space}{{}}{join}{prefix}{space}={space}"
+        )
+        .expect("writing to a string cannot fail");
+    }
+    text
+}
+
+fn can_use_global_name_identifier(name: &str) -> bool {
+    js_ast::is_identifier(name) && !crate::internal::js_lexer::KEYWORDS.contains(&name)
+}
+
+fn escaped_global_name_identifier(name: &str, options: &Options) -> String {
+    if options.ascii_only {
+        String::from_utf8(crate::internal::js_printer::quote_identifier(
+            Vec::new(),
+            name,
+            options.unsupported_js_features,
+        ))
+        .expect("quoted identifier is UTF-8")
+    } else {
+        name.into()
+    }
+}
+
+fn quoted_global_name(name: &str, options: &Options) -> String {
+    String::from_utf8(crate::internal::helpers::quote_for_json(
+        name.as_bytes(),
+        options.ascii_only,
+    ))
+    .expect("quoted JSON is UTF-8")
+}
+
+fn global_name_accessor(name: &str, options: &Options) -> String {
+    if can_use_global_name_identifier(name) {
+        format!(".{}", escaped_global_name_identifier(name, options))
+    } else {
+        format!("[{}]", quoted_global_name(name, options))
+    }
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -4256,14 +4360,15 @@ mod tests {
         classify_module_wrappers, compile_part_range_for_chunk, compute_cross_chunk_dependencies,
         compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
         create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
-        generate_cross_chunk_stmts, generate_entry_point_tail, generate_isolated_hash,
-        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
-        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
-        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
-        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
+        generate_cross_chunk_stmts, generate_entry_point_tail, generate_global_name_prefix,
+        generate_isolated_hash, has_dynamic_exports_due_to_export_star,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
+        merge_adjacent_local_stmts, path_between_chunks, print_cross_chunk_bindings,
+        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
+        wrap_common_js_stmts, wrap_esm_stmts,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -5545,6 +5650,32 @@ mod tests {
                 &renamer,
             ),
             b"export { foo };\n"
+        );
+    }
+
+    #[test]
+    fn global_name_prefix_matches_upstream_shapes() {
+        let prefix = |global_name: &[&str], minify_whitespace| {
+            generate_global_name_prefix(&Options {
+                global_name: global_name.iter().map(|name| (*name).into()).collect(),
+                minify_whitespace,
+                ..Options::default()
+            })
+        };
+        assert_eq!(prefix(&["Bundle"], false), "var Bundle = ");
+        assert_eq!(
+            prefix(&["Bundle", "lib"], false),
+            "var Bundle;\n(Bundle ||= {}).lib = "
+        );
+        assert_eq!(prefix(&["this", "App"], false), "this.App = ");
+        assert_eq!(
+            prefix(&["import", "meta", "App"], false),
+            "import.meta.App = "
+        );
+        assert_eq!(prefix(&["not-valid"], false), "this[\"not-valid\"] = ");
+        assert_eq!(
+            prefix(&["Bundle", "lib"], true),
+            "var Bundle;(Bundle||={}).lib="
         );
     }
 
