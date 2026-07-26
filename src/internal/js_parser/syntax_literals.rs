@@ -3,12 +3,39 @@
 use crate::internal::{
     compat::JsFeature,
     helpers::utf16_to_string,
-    js_ast::{Expr, ExprData, NameOfSymbolExpr, OpCode, StringExpr, UnaryExpr, is_property_access},
+    js_ast::{
+        Expr, ExprData, IdentifierExpr, NameOfSymbolExpr, OpCode, StringExpr, UnaryExpr,
+        is_property_access,
+    },
     js_lexer::{CommentBefore, Lexer, MaybeSubstring, Token},
     logger::Loc,
 };
 
 use super::parser_core::ParserCore;
+
+pub(crate) fn parse_simple_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Option<Expr> {
+    let loc = lexer.loc();
+    let data = match lexer.token {
+        Token::False => ExprData::Boolean(false),
+        Token::True => ExprData::Boolean(true),
+        Token::Null => ExprData::Null,
+        Token::This => ExprData::This,
+        Token::Identifier => {
+            let reference = core.store_name_in_ref(lexer.identifier.clone());
+            lexer.next();
+            return Some(Expr::new(
+                loc,
+                ExprData::Identifier(IdentifierExpr {
+                    reference,
+                    ..IdentifierExpr::default()
+                }),
+            ));
+        }
+        _ => return None,
+    };
+    lexer.next();
+    Some(Expr::new(loc, data))
+}
 
 pub(crate) fn parse_big_int_or_string_if_unsupported(core: &ParserCore, lexer: &Lexer) -> Expr {
     let loc = lexer.loc();
@@ -148,7 +175,8 @@ mod tests {
 
     use super::{
         parse_big_int_or_string_if_unsupported, parse_numeric_literal,
-        parse_regular_expression_literal, parse_string_literal, parse_unary_prefix,
+        parse_regular_expression_literal, parse_simple_prefix, parse_string_literal,
+        parse_unary_prefix,
     };
     use crate::internal::{
         config::TsOptions,
@@ -275,5 +303,29 @@ mod tests {
         assert_eq!(unary.op, crate::internal::js_ast::OpCode::UnaryTypeof);
         assert!(!unary.was_originally_typeof_identifier);
         assert_eq!(lexer.token, Token::Plus);
+    }
+
+    #[test]
+    fn parses_primitives_and_source_backed_identifier_names() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"identifier + true"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let identifier =
+            parse_simple_prefix(&mut core, &mut lexer).expect("expected identifier prefix");
+        let Some(ExprData::Identifier(identifier)) = identifier.data.as_deref() else {
+            panic!("expected identifier");
+        };
+        assert_eq!(core.load_name_from_ref(identifier.reference), b"identifier");
+        assert_eq!(lexer.token, Token::Plus);
+        lexer.next();
+        let boolean = parse_simple_prefix(&mut core, &mut lexer).expect("expected boolean prefix");
+        assert!(matches!(
+            boolean.data.as_deref(),
+            Some(ExprData::Boolean(true))
+        ));
     }
 }
