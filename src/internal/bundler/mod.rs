@@ -2270,6 +2270,50 @@ mod tests {
     }
 
     #[test]
+    fn bundles_common_js_require_dependencies() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "const dep = require('./dep.js'); console.log(dep.value)".into(),
+                ),
+                ("/project/dep.js".into(), "exports.value = 123".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert!(compiled.scan_result.import_issues.is_empty());
+        assert_eq!(compiled.output_files.len(), 1);
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains("require_dep"));
+        assert!(output.contains("exports.value = 123;"));
+        assert!(output.contains("const dep = require_dep();"));
+        assert!(output.contains("console.log(dep.value);"));
+        assert!(!output.contains("require(\"./dep.js\")"));
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn scans_entry_points_into_a_recursive_module_graph() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
