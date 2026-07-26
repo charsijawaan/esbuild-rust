@@ -784,7 +784,11 @@ impl Printer<'_> {
                 self.output.push(b';');
                 if for_statement.update_or_nil.data.is_some() {
                     self.print_optional_space();
-                    self.print_expr_at(&for_statement.update_or_nil, Precedence::Lowest);
+                    self.print_expr_at_with_usage(
+                        &for_statement.update_or_nil,
+                        Precedence::Lowest,
+                        true,
+                    );
                 }
                 self.output.push(b')');
                 self.print_body(&for_statement.body);
@@ -1136,7 +1140,7 @@ impl Printer<'_> {
             None | Some(StmtData::Empty) => {}
             Some(StmtData::Local(local)) => self.print_local(local, false),
             Some(StmtData::Expr(expression)) => {
-                self.print_expr_at(&expression.value, Precedence::Lowest);
+                self.print_expr_at_with_usage(&expression.value, Precedence::Lowest, true);
             }
             _ => panic!("Internal error: invalid for-loop initializer"),
         }
@@ -1586,15 +1590,31 @@ impl Printer<'_> {
                 let operator = binary.op.table_entry();
                 let higher = higher_precedence(operator.level);
                 if binary.op.is_right_associative() {
-                    self.print_expr_at(&binary.left, higher);
+                    self.print_expr_at_with_usage(
+                        &binary.left,
+                        higher,
+                        binary.op == OpCode::BinaryComma,
+                    );
                 } else {
-                    self.print_expr_at(&binary.left, operator.level);
+                    self.print_expr_at_with_usage(
+                        &binary.left,
+                        operator.level,
+                        binary.op == OpCode::BinaryComma,
+                    );
                 }
                 self.print_binary_operator(binary.op);
                 if binary.op.is_right_associative() {
-                    self.print_expr_at(&binary.right, operator.level);
+                    self.print_expr_at_with_usage(
+                        &binary.right,
+                        operator.level,
+                        binary.op == OpCode::BinaryComma && result_is_unused,
+                    );
                 } else {
-                    self.print_expr_at(&binary.right, higher);
+                    self.print_expr_at_with_usage(
+                        &binary.right,
+                        higher,
+                        binary.op == OpCode::BinaryComma && result_is_unused,
+                    );
                 }
             }
             ExprData::If(conditional) => {
@@ -1667,14 +1687,16 @@ impl Printer<'_> {
                 self.print_arguments(&new.args);
             }
             ExprData::InlinedEnum(inlined) => {
-                self.print_expr_at(&inlined.value, level);
+                self.print_expr_at_with_usage(&inlined.value, level, result_is_unused);
                 if !self.options.minify_whitespace {
                     self.output.extend_from_slice(b" /* ");
                     self.output.extend_from_slice(inlined.comment.as_bytes());
                     self.output.extend_from_slice(b" */");
                 }
             }
-            ExprData::Annotation(annotation) => self.print_expr_at(&annotation.value, level),
+            ExprData::Annotation(annotation) => {
+                self.print_expr_at_with_usage(&annotation.value, level, result_is_unused);
+            }
             ExprData::Await(await_expression) => {
                 self.output.extend_from_slice(b"await ");
                 self.print_expr_at(&await_expression.value, Precedence::Prefix);
@@ -2187,6 +2209,11 @@ impl Printer<'_> {
 
     fn print_binary_operator(&mut self, operator: OpCode) {
         let entry = operator.table_entry();
+        if operator == OpCode::BinaryComma {
+            self.output.push(b',');
+            self.print_optional_space();
+            return;
+        }
         if entry.is_keyword || !self.options.minify_whitespace {
             self.output.push(b' ');
         }
@@ -2400,6 +2427,66 @@ mod tests {
               const esm = (init_esm(), __toCommonJS(esm_exports));\n\
               init_async();\n\
               init_esm();\n"
+        );
+    }
+
+    #[test]
+    fn propagates_unused_results_through_comma_and_for_expressions() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"require('./esm'), require('./esm');\
+                  for (require('./esm');; require('./esm')) {}"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (mut ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 4);
+        for record in &mut ast.import_records {
+            record.source_index = Index32::new(1);
+        }
+
+        let wrapper_ref = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let exports_ref = Ref {
+            source_index: 1,
+            inner_index: 1,
+        };
+        let mut symbols = SymbolMap::new(2);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        symbols.symbols_for_source[1] = vec![
+            Symbol::new(SymbolKind::Other, "init_esm"),
+            Symbol::new(SymbolKind::Other, "esm_exports"),
+        ];
+        let renamer = new_no_op_renamer(symbols);
+        let metadata = |_| RequireOrImportMeta {
+            wrapper_ref,
+            exports_ref,
+            is_wrapper_async: false,
+        };
+
+        assert_eq!(
+            print_linked(
+                &ast,
+                &renamer,
+                Options::default(),
+                LinkerOptions {
+                    require_or_import_meta_for_source: &metadata,
+                    to_common_js_ref: INVALID_REF,
+                    to_esm_ref: INVALID_REF,
+                    runtime_require_ref: INVALID_REF,
+                },
+            )
+            .js,
+            b"init_esm(), init_esm();\n\
+              for (init_esm();; init_esm()) {\n\
+              }\n"
         );
     }
 
