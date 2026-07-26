@@ -85,8 +85,11 @@ pub struct ChunkInfo {
     pub isolated_hash: Vec<u8>,
     pub entry_point_bit: usize,
     pub source_index: u32,
+    pub css_chunk_index: Index32,
     pub is_entry_point: bool,
+    pub is_css: bool,
     pub is_executable: bool,
+    pub imports_in_css_order: Vec<CssImportOrder>,
 }
 
 #[derive(Debug, Default)]
@@ -2174,6 +2177,166 @@ pub fn compute_js_chunks(
         }
         (chunk.files_in_chunk_in_order, chunk.parts_in_chunk_in_order) =
             find_imported_parts_in_js_order(graph, options, chunk);
+    }
+    chunks
+}
+
+/// Compute JavaScript chunks and their CSS companion chunks together.
+///
+/// CSS imported from JavaScript is modeled as a secondary entry-point chunk
+/// sharing the JavaScript chunk's entry bits. Direct CSS entry points instead
+/// own their primary chunk.
+///
+/// # Panics
+///
+/// Panics when graph entry points or reachable files violate linker
+/// invariants.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn compute_chunks(
+    graph: &mut LinkerGraph,
+    options: &Options,
+    unique_key_prefix: &str,
+) -> Vec<ChunkInfo> {
+    let entry_points = graph.entry_points().to_vec();
+    let mut js_chunks = HashMap::<Vec<u8>, ChunkInfo>::new();
+    let mut css_chunks = HashMap::<Vec<u8>, ChunkInfo>::new();
+
+    for (entry_point_bit, entry_point) in entry_points.iter().enumerate() {
+        let mut entry_bits = BitSet::new(entry_points.len());
+        entry_bits.set_bit(entry_point_bit);
+        let key = entry_bits.as_bytes().to_vec();
+        match graph.files[entry_point.source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+        {
+            Some(InputFileRepr::Js(_)) => {
+                js_chunks.insert(
+                    key.clone(),
+                    ChunkInfo {
+                        entry_bits: entry_bits.clone(),
+                        is_entry_point: true,
+                        source_index: entry_point.source_index,
+                        entry_point_bit,
+                        ..ChunkInfo::default()
+                    },
+                );
+
+                let css_source_indices =
+                    find_imported_css_files_in_js_order(graph, entry_point.source_index);
+                if !css_source_indices.is_empty() {
+                    let imports_in_css_order =
+                        find_imported_files_in_css_order(graph, &css_source_indices);
+                    let files_with_parts_in_chunk = imports_in_css_order
+                        .iter()
+                        .filter_map(|entry| {
+                            (entry.kind == CssImportKind::SourceIndex).then_some(entry.source_index)
+                        })
+                        .collect();
+                    css_chunks.insert(
+                        key,
+                        ChunkInfo {
+                            entry_bits,
+                            files_with_parts_in_chunk,
+                            is_entry_point: true,
+                            source_index: entry_point.source_index,
+                            entry_point_bit,
+                            is_css: true,
+                            imports_in_css_order,
+                            ..ChunkInfo::default()
+                        },
+                    );
+                }
+            }
+            Some(InputFileRepr::Css(_)) => {
+                let imports_in_css_order =
+                    find_imported_files_in_css_order(graph, &[entry_point.source_index]);
+                let files_with_parts_in_chunk = imports_in_css_order
+                    .iter()
+                    .filter_map(|entry| {
+                        (entry.kind == CssImportKind::SourceIndex).then_some(entry.source_index)
+                    })
+                    .collect();
+                css_chunks.insert(
+                    key,
+                    ChunkInfo {
+                        entry_bits,
+                        files_with_parts_in_chunk,
+                        is_entry_point: true,
+                        source_index: entry_point.source_index,
+                        entry_point_bit,
+                        is_css: true,
+                        imports_in_css_order,
+                        ..ChunkInfo::default()
+                    },
+                );
+            }
+            Some(InputFileRepr::Copy(_)) | None => {}
+        }
+    }
+
+    for source_index in graph.reachable_files.clone() {
+        let file = &graph.files[source_index as usize];
+        if file.is_live && matches!(file.input_file.repr.as_ref(), Some(InputFileRepr::Js(_))) {
+            let key = file.entry_bits.as_bytes().to_vec();
+            js_chunks
+                .entry(key)
+                .or_insert_with(|| ChunkInfo {
+                    entry_bits: file.entry_bits.clone(),
+                    ..ChunkInfo::default()
+                })
+                .files_with_parts_in_chunk
+                .insert(source_index);
+        }
+    }
+
+    let mut js_chunks = js_chunks.into_iter().collect::<Vec<_>>();
+    js_chunks.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let mut chunks = Vec::with_capacity(js_chunks.len() + css_chunks.len());
+    let mut js_chunk_indices_for_css = HashMap::<Vec<u8>, usize>::new();
+    for (key, chunk) in js_chunks {
+        if css_chunks.contains_key(&key) {
+            js_chunk_indices_for_css.insert(key, chunks.len());
+        }
+        chunks.push(chunk);
+    }
+
+    let mut css_chunks = css_chunks.into_iter().collect::<Vec<_>>();
+    css_chunks.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    for (key, chunk) in css_chunks {
+        if let Some(&js_chunk_index) = js_chunk_indices_for_css.get(&key) {
+            chunks[js_chunk_index].css_chunk_index =
+                Index32::new(u32::try_from(chunks.len()).expect("chunk count fits in u32"));
+        }
+        chunks.push(chunk);
+    }
+
+    for (chunk_index, chunk) in chunks.iter().enumerate() {
+        if chunk.is_entry_point {
+            let is_secondary_css_chunk = chunk.is_css
+                && matches!(
+                    graph.files[chunk.source_index as usize]
+                        .input_file
+                        .repr
+                        .as_ref(),
+                    Some(InputFileRepr::Js(_))
+                );
+            if !is_secondary_css_chunk {
+                graph.files[chunk.source_index as usize].entry_point_chunk_index =
+                    u32::try_from(chunk_index).expect("chunk index fits in u32");
+            }
+        }
+    }
+
+    for chunk in &mut chunks {
+        if !chunk.is_css {
+            (chunk.files_in_chunk_in_order, chunk.parts_in_chunk_in_order) =
+                find_imported_parts_in_js_order(graph, options, chunk);
+        }
+    }
+    for (chunk_index, chunk) in chunks.iter_mut().enumerate() {
+        chunk.unique_key = format!("{unique_key_prefix}C{chunk_index:08}");
     }
     chunks
 }
@@ -6133,12 +6296,13 @@ mod tests {
         RuntimeReExportContext, StableRef, add_exports_for_export_star, advance_import_tracker,
         append_or_extend_part_range, assemble_css_chunk, assemble_javascript_chunk,
         assign_chunk_path_templates, bind_imports_to_exports_for_file, classify_module_wrappers,
-        compile_part_range_for_chunk, compile_prepared_css_asts, compute_cross_chunk_dependencies,
-        compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
-        create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
-        finalize_javascript_chunk_outputs, find_imported_css_files_in_js_order,
-        find_imported_files_in_css_order, generate_cross_chunk_stmts, generate_entry_point_tail,
-        generate_global_name_prefix, generate_isolated_hash, generate_source_map_for_chunk,
+        compile_part_range_for_chunk, compile_prepared_css_asts, compute_chunks,
+        compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
+        convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
+        finalize_chunk_paths, finalize_javascript_chunk_outputs,
+        find_imported_css_files_in_js_order, find_imported_files_in_css_order,
+        generate_cross_chunk_stmts, generate_entry_point_tail, generate_global_name_prefix,
+        generate_isolated_hash, generate_source_map_for_chunk,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
         match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
@@ -8561,6 +8725,72 @@ mod tests {
                 .collect::<Vec<_>>(),
             [2, 4, 3, 1]
         );
+    }
+
+    #[test]
+    fn computes_javascript_chunks_with_css_companions() {
+        let mut entry = js_file(js_ast::Ast::default());
+        let Some(InputFileRepr::Js(repr)) = entry.repr.as_mut() else {
+            panic!("expected JavaScript");
+        };
+        repr.css_source_index = Index32::new(2);
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            entry,
+            css_file(vec![], vec![], vec![]),
+        ];
+        let entry_points = [EntryPoint {
+            source_index: 1,
+            ..EntryPoint::default()
+        }];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2], &entry_points, false);
+        let chunks = compute_chunks(&mut graph, &Options::default(), PREFIX);
+        assert_eq!(chunks.len(), 2);
+        assert!(!chunks[0].is_css);
+        assert_eq!(chunks[0].css_chunk_index.get_index(), 1);
+        assert!(chunks[1].is_css);
+        assert!(chunks[1].is_entry_point);
+        assert_eq!(chunks[1].source_index, 1);
+        assert_eq!(chunks[1].unique_key, "UNIQUEC00000001");
+        assert_eq!(
+            chunks[1]
+                .imports_in_css_order
+                .iter()
+                .filter_map(|entry| {
+                    (entry.kind == CssImportKind::SourceIndex).then_some(entry.source_index)
+                })
+                .collect::<Vec<_>>(),
+            [2]
+        );
+        assert_eq!(graph.files[1].entry_point_chunk_index, 0);
+    }
+
+    #[test]
+    fn computes_direct_css_entry_point_chunks() {
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            css_file(vec![internal_css_import(2)], vec![], vec![]),
+            css_file(vec![], vec![], vec![]),
+        ];
+        let entry_points = [EntryPoint {
+            source_index: 1,
+            ..EntryPoint::default()
+        }];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2], &entry_points, false);
+        let chunks = compute_chunks(&mut graph, &Options::default(), PREFIX);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].is_css);
+        assert!(chunks[0].is_entry_point);
+        assert!(!chunks[0].css_chunk_index.is_valid());
+        assert_eq!(
+            chunks[0]
+                .imports_in_css_order
+                .iter()
+                .map(|entry| entry.source_index)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert_eq!(graph.files[1].entry_point_chunk_index, 0);
     }
 
     #[test]
