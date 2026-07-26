@@ -585,9 +585,6 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
         return Ok(Output::Text(String::new()));
     }
 
-    if !defines.is_empty() {
-        return Err("\"--define\" without \"--bundle\" is not implemented yet".into());
-    }
     if !metafile_path.is_empty() {
         return Err("\"--metafile\" without \"--bundle\" is not implemented yet".into());
     }
@@ -603,6 +600,7 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
     options.jsx_import_source = jsx_import_source;
     options.jsx_development = jsx_development;
     options.jsx_side_effects = jsx_side_effects;
+    options.define = defines;
     options.pure = pure;
     options.keep_names = keep_names;
     options.legal_comments = legal_comments;
@@ -1066,6 +1064,24 @@ mod tests {
         assert!(output.contains("Object.defineProperty"));
         assert!(output.contains("\"PreservedArrow\""));
         assert!(output.contains("console.log(PreservedArrow.name)"));
+    }
+
+    #[test]
+    fn substitutes_defines_for_transforms() {
+        let Output::Code(output) = run_with_stdin(
+            &[
+                "--define:process.env.NODE_ENV=\"production\"".into(),
+                "--define:DEBUG=false".into(),
+            ],
+            Some(b"console.log(process.env.NODE_ENV, DEBUG)"),
+        )
+        .expect("transform succeeds") else {
+            panic!("expected transformed code");
+        };
+        assert_eq!(
+            String::from_utf8(output).expect("transform output is UTF-8"),
+            "console.log(\"production\", false);\n"
+        );
     }
 
     #[test]

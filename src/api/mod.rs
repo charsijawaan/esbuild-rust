@@ -168,6 +168,7 @@ pub struct TransformOptions {
     pub jsx_import_source: String,
     pub jsx_development: bool,
     pub jsx_side_effects: bool,
+    pub define: HashMap<String, String>,
     pub pure: Vec<String>,
     pub keep_names: bool,
     pub banner: String,
@@ -680,7 +681,7 @@ fn validate_defines(
                 u32::try_from(injected_defines.len()).expect("injected define count fits in u32"),
             );
             let name = format!(
-                "define_{}",
+                "define_{}_default",
                 key.chars()
                     .map(|character| {
                         if character.is_ascii_alphanumeric() || character == '_' {
@@ -1309,7 +1310,7 @@ fn transform_javascript(
     parser_options.jsx.side_effects = options.jsx_side_effects;
     parser_options.defines = Some(validate_defines(
         log,
-        &HashMap::new(),
+        &options.define,
         &options.pure,
         BuildPlatform::Neutral,
         false,
@@ -2352,15 +2353,59 @@ mod tests {
 
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
-        assert!(output.contains("var define_CONFIG = {"));
+        assert!(output.contains("var define_CONFIG_default = {"));
         assert!(output.contains("nested: [1, 2]"));
         assert!(
-            output
-                .contains("console.log(define_CONFIG === define_CONFIG, define_CONFIG.nested[1])"),
+            output.contains(
+                "console.log(define_CONFIG_default === define_CONFIG_default, define_CONFIG_default.nested[1])"
+            ),
             "{output}"
         );
         assert_eq!(output.matches("nested: [1, 2]").count(), 1);
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn substitutes_transform_defines() {
+        let scalar = transform(
+            "console.log(process.env.NODE_ENV, process['env']['NODE_ENV'], DEBUG)",
+            TransformOptions {
+                define: HashMap::from([
+                    ("process.env.NODE_ENV".into(), r#""production""#.into()),
+                    ("DEBUG".into(), "false".into()),
+                ]),
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(
+            code(scalar),
+            "console.log(\"production\", \"production\", false);\n"
+        );
+
+        let compound = transform(
+            "console.log(CONFIG === CONFIG, CONFIG.nested[1])",
+            TransformOptions {
+                define: HashMap::from([("CONFIG".into(), r#"{"nested":[1,2]}"#.into())]),
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(
+            code(compound),
+            "var define_CONFIG_default = { nested: [1, 2] };\nconsole.log(define_CONFIG_default === define_CONFIG_default, define_CONFIG_default.nested[1]);\n"
+        );
+
+        let invalid = transform(
+            "console.log(DEBUG)",
+            TransformOptions {
+                define: HashMap::from([("DEBUG".into(), "1 + 2".into())]),
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(
+            invalid.errors.first().map(|message| message.text.as_str()),
+            Some("Invalid define value (must be an entity name or JS literal): 1 + 2")
+        );
+        assert!(invalid.code.is_empty());
     }
 
     #[test]
