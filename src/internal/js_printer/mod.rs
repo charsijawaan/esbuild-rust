@@ -1,7 +1,10 @@
 //! Port of upstream `internal/js_printer`.
 
 use crate::internal::compat::JsFeature;
-use crate::internal::js_ast::Precedence;
+use crate::internal::js_ast::{
+    Expr, ExprData, OpCode, OptionalChain, Precedence, is_identifier_es5_and_es_next,
+};
+use crate::internal::renamer::Renamer;
 
 const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
 const FIRST_ASCII: u32 = 0x20;
@@ -370,11 +373,336 @@ fn simplify_exponent(result: &mut String) {
     result.push_str(&exponent.to_string());
 }
 
+#[must_use]
+pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u8> {
+    let mut printer = Printer {
+        output: Vec::new(),
+        renamer,
+        options,
+    };
+    printer.print_expr_at(expr, Precedence::Lowest);
+    printer.output
+}
+
+struct Printer<'a> {
+    output: Vec<u8>,
+    renamer: &'a dyn Renamer,
+    options: Options,
+}
+
+impl Printer<'_> {
+    #[allow(clippy::too_many_lines)]
+    fn print_expr_at(&mut self, expr: &Expr, level: Precedence) {
+        let Some(data) = expr.data.as_deref() else {
+            return;
+        };
+        let own_level = expr_precedence(data);
+        let wrap = own_level < level;
+        if wrap {
+            self.output.push(b'(');
+        }
+        match data {
+            ExprData::Missing => {}
+            ExprData::Null => self.output.extend_from_slice(b"null"),
+            ExprData::Undefined => self.output.extend_from_slice(b"void 0"),
+            ExprData::Boolean(value) => {
+                self.output
+                    .extend_from_slice(if *value { b"true" } else { b"false" });
+            }
+            ExprData::Number(value) => self
+                .output
+                .extend_from_slice(format_number(*value, level, self.options, false).as_bytes()),
+            ExprData::BigInt(value) => {
+                self.output.extend_from_slice(value.as_bytes());
+                self.output.push(b'n');
+            }
+            ExprData::String(value) => {
+                self.output
+                    .extend(quote_utf16(&value.value, self.options, true));
+            }
+            ExprData::RegExp(value) => self.output.extend_from_slice(value.as_bytes()),
+            ExprData::This => self.output.extend_from_slice(b"this"),
+            ExprData::Super => self.output.extend_from_slice(b"super"),
+            ExprData::NewTarget(_) => self.output.extend_from_slice(b"new.target"),
+            ExprData::ImportMeta(_) => self.output.extend_from_slice(b"import.meta"),
+            ExprData::Identifier(identifier) => {
+                self.print_identifier(&self.renamer.name_for_symbol(identifier.reference));
+            }
+            ExprData::ImportIdentifier(identifier) => {
+                self.print_identifier(&self.renamer.name_for_symbol(identifier.reference));
+            }
+            ExprData::PrivateIdentifier(identifier) => {
+                self.print_identifier(&self.renamer.name_for_symbol(identifier.reference));
+            }
+            ExprData::NameOfSymbol(name) => {
+                self.print_identifier(&self.renamer.name_for_symbol(name.reference));
+            }
+            ExprData::Array(array) => {
+                self.output.push(b'[');
+                for (index, item) in array.items.iter().enumerate() {
+                    if index > 0 {
+                        self.output.push(b',');
+                        self.print_optional_space();
+                    }
+                    self.print_expr_at(item, Precedence::Comma);
+                }
+                self.output.push(b']');
+            }
+            ExprData::Spread(spread) => {
+                self.output.extend_from_slice(b"...");
+                self.print_expr_at(&spread.value, Precedence::Comma);
+            }
+            ExprData::Unary(unary) => {
+                let operator = unary.op.table_entry();
+                if matches!(
+                    unary.op,
+                    OpCode::UnaryPostDecrement | OpCode::UnaryPostIncrement
+                ) {
+                    self.print_expr_at(&unary.value, Precedence::Postfix);
+                    self.output.extend_from_slice(operator.text.as_bytes());
+                } else {
+                    self.output.extend_from_slice(operator.text.as_bytes());
+                    if operator.is_keyword {
+                        self.output.push(b' ');
+                    }
+                    self.print_expr_at(&unary.value, Precedence::Prefix);
+                }
+            }
+            ExprData::Binary(binary) => {
+                let operator = binary.op.table_entry();
+                let higher = higher_precedence(operator.level);
+                if binary.op.is_right_associative() {
+                    self.print_expr_at(&binary.left, higher);
+                } else {
+                    self.print_expr_at(&binary.left, operator.level);
+                }
+                self.print_binary_operator(binary.op);
+                if binary.op.is_right_associative() {
+                    self.print_expr_at(&binary.right, operator.level);
+                } else {
+                    self.print_expr_at(&binary.right, higher);
+                }
+            }
+            ExprData::If(conditional) => {
+                self.print_expr_at(
+                    &conditional.test,
+                    higher_precedence(Precedence::Conditional),
+                );
+                self.print_optional_space();
+                self.output.push(b'?');
+                self.print_optional_space();
+                self.print_expr_at(&conditional.yes, Precedence::Comma);
+                self.print_optional_space();
+                self.output.push(b':');
+                self.print_optional_space();
+                self.print_expr_at(&conditional.no, Precedence::Assign);
+            }
+            ExprData::Dot(dot) => {
+                if matches!(dot.target.data.as_deref(), Some(ExprData::Number(_))) {
+                    self.output.push(b'(');
+                    self.print_expr_at(&dot.target, Precedence::Lowest);
+                    self.output.push(b')');
+                } else {
+                    self.print_expr_at(&dot.target, Precedence::Member);
+                }
+                if is_identifier_es5_and_es_next(&dot.name) {
+                    if dot.optional_chain == OptionalChain::Start {
+                        self.output.extend_from_slice(b"?.");
+                    } else {
+                        self.output.push(b'.');
+                    }
+                    self.print_identifier(&dot.name);
+                } else {
+                    if dot.optional_chain == OptionalChain::Start {
+                        self.output.extend_from_slice(b"?.");
+                    }
+                    self.output.push(b'[');
+                    self.output.extend(quote_utf16(
+                        &dot.name.encode_utf16().collect::<Vec<_>>(),
+                        self.options,
+                        true,
+                    ));
+                    self.output.push(b']');
+                }
+            }
+            ExprData::Index(index) => {
+                self.print_expr_at(&index.target, Precedence::Member);
+                if index.optional_chain == OptionalChain::Start {
+                    self.output.extend_from_slice(b"?.");
+                }
+                self.output.push(b'[');
+                self.print_expr_at(&index.index, Precedence::Lowest);
+                self.output.push(b']');
+            }
+            ExprData::Call(call) => {
+                self.print_expr_at(&call.target, Precedence::Call);
+                if call.optional_chain == OptionalChain::Start {
+                    self.output.extend_from_slice(b"?.");
+                }
+                self.print_arguments(&call.args);
+            }
+            ExprData::New(new) => {
+                self.output.extend_from_slice(b"new ");
+                self.print_expr_at(&new.target, Precedence::New);
+                self.print_arguments(&new.args);
+            }
+            ExprData::InlinedEnum(inlined) => {
+                self.print_expr_at(&inlined.value, level);
+                if !self.options.minify_whitespace {
+                    self.output.extend_from_slice(b" /* ");
+                    self.output.extend_from_slice(inlined.comment.as_bytes());
+                    self.output.extend_from_slice(b" */");
+                }
+            }
+            ExprData::Annotation(annotation) => self.print_expr_at(&annotation.value, level),
+            ExprData::Await(await_expression) => {
+                self.output.extend_from_slice(b"await ");
+                self.print_expr_at(&await_expression.value, Precedence::Prefix);
+            }
+            ExprData::Yield(yield_expression) => {
+                self.output.extend_from_slice(if yield_expression.is_star {
+                    b"yield* "
+                } else {
+                    b"yield "
+                });
+                self.print_expr_at(&yield_expression.value_or_nil, Precedence::Yield);
+            }
+            ExprData::Arrow(_)
+            | ExprData::Function(_)
+            | ExprData::Class(_)
+            | ExprData::Object(_)
+            | ExprData::Template(_)
+            | ExprData::JsxElement(_)
+            | ExprData::JsxText(_)
+            | ExprData::RequireString(_)
+            | ExprData::RequireResolveString(_)
+            | ExprData::ImportString(_)
+            | ExprData::ImportCall(_) => {
+                panic!("Internal error: expression printer case has not been ported yet")
+            }
+        }
+        if wrap {
+            self.output.push(b')');
+        }
+    }
+
+    fn print_arguments(&mut self, arguments: &[Expr]) {
+        self.output.push(b'(');
+        for (index, argument) in arguments.iter().enumerate() {
+            if index > 0 {
+                self.output.push(b',');
+                self.print_optional_space();
+            }
+            self.print_expr_at(argument, Precedence::Comma);
+        }
+        self.output.push(b')');
+    }
+
+    fn print_identifier(&mut self, name: &str) {
+        if self.options.ascii_only {
+            self.output = quote_identifier(
+                std::mem::take(&mut self.output),
+                name,
+                self.options.unsupported_features,
+            );
+        } else {
+            self.output.extend_from_slice(name.as_bytes());
+        }
+    }
+
+    fn print_binary_operator(&mut self, operator: OpCode) {
+        let entry = operator.table_entry();
+        if entry.is_keyword || !self.options.minify_whitespace {
+            self.output.push(b' ');
+        }
+        self.output.extend_from_slice(entry.text.as_bytes());
+        if entry.is_keyword || !self.options.minify_whitespace {
+            self.output.push(b' ');
+        }
+    }
+
+    fn print_optional_space(&mut self) {
+        if !self.options.minify_whitespace {
+            self.output.push(b' ');
+        }
+    }
+}
+
+fn expr_precedence(data: &ExprData) -> Precedence {
+    match data {
+        ExprData::Yield(_) => Precedence::Yield,
+        ExprData::If(_) => Precedence::Conditional,
+        ExprData::Binary(binary) => binary.op.table_entry().level,
+        ExprData::Spread(_) => Precedence::Spread,
+        ExprData::Unary(unary) => unary.op.table_entry().level,
+        ExprData::Await(_) => Precedence::Prefix,
+        ExprData::New(_) => Precedence::New,
+        ExprData::Call(_) => Precedence::Call,
+        ExprData::InlinedEnum(inlined) => inlined
+            .value
+            .data
+            .as_deref()
+            .map_or(Precedence::Lowest, expr_precedence),
+        ExprData::Annotation(annotation) => annotation
+            .value
+            .data
+            .as_deref()
+            .map_or(Precedence::Lowest, expr_precedence),
+        _ => Precedence::Member,
+    }
+}
+
+fn higher_precedence(level: Precedence) -> Precedence {
+    const LEVELS: &[Precedence] = &[
+        Precedence::Lowest,
+        Precedence::Comma,
+        Precedence::Spread,
+        Precedence::Yield,
+        Precedence::Assign,
+        Precedence::Conditional,
+        Precedence::NullishCoalescing,
+        Precedence::LogicalOr,
+        Precedence::LogicalAnd,
+        Precedence::BitwiseOr,
+        Precedence::BitwiseXor,
+        Precedence::BitwiseAnd,
+        Precedence::Equals,
+        Precedence::Compare,
+        Precedence::Shift,
+        Precedence::Add,
+        Precedence::Multiply,
+        Precedence::Exponentiation,
+        Precedence::Prefix,
+        Precedence::Postfix,
+        Precedence::New,
+        Precedence::Call,
+        Precedence::Member,
+    ];
+    LEVELS
+        .iter()
+        .position(|candidate| *candidate == level)
+        .and_then(|index| LEVELS.get(index + 1))
+        .copied()
+        .unwrap_or(Precedence::Member)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Options, format_non_negative_float, format_number, quote_identifier, quote_utf16};
-    use crate::internal::js_ast::Precedence;
-    use crate::internal::{compat::JsFeature, helpers::string_to_utf16};
+    use std::{collections::HashMap, sync::Arc};
+
+    use super::{
+        Options, format_non_negative_float, format_number, print_expr, quote_identifier,
+        quote_utf16,
+    };
+    use crate::internal::{
+        ast::SymbolMap,
+        compat::JsFeature,
+        helpers::string_to_utf16,
+        js_ast::{ExprData, Precedence, StmtData},
+        js_parser,
+        logger::{DeferLogKind, Log, Source},
+        renamer::new_no_op_renamer,
+    };
 
     fn quoted(text: &str, options: Options, allow_backtick: bool) -> String {
         String::from_utf8(quote_utf16(
@@ -482,5 +810,54 @@ mod tests {
         assert_eq!(format_non_negative_float(0.01, true), ".01");
         assert_eq!(format_non_negative_float(12_000.0, false), "12e3");
         assert_eq!(format_non_negative_float(543.25, false), "543.25");
+    }
+
+    #[test]
+    fn prints_parsed_expressions_with_precedence() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"const math = 1 + 2 * 3;\
+                  const grouped = a - (b - c);\
+                  const read = object?.value ?? fallback;"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        let printed = ast.parts[1]
+            .statements
+            .iter()
+            .map(|statement| {
+                let Some(StmtData::Local(local)) = statement.data.as_deref() else {
+                    panic!("expected local declaration");
+                };
+                String::from_utf8(print_expr(
+                    &local.declarations[0].value_or_nil,
+                    &renamer,
+                    Options::default(),
+                ))
+                .expect("printer output is UTF-8")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            printed,
+            ["1 + 2 * 3", "a - (b - c)", "object?.value ?? fallback"]
+        );
+
+        let Some(StmtData::Local(local)) = ast.parts[1].statements[0].data.as_deref() else {
+            unreachable!();
+        };
+        assert!(matches!(
+            local.declarations[0].value_or_nil.data.as_deref(),
+            Some(ExprData::Binary(_))
+        ));
     }
 }
