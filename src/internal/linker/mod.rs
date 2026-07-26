@@ -2535,6 +2535,64 @@ pub fn merge_adjacent_local_stmts(statements: Vec<js_ast::Stmt>) -> Vec<js_ast::
     result
 }
 
+/// Remove ESM export syntax from statements that are being absorbed into a
+/// bundle while preserving the underlying declarations.
+///
+/// # Panics
+///
+/// Panics when a default export contains a statement kind other than an
+/// expression, function, or class.
+#[must_use]
+pub fn strip_exports_from_stmts(statements: &[js_ast::Stmt]) -> Vec<js_ast::Stmt> {
+    let mut result = Vec::with_capacity(statements.len());
+    for original in statements {
+        let mut statement = original.clone();
+        match statement.data.as_deref_mut() {
+            Some(js_ast::StmtData::ExportClause(_)) => continue,
+            Some(js_ast::StmtData::Function(function)) => function.is_export = false,
+            Some(js_ast::StmtData::Class(class)) => class.is_export = false,
+            Some(js_ast::StmtData::Local(local)) => local.is_export = false,
+            Some(js_ast::StmtData::ExportDefault(export)) => {
+                let default_name = export.default_name;
+                let value = export.value.clone();
+                statement = match value.data.as_deref() {
+                    Some(js_ast::StmtData::Expr(expression)) => js_ast::Stmt::new(
+                        original.loc,
+                        js_ast::StmtData::Local(js_ast::LocalStmt {
+                            declarations: vec![js_ast::Decl {
+                                binding: js_ast::Binding {
+                                    data: Some(Box::new(js_ast::BindingData::Identifier(
+                                        js_ast::IdentifierBinding {
+                                            reference: default_name.reference,
+                                        },
+                                    ))),
+                                    loc: default_name.loc,
+                                },
+                                value_or_nil: expression.value.clone(),
+                            }],
+                            ..js_ast::LocalStmt::default()
+                        }),
+                    ),
+                    Some(js_ast::StmtData::Function(function)) => {
+                        let mut function = function.clone();
+                        function.function.name = Some(default_name);
+                        js_ast::Stmt::new(value.loc, js_ast::StmtData::Function(function))
+                    }
+                    Some(js_ast::StmtData::Class(class)) => {
+                        let mut class = class.clone();
+                        class.class.name = Some(default_name);
+                        js_ast::Stmt::new(value.loc, js_ast::StmtData::Class(class))
+                    }
+                    _ => panic!("Internal error: invalid default export"),
+                };
+            }
+            _ => {}
+        }
+        result.push(statement);
+    }
+    result
+}
+
 /// Assign the output path template for every JavaScript chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -2940,7 +2998,7 @@ mod tests {
         merge_adjacent_local_stmts, path_between_chunks, print_cross_chunk_bindings,
         propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
         resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, tree_shaking_and_code_splitting,
+        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -3429,6 +3487,82 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(declaration_counts, [3, 1, 3]);
+    }
+
+    #[test]
+    fn bundled_statements_strip_exports_without_mutating_inputs() {
+        let default_ref = Ref {
+            source_index: 0,
+            inner_index: 9,
+        };
+        let statements = vec![
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::ExportClause(js_ast::ExportClauseStmt::default()),
+            ),
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::Local(js_ast::LocalStmt {
+                    declarations: vec![js_ast::Decl::default()],
+                    is_export: true,
+                    ..js_ast::LocalStmt::default()
+                }),
+            ),
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::Function(js_ast::FunctionStmt {
+                    is_export: true,
+                    ..js_ast::FunctionStmt::default()
+                }),
+            ),
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::Class(js_ast::ClassStmt {
+                    is_export: true,
+                    ..js_ast::ClassStmt::default()
+                }),
+            ),
+            js_ast::Stmt::new(
+                Loc::default(),
+                js_ast::StmtData::ExportDefault(js_ast::ExportDefaultStmt {
+                    default_name: crate::internal::ast::LocRef {
+                        reference: default_ref,
+                        ..crate::internal::ast::LocRef::default()
+                    },
+                    value: js_ast::Stmt::new(
+                        Loc::default(),
+                        js_ast::StmtData::Expr(js_ast::ExprStmt::default()),
+                    ),
+                }),
+            ),
+        ];
+        let stripped = strip_exports_from_stmts(&statements);
+        assert_eq!(stripped.len(), 4);
+        assert!(matches!(
+            statements[1].data.as_deref(),
+            Some(js_ast::StmtData::Local(local)) if local.is_export
+        ));
+        assert!(matches!(
+            stripped[0].data.as_deref(),
+            Some(js_ast::StmtData::Local(local)) if !local.is_export
+        ));
+        assert!(matches!(
+            stripped[1].data.as_deref(),
+            Some(js_ast::StmtData::Function(function)) if !function.is_export
+        ));
+        assert!(matches!(
+            stripped[2].data.as_deref(),
+            Some(js_ast::StmtData::Class(class)) if !class.is_export
+        ));
+        let Some(js_ast::StmtData::Local(default_local)) = stripped[3].data.as_deref() else {
+            panic!("default expression must become a local declaration");
+        };
+        let Some(js_ast::BindingData::Identifier(binding)) =
+            default_local.declarations[0].binding.data.as_deref()
+        else {
+            panic!("default binding must be an identifier");
+        };
+        assert_eq!(binding.reference, default_ref);
     }
 
     #[test]
