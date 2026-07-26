@@ -4,8 +4,8 @@ use crate::internal::{
     compat::JsFeature,
     helpers::utf16_to_string,
     js_ast::{
-        Expr, ExprData, IdentifierExpr, NameOfSymbolExpr, OpCode, StringExpr, UnaryExpr,
-        is_property_access,
+        ArrayExpr, Expr, ExprData, IdentifierExpr, NameOfSymbolExpr, OpCode, SpreadExpr,
+        StringExpr, UnaryExpr, is_property_access,
     },
     js_lexer::{CommentBefore, Lexer, MaybeSubstring, Token},
     logger::Loc,
@@ -35,6 +35,68 @@ pub(crate) fn parse_simple_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> O
     };
     lexer.next();
     Some(Expr::new(loc, data))
+}
+
+pub(crate) fn parse_array_prefix(
+    lexer: &mut Lexer,
+    mut parse_item: impl FnMut(&mut Lexer) -> Expr,
+) -> Option<Expr> {
+    if lexer.token != Token::OpenBracket {
+        return None;
+    }
+    let loc = lexer.loc();
+    lexer.next();
+    let mut is_single_line = !lexer.has_newline_before;
+    let mut items = Vec::new();
+    let mut comma_after_spread = Loc::default();
+
+    while lexer.token != Token::CloseBracket {
+        match lexer.token {
+            Token::Comma => {
+                items.push(Expr::new(lexer.loc(), ExprData::Missing));
+            }
+            Token::DotDotDot => {
+                let dots_loc = lexer.loc();
+                lexer.next();
+                let item = parse_item(lexer);
+                items.push(Expr::new(
+                    dots_loc,
+                    ExprData::Spread(SpreadExpr { value: item }),
+                ));
+                if lexer.token == Token::Comma {
+                    comma_after_spread = lexer.loc();
+                }
+            }
+            _ => items.push(parse_item(lexer)),
+        }
+
+        if lexer.token != Token::Comma {
+            break;
+        }
+        if lexer.has_newline_before {
+            is_single_line = false;
+        }
+        lexer.next();
+        if lexer.has_newline_before {
+            is_single_line = false;
+        }
+    }
+
+    if lexer.has_newline_before {
+        is_single_line = false;
+    }
+    let close_bracket_loc = lexer.loc();
+    lexer.expect(Token::CloseBracket);
+    Some(Expr::new(
+        loc,
+        ExprData::Array(ArrayExpr {
+            items,
+            comma_after_spread,
+            close_bracket_loc,
+            is_single_line,
+            ..ArrayExpr::default()
+        }),
+    ))
 }
 
 pub(crate) fn parse_big_int_or_string_if_unsupported(core: &ParserCore, lexer: &Lexer) -> Expr {
@@ -174,7 +236,7 @@ mod tests {
     use regex::Regex;
 
     use super::{
-        parse_big_int_or_string_if_unsupported, parse_numeric_literal,
+        parse_array_prefix, parse_big_int_or_string_if_unsupported, parse_numeric_literal,
         parse_regular_expression_literal, parse_simple_prefix, parse_string_literal,
         parse_unary_prefix,
     };
@@ -327,5 +389,36 @@ mod tests {
             boolean.data.as_deref(),
             Some(ExprData::Boolean(true))
         ));
+    }
+
+    #[test]
+    fn parses_array_holes_spreads_and_trailing_commas() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"[, 1, ...2,]"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source, TsOptions::default());
+        let array = parse_array_prefix(&mut lexer, |lexer| {
+            let loc = lexer.loc();
+            let number = lexer.number;
+            lexer.next();
+            crate::internal::js_ast::Expr::new(loc, ExprData::Number(number))
+        })
+        .expect("expected array");
+        let Some(ExprData::Array(array)) = array.data.as_deref() else {
+            panic!("expected array expression");
+        };
+        assert_eq!(array.items.len(), 3);
+        assert!(matches!(
+            array.items[0].data.as_deref(),
+            Some(ExprData::Missing)
+        ));
+        assert!(matches!(
+            array.items[2].data.as_deref(),
+            Some(ExprData::Spread(_))
+        ));
+        assert!(array.comma_after_spread.start > 0);
+        assert_eq!(lexer.token, Token::EndOfFile);
     }
 }
