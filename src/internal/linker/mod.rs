@@ -3035,6 +3035,8 @@ pub fn assemble_css_chunk(
 ) {
     let mut joiner = Joiner::default();
     let mut newline_before_comment = false;
+    let mut metadata_inputs = Vec::new();
+    chunk.metadata_inputs.clear();
 
     if !options.css_banner.is_empty() {
         joiner.add_string(options.css_banner.clone());
@@ -3067,6 +3069,17 @@ pub fn assemble_css_chunk(
     }
 
     for item in compiled {
+        if options.needs_metafile
+            && item.source_index.is_valid()
+            && !graph.files[item.source_index.get_index() as usize]
+                .input_file
+                .omit_from_source_maps_and_metafile
+        {
+            metadata_inputs.push(MetadataInput {
+                source_index: item.source_index.get_index(),
+                outputs: vec![output_paths.break_output_into_pieces(item.css.clone())],
+            });
+        }
         if options.mode == Mode::Bundle
             && !options.minify_whitespace
             && item.source_index.is_valid()
@@ -3094,6 +3107,7 @@ pub fn assemble_css_chunk(
         joiner.add_string("\n");
     }
     chunk.intermediate_output = output_paths.break_joiner_into_pieces(joiner);
+    chunk.metadata_inputs = metadata_inputs;
 }
 
 /// Discover symbol edges that cross JavaScript chunk boundaries and assign
@@ -5952,7 +5966,16 @@ fn generate_javascript_metadata_chunk(
     }
     joiner.add_string(fragment("],\n"));
 
-    if chunk.is_entry_point {
+    let include_entry_point = chunk.is_entry_point
+        && (!chunk.is_css
+            || matches!(
+                graph.files[chunk.source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref(),
+                Some(InputFileRepr::Css(_))
+            ));
+    if include_entry_point {
         let entry_point = graph.files[chunk.source_index as usize]
             .input_file
             .source
@@ -5960,6 +5983,13 @@ fn generate_javascript_metadata_chunk(
             .select(options.metafile_path_style);
         joiner.add_string(fragment("      \"entryPoint\": "));
         joiner.add_bytes(quote_for_json(entry_point.as_bytes(), options.ascii_only));
+        joiner.add_string(fragment(",\n"));
+    }
+    if !chunk.is_css && chunk.css_chunk_index.is_valid() {
+        let css_chunk = &output_paths.chunks[chunk.css_chunk_index.get_index() as usize];
+        let css_bundle = metafile_output_path(file_system, options, &css_chunk.final_rel_path);
+        joiner.add_string(fragment("      \"cssBundle\": "));
+        joiner.add_bytes(quote_for_json(css_bundle.as_bytes(), options.ascii_only));
         joiner.add_string(fragment(",\n"));
     }
     joiner.add_string(fragment("      \"inputs\": {"));
@@ -9188,10 +9218,13 @@ mod tests {
                 mode: Mode::Bundle,
                 css_banner: "/* banner */".into(),
                 css_footer: "/* footer */".into(),
+                needs_metafile: true,
                 ..Options::default()
             },
             &context(&[], &[]),
         );
+        assert_eq!(chunk.metadata_inputs.len(), 1);
+        assert_eq!(chunk.metadata_inputs[0].source_index, 1);
         let (joiner, shifts) =
             context(&[], &[]).substitute_final_paths(chunk.intermediate_output, str::to_owned);
         assert_eq!(
@@ -9227,6 +9260,90 @@ mod tests {
         let (joiner, _) = context(&assets, &[])
             .substitute_final_paths(chunk.intermediate_output, |_| "assets/image.png".into());
         assert_eq!(joiner.done(), b"a{background:url(assets/image.png)}\n");
+    }
+
+    #[test]
+    fn finalizes_css_companions_and_links_javascript_metadata() {
+        let mut javascript = js_file(js_ast::Ast::default());
+        javascript.source.pretty_paths = PrettyPaths {
+            abs: "/project/app.js".into(),
+            rel: "app.js".into(),
+        };
+        let mut stylesheet = css_file(vec![], vec![], vec![]);
+        stylesheet.source.pretty_paths = PrettyPaths {
+            abs: "/project/style.css".into(),
+            rel: "style.css".into(),
+        };
+        let input_files = [javascript, stylesheet];
+        let graph = clone_linker_graph(&input_files, &[0, 1], &[EntryPoint::default()], false);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let options = Options {
+            abs_output_dir: "/out".into(),
+            needs_metafile: true,
+            metafile_path_style: crate::internal::logger::PathStyle::Absolute,
+            ..Options::default()
+        };
+
+        let mut javascript_joiner = Joiner::default();
+        javascript_joiner.add_string("console.log(1);\n");
+        let javascript_chunk = ChunkInfo {
+            unique_key: "UNIQUEC00000000".into(),
+            final_template: vec![PathTemplate {
+                data: "app.js".into(),
+                ..PathTemplate::default()
+            }],
+            intermediate_output: context(&[], &[]).break_joiner_into_pieces(javascript_joiner),
+            css_chunk_index: Index32::new(1),
+            is_entry_point: true,
+            ..ChunkInfo::default()
+        };
+
+        let mut css_chunk = ChunkInfo {
+            unique_key: "UNIQUEC00000001".into(),
+            final_template: vec![PathTemplate {
+                data: "app.css".into(),
+                ..PathTemplate::default()
+            }],
+            source_index: 0,
+            is_entry_point: true,
+            is_css: true,
+            ..ChunkInfo::default()
+        };
+        assemble_css_chunk(
+            &graph,
+            &mut css_chunk,
+            &[CompiledCssAst {
+                css: b".app{color:red}".to_vec(),
+                source_index: Index32::new(1),
+                ..CompiledCssAst::default()
+            }],
+            &options,
+            &context(&[], &[]),
+        );
+
+        let mut chunks = vec![javascript_chunk, css_chunk];
+        let outputs =
+            finalize_javascript_chunk_outputs(&file_system, &graph, &mut chunks, &[], &options);
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].abs_path, "/out/app.js");
+        assert!(
+            outputs[0]
+                .json_metadata_chunk
+                .contains("\"cssBundle\": \"/out/app.css\"")
+        );
+        assert!(
+            outputs[0]
+                .json_metadata_chunk
+                .contains("\"entryPoint\": \"/project/app.js\"")
+        );
+        assert_eq!(outputs[1].abs_path, "/out/app.css");
+        assert_eq!(outputs[1].contents, b".app{color:red}\n");
+        assert!(!outputs[1].json_metadata_chunk.contains("\"entryPoint\""));
+        assert!(
+            outputs[1]
+                .json_metadata_chunk
+                .contains("\"/project/style.css\"")
+        );
     }
 
     fn js_repr(graph: &crate::internal::graph::LinkerGraph, source_index: usize) -> &JsRepr {
