@@ -2,9 +2,9 @@
 
 use crate::internal::{
     js_ast::{
-        Binding, BindingData, BlockStmt, Decl, DoWhileStmt, Expr, ExprData, ExprStmt,
-        IdentifierBinding, IdentifierExpr, IfStmt, LocalKind, LocalStmt, Precedence, ReturnStmt,
-        Stmt, StmtData, ThrowStmt, WhileStmt,
+        Binding, BindingData, BlockStmt, BreakStmt, ContinueStmt, Decl, DoWhileStmt, Expr,
+        ExprData, ExprStmt, IdentifierBinding, IdentifierExpr, IfStmt, LocalKind, LocalStmt,
+        Precedence, ReturnStmt, Stmt, StmtData, ThrowStmt, WhileStmt, WithStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
@@ -138,6 +138,36 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             lexer.next();
             parse_local_declarations(core, lexer, loc, LocalKind::Const)
         }
+        Token::Break => {
+            lexer.next();
+            let label = parse_optional_label(core, lexer);
+            lexer.expect_or_insert_semicolon();
+            Stmt::new(loc, StmtData::Break(BreakStmt { label }))
+        }
+        Token::Continue => {
+            lexer.next();
+            let label = parse_optional_label(core, lexer);
+            lexer.expect_or_insert_semicolon();
+            Stmt::new(loc, StmtData::Continue(ContinueStmt { label }))
+        }
+        Token::With => {
+            lexer.next();
+            lexer.expect(Token::OpenParen);
+            let value = parse_expression(core, lexer, Precedence::Lowest, true);
+            let body_loc = lexer.loc();
+            lexer.expect(Token::CloseParen);
+            let is_single_line_body = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
+            let body = parse_statement(core, lexer);
+            Stmt::new(
+                loc,
+                StmtData::With(WithStmt {
+                    value,
+                    body,
+                    body_loc,
+                    is_single_line_body,
+                }),
+            )
+        }
         Token::Return => {
             if core.fn_or_arrow_data_parse.is_return_disallowed {
                 core.add_error_range(lexer.range(), "A return statement cannot be used here:");
@@ -252,6 +282,21 @@ fn parse_local_declarations(
     )
 }
 
+fn parse_optional_label(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+) -> Option<crate::internal::ast::LocRef> {
+    if lexer.has_newline_before || lexer.token != Token::Identifier {
+        return None;
+    }
+    let label = crate::internal::ast::LocRef {
+        loc: lexer.loc(),
+        reference: core.store_name_in_ref(lexer.identifier.clone()),
+    };
+    lexer.next();
+    Some(label)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
@@ -355,5 +400,30 @@ mod tests {
         let mut core = super::ParserCore::new_with_log(source, Options::default(), log.clone());
         let _ = parse_block(&mut core, &mut lexer);
         assert_eq!(log.peek().len(), 1);
+    }
+
+    #[test]
+    fn parses_break_continue_labels_and_with_bodies() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"{break outer; continue inner; with (scope) work();}"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        assert!(matches!(
+            block.statements[0].data.as_deref(),
+            Some(StmtData::Break(break_stmt)) if break_stmt.label.is_some()
+        ));
+        assert!(matches!(
+            block.statements[1].data.as_deref(),
+            Some(StmtData::Continue(continue_stmt)) if continue_stmt.label.is_some()
+        ));
+        assert!(matches!(
+            block.statements[2].data.as_deref(),
+            Some(StmtData::With(_))
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
     }
 }
