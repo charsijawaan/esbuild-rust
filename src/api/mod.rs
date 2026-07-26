@@ -750,6 +750,22 @@ mod tests {
     }
 
     #[test]
+    fn minifies_css_border_radii() {
+        assert_eq!(
+            code(transform(
+                "a { border-radius: 1px 1px 1px 1px; one: 1px } b { border-radius: 1px 2px 1px 2px } c { border-radius: 1px 2px 3px 2px } d { border-radius: 1px 2px / 1px 2px } e { border-radius: 1px 2px 3px 2px / 4px 5px 4px 5px } f { border-top-left-radius: 2px 2px; border-bottom-right-radius: 2px 3px } g { border-radius: var(--x) var(--y) var(--z) var(--y) }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{border-radius:1px;one:1px}b{border-radius:1px 2px}c{border-radius:1px 2px 3px}d{border-radius:1px 2px}e{border-radius:1px 2px 3px/4px 5px}f{border-top-left-radius:2px;border-bottom-right-radius:2px 3px}g{border-radius:var(--x) var(--y) var(--z) var(--y)}\n"
+        );
+    }
+
+    #[test]
     fn scopes_and_minifies_local_css_names() {
         let input = ".card { color: red } #root .card { color: blue }";
         assert_eq!(

@@ -674,6 +674,17 @@ impl Parser {
             if matches!(key_lower.as_str(), "margin" | "padding" | "inset") {
                 minify_four_side_shorthand(&mut value);
             }
+            if key_lower == "border-radius" {
+                minify_border_radius(&mut value, self.minify_whitespace);
+            } else if matches!(
+                key_lower.as_str(),
+                "border-top-left-radius"
+                    | "border-top-right-radius"
+                    | "border-bottom-right-radius"
+                    | "border-bottom-left-radius"
+            ) {
+                minify_border_radius_corner(&mut value);
+            }
             if key_lower == "font-weight"
                 && let [token] = value.as_mut_slice()
                 && token.kind == TokenKind::Ident
@@ -1952,6 +1963,70 @@ fn minify_four_side_shorthand(tokens: &mut Vec<Token>) {
             WhitespaceFlags::BEFORE
         };
     }
+}
+
+fn minify_border_radius(tokens: &mut Vec<Token>, minify_whitespace: bool) {
+    let mut slash_index = None;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind == TokenKind::DelimSlash {
+            if slash_index.is_some() {
+                return;
+            }
+            slash_index = Some(index);
+        }
+    }
+
+    let split = slash_index.unwrap_or(tokens.len());
+    let second_start = split + usize::from(slash_index.is_some());
+    let mut first = tokens[..split].to_vec();
+    let mut second = tokens[second_start..].to_vec();
+    if !is_numeric_quad(&first) || slash_index.is_some() && !is_numeric_quad(&second) {
+        return;
+    }
+
+    minify_four_side_shorthand(&mut first);
+    if slash_index.is_none() {
+        *tokens = first;
+        return;
+    }
+
+    minify_four_side_shorthand(&mut second);
+    if tokens_equal_ignoring_whitespace(&first, &second) {
+        *tokens = first;
+        return;
+    }
+
+    let mut slash = tokens[split].clone();
+    slash.whitespace = if minify_whitespace {
+        WhitespaceFlags::default()
+    } else {
+        WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER
+    };
+    first.push(slash);
+    first.extend(second);
+    *tokens = first;
+}
+
+fn minify_border_radius_corner(tokens: &mut Vec<Token>) {
+    if tokens.len() == 2
+        && tokens.iter().all(|token| token.kind.is_numeric())
+        && tokens[0].equal_ignoring_whitespace(&tokens[1])
+    {
+        tokens.truncate(1);
+        tokens[0].whitespace = WhitespaceFlags::default();
+    }
+}
+
+fn is_numeric_quad(tokens: &[Token]) -> bool {
+    (1..=4).contains(&tokens.len()) && tokens.iter().all(|token| token.kind.is_numeric())
+}
+
+fn tokens_equal_ignoring_whitespace(left: &[Token], right: &[Token]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.equal_ignoring_whitespace(right))
 }
 
 fn minify_box_shadows(tokens: &mut Vec<Token>, minify_whitespace: bool) {
