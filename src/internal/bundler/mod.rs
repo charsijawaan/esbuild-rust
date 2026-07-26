@@ -587,12 +587,16 @@ pub fn scan_bundle(
                 result.file;
         }
     }
-    finalize_scan_import_records(&mut bundle.files, &resolution_slots);
+    finalize_scan_import_records(log, caches, options, &mut bundle.files, &resolution_slots);
     bundle
 }
 
+#[allow(clippy::too_many_lines)]
 fn finalize_scan_import_records(
-    files: &mut [ScannerFile],
+    log: &Log,
+    caches: &CacheSet,
+    options: &Options,
+    files: &mut Vec<ScannerFile>,
     resolution_slots: &HashMap<u32, Vec<Option<ResolveResult>>>,
 ) {
     let visited: HashMap<logger::Path, u32> = files
@@ -635,6 +639,118 @@ fn finalize_scan_import_records(
                 record.copy_source_index = record.source_index;
                 record.source_index = Index32::default();
             }
+        }
+    }
+
+    let mut css_edges = Vec::new();
+    for (importer_index, file) in files.iter().enumerate() {
+        let Some(InputFileRepr::Js(repr)) = &file.input_file.repr else {
+            continue;
+        };
+        for (record_index, record) in repr.ast.import_records.iter().enumerate() {
+            if !record.source_index.is_valid() {
+                continue;
+            }
+            let target_index = record.source_index.get_index();
+            if files
+                .get(usize::try_from(target_index).expect("source index fits usize"))
+                .is_some_and(|target| matches!(target.input_file.repr, Some(InputFileRepr::Css(_))))
+            {
+                css_edges.push((
+                    u32::try_from(importer_index).expect("source index fits u32"),
+                    u32::try_from(record_index).expect("import record index fits u32"),
+                    target_index,
+                ));
+            }
+        }
+    }
+
+    let mut css_stubs = HashMap::new();
+    for (importer_index, record_index, css_source_index) in css_edges {
+        if options.write_to_stdout {
+            let target_path = files
+                [usize::try_from(css_source_index).expect("source index fits usize")]
+            .input_file
+            .source
+            .pretty_paths
+            .select(options.log_path_style)
+            .to_string();
+            log.add_error(
+                None,
+                Range::default(),
+                format!(
+                    "Cannot import {target_path:?} into a JavaScript file without an output path configured"
+                ),
+            );
+            let Some(InputFileRepr::Js(importer_repr)) = files
+                [usize::try_from(importer_index).expect("source index fits usize")]
+            .input_file
+            .repr
+            .as_mut() else {
+                continue;
+            };
+            importer_repr.ast.import_records
+                [usize::try_from(record_index).expect("import record index fits usize")]
+            .source_index = Index32::default();
+            continue;
+        }
+
+        let stub_source_index = *css_stubs.entry(css_source_index).or_insert_with(|| {
+            let css_file =
+                &files[usize::try_from(css_source_index).expect("source index fits usize")];
+            caches.source_index_cache.get(
+                css_file.input_file.source.key_path.clone(),
+                SourceIndexKind::JsStubForCss,
+            )
+        });
+        let stub_index = usize::try_from(stub_source_index).expect("source index fits usize");
+        if files.len() <= stub_index {
+            files.resize_with(stub_index + 1, ScannerFile::default);
+        }
+        if files[stub_index].input_file.repr.is_none() {
+            let css_file =
+                &files[usize::try_from(css_source_index).expect("source index fits usize")];
+            let mut source = css_file.input_file.source.clone();
+            source.index = stub_source_index;
+            let loader = css_file.input_file.loader;
+            let ast = js_parser::lazy_export_ast(
+                log.clone(),
+                &source,
+                js_parser::options_from_config(options),
+                Expr::new(logger::Loc::default(), ExprData::Null),
+                None,
+            );
+            files[stub_index] = ScannerFile {
+                input_file: InputFile {
+                    source,
+                    loader,
+                    repr: Some(InputFileRepr::Js(Box::new(JsRepr {
+                        ast,
+                        css_source_index: Index32::new(css_source_index),
+                        ..JsRepr::default()
+                    }))),
+                    ..InputFile::default()
+                },
+                ..ScannerFile::default()
+            };
+        }
+        if let Some(InputFileRepr::Css(css_repr)) = files
+            [usize::try_from(css_source_index).expect("source index fits usize")]
+        .input_file
+        .repr
+        .as_mut()
+        {
+            css_repr.js_source_index = Index32::new(stub_source_index);
+        }
+        if let Some(InputFileRepr::Js(importer_repr)) = files
+            [usize::try_from(importer_index).expect("source index fits usize")]
+        .input_file
+        .repr
+        .as_mut()
+        {
+            importer_repr.ast.import_records
+                [usize::try_from(record_index).expect("import record index fits usize")]
+            .source_index = Index32::new(stub_source_index);
         }
     }
 }
@@ -1545,6 +1661,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn scans_entry_points_into_a_recursive_module_graph() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let file_system = mock_fs(
@@ -1590,7 +1707,7 @@ mod tests {
 
         assert_eq!(bundle.entry_points.len(), 1);
         assert_eq!(bundle.entry_points[0].output_path, "app");
-        assert_eq!(bundle.files.len(), 5);
+        assert_eq!(bundle.files.len(), 6);
         assert_eq!(
             bundle.files[runtime::SOURCE_INDEX as usize]
                 .input_file
@@ -1619,6 +1736,44 @@ mod tests {
                 "/project/style.css",
                 "/project/nested.css",
             ])
+        );
+        let css_file = bundle
+            .files
+            .iter()
+            .find(|file| {
+                file.input_file.source.key_path.text == "/project/style.css"
+                    && matches!(file.input_file.repr, Some(InputFileRepr::Css(_)))
+            })
+            .expect("stylesheet input");
+        let Some(InputFileRepr::Css(css_repr)) = &css_file.input_file.repr else {
+            panic!("expected stylesheet representation");
+        };
+        assert!(css_repr.js_source_index.is_valid());
+        let stub = &bundle.files[css_repr.js_source_index.get_index() as usize];
+        let Some(InputFileRepr::Js(stub_repr)) = &stub.input_file.repr else {
+            panic!("expected JavaScript CSS stub");
+        };
+        assert_eq!(
+            stub_repr.css_source_index.get_index(),
+            css_file.input_file.source.index
+        );
+        let entry = bundle
+            .files
+            .iter()
+            .find(|file| file.input_file.source.key_path.text == "/project/entry.js")
+            .expect("entry input");
+        let style_import = entry
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+            .expect("entry import records")
+            .iter()
+            .find(|record| record.path.text == "./style.css")
+            .expect("style import");
+        assert_eq!(
+            style_import.source_index.get_index(),
+            css_repr.js_source_index.get_index()
         );
         for file in bundle.files.iter().skip(1) {
             for record in file
@@ -1805,5 +1960,52 @@ mod tests {
             Some(InputFileRepr::Copy(_))
         ));
         assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn scan_rejects_javascript_css_imports_when_writing_to_stdout() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                ("/project/entry.js".into(), "import './style.css'".into()),
+                ("/project/style.css".into(), ".entry { color: red }".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into(), ".css".into()],
+            write_to_stdout: true,
+            ..Options::default()
+        };
+        let bundle = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        assert_eq!(bundle.files.len(), 3);
+        let entry = bundle
+            .files
+            .iter()
+            .find(|file| file.input_file.source.key_path.text == "/project/entry.js")
+            .expect("entry input");
+        let record = &entry
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+            .expect("entry import records")[0];
+        assert!(!record.source_index.is_valid());
+        assert_eq!(
+            log.done()[0].data.text,
+            "Cannot import \"style.css\" into a JavaScript file without an output path configured"
+        );
     }
 }
