@@ -289,6 +289,209 @@ fn file_path_pair(text: &str, disabled: bool) -> PathPair {
     }
 }
 
+#[must_use]
+pub fn is_package_path(path: &str) -> bool {
+    !path.starts_with('/')
+        && !path.starts_with("./")
+        && !path.starts_with("../")
+        && path != "."
+        && path != ".."
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_file_or_package(
+    log: &Log,
+    file_system: &dyn Fs,
+    source_dir: &str,
+    import_path: &str,
+    extension_order: &[String],
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+    is_require: bool,
+) -> Option<LoadedPathPair> {
+    if import_path.starts_with('/') || file_system.is_abs(import_path) {
+        return load_as_file_or_directory(
+            log,
+            file_system,
+            import_path,
+            extension_order,
+            platform,
+            configured_main_fields,
+            is_require,
+        );
+    }
+    if !is_package_path(import_path) {
+        let absolute = file_system.join(&[source_dir, import_path]);
+        return load_as_file_or_directory(
+            log,
+            file_system,
+            &absolute,
+            extension_order,
+            platform,
+            configured_main_fields,
+            is_require,
+        );
+    }
+
+    let (package_name, package_subpath) = parse_esm_package_name(import_path)?;
+    let mut current = source_dir.to_string();
+    loop {
+        if file_system.base(&current) != "node_modules" {
+            let node_modules = file_system.join(&[&current, "node_modules"]);
+            let package_dir = file_system.join(&[&node_modules, package_name]);
+            if let Some(package) = read_package_json(
+                log,
+                file_system,
+                &package_dir,
+                platform,
+                configured_main_fields,
+            ) && let Some(exports) = &package.exports_map
+            {
+                let mut conditions = HashMap::from([("default".into(), true)]);
+                conditions.insert(if is_require { "require" } else { "import" }.into(), true);
+                conditions.insert(
+                    match platform {
+                        Platform::Browser => "browser",
+                        Platform::Node => "node",
+                        Platform::Neutral => "default",
+                    }
+                    .into(),
+                    true,
+                );
+                let resolution = handle_package_map_post_conditions(resolve_package_exports(
+                    "/",
+                    &package_subpath,
+                    &exports.root,
+                    &conditions,
+                ));
+                return finalize_package_map_resolution(
+                    log,
+                    file_system,
+                    &package_dir,
+                    &resolution,
+                    extension_order,
+                    platform,
+                    configured_main_fields,
+                    is_require,
+                );
+            }
+
+            let absolute = file_system.join(&[&node_modules, import_path]);
+            if let Some(result) = load_as_file_or_directory(
+                log,
+                file_system,
+                &absolute,
+                extension_order,
+                platform,
+                configured_main_fields,
+                is_require,
+            ) {
+                return Some(result);
+            }
+        }
+        let parent = file_system.dir(&current);
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_as_file_or_directory(
+    log: &Log,
+    file_system: &dyn Fs,
+    path: &str,
+    extension_order: &[String],
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+    is_require: bool,
+) -> Option<LoadedPathPair> {
+    if let Some(file) = load_as_file(file_system, path, extension_order) {
+        return Some(LoadedPathPair {
+            paths: file_path_pair(&file.path, file.disabled),
+            different_case: file.different_case,
+        });
+    }
+    load_as_directory(
+        log,
+        file_system,
+        path,
+        extension_order,
+        platform,
+        configured_main_fields,
+        is_require,
+    )
+}
+
+fn read_package_json(
+    log: &Log,
+    file_system: &dyn Fs,
+    package_dir: &str,
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+) -> Option<PackageJson> {
+    let package_path = file_system.join(&[package_dir, "package.json"]);
+    let (contents, error, _) = file_system.read_file(&package_path);
+    if error.is_some() {
+        return None;
+    }
+    let source = Source {
+        key_path: Path {
+            text: package_path,
+            namespace: "file".into(),
+            ..Path::default()
+        },
+        contents: Arc::from(contents.into_bytes()),
+        ..Source::default()
+    };
+    parse_package_json(
+        log,
+        &source,
+        package_dir,
+        file_system,
+        platform,
+        configured_main_fields,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_package_map_resolution(
+    log: &Log,
+    file_system: &dyn Fs,
+    package_dir: &str,
+    resolution: &PackageMapResolution,
+    extension_order: &[String],
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+    is_require: bool,
+) -> Option<LoadedPathPair> {
+    let relative = resolution
+        .path
+        .strip_prefix('/')
+        .unwrap_or(&resolution.path);
+    let absolute = file_system.join(&[package_dir, relative]);
+    match resolution.status {
+        PackageMapStatus::Exact | PackageMapStatus::ExactEndsWithStar => {
+            load_as_file(file_system, &absolute, &[]).map(|file| LoadedPathPair {
+                paths: file_path_pair(&file.path, file.disabled),
+                different_case: file.different_case,
+            })
+        }
+        PackageMapStatus::Inexact => load_as_file_or_directory(
+            log,
+            file_system,
+            &absolute,
+            extension_order,
+            platform,
+            configured_main_fields,
+            is_require,
+        ),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SideEffectsData {
     pub source: Option<Source>,
@@ -2633,10 +2836,11 @@ mod tests {
         DataUrl, DebugMeta, MimeType, PackageMapKind, PackageMapStatus, PathPair, PnpStatus,
         TsConfigJson, TsConfigPath, TsConfigPaths, compile_yarn_pnp_data,
         find_invalid_package_segment, globstar_to_escaped_regexp,
-        handle_package_map_post_conditions, is_valid_tsconfig_path_no_base_url_pattern,
-        load_as_directory, load_as_file, load_as_index, match_tsconfig_path_candidates,
-        parse_bare_identifier, parse_esm_package_name, parse_imports_exports_map,
-        parse_package_json, parse_tsconfig_json, resolve_package_exports, resolve_package_imports,
+        handle_package_map_post_conditions, is_package_path,
+        is_valid_tsconfig_path_no_base_url_pattern, load_as_directory, load_as_file, load_as_index,
+        match_tsconfig_path_candidates, parse_bare_identifier, parse_esm_package_name,
+        parse_imports_exports_map, parse_package_json, parse_tsconfig_json,
+        resolve_file_or_package, resolve_package_exports, resolve_package_imports,
         reverse_resolve_package_exports, sort_package_expansion_keys,
     };
     use crate::internal::{
@@ -3463,5 +3667,131 @@ mod tests {
         )
         .expect("index fallback");
         assert_eq!(fallback.paths.primary.text, "/project/fallback/index.ts");
+    }
+
+    #[test]
+    fn resolves_relative_and_ancestor_node_modules_paths() {
+        let package_json = r#"{
+          "exports": {
+            ".": "./main.js",
+            "./feature/*": "./src/*.js",
+            "./no-extension": "./src/no-extension"
+          }
+        }"#;
+        let file_system = mock_fs(
+            &HashMap::from([
+                ("/project/src/local.ts".into(), String::new()),
+                (
+                    "/project/node_modules/pkg/package.json".into(),
+                    package_json.into(),
+                ),
+                ("/project/node_modules/pkg/main.js".into(), String::new()),
+                (
+                    "/project/node_modules/pkg/src/button.js".into(),
+                    String::new(),
+                ),
+                (
+                    "/project/node_modules/pkg/src/no-extension.js".into(),
+                    String::new(),
+                ),
+                (
+                    "/project/src/node_modules/nearest/index.js".into(),
+                    String::new(),
+                ),
+                (
+                    "/project/node_modules/nearest/index.js".into(),
+                    String::new(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/",
+        );
+        let extensions = vec![".js".into(), ".ts".into()];
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+
+        assert!(!is_package_path("./local"));
+        assert!(is_package_path("pkg/feature/button"));
+        assert_eq!(
+            resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project/src/deep",
+                "../local",
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+            )
+            .expect("relative import")
+            .paths
+            .primary
+            .text,
+            "/project/src/local.ts"
+        );
+        assert_eq!(
+            resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project/src/deep",
+                "pkg",
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+            )
+            .expect("package root export")
+            .paths
+            .primary
+            .text,
+            "/project/node_modules/pkg/main.js"
+        );
+        assert_eq!(
+            resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project/src/deep",
+                "pkg/feature/button",
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+            )
+            .expect("package wildcard export")
+            .paths
+            .primary
+            .text,
+            "/project/node_modules/pkg/src/button.js"
+        );
+        assert!(
+            resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project/src/deep",
+                "pkg/no-extension",
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+            )
+            .is_none(),
+            "exact exports targets must not gain implicit extensions"
+        );
+        assert_eq!(
+            resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project/src/deep",
+                "nearest",
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+            )
+            .expect("nearest node_modules")
+            .paths
+            .primary
+            .text,
+            "/project/src/node_modules/nearest/index.js"
+        );
     }
 }
