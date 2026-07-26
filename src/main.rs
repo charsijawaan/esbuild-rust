@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     io::{self, Read, Write},
 };
@@ -47,6 +48,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut sourcemap = BuildSourceMap::None;
     let mut external = Vec::new();
     let mut packages = Packages::Bundle;
+    let mut build_loaders = HashMap::new();
     for argument in arguments {
         if argument == "--help" || argument == "-h" {
             return Ok(Output::Text(help_text()));
@@ -123,6 +125,20 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             options.minify_syntax = true;
             continue;
         }
+        if let Some(value) = argument.strip_prefix("--loader:") {
+            let Some((extension, loader)) = value.split_once('=') else {
+                return Err(format!(
+                    "Missing \"=\" in {argument:?}\n\n\
+                     You need to specify the file extension that the loader applies to. \
+                     For example, \"--loader:.js=jsx\" applies the \"jsx\" loader to files \
+                     with the \".js\" extension."
+                ));
+            };
+            let loader = cli_helpers::parse_loader(loader)
+                .map_err(|error| format!("{}\n\n{}", error.text, error.note))?;
+            build_loaders.insert(extension.into(), loader);
+            continue;
+        }
         if let Some(loader) = argument.strip_prefix("--loader=") {
             options.loader = parse_loader(loader)?;
             continue;
@@ -167,7 +183,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             return Err("Cannot use both \"--outfile\" and \"--outdir\"".into());
         }
         if options.loader != Loader::None {
-            return Err("\"--loader\" with \"--bundle\" is not implemented yet".into());
+            return Err("Use \"--loader:.ext=loader\" when bundling".into());
         }
         let result = build(BuildOptions {
             entry_points: input_paths,
@@ -184,6 +200,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             footer: options.footer,
             external,
             packages,
+            loader: build_loaders,
             ..BuildOptions::default()
         });
         if !result.errors.is_empty() {
@@ -288,6 +305,7 @@ fn help_text() -> String {
          \x20\x20--external:PATH\n\
          \x20\x20--packages=bundle|external\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
+         \x20\x20--loader:.EXT=LOADER\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
          \x20\x20--minify-identifiers\n\
@@ -416,6 +434,36 @@ mod tests {
         let source_map =
             std::fs::read_to_string(output_directory.join("entry.js.map")).expect("read map");
         assert!(source_map.contains("\"version\": 3"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn bundles_with_extension_loader_overrides() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-loader-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(
+            &entry,
+            "import message from './message.custom'; console.log(message)",
+        )
+        .expect("write entry file");
+        std::fs::write(directory.join("message.custom"), "cli custom loader")
+            .expect("write custom input");
+
+        let Output::Code(output) = run(&[
+            "--bundle".into(),
+            "--loader:.custom=text".into(),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("bundle succeeds") else {
+            panic!("expected bundled code");
+        };
+        let output = String::from_utf8(output).expect("bundle output is UTF-8");
+        assert!(output.contains("\"cli custom loader\""));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

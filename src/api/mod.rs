@@ -123,6 +123,7 @@ pub struct BuildOptions {
     pub footer: String,
     pub external: Vec<String>,
     pub packages: Packages,
+    pub loader: HashMap<String, Loader>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -218,6 +219,51 @@ fn default_abs_output_base(file_system: &dyn Fs, entry_points: &[String]) -> Str
     common.to_string_lossy().into_owned()
 }
 
+const fn build_loader(loader: Loader) -> config::Loader {
+    match loader {
+        Loader::None => config::Loader::None,
+        Loader::Base64 => config::Loader::Base64,
+        Loader::Binary => config::Loader::Binary,
+        Loader::Copy => config::Loader::Copy,
+        Loader::Css => config::Loader::Css,
+        Loader::DataUrl => config::Loader::DataUrl,
+        Loader::Default => config::Loader::Default,
+        Loader::Empty => config::Loader::Empty,
+        Loader::File => config::Loader::File,
+        Loader::GlobalCss => config::Loader::GlobalCss,
+        Loader::Js => config::Loader::Js,
+        Loader::Json => config::Loader::Json,
+        Loader::Jsx => config::Loader::Jsx,
+        Loader::LocalCss => config::Loader::LocalCss,
+        Loader::Text => config::Loader::Text,
+        Loader::Ts => config::Loader::Ts,
+        Loader::Tsx => config::Loader::Tsx,
+    }
+}
+
+fn validate_build_loaders(
+    loaders: &HashMap<String, Loader>,
+) -> Result<HashMap<String, config::Loader>, Vec<Message>> {
+    let mut result = bundler::default_extension_to_loader_map();
+    let mut errors = Vec::new();
+    for (extension, &loader) in loaders {
+        if !extension.is_empty()
+            && (extension.len() < 2 || !extension.starts_with('.') || extension.ends_with('.'))
+        {
+            errors.push(Message {
+                text: format!("Invalid file extension: {extension:?}"),
+                kind: MessageKind::Error,
+            });
+        }
+        result.insert(extension.clone(), build_loader(loader));
+    }
+    if errors.is_empty() {
+        Ok(result)
+    } else {
+        Err(errors)
+    }
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn build(options: BuildOptions) -> BuildResult {
@@ -247,6 +293,15 @@ pub fn build(options: BuildOptions) -> BuildResult {
         }
     };
     let abs_output_base = default_abs_output_base(file_system.as_ref(), &options.entry_points);
+    let extension_to_loader = match validate_build_loaders(&options.loader) {
+        Ok(loaders) => loaders,
+        Err(errors) => {
+            return BuildResult {
+                errors,
+                ..BuildResult::default()
+            };
+        }
+    };
     let output_dir = if options.outdir.is_empty() {
         file_system.cwd().to_string()
     } else if file_system.is_abs(&options.outdir) {
@@ -285,6 +340,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         js_footer: options.footer,
         external_settings,
         external_packages: options.packages == Packages::External,
+        extension_to_loader,
         abs_output_dir: output_dir,
         abs_output_file: output_file,
         abs_output_base,
@@ -708,6 +764,8 @@ fn add_banner_and_footer(mut code: Vec<u8>, banner: &str, footer: &str) -> Vec<u
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
         BuildFormat, BuildOptions, BuildSourceMap, Loader, Packages, TransformOptions, build,
         transform,
@@ -903,6 +961,38 @@ mod tests {
     }
 
     #[test]
+    fn applies_build_loader_overrides() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-loader-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import message from './message.custom'; console.log(message)",
+        )
+        .expect("write entry file");
+        std::fs::write(directory.join("message.custom"), "hello loader")
+            .expect("write custom input");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::Iife,
+            loader: HashMap::from([(".custom".into(), Loader::Text)]),
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("\"hello loader\""));
+        assert!(output.contains("console.log("));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
     fn rejects_external_paths_with_multiple_wildcards() {
         let result = build(BuildOptions {
             external: vec!["pkg/*/bad/*".into()],
@@ -910,6 +1000,16 @@ mod tests {
         });
         assert_eq!(result.errors.len(), 1);
         assert!(result.errors[0].text.contains("more than one"));
+    }
+
+    #[test]
+    fn rejects_invalid_build_loader_extensions() {
+        let result = build(BuildOptions {
+            loader: HashMap::from([("custom".into(), Loader::Text)]),
+            ..BuildOptions::default()
+        });
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].text.contains("Invalid file extension"));
     }
 
     #[test]
