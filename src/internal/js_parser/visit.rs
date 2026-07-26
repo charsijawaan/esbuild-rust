@@ -903,18 +903,35 @@ fn class_constructor_index(class: &Class) -> Option<usize> {
 fn take_class_field_assignment(property: &mut Property) -> Option<Stmt> {
     if property.kind != PropertyKind::Field
         || property.flags.contains(PropertyFlags::IS_STATIC)
-        || property.flags.contains(PropertyFlags::IS_COMPUTED)
         || !property.decorators.is_empty()
     {
         return None;
     }
-    let ExprData::String(key) = property.key.data.as_deref()? else {
-        return None;
+    let target = match property.key.data.as_deref()? {
+        ExprData::String(key)
+            if !property.flags.contains(PropertyFlags::IS_COMPUTED)
+                && is_identifier_es5_and_es_next(&String::from_utf16_lossy(&key.value)) =>
+        {
+            Expr::new(
+                property.loc,
+                ExprData::Dot(DotExpr {
+                    target: Expr::new(property.loc, ExprData::This),
+                    name: String::from_utf16_lossy(&key.value),
+                    name_loc: property.key.loc,
+                    ..DotExpr::default()
+                }),
+            )
+        }
+        ExprData::String(_) | ExprData::Number(_) => Expr::new(
+            property.loc,
+            ExprData::Index(crate::internal::js_ast::IndexExpr {
+                target: Expr::new(property.loc, ExprData::This),
+                index: property.key.clone(),
+                ..crate::internal::js_ast::IndexExpr::default()
+            }),
+        ),
+        _ => return None,
     };
-    let name = String::from_utf16_lossy(&key.value);
-    if !is_identifier_es5_and_es_next(&name) {
-        return None;
-    }
     let initializer = if property.initializer_or_nil.data.is_some() {
         &property.initializer_or_nil
     } else {
@@ -935,15 +952,7 @@ fn take_class_field_assignment(property: &mut Property) -> Option<Stmt> {
             value: Expr::new(
                 loc,
                 ExprData::Binary(BinaryExpr {
-                    left: Expr::new(
-                        loc,
-                        ExprData::Dot(DotExpr {
-                            target: Expr::new(loc, ExprData::This),
-                            name,
-                            name_loc: property.key.loc,
-                            ..DotExpr::default()
-                        }),
-                    ),
+                    left: target,
                     right: initializer,
                     op: OpCode::BinaryAssign,
                 }),
