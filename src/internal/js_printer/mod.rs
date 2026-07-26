@@ -497,6 +497,14 @@ impl Printer<'_> {
                 self.print_function(&function.function);
                 self.print_newline();
             }
+            StmtData::Class(class) => {
+                self.print_indent();
+                if class.is_export {
+                    self.output.extend_from_slice(b"export ");
+                }
+                self.print_class(&class.class);
+                self.print_newline();
+            }
             StmtData::Return(return_statement) => {
                 self.print_indent();
                 self.output.extend_from_slice(b"return");
@@ -718,7 +726,6 @@ impl Printer<'_> {
             | StmtData::ExportStar(_)
             | StmtData::Enum(_)
             | StmtData::Namespace(_)
-            | StmtData::Class(_)
             | StmtData::Import(_) => {
                 panic!("Internal error: statement printer case has not been ported yet")
             }
@@ -885,6 +892,94 @@ impl Printer<'_> {
             }
         }
         self.output.push(b')');
+    }
+
+    fn print_class(&mut self, class: &crate::internal::js_ast::Class) {
+        for decorator in &class.decorators {
+            self.output.push(b'@');
+            self.print_expr_at(&decorator.value, Precedence::Lowest);
+            self.print_newline();
+            self.print_indent();
+        }
+        self.output.extend_from_slice(b"class");
+        if let Some(name) = class.name {
+            self.output.push(b' ');
+            self.print_identifier(&self.renamer.name_for_symbol(name.reference));
+        }
+        if class.extends_or_nil.data.is_some() {
+            self.output.extend_from_slice(b" extends ");
+            self.print_expr_at(&class.extends_or_nil, Precedence::Compare);
+        }
+        self.print_optional_space();
+        self.output.push(b'{');
+        self.print_newline();
+        self.indent += 1;
+        for property in &class.properties {
+            self.print_indent();
+            for decorator in &property.decorators {
+                self.output.push(b'@');
+                self.print_expr_at(&decorator.value, Precedence::Lowest);
+                self.print_newline();
+                self.print_indent();
+            }
+            if property.kind == PropertyKind::ClassStaticBlock {
+                self.output.extend_from_slice(b"static ");
+                if let Some(block) = &property.class_static_block {
+                    self.print_block(&block.block, true);
+                }
+                continue;
+            }
+            if property.flags.contains(PropertyFlags::IS_STATIC) {
+                self.output.extend_from_slice(b"static ");
+            }
+            if property.kind.is_method_definition()
+                && let Some(ExprData::Function(function)) = property.value_or_nil.data.as_deref()
+            {
+                match property.kind {
+                    PropertyKind::Getter => self.output.extend_from_slice(b"get "),
+                    PropertyKind::Setter => self.output.extend_from_slice(b"set "),
+                    _ => {}
+                }
+                if function.function.is_async {
+                    self.output.extend_from_slice(b"async ");
+                }
+                if function.function.is_generator {
+                    self.output.push(b'*');
+                }
+                self.print_class_key(property);
+                self.print_function_arguments(&function.function);
+                self.print_optional_space();
+                self.print_block(&function.function.body.block, true);
+                continue;
+            }
+            self.print_class_key(property);
+            let initializer = if property.initializer_or_nil.data.is_some() {
+                &property.initializer_or_nil
+            } else {
+                &property.value_or_nil
+            };
+            if initializer.data.is_some() {
+                self.print_optional_space();
+                self.output.push(b'=');
+                self.print_optional_space();
+                self.print_expr_at(initializer, Precedence::Comma);
+            }
+            self.output.push(b';');
+            self.print_newline();
+        }
+        self.indent -= 1;
+        self.print_indent();
+        self.output.push(b'}');
+    }
+
+    fn print_class_key(&mut self, property: &crate::internal::js_ast::Property) {
+        if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+            self.output.push(b'[');
+            self.print_expr_at(&property.key, Precedence::Lowest);
+            self.output.push(b']');
+        } else {
+            self.print_property_key(&property.key);
+        }
     }
 
     fn print_indent(&mut self) {
@@ -1154,8 +1249,8 @@ impl Printer<'_> {
                     self.print_block(&arrow.body.block, false);
                 }
             }
-            ExprData::Class(_)
-            | ExprData::Template(_)
+            ExprData::Class(class) => self.print_class(&class.class),
+            ExprData::Template(_)
             | ExprData::JsxElement(_)
             | ExprData::JsxText(_)
             | ExprData::RequireString(_)
@@ -1586,6 +1681,44 @@ mod tests {
              \x20\x20\x20\x20break;\n\
              \x20\x20default:\n\
              \x20\x20\x20\x20fallback();\n\
+             }\n"
+        );
+    }
+
+    #[test]
+    fn prints_classes_fields_and_methods() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"class Point extends Base {\
+                    x = 0;\
+                    constructor(x) { this.x = x; }\
+                    move(dx) { this.x += dx; }\
+                    static origin = new Point(0);\
+                }"
+                .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "class Point extends Base {\n\
+             \x20\x20x = 0;\n\
+             \x20\x20constructor(x) {\n\
+             \x20\x20\x20\x20this.x = x;\n\
+             \x20\x20}\n\
+             \x20\x20move(dx) {\n\
+             \x20\x20\x20\x20this.x += dx;\n\
+             \x20\x20}\n\
+             \x20\x20static origin = new Point(0);\n\
              }\n"
         );
     }

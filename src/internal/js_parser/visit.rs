@@ -546,7 +546,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
                 .clone()
         };
         let inner_reference =
-            core.new_symbol(crate::internal::ast::SymbolKind::Const, format!("_{text}"));
+            core.new_symbol(crate::internal::ast::SymbolKind::Const, text.clone());
         core.record_declared_symbol(inner_reference);
         core.current_scope
             .as_ref()
