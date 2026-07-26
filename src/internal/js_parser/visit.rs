@@ -30,6 +30,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.record_usage(core.module_ref);
                 visit_expr(core, &mut export.value, resolve_identifiers);
             }
+            Some(StmtData::LazyExport(export)) => {
+                visit_expr(core, &mut export.value, resolve_identifiers);
+            }
             Some(StmtData::Local(local)) => {
                 for declaration in &mut local.declarations {
                     record_binding(core, &mut declaration.binding);
@@ -437,6 +440,9 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         function.is_unique_formal_parameters || !has_simple_args || core.is_strict_mode();
     let mut duplicate_args = HashMap::new();
     for argument in &mut function.args {
+        for decorator in &mut argument.decorators {
+            visit_expr(core, &mut decorator.value, resolve_identifiers);
+        }
         record_binding_with_duplicates(
             core,
             &mut argument.binding,
@@ -444,9 +450,6 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         );
         visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
         visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
-        for decorator in &mut argument.decorators {
-            visit_expr(core, &mut decorator.value, resolve_identifiers);
-        }
     }
     core.push_scope_for_visit_pass(ScopeKind::FunctionBody, function.body.loc);
     visit_statements(

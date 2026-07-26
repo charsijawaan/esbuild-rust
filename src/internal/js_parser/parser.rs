@@ -2280,7 +2280,9 @@ mod tests {
         let (ast, ok, log) = parse_source_with_options(
             "@sealed class Example {\
                @field accessor value = 1;\
-               @logged method(@inject dependency) { return dependency; }\
+               @logged method(@inject(() => side()) dependency = () => fallback()) {\
+                 return dependency;\
+               }\
              }\
              const Decorated = @sealed class {};\
              export @sealed class Public {}",
@@ -2307,7 +2309,14 @@ mod tests {
         else {
             panic!("expected decorated method");
         };
-        assert_eq!(method.function.args[0].decorators.len(), 1);
+        assert!(matches!(
+            method.function.args[0].decorators[0].value.data.as_deref(),
+            Some(ExprData::Call(_))
+        ));
+        assert!(matches!(
+            method.function.args[0].default_or_nil.data.as_deref(),
+            Some(ExprData::Arrow(_))
+        ));
         assert!(matches!(
             ast.parts[1].statements[1].data.as_deref(),
             Some(StmtData::Local(local))
