@@ -5685,6 +5685,7 @@ pub struct ConvertedStmts {
     pub inside_wrapper_prefix: Vec<js_ast::Stmt>,
     pub inside_wrapper_suffix: Vec<js_ast::Stmt>,
     pub outside_wrapper_prefix: Vec<js_ast::Stmt>,
+    pub arbitrary_namespace_issues: Vec<ArbitraryNamespaceIssue>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -5728,6 +5729,9 @@ pub fn convert_stmts_for_chunk(
     };
     let should_strip_exports = options.mode != Mode::PassThrough || !file.is_entry_point();
     let extract_esm_from_wrapper = repr.meta.wrap != WrapKind::None;
+    let validate_arbitrary_names = options
+        .unsupported_js_features
+        .contains(crate::internal::compat::JsFeature::ARBITRARY_MODULE_NAMESPACE_NAMES);
     let mut result = ConvertedStmts::default();
 
     for original in part_statements {
@@ -5748,6 +5752,19 @@ pub fn convert_stmts_for_chunk(
                 if !conversion.keep_original {
                     continue;
                 }
+                if validate_arbitrary_names && let Some(items) = &import.items {
+                    result.arbitrary_namespace_issues.extend(
+                        items
+                            .iter()
+                            .filter(|item| !js_ast::is_identifier(&item.alias))
+                            .map(|item| ArbitraryNamespaceIssue {
+                                kind: "import".into(),
+                                source_index,
+                                name_loc: item.alias_loc,
+                                alias: item.alias.clone(),
+                            }),
+                    );
+                }
                 result.push_esm_statement(statement, extract_esm_from_wrapper);
                 continue;
             }
@@ -5765,6 +5782,33 @@ pub fn convert_stmts_for_chunk(
                 }
                 if !conversion.keep_original {
                     continue;
+                }
+                if validate_arbitrary_names {
+                    for item in &export.items {
+                        if !js_ast::is_identifier(&item.original_name) {
+                            result
+                                .arbitrary_namespace_issues
+                                .push(ArbitraryNamespaceIssue {
+                                    kind: "import".into(),
+                                    source_index,
+                                    name_loc: item.name.loc,
+                                    alias: item.original_name.clone(),
+                                });
+                        }
+                        if !should_strip_exports
+                            && item.alias_loc != item.name.loc
+                            && !js_ast::is_identifier(&item.alias)
+                        {
+                            result
+                                .arbitrary_namespace_issues
+                                .push(ArbitraryNamespaceIssue {
+                                    kind: "export".into(),
+                                    source_index,
+                                    name_loc: item.alias_loc,
+                                    alias: item.alias.clone(),
+                                });
+                        }
+                    }
                 }
                 if should_strip_exports {
                     for item in &mut export.items {
@@ -5795,6 +5839,19 @@ pub fn convert_stmts_for_chunk(
                 }
                 if !conversion.keep_original {
                     continue;
+                }
+                if validate_arbitrary_names
+                    && let Some(alias) = &export.alias
+                    && !js_ast::is_identifier(&alias.original_name)
+                {
+                    result
+                        .arbitrary_namespace_issues
+                        .push(ArbitraryNamespaceIssue {
+                            kind: "export".into(),
+                            source_index,
+                            name_loc: alias.loc,
+                            alias: alias.original_name.clone(),
+                        });
                 }
                 if should_strip_exports {
                     statement.data = Some(Box::new(js_ast::StmtData::Import(js_ast::ImportStmt {
@@ -5909,7 +5966,21 @@ pub fn convert_stmts_for_chunk(
                 continue;
             }
             Some(js_ast::StmtData::ExportClause(_)) if should_strip_exports => continue,
-            Some(js_ast::StmtData::ExportClause(_)) => {
+            Some(js_ast::StmtData::ExportClause(export)) => {
+                if validate_arbitrary_names {
+                    result.arbitrary_namespace_issues.extend(
+                        export
+                            .items
+                            .iter()
+                            .filter(|item| !js_ast::is_identifier(&item.alias))
+                            .map(|item| ArbitraryNamespaceIssue {
+                                kind: "export".into(),
+                                source_index,
+                                name_loc: item.alias_loc,
+                                alias: item.alias.clone(),
+                            }),
+                    );
+                }
                 result.push_esm_statement(statement, extract_esm_from_wrapper);
                 continue;
             }
@@ -8337,18 +8408,18 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::{
-        AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, ChunkRuntimeRefs,
-        CompileResultForSourceMap, CompiledCssAst, CrossChunkImport, CrossChunkImportItem,
-        CssImportKind, EntryPointTailRefs, ImportStatus, ImportTracker, MatchImportKind,
-        OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, PreparedCssAst,
-        RuntimeReExportContext, StableRef, add_exports_for_export_star, advance_import_tracker,
-        append_or_extend_part_range, arbitrary_namespace_export_issues, assemble_css_chunk,
-        assemble_javascript_chunk, assign_chunk_path_templates, bind_imports_to_exports_for_file,
-        bind_imports_to_parts_for_file, classify_module_wrappers, compile_part_range_for_chunk,
-        compile_prepared_css_asts, compute_chunks, compute_cross_chunk_dependencies,
-        compute_js_chunks, configure_entry_point_exports, convert_import_for_chunk,
-        convert_stmts_for_chunk, create_entry_point_part, create_exports_for_file,
-        create_wrapper_for_file, encode_import_constraints_for_file,
+        AmbiguousReExport, ArbitraryNamespaceIssue, AssetPath, ChunkImport, ChunkInfo, ChunkPath,
+        ChunkRuntimeRefs, CompileResultForSourceMap, CompiledCssAst, CrossChunkImport,
+        CrossChunkImportItem, CssImportKind, EntryPointTailRefs, ImportStatus, ImportTracker,
+        MatchImportKind, OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange,
+        PreparedCssAst, RuntimeReExportContext, StableRef, add_exports_for_export_star,
+        advance_import_tracker, append_or_extend_part_range, arbitrary_namespace_export_issues,
+        assemble_css_chunk, assemble_javascript_chunk, assign_chunk_path_templates,
+        bind_imports_to_exports_for_file, bind_imports_to_parts_for_file, classify_module_wrappers,
+        compile_part_range_for_chunk, compile_prepared_css_asts, compute_chunks,
+        compute_cross_chunk_dependencies, compute_js_chunks, configure_entry_point_exports,
+        convert_import_for_chunk, convert_stmts_for_chunk, create_entry_point_part,
+        create_exports_for_file, create_wrapper_for_file, encode_import_constraints_for_file,
         enforce_no_cyclic_chunk_imports, finalize_chunk_paths, finalize_javascript_chunk_outputs,
         finalize_part_dependencies_for_file, find_imported_css_files_in_js_order,
         find_imported_files_in_css_order, generate_code_for_lazy_exports,
@@ -9331,6 +9402,51 @@ mod tests {
             converted.inside_wrapper_suffix[0].data.as_deref(),
             Some(js_ast::StmtData::Local(local)) if !local.is_export
         ));
+    }
+
+    #[test]
+    fn statement_conversion_reports_arbitrary_import_names() {
+        let input_files = [js_file(js_ast::Ast {
+            import_records: vec![ImportRecord::default()],
+            ..js_ast::Ast::default()
+        })];
+        let graph = clone_linker_graph(&input_files, &[0], &[EntryPoint::default()], false);
+        let statements = [js_ast::Stmt::new(
+            Loc::default(),
+            js_ast::StmtData::Import(js_ast::ImportStmt {
+                items: Some(vec![js_ast::ClauseItem {
+                    alias: "not-valid".into(),
+                    alias_loc: Loc { start: 9 },
+                    ..js_ast::ClauseItem::default()
+                }]),
+                ..js_ast::ImportStmt::default()
+            }),
+        )];
+
+        let converted = convert_stmts_for_chunk(
+            &graph,
+            &Options {
+                mode: Mode::PassThrough,
+                output_format: Format::EsModule,
+                unsupported_js_features:
+                    crate::internal::compat::JsFeature::ARBITRARY_MODULE_NAMESPACE_NAMES,
+                ..Options::default()
+            },
+            0,
+            &statements,
+            None,
+        );
+
+        assert_eq!(converted.arbitrary_namespace_issues.len(), 1);
+        assert_eq!(
+            converted.arbitrary_namespace_issues[0],
+            ArbitraryNamespaceIssue {
+                kind: "import".into(),
+                source_index: 0,
+                name_loc: Loc { start: 9 },
+                alias: "not-valid".into(),
+            }
+        );
     }
 
     #[test]
