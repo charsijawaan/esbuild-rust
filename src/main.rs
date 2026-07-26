@@ -4,7 +4,10 @@ use std::{
 };
 
 use esbuild_rs::{
-    api::{BuildFormat, BuildOptions, Loader, Packages, TransformOptions, build, transform},
+    api::{
+        BuildFormat, BuildOptions, BuildSourceMap, Loader, Packages, TransformOptions, build,
+        transform,
+    },
     internal::cli_helpers,
 };
 
@@ -41,6 +44,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut outfile = String::new();
     let mut format = BuildFormat::Iife;
     let mut splitting = false;
+    let mut sourcemap = BuildSourceMap::None;
     let mut external = Vec::new();
     let mut packages = Packages::Bundle;
     for argument in arguments {
@@ -62,6 +66,20 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         }
         if argument == "--splitting" {
             splitting = true;
+            continue;
+        }
+        if argument == "--sourcemap" {
+            sourcemap = BuildSourceMap::Linked;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--sourcemap=") {
+            sourcemap = match value {
+                "linked" => BuildSourceMap::Linked,
+                "external" => BuildSourceMap::External,
+                "inline" => BuildSourceMap::Inline,
+                "both" => BuildSourceMap::InlineAndExternal,
+                _ => return Err(format!("Invalid source map setting {value:?}")),
+            };
             continue;
         }
         if let Some(value) = argument.strip_prefix("--outdir=") {
@@ -156,6 +174,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             outdir: outdir.clone(),
             outfile: outfile.clone(),
             format,
+            sourcemap,
             splitting,
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
@@ -196,6 +215,9 @@ fn run(arguments: &[String]) -> Result<Output, String> {
         return Ok(Output::Text(String::new()));
     }
 
+    if sourcemap != BuildSourceMap::None {
+        return Err("\"--sourcemap\" without \"--bundle\" is not implemented yet".into());
+    }
     if input_paths.len() > 1 {
         return Err("Only one input file can be transformed at a time".into());
     }
@@ -262,6 +284,7 @@ fn help_text() -> String {
          \x20\x20--outfile=FILE\n\
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--splitting\n\
+         \x20\x20--sourcemap[=linked|external|inline|both]\n\
          \x20\x20--external:PATH\n\
          \x20\x20--packages=bundle|external\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
@@ -311,6 +334,7 @@ mod tests {
         assert!(run(&["--loader=wat".into()]).is_err());
         assert!(run(&["--format=wat".into()]).is_err());
         assert!(run(&["--packages=wat".into()]).is_err());
+        assert!(run(&["--sourcemap=wat".into()]).is_err());
     }
 
     #[test]
@@ -361,6 +385,37 @@ mod tests {
         };
         let output = String::from_utf8(output).expect("bundle output is UTF-8");
         assert!(output.contains("from \"pkg/subpath\""));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn writes_linked_source_maps_for_bundles() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-sourcemap-{unique}"));
+        let output_directory = directory.join("out");
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "console.log('cli source map')").expect("write entry file");
+
+        let Output::Text(output) = run(&[
+            "--bundle".into(),
+            "--sourcemap".into(),
+            format!("--outdir={}", output_directory.display()),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("bundle succeeds") else {
+            panic!("expected file output");
+        };
+        assert!(output.is_empty());
+        let javascript =
+            std::fs::read_to_string(output_directory.join("entry.js")).expect("read JavaScript");
+        assert!(javascript.contains("//# sourceMappingURL=entry.js.map"));
+        let source_map =
+            std::fs::read_to_string(output_directory.join("entry.js.map")).expect("read map");
+        assert!(source_map.contains("\"version\": 3"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

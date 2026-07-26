@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::Path as FsPath,
+    path::{Path as FsPath, PathBuf},
     sync::Arc,
 };
 
@@ -89,6 +89,16 @@ pub enum BuildFormat {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BuildSourceMap {
+    #[default]
+    None,
+    Linked,
+    External,
+    Inline,
+    InlineAndExternal,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Packages {
     #[default]
     Bundle,
@@ -103,6 +113,7 @@ pub struct BuildOptions {
     pub outfile: String,
     pub abs_working_dir: String,
     pub format: BuildFormat,
+    pub sourcemap: BuildSourceMap,
     pub splitting: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
@@ -185,6 +196,28 @@ fn validate_externals(
     }
 }
 
+fn default_abs_output_base(file_system: &dyn Fs, entry_points: &[String]) -> String {
+    let mut directories = entry_points.iter().map(|entry_point| {
+        let absolute = if file_system.is_abs(entry_point) {
+            entry_point.clone()
+        } else {
+            file_system.join(&[file_system.cwd(), entry_point])
+        };
+        PathBuf::from(file_system.dir(&absolute))
+    });
+    let Some(mut common) = directories.next() else {
+        return file_system.cwd().to_string();
+    };
+    for directory in directories {
+        while !directory.starts_with(&common) {
+            if !common.pop() {
+                return file_system.cwd().to_string();
+            }
+        }
+    }
+    common.to_string_lossy().into_owned()
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn build(options: BuildOptions) -> BuildResult {
@@ -213,6 +246,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             };
         }
     };
+    let abs_output_base = default_abs_output_base(file_system.as_ref(), &options.entry_points);
     let output_dir = if options.outdir.is_empty() {
         file_system.cwd().to_string()
     } else if file_system.is_abs(&options.outdir) {
@@ -234,6 +268,13 @@ pub fn build(options: BuildOptions) -> BuildResult {
             BuildFormat::CommonJs => config::Format::CommonJs,
             BuildFormat::EsModule => config::Format::EsModule,
         },
+        source_map: match options.sourcemap {
+            BuildSourceMap::None => config::SourceMap::None,
+            BuildSourceMap::Linked => config::SourceMap::LinkedWithComment,
+            BuildSourceMap::External => config::SourceMap::ExternalWithoutComment,
+            BuildSourceMap::Inline => config::SourceMap::Inline,
+            BuildSourceMap::InlineAndExternal => config::SourceMap::InlineAndExternal,
+        },
         code_splitting: options.splitting,
         tree_shaking: true,
         minify_whitespace: options.minify_whitespace,
@@ -246,7 +287,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         external_packages: options.packages == Packages::External,
         abs_output_dir: output_dir,
         abs_output_file: output_file,
-        abs_output_base: file_system.cwd().to_string(),
+        abs_output_base,
         ..config::Options::default()
     };
     let entry_points: Vec<_> = options
@@ -667,7 +708,10 @@ fn add_banner_and_footer(mut code: Vec<u8>, banner: &str, footer: &str) -> Vec<u
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildFormat, BuildOptions, Loader, Packages, TransformOptions, build, transform};
+    use super::{
+        BuildFormat, BuildOptions, BuildSourceMap, Loader, Packages, TransformOptions, build,
+        transform,
+    };
 
     fn code(result: super::TransformResult) -> String {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
@@ -699,6 +743,95 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("console.log(\"api build\");"));
         assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn emits_linked_build_source_maps() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-sourcemap-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "const sourceMapValue = 1; console.log(sourceMapValue)",
+        )
+        .expect("write entry file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::EsModule,
+            sourcemap: BuildSourceMap::Linked,
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 2);
+        let javascript = result
+            .output_files
+            .iter()
+            .find(|output| output.path.ends_with("/entry.js"))
+            .expect("JavaScript output");
+        let source_map = result
+            .output_files
+            .iter()
+            .find(|output| output.path.ends_with("/entry.js.map"))
+            .expect("source map output");
+        assert!(
+            String::from_utf8_lossy(&javascript.contents)
+                .contains("//# sourceMappingURL=entry.js.map")
+        );
+        let source_map = String::from_utf8_lossy(&source_map.contents);
+        assert!(source_map.contains("\"version\": 3"));
+        assert!(source_map.contains("entry.js"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn emits_all_build_source_map_modes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-sourcemap-modes-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "console.log('source map modes')",
+        )
+        .expect("write entry file");
+
+        for (mode, name, output_count, has_inline_map) in [
+            (BuildSourceMap::External, "external", 2, false),
+            (BuildSourceMap::Inline, "inline", 1, true),
+            (BuildSourceMap::InlineAndExternal, "both", 2, true),
+        ] {
+            let result = build(BuildOptions {
+                entry_points: vec!["entry.js".into()],
+                outdir: format!("out-{name}"),
+                abs_working_dir: directory.to_string_lossy().into_owned(),
+                format: BuildFormat::EsModule,
+                sourcemap: mode,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(result.output_files.len(), output_count);
+            let javascript = result
+                .output_files
+                .iter()
+                .find(|output| output.path.ends_with("/entry.js"))
+                .expect("JavaScript output");
+            let javascript = String::from_utf8_lossy(&javascript.contents);
+            assert_eq!(
+                javascript.contains("//# sourceMappingURL=data:application/json;base64,"),
+                has_inline_map
+            );
+            assert!(!javascript.contains("//# sourceMappingURL=entry.js.map"));
+        }
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
