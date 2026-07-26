@@ -311,7 +311,16 @@ pub(crate) fn parse_type_script_statement(
     if lexer.is_contextual_keyword(b"declare") {
         return Some(parse_declare_statement(core, lexer, loc, is_export));
     }
-    if lexer.is_contextual_keyword(b"namespace") || lexer.is_contextual_keyword(b"module") {
+    let is_namespace_scope = core.current_scope.as_ref().is_some_and(|scope| {
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ts_namespace
+            .is_some()
+    });
+    if (lexer.is_contextual_keyword(b"namespace") || lexer.is_contextual_keyword(b"module"))
+        && (core.is_current_scope_module_scope() || is_namespace_scope)
+    {
         let is_module = lexer.is_contextual_keyword(b"module");
         let reference = core.store_name_in_ref(lexer.identifier.clone());
         lexer.next();

@@ -5826,6 +5826,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_typescript_namespaces_outside_module_or_namespace_scopes() {
+        for input in [
+            "{namespace N{}}",
+            "if(x){namespace N{}}",
+            "function f(){namespace N{}}",
+            "(()=>{namespace N{}})()",
+        ] {
+            let result = transform(
+                input,
+                TransformOptions {
+                    loader: Loader::Ts,
+                    ..TransformOptions::default()
+                },
+            );
+            assert_eq!(result.errors.len(), 1, "{input}: {:?}", result.errors);
+            assert_eq!(result.errors[0].text, "Expected \";\" but found \"N\"");
+        }
+    }
+
+    #[test]
     fn preserves_empty_statements_after_type_script_interfaces() {
         assert_eq!(
             code(transform(

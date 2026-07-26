@@ -298,7 +298,6 @@ fn lower_namespace_locals(
         let mut binding = declaration.binding;
         for_each_identifier_binding(&mut binding, &mut |_loc, identifier| {
             set_namespace_alias(core, identifier.reference, argument);
-            core.record_usage(identifier.reference);
             core.record_usage(argument);
         });
         if declaration.value_or_nil.data.is_some() {
