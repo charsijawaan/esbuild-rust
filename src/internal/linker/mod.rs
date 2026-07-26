@@ -189,6 +189,7 @@ pub struct MatchImportResult {
     pub other_source_index: u32,
     pub other_name_loc: crate::internal::logger::Loc,
     pub reference: Ref,
+    pub is_missing: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1234,6 +1235,10 @@ pub fn match_import_with_export(
                         }
                     }
                 }
+                if status == ImportStatus::CommonJsWithoutExports {
+                    result.is_missing = true;
+                    result.source_index = next_tracker.source_index;
+                }
             }
 
             ImportStatus::DynamicFallback => {
@@ -1496,6 +1501,15 @@ pub fn bind_imports_to_exports_for_file(
             &mut Vec::new(),
             output_format,
         );
+
+        if result.is_missing {
+            graph.symbols.get_mut(import_ref).import_item_status = ImportItemStatus::Missing;
+            issues.push(ImportMatchIssue {
+                import_ref,
+                result: result.clone(),
+                suggestion: None,
+            });
+        }
 
         if matches!(
             result.kind,
@@ -13703,6 +13717,28 @@ mod tests {
             .expect("namespace alias");
         assert_eq!(alias.namespace_ref, namespace_ref);
         assert_eq!(alias.alias, "property");
+
+        let (mut graph, tracker) = import_tracker_graph(
+            Loader::Js,
+            NamedImport {
+                alias: "missing".into(),
+                namespace_ref,
+                ..NamedImport::default()
+            },
+            ImportRecord {
+                source_index: Index32::new(1),
+                ..ImportRecord::default()
+            },
+            JsRepr::default(),
+        );
+        graph.symbols.symbols_for_source[0].push(Symbol::new(SymbolKind::Import, "missing"));
+        let issues = bind_imports_to_exports_for_file(&mut graph, 0, Format::CommonJs);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].result.is_missing);
+        assert_eq!(
+            graph.symbols.get(tracker.import_ref).import_item_status,
+            ImportItemStatus::Missing
+        );
 
         let (mut graph, tracker) = import_tracker_graph(
             Loader::Ts,
