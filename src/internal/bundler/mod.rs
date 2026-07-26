@@ -1,15 +1,46 @@
 //! Port of upstream `internal/bundler`.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::internal::{
+    ast::Index32,
     compat::{CssFeature, JsFeature},
-    config::{Loader, Options, PathPlaceholder, PathTemplate, Platform},
+    config::{Loader, Options, PathPlaceholder, PathTemplate, Platform, PluginData},
+    css_parser,
     fs::Fs,
-    graph::{EntryPoint as GraphEntryPoint, InputFile, InputFileRepr},
-    logger, runtime,
+    graph::{
+        CssRepr, EntryPoint as GraphEntryPoint, InputFile, InputFileRepr, JsRepr, SideEffects,
+        SideEffectsKind,
+    },
+    js_ast, js_parser,
+    logger::{self, Log, Range, Source},
+    runtime,
     sourcemap::LineOffsetTable,
 };
+
+#[derive(Clone, Default)]
+pub struct ScannerFile {
+    pub json_metadata_chunk: String,
+    pub plugin_data: Option<PluginData>,
+    pub input_file: InputFile,
+}
+
+#[derive(Clone, Default)]
+pub struct ParseResult {
+    pub file: ScannerFile,
+    pub tla_check: TlaCheck,
+    pub ok: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TlaCheck {
+    pub parent: Index32,
+    pub depth: u32,
+    pub import_record_index: u32,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct DataForSourceMap {
@@ -44,6 +75,104 @@ pub fn default_extension_to_loader_map() -> HashMap<String, Loader> {
     .into_iter()
     .map(|(extension, loader)| (extension.to_string(), loader))
     .collect()
+}
+
+#[must_use]
+pub fn parse_file(
+    log: &Log,
+    mut source: Source,
+    mut loader: Loader,
+    options: &Options,
+) -> ParseResult {
+    let (_, base, extension) =
+        logger::platform_independent_path_dir_base_ext(&source.key_path.text);
+    if loader == Loader::Default {
+        loader = crate::internal::config::loader_from_file_extension(
+            &options.extension_to_loader,
+            &format!("{base}{extension}"),
+        );
+    }
+    if source.identifier_name.is_empty() {
+        source.identifier_name = js_ast::generate_non_unique_name_from_path(&source.key_path.text);
+    }
+    if loader == Loader::Empty {
+        source.contents = Arc::from(&b""[..]);
+    }
+
+    let mut result = ParseResult {
+        file: ScannerFile {
+            input_file: InputFile {
+                source: source.clone(),
+                loader,
+                side_effects: SideEffects::default(),
+                ..InputFile::default()
+            },
+            ..ScannerFile::default()
+        },
+        ..ParseResult::default()
+    };
+
+    match loader {
+        Loader::Js
+        | Loader::Jsx
+        | Loader::Ts
+        | Loader::TsNoAmbiguousLessThan
+        | Loader::Tsx
+        | Loader::Empty => {
+            let mut parser_options = js_parser::options_from_config(options);
+            parser_options.jsx.parse = matches!(loader, Loader::Jsx | Loader::Tsx);
+            parser_options.ts.parse = matches!(
+                loader,
+                Loader::Ts | Loader::TsNoAmbiguousLessThan | Loader::Tsx
+            );
+            parser_options.ts.no_ambiguous_less_than = loader == Loader::TsNoAmbiguousLessThan;
+            let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
+            if ast.parts.len() <= 1 {
+                result.file.input_file.side_effects.kind = SideEffectsKind::NoSideEffectsEmptyAst;
+            }
+            result.file.input_file.repr = Some(InputFileRepr::Js(Box::new(JsRepr {
+                ast,
+                ..JsRepr::default()
+            })));
+            result.ok = ok;
+        }
+        Loader::Css | Loader::GlobalCss | Loader::LocalCss => {
+            let ast = css_parser::parse(
+                log.clone(),
+                source,
+                css_parser::Options {
+                    minify_syntax: options.minify_syntax,
+                    minify_whitespace: options.minify_whitespace,
+                    minify_identifiers: options.minify_identifiers,
+                    symbol_mode: match loader {
+                        Loader::LocalCss => css_parser::SymbolMode::Local,
+                        Loader::GlobalCss => css_parser::SymbolMode::Global,
+                        _ => css_parser::SymbolMode::Disabled,
+                    },
+                },
+            );
+            result.file.input_file.repr = Some(InputFileRepr::Css(Box::new(CssRepr {
+                ast,
+                ..CssRepr::default()
+            })));
+            result.ok = true;
+        }
+        _ => {
+            let display_path = if source.pretty_paths.rel.is_empty() {
+                &source.key_path.text
+            } else {
+                source.pretty_paths.select(options.log_path_style)
+            };
+            let message = if source.key_path.namespace == "file" && !extension.is_empty() {
+                format!("No loader is configured for {extension:?} files: {display_path}")
+            } else {
+                format!("Do not know how to load path: {display_path}")
+            };
+            log.add_error(None, Range::default(), message);
+        }
+    }
+
+    result
 }
 
 pub fn apply_option_defaults(options: &mut Options) {
@@ -331,16 +460,17 @@ pub fn sanitize_file_path_for_virtual_module_path(path: &str) -> String {
 mod tests {
     use super::{
         apply_option_defaults, default_extension_to_loader_map, find_reachable_files,
-        hash_for_file_name, is_ascii_only, path_relative_to_outbase,
+        hash_for_file_name, is_ascii_only, parse_file, path_relative_to_outbase,
         sanitize_file_path_for_virtual_module_path,
     };
     use crate::internal::{
         ast::{ImportRecord, Index32},
         config::{Loader, Options, PathPlaceholder, Platform},
         fs::{MockKind, mock_fs},
-        graph::{EntryPoint, InputFile, InputFileRepr, JsRepr},
-        logger::{Path, Source},
+        graph::{EntryPoint, InputFile, InputFileRepr, JsRepr, SideEffectsKind},
+        logger::{DeferLogKind, Log, Path, Source},
     };
+    use std::{collections::HashMap, sync::Arc};
 
     #[test]
     fn applies_upstream_option_defaults() {
@@ -478,6 +608,108 @@ mod tests {
         assert_eq!(
             path_relative_to_outbase(&input, &options, &file_system, false, "custom/name.js"),
             ("/custom".into(), "name.js".into())
+        );
+    }
+
+    fn source(path: &str, contents: &[u8]) -> Source {
+        Source {
+            key_path: Path {
+                text: path.into(),
+                namespace: "file".into(),
+                ..Path::default()
+            },
+            contents: Arc::from(contents),
+            ..Source::default()
+        }
+    }
+
+    #[test]
+    fn parses_script_loaders_into_graph_files() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut options = Options::default();
+        apply_option_defaults(&mut options);
+
+        let js = parse_file(
+            &log,
+            source("/project/entry.js", b"import './dep.js'; export let x = 1"),
+            Loader::Default,
+            &options,
+        );
+        assert!(js.ok);
+        assert_eq!(js.file.input_file.loader, Loader::Js);
+        assert_eq!(js.file.input_file.source.identifier_name, "entry");
+        let Some(InputFileRepr::Js(repr)) = js.file.input_file.repr else {
+            panic!("expected a JavaScript representation");
+        };
+        assert_eq!(repr.ast.import_records.len(), 1);
+
+        let ts = parse_file(
+            &log,
+            source(
+                "/project/types.ts",
+                b"interface Point { x: number } export const p: Point = { x: 1 }",
+            ),
+            Loader::Ts,
+            &options,
+        );
+        assert!(ts.ok);
+        assert_eq!(ts.file.input_file.loader, Loader::Ts);
+
+        let empty = parse_file(
+            &log,
+            source("/project/empty.js", b"this is not valid JavaScript"),
+            Loader::Empty,
+            &options,
+        );
+        assert!(empty.ok);
+        assert!(empty.file.input_file.source.contents.is_empty());
+        assert_eq!(
+            empty.file.input_file.side_effects.kind,
+            SideEffectsKind::NoSideEffectsEmptyAst
+        );
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn parses_css_loaders_with_their_symbol_modes() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let options = Options {
+            minify_identifiers: true,
+            ..Options::default()
+        };
+        let local = parse_file(
+            &log,
+            source("/project/styles.module.css", b".button { color: red }"),
+            Loader::LocalCss,
+            &options,
+        );
+        assert!(local.ok);
+        let Some(InputFileRepr::Css(repr)) = local.file.input_file.repr else {
+            panic!("expected a CSS representation");
+        };
+        assert_eq!(repr.ast.local_symbols.len(), 1);
+        assert!(repr.ast.char_freq.is_some());
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn reports_a_missing_loader_during_parsing() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut options = Options::default();
+        apply_option_defaults(&mut options);
+        let result = parse_file(
+            &log,
+            source("/project/data.bin", b"\0\x01"),
+            Loader::Default,
+            &options,
+        );
+        assert!(!result.ok);
+        assert!(result.file.input_file.repr.is_none());
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].data.text,
+            "No loader is configured for \".bin\" files: /project/data.bin"
         );
     }
 }
