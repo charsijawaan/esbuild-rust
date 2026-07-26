@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
 use crate::internal::{
-    ast::{INVALID_REF, NamespaceAlias, Ref},
+    ast::{INVALID_REF, NamespaceAlias, Ref, SymbolKind},
     js_ast::{
         Arg, ArrowExpr, BinaryExpr, Binding, BindingData, BlockStmt, Decl, DotExpr, EnumStmt, Expr,
         ExprData, ExprStmt, FunctionBody, IdentifierBinding, IdentifierExpr, IndexExpr, LocalKind,
         LocalStmt, NamespaceStmt, ObjectExpr, OpCode, PrimitiveType, ReturnStmt, Stmt, StmtData,
-        StringExpr, known_primitive_type,
+        StringExpr, convert_binding_to_expr, for_each_identifier_binding, known_primitive_type,
     },
     logger::Loc,
 };
@@ -50,7 +50,7 @@ fn lower_namespace(
         return;
     }
     let name_ref = follow_symbols(core, namespace.name.reference);
-    if emitted.insert(name_ref) {
+    if should_emit_namespace_var(core, name_ref, emitted) {
         result.push(Stmt::new(
             loc,
             StmtData::Local(LocalStmt {
@@ -157,39 +157,28 @@ fn lower_namespace_locals(
     core: &mut ParserCore,
     argument: Ref,
     loc: Loc,
-    mut local: LocalStmt,
+    local: LocalStmt,
     result: &mut Vec<Stmt>,
 ) {
-    let all_identifiers = local.declarations.iter().all(|declaration| {
-        matches!(
-            declaration.binding.data.as_deref(),
-            Some(BindingData::Identifier(_))
-        )
-    });
-    if !all_identifiers {
-        local.is_export = false;
-        result.push(Stmt::new(loc, StmtData::Local(local)));
-        return;
-    }
     for declaration in local.declarations {
-        let Some(BindingData::Identifier(binding)) = declaration.binding.data.as_deref() else {
-            unreachable!("namespace export bindings were checked above");
-        };
-        set_namespace_alias(core, binding.reference, argument);
+        let mut binding = declaration.binding;
+        for_each_identifier_binding(&mut binding, &mut |_loc, identifier| {
+            set_namespace_alias(core, identifier.reference, argument);
+            core.record_usage(identifier.reference);
+            core.record_usage(argument);
+        });
         if declaration.value_or_nil.data.is_some() {
             result.push(Stmt::new(
                 loc,
                 StmtData::Expr(ExprStmt {
                     value: assign(
                         loc,
-                        identifier(declaration.binding.loc, binding.reference),
+                        convert_binding_to_expr(&binding, None),
                         declaration.value_or_nil,
                     ),
                     ..ExprStmt::default()
                 }),
             ));
-            core.record_usage(binding.reference);
-            core.record_usage(argument);
         }
     }
 }
@@ -316,7 +305,7 @@ fn lower_enum(
     enclosing_namespace: Option<Ref>,
 ) {
     let name_ref = follow_symbols(core, enumeration.name.reference);
-    if emitted.insert(name_ref) {
+    if should_emit_namespace_var(core, name_ref, emitted) {
         result.push(Stmt::new(
             loc,
             StmtData::Local(LocalStmt {
@@ -498,6 +487,18 @@ fn follow_symbols(core: &ParserCore, mut reference: Ref) -> Ref {
         reference = link;
     }
     reference
+}
+
+fn should_emit_namespace_var(
+    core: &ParserCore,
+    reference: Ref,
+    emitted: &mut HashSet<Ref>,
+) -> bool {
+    emitted.insert(reference)
+        && matches!(
+            core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind,
+            SymbolKind::TsEnum | SymbolKind::TsNamespace
+        )
 }
 
 fn identifier(loc: Loc, reference: Ref) -> Expr {

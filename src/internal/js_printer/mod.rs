@@ -2293,4 +2293,70 @@ mod tests {
              })(Tools || (Tools = {}));\n"
         );
     }
+
+    #[test]
+    fn prints_lowered_type_script_namespace_destructuring() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(b"namespace A { export var [a, b = c, ...d] = ref; }".as_slice()),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let mut options = js_parser::Options::default();
+        options.ts.parse = true;
+        let (ast, ok) = js_parser::parse(log.clone(), source, options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "var A;\n\
+             ((A) => {\n\
+             \x20\x20[A.a, A.b = c, ...A.d] = ref;\n\
+             })(A || (A = {}));\n"
+        );
+    }
+
+    #[test]
+    fn prints_merged_type_script_namespaces() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"function joined() {}\
+                  namespace joined { export const x = 1 }\
+                  namespace split { 0 }\
+                  namespace split { 1 }"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let mut options = js_parser::Options::default();
+        options.ts.parse = true;
+        let (ast, ok) = js_parser::parse(log.clone(), source, options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "function joined() {\n\
+             }\n\
+             ((joined) => {\n\
+             \x20\x20joined.x = 1;\n\
+             })(joined || (joined = {}));\n\
+             var split;\n\
+             ((split) => {\n\
+             \x20\x200;\n\
+             })(split || (split = {}));\n\
+             ((split) => {\n\
+             \x20\x201;\n\
+             })(split || (split = {}));\n"
+        );
+    }
 }
