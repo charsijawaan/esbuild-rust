@@ -12,8 +12,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
     ast::{
-        CharFreq, DEFAULT_NAME_MINIFIER_CSS, INVALID_REF, ImportItemStatus, ImportKind,
-        ImportRecord, ImportRecordFlags, Index32, LocRef, NamespaceAlias, Ref, SymbolKind,
+        CharFreq, DEFAULT_NAME_MINIFIER_CSS, DEFAULT_NAME_MINIFIER_JS, INVALID_REF,
+        ImportItemStatus, ImportKind, ImportRecord, ImportRecordFlags, Index32, LocRef,
+        NamespaceAlias, Ref, SymbolKind,
     },
     bundler::{hash_for_file_name, path_relative_to_outbase},
     config::{
@@ -3372,6 +3373,108 @@ pub fn compute_chunks(
         chunk.unique_key = format!("{unique_key_prefix}C{chunk_index:08}");
     }
     chunks
+}
+
+/// Merge and assign minified names to JavaScript property symbols.
+///
+/// Existing cache entries are preserved and reserved names are never reused.
+///
+/// # Panics
+///
+/// Panics when graph source or stable-index tables are inconsistent, or when
+/// a mangle-cache value is neither a boolean nor a string.
+pub fn mangle_props(
+    graph: &mut LinkerGraph,
+    mangle_cache: &mut crate::internal::config::MangleCache,
+) -> HashMap<Ref, String> {
+    let mut reserved_props = crate::internal::js_lexer::KEYWORDS
+        .iter()
+        .map(|keyword| ((*keyword).to_string(), true))
+        .collect::<HashMap<_, _>>();
+    for (original, remapped) in mangle_cache.iter() {
+        if let Some(value) = remapped.downcast_ref::<bool>() {
+            if !*value {
+                reserved_props.insert(original.clone(), true);
+            }
+        } else if let Some(value) = remapped.downcast_ref::<String>() {
+            reserved_props.insert(value.clone(), true);
+        } else {
+            panic!("mangle cache values must be booleans or strings");
+        }
+    }
+
+    let mut frequency = CharFreq::default();
+    let mut merged_props = HashMap::<String, Ref>::new();
+    for source_index in graph.reachable_files.clone() {
+        if source_index == crate::internal::runtime::SOURCE_INDEX {
+            continue;
+        }
+        let (reserved, mangled, char_freq) = {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_ref()
+            else {
+                continue;
+            };
+            (
+                repr.ast.reserved_props.keys().cloned().collect::<Vec<_>>(),
+                repr.ast.mangled_props.clone(),
+                repr.ast.char_freq,
+            )
+        };
+        for property in reserved {
+            reserved_props.insert(property, true);
+        }
+        for (name, reference) in mangled {
+            if let Some(existing) = merged_props.get(&name).copied() {
+                let canonical = graph.symbols.merge_symbols(reference, existing);
+                merged_props.insert(name, canonical);
+            } else {
+                merged_props.insert(name, reference);
+            }
+        }
+        if let Some(char_freq) = char_freq {
+            frequency.include(&char_freq);
+        }
+    }
+
+    let mut sorted = merged_props
+        .into_values()
+        .map(|reference| crate::internal::renamer::StableSymbolCount {
+            stable_source_index: graph.stable_source_indices[reference.source_index as usize],
+            count: graph.symbols.get(reference).use_count_estimate,
+            reference,
+        })
+        .collect::<Vec<_>>();
+    crate::internal::renamer::sort_stable_symbol_counts(&mut sorted);
+
+    let minifier = DEFAULT_NAME_MINIFIER_JS.shuffle_by_char_freq(frequency);
+    let mut next_name = 0;
+    let mut result = HashMap::new();
+    for symbol_count in sorted {
+        let original_name = graph
+            .symbols
+            .get(symbol_count.reference)
+            .original_name
+            .clone();
+        if let Some(existing) = mangle_cache.get(&original_name) {
+            if let Some(existing) = existing.downcast_ref::<String>() {
+                result.insert(symbol_count.reference, existing.clone());
+            } else if existing.downcast_ref::<bool>().is_none() {
+                panic!("mangle cache values must be booleans or strings");
+            }
+            continue;
+        }
+
+        let mut name = minifier.number_to_minified_name(next_name);
+        next_name += 1;
+        while reserved_props.contains_key(&name) {
+            name = minifier.number_to_minified_name(next_name);
+            next_name += 1;
+        }
+        mangle_cache.insert(original_name, std::sync::Arc::new(name.clone()));
+        result.insert(symbol_count.reference, name);
+    }
+    result
 }
 
 /// Assign globally collision-free names to all local CSS symbols.
@@ -8065,7 +8168,7 @@ mod tests {
         generate_isolated_hash, generate_source_map_for_chunk,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
-        lower_esm_lazy_export, mangle_local_css, mark_file_live_for_tree_shaking,
+        lower_esm_lazy_export, mangle_local_css, mangle_props, mark_file_live_for_tree_shaking,
         match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
         populate_css_stub_lazy_export, prepare_css_asts, print_cross_chunk_bindings,
         propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
@@ -10695,6 +10798,57 @@ mod tests {
         assert_eq!(outputs[0].contents, b"image");
         assert_eq!(outputs[1].abs_path, "/out/app.css");
         assert_eq!(outputs[1].contents, b".app{color:red}\n");
+    }
+
+    #[test]
+    fn mangles_javascript_properties_with_cache_and_reservations() {
+        let foo_a = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let bar = Ref {
+            source_index: 1,
+            inner_index: 1,
+        };
+        let foo_b = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast {
+                symbols: vec![
+                    Symbol::new(SymbolKind::MangledProp, "_foo"),
+                    Symbol::new(SymbolKind::MangledProp, "_bar"),
+                ],
+                mangled_props: HashMap::from([("_foo".into(), foo_a), ("_bar".into(), bar)]),
+                reserved_props: HashMap::from([("a".into(), true)]),
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::MangledProp, "_foo")],
+                mangled_props: HashMap::from([("_foo".into(), foo_b)]),
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2], &[], false);
+        graph.symbols.get_mut(foo_a).use_count_estimate = 5;
+        graph.symbols.get_mut(foo_b).use_count_estimate = 3;
+        graph.symbols.get_mut(bar).use_count_estimate = 1;
+        let mut cache = crate::internal::config::MangleCache::from([(
+            "_bar".into(),
+            std::sync::Arc::new("z".to_string()) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        )]);
+
+        let names = mangle_props(&mut graph, &mut cache);
+
+        assert_eq!(graph.symbols.follow_symbols_const(foo_b), foo_a);
+        assert_eq!(names[&foo_a], "b");
+        assert_eq!(names[&bar], "z");
+        assert_eq!(
+            cache["_foo"].downcast_ref::<String>().map(String::as_str),
+            Some("b")
+        );
     }
 
     #[test]
