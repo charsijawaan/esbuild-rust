@@ -697,6 +697,24 @@ mod tests {
     }
 
     #[test]
+    fn processes_local_css_list_style_names() {
+        assert_eq!(
+            code(transform(
+                "div { list-style-type: custom } div { list-style: custom none } div { list-style: none custom } div { list-style: custom inside } div { list-style: inside inside } div { list-style-type: decimal } div { list-style: INITIAL }",
+                TransformOptions {
+                    sourcefile: "entry.module.css".into(),
+                    loader: Loader::LocalCss,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "div{list-style-type:i}div{list-style:i none}div{list-style:none i}div{list-style:i inside}div{list-style:inside s}div{list-style-type:decimal}div{list-style:INITIAL}\n"
+        );
+    }
+
+    #[test]
     fn minifies_css_transforms() {
         assert_eq!(
             code(transform(

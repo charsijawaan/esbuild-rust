@@ -662,6 +662,10 @@ impl Parser {
             "animation-name" | "-webkit-animation-name" => {
                 self.process_animation_names(&mut value);
             }
+            "list-style" => self.process_list_style_shorthand(&mut value),
+            "list-style-type" if value.len() == 1 => {
+                self.process_list_style_type(&mut value[0]);
+            }
             _ => {}
         }
         if self.minify_syntax {
@@ -868,6 +872,92 @@ impl Parser {
             return;
         }
         let reference = self.new_css_symbol(&token.text, token.loc);
+        tokens[index].kind = TokenKind::Symbol;
+        tokens[index].payload_index = reference.inner_index;
+    }
+
+    fn process_list_style_shorthand(&mut self, tokens: &mut [Token]) {
+        if !(1..=3).contains(&tokens.len()) {
+            return;
+        }
+        let mut found_image = false;
+        let mut found_position = false;
+        let mut type_index = None;
+        let mut none_count = 0;
+        for (index, token) in tokens.iter().enumerate() {
+            match token.kind {
+                TokenKind::String => return,
+                TokenKind::Url if !found_image => {
+                    found_image = true;
+                    continue;
+                }
+                TokenKind::Function if !found_image => {
+                    if matches!(
+                        token.text.to_ascii_lowercase().as_str(),
+                        "src"
+                            | "linear-gradient"
+                            | "repeating-linear-gradient"
+                            | "radial-gradient"
+                            | "radial-linear-gradient"
+                    ) {
+                        found_image = true;
+                        continue;
+                    }
+                }
+                TokenKind::Ident => {
+                    let lower = token.text.to_ascii_lowercase();
+                    if lower == "none" {
+                        none_count += 1;
+                        continue;
+                    }
+                    if !found_position && matches!(lower.as_str(), "inside" | "outside") {
+                        found_position = true;
+                        continue;
+                    }
+                    if type_index.is_none() {
+                        if CSS_WIDE_AND_RESERVED_KEYWORDS.contains(&lower.as_str())
+                            || is_predefined_counter_style(&lower)
+                        {
+                            return;
+                        }
+                        type_index = Some(index);
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        let Some(type_index) = type_index else {
+            return;
+        };
+        if !found_image && none_count > 0 {
+            none_count -= 1;
+        }
+        if none_count > 0 {
+            return;
+        }
+        self.mark_list_style_name(tokens, type_index);
+    }
+
+    fn process_list_style_type(&mut self, token: &mut Token) {
+        if token.kind != TokenKind::Ident {
+            return;
+        }
+        let lower = token.text.to_ascii_lowercase();
+        if lower != "none"
+            && !CSS_WIDE_AND_RESERVED_KEYWORDS.contains(&lower.as_str())
+            && !is_predefined_counter_style(&lower)
+        {
+            let reference = self.new_css_symbol(&token.text, token.loc);
+            token.kind = TokenKind::Symbol;
+            token.payload_index = reference.inner_index;
+        }
+    }
+
+    fn mark_list_style_name(&mut self, tokens: &mut [Token], index: usize) {
+        let reference = self.new_css_symbol(&tokens[index].text, tokens[index].loc);
         tokens[index].kind = TokenKind::Symbol;
         tokens[index].payload_index = reference.inner_index;
     }
@@ -2744,6 +2834,66 @@ const GENERIC_FONT_FAMILY_NAMES: &[&str] = &[
     "ui-monospace",
     "ui-rounded",
 ];
+
+fn is_predefined_counter_style(name: &str) -> bool {
+    matches!(
+        name,
+        "arabic-indic"
+            | "armenian"
+            | "bengali"
+            | "cambodian"
+            | "cjk-decimal"
+            | "decimal-leading-zero"
+            | "decimal"
+            | "devanagari"
+            | "georgian"
+            | "gujarati"
+            | "gurmukhi"
+            | "hebrew"
+            | "kannada"
+            | "khmer"
+            | "lao"
+            | "lower-armenian"
+            | "lower-roman"
+            | "malayalam"
+            | "mongolian"
+            | "myanmar"
+            | "oriya"
+            | "persian"
+            | "tamil"
+            | "telugu"
+            | "thai"
+            | "tibetan"
+            | "upper-armenian"
+            | "upper-roman"
+            | "hiragana-iroha"
+            | "hiragana"
+            | "katakana-iroha"
+            | "katakana"
+            | "lower-alpha"
+            | "lower-greek"
+            | "lower-latin"
+            | "upper-alpha"
+            | "upper-latin"
+            | "circle"
+            | "disc"
+            | "disclosure-closed"
+            | "disclosure-open"
+            | "square"
+            | "cjk-earthly-branch"
+            | "cjk-heavenly-stem"
+            | "japanese-formal"
+            | "japanese-informal"
+            | "korean-hangul-formal"
+            | "korean-hanja-formal"
+            | "korean-hanja-informal"
+            | "simp-chinese-formal"
+            | "simp-chinese-informal"
+            | "trad-chinese-formal"
+            | "trad-chinese-informal"
+            | "ethiopic-numeric"
+    )
+}
 
 fn minify_font_family(tokens: &[Token], minify_whitespace: bool) -> Option<Vec<Token>> {
     let mut result = Vec::new();
