@@ -2,7 +2,8 @@
 
 use crate::internal::compat::JsFeature;
 use crate::internal::js_ast::{
-    Expr, ExprData, OpCode, OptionalChain, Precedence, is_identifier_es5_and_es_next,
+    Ast, Binding, BindingData, BlockStmt, Expr, ExprData, LocalKind, OpCode, OptionalChain,
+    Precedence, Stmt, StmtData, is_identifier_es5_and_es_next,
 };
 use crate::internal::renamer::Renamer;
 
@@ -379,18 +380,336 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
         output: Vec::new(),
         renamer,
         options,
+        indent: 0,
     };
     printer.print_expr_at(expr, Precedence::Lowest);
     printer.output
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PrintResult {
+    pub js: Vec<u8>,
+}
+
+/// Prints all live AST parts as JavaScript.
+///
+/// # Panics
+///
+/// Panics if the tree contains an AST node whose printer case has not yet been
+/// ported.
+#[must_use]
+pub fn print(tree: &Ast, renamer: &dyn Renamer, options: Options) -> PrintResult {
+    let mut printer = Printer {
+        output: Vec::new(),
+        renamer,
+        options,
+        indent: 0,
+    };
+    if !tree.hashbang.is_empty() {
+        printer.output.extend_from_slice(b"#!");
+        printer.output.extend_from_slice(tree.hashbang.as_bytes());
+        printer.print_newline();
+    }
+    for directive in &tree.directives {
+        printer.print_indent();
+        printer.output.extend(quote_utf16(
+            &directive.encode_utf16().collect::<Vec<_>>(),
+            options,
+            false,
+        ));
+        printer.output.push(b';');
+        printer.print_newline();
+    }
+    for part in &tree.parts {
+        for statement in &part.statements {
+            printer.print_stmt(statement);
+        }
+    }
+    PrintResult { js: printer.output }
 }
 
 struct Printer<'a> {
     output: Vec<u8>,
     renamer: &'a dyn Renamer,
     options: Options,
+    indent: usize,
 }
 
 impl Printer<'_> {
+    #[allow(clippy::too_many_lines)]
+    fn print_stmt(&mut self, statement: &Stmt) {
+        let Some(data) = statement.data.as_deref() else {
+            return;
+        };
+        match data {
+            StmtData::TypeScript(_) => {}
+            StmtData::Empty => {
+                self.print_indent();
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::Comment(comment) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"//");
+                self.output.extend_from_slice(comment.text.as_bytes());
+                self.print_newline();
+            }
+            StmtData::Debugger => {
+                self.print_indent();
+                self.output.extend_from_slice(b"debugger;");
+                self.print_newline();
+            }
+            StmtData::Directive(directive) => {
+                self.print_indent();
+                self.output
+                    .extend(quote_utf16(&directive.value, self.options, false));
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::Expr(expression) => {
+                self.print_indent();
+                self.print_expr_at(&expression.value, Precedence::Lowest);
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::Local(local) => {
+                self.print_indent();
+                if local.is_export {
+                    self.output.extend_from_slice(b"export ");
+                }
+                self.output.extend_from_slice(match local.kind {
+                    LocalKind::Var => b"var ",
+                    LocalKind::Let => b"let ",
+                    LocalKind::Const => b"const ",
+                    LocalKind::Using => b"using ",
+                    LocalKind::AwaitUsing => b"await using ",
+                });
+                for (index, declaration) in local.declarations.iter().enumerate() {
+                    if index > 0 {
+                        self.output.push(b',');
+                        self.print_optional_space();
+                    }
+                    self.print_binding(&declaration.binding);
+                    if declaration.value_or_nil.data.is_some() {
+                        self.print_optional_space();
+                        self.output.push(b'=');
+                        self.print_optional_space();
+                        self.print_expr_at(&declaration.value_or_nil, Precedence::Comma);
+                    }
+                }
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::Block(block) => self.print_block(block),
+            StmtData::Return(return_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"return");
+                if return_statement.value_or_nil.data.is_some() {
+                    self.output.push(b' ');
+                    self.print_expr_at(&return_statement.value_or_nil, Precedence::Lowest);
+                }
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::Throw(throw_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"throw ");
+                self.print_expr_at(&throw_statement.value, Precedence::Lowest);
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::If(if_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"if");
+                self.print_optional_space();
+                self.output.push(b'(');
+                self.print_expr_at(&if_statement.test, Precedence::Lowest);
+                self.output.push(b')');
+                self.print_body(&if_statement.yes);
+                if if_statement.no_or_nil.data.is_some() {
+                    if !self.options.minify_whitespace {
+                        self.print_indent();
+                    }
+                    self.output.extend_from_slice(b"else");
+                    self.print_body(&if_statement.no_or_nil);
+                }
+            }
+            StmtData::While(while_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"while");
+                self.print_optional_space();
+                self.output.push(b'(');
+                self.print_expr_at(&while_statement.test, Precedence::Lowest);
+                self.output.push(b')');
+                self.print_body(&while_statement.body);
+            }
+            StmtData::DoWhile(do_while) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"do");
+                self.print_body(&do_while.body);
+                self.output.extend_from_slice(b"while");
+                self.print_optional_space();
+                self.output.push(b'(');
+                self.print_expr_at(&do_while.test, Precedence::Lowest);
+                self.output.extend_from_slice(b");");
+                self.print_newline();
+            }
+            StmtData::Break(break_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"break");
+                if let Some(label) = break_statement.label {
+                    self.output.push(b' ');
+                    self.print_identifier(&self.renamer.name_for_symbol(label.reference));
+                }
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::Continue(continue_statement) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"continue");
+                if let Some(label) = continue_statement.label {
+                    self.output.push(b' ');
+                    self.print_identifier(&self.renamer.name_for_symbol(label.reference));
+                }
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::ExportEquals(export) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"module.exports");
+                self.print_optional_space();
+                self.output.push(b'=');
+                self.print_optional_space();
+                self.print_expr_at(&export.value, Precedence::Comma);
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::LazyExport(export) => {
+                self.print_indent();
+                self.print_expr_at(&export.value, Precedence::Lowest);
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::ExportClause(_)
+            | StmtData::ExportFrom(_)
+            | StmtData::ExportDefault(_)
+            | StmtData::ExportStar(_)
+            | StmtData::Enum(_)
+            | StmtData::Namespace(_)
+            | StmtData::Function(_)
+            | StmtData::Class(_)
+            | StmtData::Label(_)
+            | StmtData::For(_)
+            | StmtData::ForIn(_)
+            | StmtData::ForOf(_)
+            | StmtData::With(_)
+            | StmtData::Try(_)
+            | StmtData::Switch(_)
+            | StmtData::Import(_) => {
+                panic!("Internal error: statement printer case has not been ported yet")
+            }
+        }
+    }
+
+    fn print_block(&mut self, block: &BlockStmt) {
+        self.output.push(b'{');
+        self.print_newline();
+        self.indent += 1;
+        for statement in &block.statements {
+            self.print_stmt(statement);
+        }
+        self.indent -= 1;
+        self.print_indent();
+        self.output.push(b'}');
+        self.print_newline();
+    }
+
+    fn print_body(&mut self, body: &Stmt) {
+        if let Some(StmtData::Block(block)) = body.data.as_deref() {
+            self.print_optional_space();
+            self.print_block(block);
+        } else {
+            self.print_newline();
+            self.indent += 1;
+            self.print_stmt(body);
+            self.indent -= 1;
+        }
+    }
+
+    fn print_binding(&mut self, binding: &Binding) {
+        match binding.data.as_deref() {
+            None | Some(BindingData::Missing) => {}
+            Some(BindingData::Identifier(identifier)) => {
+                self.print_identifier(&self.renamer.name_for_symbol(identifier.reference));
+            }
+            Some(BindingData::Array(array)) => {
+                self.output.push(b'[');
+                for (index, item) in array.items.iter().enumerate() {
+                    if index > 0 {
+                        self.output.push(b',');
+                        self.print_optional_space();
+                    }
+                    if array.has_spread && index + 1 == array.items.len() {
+                        self.output.extend_from_slice(b"...");
+                    }
+                    self.print_binding(&item.binding);
+                    if item.default_value_or_nil.data.is_some() {
+                        self.print_optional_space();
+                        self.output.push(b'=');
+                        self.print_optional_space();
+                        self.print_expr_at(&item.default_value_or_nil, Precedence::Comma);
+                    }
+                }
+                self.output.push(b']');
+            }
+            Some(BindingData::Object(object)) => {
+                self.output.push(b'{');
+                for (index, property) in object.properties.iter().enumerate() {
+                    if index > 0 {
+                        self.output.push(b',');
+                        self.print_optional_space();
+                    }
+                    if property.is_spread {
+                        self.output.extend_from_slice(b"...");
+                        self.print_binding(&property.value);
+                        continue;
+                    }
+                    if property.is_computed {
+                        self.output.push(b'[');
+                        self.print_expr_at(&property.key, Precedence::Lowest);
+                        self.output.push(b']');
+                    } else {
+                        self.print_expr_at(&property.key, Precedence::Lowest);
+                    }
+                    self.output.push(b':');
+                    self.print_optional_space();
+                    self.print_binding(&property.value);
+                    if property.default_value_or_nil.data.is_some() {
+                        self.print_optional_space();
+                        self.output.push(b'=');
+                        self.print_optional_space();
+                        self.print_expr_at(&property.default_value_or_nil, Precedence::Comma);
+                    }
+                }
+                self.output.push(b'}');
+            }
+        }
+    }
+
+    fn print_indent(&mut self) {
+        if !self.options.minify_whitespace {
+            for _ in 0..self.indent {
+                self.output.extend_from_slice(b"  ");
+            }
+        }
+    }
+
+    fn print_newline(&mut self) {
+        if !self.options.minify_whitespace {
+            self.output.push(b'\n');
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn print_expr_at(&mut self, expr: &Expr, level: Precedence) {
         let Some(data) = expr.data.as_deref() else {
@@ -691,7 +1010,7 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use super::{
-        Options, format_non_negative_float, format_number, print_expr, quote_identifier,
+        Options, format_non_negative_float, format_number, print, print_expr, quote_identifier,
         quote_utf16,
     };
     use crate::internal::{
@@ -850,6 +1169,13 @@ mod tests {
         assert_eq!(
             printed,
             ["1 + 2 * 3", "a - (b - c)", "object?.value ?? fallback"]
+        );
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "const math = 1 + 2 * 3;\n\
+             const grouped = a - (b - c);\n\
+             const read = object?.value ?? fallback;\n"
         );
 
         let Some(StmtData::Local(local)) = ast.parts[1].statements[0].data.as_deref() else {
