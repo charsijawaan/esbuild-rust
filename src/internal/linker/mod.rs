@@ -12,7 +12,7 @@ use crate::internal::{
         INVALID_REF, ImportItemStatus, ImportKind, ImportRecordFlags, Index32, LocRef,
         NamespaceAlias, Ref, SymbolKind,
     },
-    bundler::hash_for_file_name,
+    bundler::{hash_for_file_name, path_relative_to_outbase},
     config::{
         Format, Loader, Options, PathPlaceholder, PathPlaceholders, PathTemplate, has_placeholder,
         substitute_template, template_to_string,
@@ -2432,6 +2432,82 @@ pub fn generate_cross_chunk_stmts(
     }
 }
 
+/// Assign the output path template for every JavaScript chunk, leaving the
+/// content-hash placeholder unresolved until final hashing.
+///
+/// # Panics
+///
+/// Panics when an entry-point chunk does not have a corresponding graph entry
+/// point or an explicit output file extension cannot be removed from its base.
+pub fn assign_chunk_path_templates(
+    file_system: &dyn Fs,
+    graph: &LinkerGraph,
+    chunks: &mut [ChunkInfo],
+    options: &Options,
+) {
+    for chunk in chunks {
+        let standard_extension = options.output_extension_js.clone();
+        let (directory, base, extension, mut template) = if chunk.is_entry_point {
+            let file = &graph.files[chunk.source_index as usize];
+            let template = if file.is_user_specified_entry_point() {
+                options.entry_path_template.clone()
+            } else {
+                options.chunk_path_template.clone()
+            };
+
+            if options.abs_output_file.is_empty() {
+                let (directory, base) = path_relative_to_outbase(
+                    &file.input_file,
+                    options,
+                    file_system,
+                    !file.is_user_specified_entry_point(),
+                    &graph.entry_points()[chunk.entry_point_bit].output_path,
+                );
+                (directory, base, standard_extension, template)
+            } else {
+                let mut base = file_system.base(&options.abs_output_file);
+                let original_extension = file_system.ext(&base);
+                base.truncate(
+                    base.len()
+                        .checked_sub(original_extension.len())
+                        .expect("output extension must be a suffix of the base name"),
+                );
+                let extension =
+                    if matches!(file.input_file.repr.as_ref(), Some(InputFileRepr::Css(_)))
+                        || standard_extension != options.output_extension_css
+                    {
+                        original_extension
+                    } else {
+                        standard_extension
+                    };
+                ("/".into(), base, extension, template)
+            }
+        } else {
+            (
+                "/".into(),
+                "chunk".into(),
+                standard_extension,
+                options.chunk_path_template.clone(),
+            )
+        };
+
+        let extension_without_dot = extension.strip_prefix('.').unwrap_or(&extension).to_owned();
+        template.push(PathTemplate {
+            data: extension,
+            ..PathTemplate::default()
+        });
+        chunk.final_template = substitute_template(
+            &template,
+            &PathPlaceholders {
+                dir: Some(directory),
+                name: Some(base),
+                ext: Some(extension_without_dot),
+                ..PathPlaceholders::default()
+            },
+        );
+    }
+}
+
 fn hash_write_u32(hash: &mut xxhash::Digest, value: u32) {
     hash.write(&value.to_le_bytes());
 }
@@ -2751,10 +2827,11 @@ mod tests {
         AmbiguousReExport, AssetPath, ChunkImport, ChunkInfo, ChunkPath, CrossChunkImport,
         CrossChunkImportItem, ImportStatus, ImportTracker, MatchImportKind, OutputPathContext,
         OutputPiece, OutputPieceIndexKind, PartRange, StableRef, add_exports_for_export_star,
-        advance_import_tracker, append_or_extend_part_range, bind_imports_to_exports_for_file,
-        classify_module_wrappers, compute_cross_chunk_dependencies, compute_js_chunks,
-        create_wrapper_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
-        generate_cross_chunk_stmts, generate_isolated_hash, has_dynamic_exports_due_to_export_star,
+        advance_import_tracker, append_or_extend_part_range, assign_chunk_path_templates,
+        bind_imports_to_exports_for_file, classify_module_wrappers,
+        compute_cross_chunk_dependencies, compute_js_chunks, create_wrapper_for_file,
+        enforce_no_cyclic_chunk_imports, finalize_chunk_paths, generate_cross_chunk_stmts,
+        generate_isolated_hash, has_dynamic_exports_due_to_export_star,
         import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
         join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
         path_between_chunks, propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
@@ -2763,7 +2840,7 @@ mod tests {
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
-        config::{Format, Loader, Options, PathPlaceholder, PathTemplate},
+        config::{Format, Loader, Options, PathPlaceholder, PathTemplate, template_to_string},
         css_ast::{
             ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
             WhitespaceFlags,
@@ -3011,6 +3088,65 @@ mod tests {
         finalize_chunk_paths(&file_system, &graph, &mut chunks, &Options::default());
         assert_eq!(chunks[0].final_rel_path.len(), "chunk-".len() + 8);
         assert_eq!(chunks[1].final_rel_path.len(), "chunk-".len() + 8);
+    }
+
+    #[test]
+    fn assigns_non_entry_chunk_path_template() {
+        let graph = clone_linker_graph(&[], &[], &[], false);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let options = Options {
+            chunk_path_template: vec![
+                PathTemplate {
+                    data: "assets/".into(),
+                    placeholder: PathPlaceholder::Name,
+                },
+                PathTemplate {
+                    data: "-".into(),
+                    placeholder: PathPlaceholder::Hash,
+                },
+            ],
+            output_extension_js: ".mjs".into(),
+            ..Options::default()
+        };
+        let mut chunks = vec![ChunkInfo::default()];
+        assign_chunk_path_templates(&file_system, &graph, &mut chunks, &options);
+        assert_eq!(
+            template_to_string(&chunks[0].final_template),
+            "assets/chunk-[hash].mjs"
+        );
+    }
+
+    #[test]
+    fn explicit_outfile_controls_entry_chunk_name_and_extension() {
+        let input_files = [js_file(js_ast::Ast::default())];
+        let entry_points = [EntryPoint::default()];
+        let graph = clone_linker_graph(&input_files, &[0], &entry_points, false);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let options = Options {
+            abs_output_file: "/out/custom.cjs".into(),
+            entry_path_template: vec![
+                PathTemplate {
+                    placeholder: PathPlaceholder::Name,
+                    ..PathTemplate::default()
+                },
+                PathTemplate {
+                    data: "-".into(),
+                    placeholder: PathPlaceholder::Hash,
+                },
+            ],
+            output_extension_js: ".js".into(),
+            output_extension_css: ".css".into(),
+            ..Options::default()
+        };
+        let mut chunks = vec![ChunkInfo {
+            is_entry_point: true,
+            ..ChunkInfo::default()
+        }];
+        assign_chunk_path_templates(&file_system, &graph, &mut chunks, &options);
+        assert_eq!(
+            template_to_string(&chunks[0].final_template),
+            "custom-[hash].cjs"
+        );
     }
 
     #[test]
