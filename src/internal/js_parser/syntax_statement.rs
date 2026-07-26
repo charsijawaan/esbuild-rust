@@ -4,7 +4,8 @@ use crate::internal::{
     js_ast::{
         Binding, BindingData, BlockStmt, BreakStmt, Catch, ContinueStmt, Decl, DoWhileStmt, Expr,
         ExprData, ExprStmt, Finally, IdentifierBinding, IdentifierExpr, IfStmt, LocalKind,
-        LocalStmt, Precedence, ReturnStmt, Stmt, StmtData, ThrowStmt, TryStmt, WhileStmt, WithStmt,
+        LocalStmt, Precedence, ReturnStmt, Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt,
+        TryStmt, WhileStmt, WithStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
@@ -234,6 +235,59 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                     finally,
                     block,
                     block_loc,
+                }),
+            )
+        }
+        Token::Switch => {
+            lexer.next();
+            lexer.expect(Token::OpenParen);
+            let test = parse_expression(core, lexer, Precedence::Lowest, true);
+            lexer.expect(Token::CloseParen);
+            let body_loc = lexer.loc();
+            lexer.expect(Token::OpenBrace);
+            let mut cases = Vec::new();
+            let mut found_default = false;
+            while lexer.token != Token::CloseBrace {
+                let case_loc = lexer.loc();
+                let value_or_nil = if lexer.token == Token::Default {
+                    if found_default {
+                        core.add_error_range(
+                            lexer.range(),
+                            "Multiple default clauses are not allowed",
+                        );
+                    }
+                    found_default = true;
+                    lexer.next();
+                    lexer.expect(Token::Colon);
+                    Expr::default()
+                } else {
+                    lexer.expect(Token::Case);
+                    let value = parse_expression(core, lexer, Precedence::Lowest, true);
+                    lexer.expect(Token::Colon);
+                    value
+                };
+                let mut body = Vec::new();
+                while !matches!(
+                    lexer.token,
+                    Token::CloseBrace | Token::Case | Token::Default
+                ) {
+                    body.push(parse_statement(core, lexer));
+                }
+                cases.push(SwitchCase {
+                    value_or_nil,
+                    body,
+                    loc: case_loc,
+                });
+            }
+            let close_brace_loc = lexer.loc();
+            lexer.expect(Token::CloseBrace);
+            Stmt::new(
+                loc,
+                StmtData::Switch(SwitchStmt {
+                    test,
+                    cases,
+                    body_loc,
+                    close_brace_loc,
                 }),
             )
         }
@@ -527,6 +581,27 @@ mod tests {
                 .as_ref()
                 .is_some_and(|catch| catch.binding_or_nil.data.is_none())
         );
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_switch_cases_and_reports_duplicate_defaults() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"{switch (value) { case 1: work(); break; default: other(); default: finalWork(); }}"[..],
+            ),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log.clone(), source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new_with_log(source, Options::default(), log.clone());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        let Some(StmtData::Switch(switch_stmt)) = block.statements[0].data.as_deref() else {
+            panic!("expected switch");
+        };
+        assert_eq!(switch_stmt.cases.len(), 3);
+        assert_eq!(switch_stmt.cases[0].body.len(), 2);
+        assert_eq!(log.peek().len(), 1);
         assert_eq!(lexer.token, Token::EndOfFile);
     }
 }
