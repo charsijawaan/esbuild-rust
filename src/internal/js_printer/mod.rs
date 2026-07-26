@@ -1,5 +1,6 @@
 //! Port of upstream `internal/js_printer`.
 
+use crate::internal::ast::ImportRecord;
 use crate::internal::compat::JsFeature;
 use crate::internal::js_ast::{
     Ast, Binding, BindingData, BlockStmt, Expr, ExprData, LocalKind, OpCode, OptionalChain,
@@ -381,6 +382,7 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
         renamer,
         options,
         indent: 0,
+        import_records: &[],
     };
     printer.print_expr_at(expr, Precedence::Lowest);
     printer.output
@@ -404,6 +406,7 @@ pub fn print(tree: &Ast, renamer: &dyn Renamer, options: Options) -> PrintResult
         renamer,
         options,
         indent: 0,
+        import_records: &tree.import_records,
     };
     if !tree.hashbang.is_empty() {
         printer.output.extend_from_slice(b"#!");
@@ -433,6 +436,7 @@ struct Printer<'a> {
     renamer: &'a dyn Renamer,
     options: Options,
     indent: usize,
+    import_records: &'a [ImportRecord],
 }
 
 impl Printer<'_> {
@@ -720,13 +724,86 @@ impl Printer<'_> {
                 self.output.push(b';');
                 self.print_newline();
             }
-            StmtData::ExportClause(_)
-            | StmtData::ExportFrom(_)
-            | StmtData::ExportDefault(_)
-            | StmtData::ExportStar(_)
-            | StmtData::Enum(_)
-            | StmtData::Namespace(_)
-            | StmtData::Import(_) => {
+            StmtData::Import(import) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"import");
+                let has_clause = import.default_name.is_some()
+                    || import.star_name_loc.is_some()
+                    || import.items.as_ref().is_some_and(|items| !items.is_empty());
+                if has_clause {
+                    self.output.push(b' ');
+                    let mut needs_comma = false;
+                    if let Some(default_name) = import.default_name {
+                        self.print_identifier(
+                            &self.renamer.name_for_symbol(default_name.reference),
+                        );
+                        needs_comma = true;
+                    }
+                    if import.star_name_loc.is_some() {
+                        if needs_comma {
+                            self.output.push(b',');
+                            self.print_optional_space();
+                        }
+                        self.output.extend_from_slice(b"* as ");
+                        self.print_identifier(&self.renamer.name_for_symbol(import.namespace_ref));
+                    } else if let Some(items) = &import.items {
+                        if needs_comma {
+                            self.output.push(b',');
+                            self.print_optional_space();
+                        }
+                        self.print_import_items(items, true);
+                    }
+                    self.output.extend_from_slice(b" from ");
+                } else {
+                    self.output.push(b' ');
+                }
+                self.print_import_path(import.import_record_index);
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::ExportClause(export) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"export ");
+                self.print_import_items(&export.items, false);
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::ExportFrom(export) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"export ");
+                self.print_export_from_items(&export.items);
+                self.output.extend_from_slice(b" from ");
+                self.print_import_path(export.import_record_index);
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::ExportStar(export) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"export *");
+                if let Some(alias) = &export.alias {
+                    self.output.extend_from_slice(b" as ");
+                    self.print_identifier(&alias.original_name);
+                }
+                self.output.extend_from_slice(b" from ");
+                self.print_import_path(export.import_record_index);
+                self.output.push(b';');
+                self.print_newline();
+            }
+            StmtData::ExportDefault(export) => {
+                self.print_indent();
+                self.output.extend_from_slice(b"export default ");
+                match export.value.data.as_deref() {
+                    Some(StmtData::Expr(expression)) => {
+                        self.print_expr_at(&expression.value, Precedence::Comma);
+                        self.output.push(b';');
+                    }
+                    Some(StmtData::Function(function)) => self.print_function(&function.function),
+                    Some(StmtData::Class(class)) => self.print_class(&class.class),
+                    _ => panic!("Internal error: invalid default export"),
+                }
+                self.print_newline();
+            }
+            StmtData::Enum(_) | StmtData::Namespace(_) => {
                 panic!("Internal error: statement printer case has not been ported yet")
             }
         }
@@ -854,6 +931,81 @@ impl Printer<'_> {
             }
             _ => panic!("Internal error: invalid for-loop initializer"),
         }
+    }
+
+    fn print_import_items(
+        &mut self,
+        items: &[crate::internal::js_ast::ClauseItem],
+        is_import: bool,
+    ) {
+        self.output.push(b'{');
+        if !items.is_empty() {
+            self.print_optional_space();
+        }
+        for (index, item) in items.iter().enumerate() {
+            if index > 0 {
+                self.output.push(b',');
+                self.print_optional_space();
+            }
+            let local_name = self.renamer.name_for_symbol(item.name.reference);
+            let (original, alias) = if is_import {
+                (&item.alias, &local_name)
+            } else {
+                (&local_name, &item.alias)
+            };
+            self.print_clause_name(original);
+            if original != alias {
+                self.output.extend_from_slice(b" as ");
+                self.print_clause_name(alias);
+            }
+        }
+        if !items.is_empty() {
+            self.print_optional_space();
+        }
+        self.output.push(b'}');
+    }
+
+    fn print_export_from_items(&mut self, items: &[crate::internal::js_ast::ClauseItem]) {
+        self.output.push(b'{');
+        if !items.is_empty() {
+            self.print_optional_space();
+        }
+        for (index, item) in items.iter().enumerate() {
+            if index > 0 {
+                self.output.push(b',');
+                self.print_optional_space();
+            }
+            self.print_clause_name(&item.original_name);
+            if item.original_name != item.alias {
+                self.output.extend_from_slice(b" as ");
+                self.print_clause_name(&item.alias);
+            }
+        }
+        if !items.is_empty() {
+            self.print_optional_space();
+        }
+        self.output.push(b'}');
+    }
+
+    fn print_clause_name(&mut self, name: &str) {
+        if is_identifier_es5_and_es_next(name) {
+            self.print_identifier(name);
+        } else {
+            self.output.extend(quote_utf16(
+                &name.encode_utf16().collect::<Vec<_>>(),
+                self.options,
+                false,
+            ));
+        }
+    }
+
+    fn print_import_path(&mut self, index: u32) {
+        let record = &self.import_records[usize::try_from(index).expect("import record index")];
+        self.output.extend(quote_utf16(
+            &record.path.text.encode_utf16().collect::<Vec<_>>(),
+            self.options,
+            false,
+        ));
     }
 
     fn print_function(&mut self, function: &crate::internal::js_ast::Function) {
@@ -1720,6 +1872,42 @@ mod tests {
              \x20\x20}\n\
              \x20\x20static origin = new Point(0);\n\
              }\n"
+        );
+    }
+
+    #[test]
+    fn prints_import_and_export_statements() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"import value, {named as local} from 'pkg';\
+                  import * as ns from 'other';\
+                  import 'side';\
+                  export {local as renamed};\
+                  export {external as out} from 'third';\
+                  export * from 'all';\
+                  export default value;"
+                    .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "import value, { named as local } from \"pkg\";\n\
+             import * as ns from \"other\";\n\
+             import \"side\";\n\
+             export { local as renamed };\n\
+             export { external as out } from \"third\";\n\
+             export * from \"all\";\n\
+             export default value;\n"
         );
     }
 }
