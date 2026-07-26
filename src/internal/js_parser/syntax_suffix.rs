@@ -2,8 +2,8 @@
 
 use crate::internal::{
     js_ast::{
-        CallExpr, CallKind, Expr, ExprData, IndexExpr, OpCode, OptionalChain, Precedence,
-        PrivateIdentifierExpr, SpreadExpr, UnaryExpr, is_property_access,
+        BinaryExpr, CallExpr, CallKind, Expr, ExprData, IndexExpr, OpCode, OptionalChain,
+        Precedence, PrivateIdentifierExpr, SpreadExpr, UnaryExpr, is_property_access,
     },
     js_lexer::{Lexer, Token},
     logger::Loc,
@@ -90,6 +90,46 @@ pub(crate) fn binary_operator(token: Token) -> Option<BinaryOperator> {
         precedence,
         is_right_associative,
     })
+}
+
+pub(crate) fn parse_binary_expression(
+    lexer: &mut Lexer,
+    minimum_precedence: Precedence,
+    allow_in: bool,
+    parse_operand: &mut impl FnMut(&mut Lexer) -> Expr,
+) -> Expr {
+    let mut left = parse_operand(lexer);
+    loop {
+        let Some(operator) = binary_operator(lexer.token) else {
+            return left;
+        };
+        if operator.precedence <= minimum_precedence || (lexer.token == Token::In && !allow_in) {
+            return left;
+        }
+        lexer.next();
+        let right_minimum = if operator.is_right_associative {
+            precedence_before(operator.precedence)
+        } else {
+            operator.precedence
+        };
+        let right = parse_binary_expression(lexer, right_minimum, allow_in, parse_operand);
+        left = Expr::new(
+            left.loc,
+            ExprData::Binary(BinaryExpr {
+                left,
+                right,
+                op: operator.op,
+            }),
+        );
+    }
+}
+
+const fn precedence_before(precedence: Precedence) -> Precedence {
+    match precedence {
+        Precedence::Assign => Precedence::Yield,
+        Precedence::Exponentiation => Precedence::Multiply,
+        _ => precedence,
+    }
 }
 
 pub(crate) fn parse_call_args(
@@ -317,7 +357,10 @@ pub(crate) fn parse_high_precedence_suffix_chain(
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use super::{binary_operator, parse_call_args, parse_high_precedence_suffix_chain};
+    use super::{
+        binary_operator, parse_binary_expression, parse_call_args,
+        parse_high_precedence_suffix_chain,
+    };
     use crate::internal::{
         config::TsOptions,
         js_ast::{Expr, ExprData},
@@ -401,5 +444,72 @@ mod tests {
         );
         assert!(assign.is_right_associative);
         assert!(binary_operator(Token::CloseParen).is_none());
+    }
+
+    #[test]
+    fn precedence_climbing_groups_left_and_right_associative_operators() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"1 + 2 * 3 ** 4 ** 5, 6"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source, TsOptions::default());
+        let mut operand = |lexer: &mut Lexer| {
+            let loc = lexer.loc();
+            let value = lexer.number;
+            lexer.next();
+            Expr::new(loc, ExprData::Number(value))
+        };
+        let result = parse_binary_expression(
+            &mut lexer,
+            crate::internal::js_ast::Precedence::Lowest,
+            true,
+            &mut operand,
+        );
+        let Some(ExprData::Binary(comma)) = result.data.as_deref() else {
+            panic!("expected comma expression");
+        };
+        assert_eq!(comma.op, crate::internal::js_ast::OpCode::BinaryComma);
+        let Some(ExprData::Binary(add)) = comma.left.data.as_deref() else {
+            panic!("expected addition");
+        };
+        assert_eq!(add.op, crate::internal::js_ast::OpCode::BinaryAdd);
+        let Some(ExprData::Binary(multiply)) = add.right.data.as_deref() else {
+            panic!("expected multiplication");
+        };
+        assert_eq!(multiply.op, crate::internal::js_ast::OpCode::BinaryMultiply);
+        let Some(ExprData::Binary(power)) = multiply.right.data.as_deref() else {
+            panic!("expected exponentiation");
+        };
+        assert_eq!(power.op, crate::internal::js_ast::OpCode::BinaryPower);
+        assert!(matches!(
+            power.right.data.as_deref(),
+            Some(ExprData::Binary(right)) if right.op
+                == crate::internal::js_ast::OpCode::BinaryPower
+        ));
+    }
+
+    #[test]
+    fn in_operator_can_be_suppressed_for_loop_initializers() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"1 in 2"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source, TsOptions::default());
+        let mut operand = |lexer: &mut Lexer| {
+            let loc = lexer.loc();
+            let value = lexer.number;
+            lexer.next();
+            Expr::new(loc, ExprData::Number(value))
+        };
+        let result = parse_binary_expression(
+            &mut lexer,
+            crate::internal::js_ast::Precedence::Lowest,
+            false,
+            &mut operand,
+        );
+        assert!(matches!(result.data.as_deref(), Some(ExprData::Number(_))));
+        assert_eq!(lexer.token, Token::In);
     }
 }
