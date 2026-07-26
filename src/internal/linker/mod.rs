@@ -1793,6 +1793,133 @@ pub fn create_exports_for_file(
     }
 }
 
+/// Finalize per-part symbol uses and local dependency edges for one file.
+///
+/// This runs after imports and exports have been matched, so TypeScript enum
+/// property accesses and calls to functions that will be inlined can be
+/// excluded from reachability counts.
+///
+/// # Panics
+///
+/// Panics when source symbols, imported bindings, or part indexes violate
+/// linker graph invariants.
+#[allow(clippy::too_many_lines)]
+pub fn finalize_part_dependencies_for_file(graph: &mut LinkerGraph, source_index: u32) {
+    let repr = graph.files[source_index as usize]
+        .input_file
+        .repr
+        .take()
+        .expect("dependency source must have a representation");
+    let InputFileRepr::Js(mut repr) = repr else {
+        panic!("dependency source must be JavaScript");
+    };
+    let mut local_dependencies = HashMap::new();
+
+    for part_index in 0..repr.ast.parts.len() {
+        {
+            let part = &mut repr.ast.parts[part_index];
+            for (reference, properties) in &part.import_symbol_property_uses {
+                let mut symbol_use = part.symbol_uses.get(reference).copied().unwrap_or_default();
+                let mut handled_as_enum = false;
+                if let Some(import_data) = repr.meta.imports_to_bind.get(reference)
+                    && graph.symbols.get(import_data.reference).kind == SymbolKind::TsEnum
+                    && let Some(enum_values) = graph.ts_enums.get(&import_data.reference)
+                {
+                    let mut found_non_inlined_enum = false;
+                    for (name, property_use) in properties {
+                        if !enum_values.contains_key(name) {
+                            found_non_inlined_enum = true;
+                            symbol_use.count_estimate += property_use.count_estimate;
+                        }
+                    }
+                    if found_non_inlined_enum {
+                        part.symbol_uses.insert(*reference, symbol_use);
+                    }
+                    handled_as_enum = true;
+                }
+                if !handled_as_enum {
+                    for property_use in properties.values() {
+                        symbol_use.count_estimate += property_use.count_estimate;
+                    }
+                    part.symbol_uses.insert(*reference, symbol_use);
+                }
+            }
+
+            for (reference, call_use) in &part.symbol_call_uses {
+                let mut symbol_use = part.symbol_uses.get(reference).copied().unwrap_or_default();
+                let mut symbol = graph.symbols.get(*reference);
+                if symbol.kind == SymbolKind::Import
+                    && let Some(import_data) = repr.meta.imports_to_bind.get(reference)
+                {
+                    symbol = graph.symbols.get(import_data.reference);
+                }
+                let flags = symbol.flags;
+                if flags.contains(crate::internal::ast::SymbolFlags::IS_EMPTY_FUNCTION)
+                    && !flags
+                        .contains(crate::internal::ast::SymbolFlags::COULD_POTENTIALLY_BE_MUTATED)
+                {
+                    continue;
+                }
+                let mut call_count = call_use.call_count_estimate;
+                if flags.contains(crate::internal::ast::SymbolFlags::IS_IDENTITY_FUNCTION)
+                    && !flags
+                        .contains(crate::internal::ast::SymbolFlags::COULD_POTENTIALLY_BE_MUTATED)
+                {
+                    call_count = call_count
+                        .checked_sub(call_use.single_arg_non_spread_call_count_estimate)
+                        .expect("single-argument call count must not exceed total call count");
+                    if call_count == 0 {
+                        continue;
+                    }
+                }
+                symbol_use.count_estimate += call_count;
+                part.symbol_uses.insert(*reference, symbol_use);
+            }
+        }
+
+        let references = repr.ast.parts[part_index]
+            .symbol_uses
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for reference in references {
+            if let Some(import_data) = repr.meta.imports_to_bind.get(&reference)
+                && graph.const_values.contains_key(&import_data.reference)
+            {
+                repr.ast.parts[part_index]
+                    .symbol_uses
+                    .remove(&import_data.reference);
+                continue;
+            }
+
+            let declaring_parts = repr
+                .top_level_symbol_to_parts(reference)
+                .unwrap_or_default()
+                .to_vec();
+            for declaring_part_index in declaring_parts {
+                let current_part_index = u32::try_from(part_index).expect("part index fits in u32");
+                if local_dependencies.get(&declaring_part_index) != Some(&current_part_index) {
+                    local_dependencies.insert(declaring_part_index, current_part_index);
+                    repr.ast.parts[part_index]
+                        .dependencies
+                        .push(js_ast::Dependency {
+                            source_index,
+                            part_index: declaring_part_index,
+                        });
+                }
+            }
+
+            if let Some(named_import) = repr.ast.named_imports.get_mut(&reference) {
+                named_import
+                    .local_parts_with_uses
+                    .push(u32::try_from(part_index).expect("part index fits in u32"));
+            }
+        }
+    }
+
+    graph.files[source_index as usize].input_file.repr = Some(InputFileRepr::Js(repr));
+}
+
 /// Create the synthetic wrapper part used by wrapped `CommonJS` and ESM files.
 ///
 /// # Panics
@@ -7275,19 +7402,20 @@ mod tests {
         compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
         convert_stmts_for_chunk, create_exports_for_file, create_wrapper_for_file,
         enforce_no_cyclic_chunk_imports, finalize_chunk_paths, finalize_javascript_chunk_outputs,
-        find_imported_css_files_in_js_order, find_imported_files_in_css_order,
-        generate_code_for_lazy_exports, generate_cross_chunk_stmts, generate_css_chunk,
-        generate_css_module_exports, generate_entry_point_tail, generate_global_name_prefix,
-        generate_isolated_hash, generate_source_map_for_chunk,
-        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
-        lower_esm_lazy_export, mangle_local_css, mark_file_live_for_tree_shaking,
-        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
-        populate_css_stub_lazy_export, prepare_css_asts, print_cross_chunk_bindings,
-        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
-        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
+        finalize_part_dependencies_for_file, find_imported_css_files_in_js_order,
+        find_imported_files_in_css_order, generate_code_for_lazy_exports,
+        generate_cross_chunk_stmts, generate_css_chunk, generate_css_module_exports,
+        generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
+        generate_source_map_for_chunk, has_dynamic_exports_due_to_export_star,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, lower_common_js_lazy_export, lower_esm_lazy_export,
+        mangle_local_css, mark_file_live_for_tree_shaking, match_import_with_export,
+        merge_adjacent_local_stmts, path_between_chunks, populate_css_stub_lazy_export,
+        prepare_css_asts, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
+        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
+        wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -12641,6 +12769,134 @@ mod tests {
                         if identifier.reference == to_common_js_ref
                 )
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn finalizes_inlined_uses_and_local_part_dependencies() {
+        let declared_ref = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let empty_ref = Ref {
+            source_index: 1,
+            inner_index: 1,
+        };
+        let identity_ref = Ref {
+            source_index: 1,
+            inner_index: 2,
+        };
+        let enum_import_ref = Ref {
+            source_index: 1,
+            inner_index: 3,
+        };
+        let enum_ref = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let mut empty_symbol = Symbol::new(SymbolKind::Other, "empty");
+        empty_symbol.flags |= crate::internal::ast::SymbolFlags::IS_EMPTY_FUNCTION;
+        let mut identity_symbol = Symbol::new(SymbolKind::Other, "identity");
+        identity_symbol.flags |= crate::internal::ast::SymbolFlags::IS_IDENTITY_FUNCTION;
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast {
+                symbols: vec![
+                    Symbol::new(SymbolKind::Other, "declared"),
+                    empty_symbol,
+                    identity_symbol,
+                    Symbol::new(SymbolKind::Import, "Enum"),
+                ],
+                named_imports: HashMap::from([(
+                    enum_import_ref,
+                    NamedImport {
+                        alias: "Enum".into(),
+                        ..NamedImport::default()
+                    },
+                )]),
+                parts: vec![
+                    js_ast::Part {
+                        declared_symbols: vec![js_ast::DeclaredSymbol {
+                            reference: declared_ref,
+                            is_top_level: true,
+                        }],
+                        ..js_ast::Part::default()
+                    },
+                    js_ast::Part {
+                        symbol_uses: HashMap::from([(
+                            declared_ref,
+                            js_ast::SymbolUse { count_estimate: 1 },
+                        )]),
+                        symbol_call_uses: HashMap::from([
+                            (
+                                empty_ref,
+                                js_ast::SymbolCallUse {
+                                    call_count_estimate: 2,
+                                    ..js_ast::SymbolCallUse::default()
+                                },
+                            ),
+                            (
+                                identity_ref,
+                                js_ast::SymbolCallUse {
+                                    call_count_estimate: 3,
+                                    single_arg_non_spread_call_count_estimate: 2,
+                                },
+                            ),
+                        ]),
+                        import_symbol_property_uses: HashMap::from([(
+                            enum_import_ref,
+                            HashMap::from([
+                                ("Known".into(), js_ast::SymbolUse { count_estimate: 4 }),
+                                ("Unknown".into(), js_ast::SymbolUse { count_estimate: 5 }),
+                            ]),
+                        )]),
+                        ..js_ast::Part::default()
+                    },
+                ],
+                top_level_symbol_to_parts_from_parser: HashMap::from([(declared_ref, vec![0])]),
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::TsEnum, "Enum")],
+                ts_enums: HashMap::from([(
+                    enum_ref,
+                    HashMap::from([("Known".into(), js_ast::TsEnumValue::default())]),
+                )]),
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2], &[], false);
+        let Some(InputFileRepr::Js(repr)) = graph.files[1].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta.imports_to_bind.insert(
+            enum_import_ref,
+            crate::internal::graph::ImportData {
+                source_index: 2,
+                reference: enum_ref,
+                ..crate::internal::graph::ImportData::default()
+            },
+        );
+
+        finalize_part_dependencies_for_file(&mut graph, 1);
+
+        let repr = js_repr(&graph, 1);
+        let part = &repr.ast.parts[1];
+        assert_eq!(part.symbol_uses[&declared_ref].count_estimate, 1);
+        assert!(!part.symbol_uses.contains_key(&empty_ref));
+        assert_eq!(part.symbol_uses[&identity_ref].count_estimate, 1);
+        assert_eq!(part.symbol_uses[&enum_import_ref].count_estimate, 5);
+        assert_eq!(
+            part.dependencies,
+            [js_ast::Dependency {
+                source_index: 1,
+                part_index: 0,
+            }]
+        );
+        assert_eq!(
+            repr.ast.named_imports[&enum_import_ref].local_parts_with_uses,
+            [1]
+        );
     }
 
     #[test]
