@@ -2374,6 +2374,47 @@ mod tests {
     }
 
     #[test]
+    fn converts_esm_entry_exports_to_common_js() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([(
+                "/project/entry.js".into(),
+                "export const value = 123".into(),
+            )]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::CommonJs,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert!(compiled.scan_result.import_issues.is_empty());
+        assert_eq!(compiled.output_files.len(), 1);
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains("__export(entry_exports"));
+        assert!(output.contains("value: () => value"));
+        assert!(output.contains("const value = 123;"));
+        assert!(output.contains("module.exports = __toCommonJS(entry_exports);"));
+        assert!(!output.contains("export const"));
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn scans_entry_points_into_a_recursive_module_graph() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
