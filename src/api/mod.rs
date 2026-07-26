@@ -1,13 +1,16 @@
 //! Port of esbuild's public `pkg/api` package.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::Path as FsPath, sync::Arc};
 
 use crate::internal::{
     ast::SymbolMap,
-    css_parser, css_printer, js_parser, js_printer,
+    css_parser, css_printer,
+    helpers::{encode_string_as_shortest_data_url, mime_type_by_extension, string_to_utf16},
+    js_parser, js_printer,
     logger::{DeferLogKind, Log, Msg, MsgKind, PrettyPaths, Source},
     renamer::new_no_op_renamer,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u16)]
@@ -91,6 +94,12 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::Default | Loader::None => {
             transform_javascript(&log, source, &options)
         }
+        Loader::Json => transform_json(&log, source, &options),
+        Loader::Text => transform_text(&source, &options),
+        Loader::Base64 => transform_base64(&source, &options),
+        Loader::Binary => transform_binary(&source, &options),
+        Loader::DataUrl => transform_data_url(&source, &options),
+        Loader::Empty => Vec::new(),
         loader => {
             let message = format!("Transform loader {loader:?} is not implemented yet");
             return TransformResult {
@@ -118,6 +127,112 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
     }
 }
 
+fn transform_json(log: &Log, source: Source, options: &TransformOptions) -> Vec<u8> {
+    let (expression, ok) =
+        js_parser::parse_json(log.clone(), source, js_parser::JsonOptions::default());
+    if !ok {
+        return Vec::new();
+    }
+    let renamer = new_no_op_renamer(SymbolMap::new(1));
+    let value = js_printer::print_expr(&expression, &renamer, js_printer_options(options));
+    export_default(value, options.minify_whitespace)
+}
+
+fn transform_text(source: &Source, options: &TransformOptions) -> Vec<u8> {
+    let contents = source
+        .contents
+        .strip_prefix(&[0xef, 0xbb, 0xbf])
+        .unwrap_or(&source.contents);
+    export_string(contents, options)
+}
+
+fn transform_base64(source: &Source, options: &TransformOptions) -> Vec<u8> {
+    export_string(STANDARD.encode(&source.contents).as_bytes(), options)
+}
+
+fn transform_binary(source: &Source, options: &TransformOptions) -> Vec<u8> {
+    let encoded = STANDARD.encode(&source.contents);
+    let mut value = b"Uint8Array.fromBase64(".to_vec();
+    value.extend(js_printer::quote_utf16(
+        &string_to_utf16(encoded.as_bytes()),
+        js_printer_options(options),
+        true,
+    ));
+    value.push(b')');
+    export_default(value, options.minify_whitespace)
+}
+
+fn transform_data_url(source: &Source, options: &TransformOptions) -> Vec<u8> {
+    let mime_type = guess_mime_type(&source.pretty_paths.abs, &source.contents);
+    let url = encode_string_as_shortest_data_url(&mime_type, &source.contents);
+    export_string(url.as_bytes(), options)
+}
+
+fn export_string(value: &[u8], options: &TransformOptions) -> Vec<u8> {
+    let quoted =
+        js_printer::quote_utf16(&string_to_utf16(value), js_printer_options(options), true);
+    export_default(quoted, options.minify_whitespace)
+}
+
+fn export_default(mut value: Vec<u8>, minify_whitespace: bool) -> Vec<u8> {
+    let mut code = if minify_whitespace {
+        b"module.exports=".to_vec()
+    } else {
+        b"module.exports = ".to_vec()
+    };
+    code.append(&mut value);
+    code.extend_from_slice(b";\n");
+    code
+}
+
+fn js_printer_options(options: &TransformOptions) -> js_printer::Options {
+    js_printer::Options {
+        line_limit: options.line_limit,
+        minify_syntax: options.minify_syntax,
+        minify_whitespace: options.minify_whitespace,
+        ascii_only: options.ascii_only,
+        ..js_printer::Options::default()
+    }
+}
+
+fn guess_mime_type(sourcefile: &str, contents: &[u8]) -> String {
+    let extension = FsPath::new(sourcefile)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map_or_else(String::new, |extension| format!(".{extension}"));
+    let known = mime_type_by_extension(&extension);
+    let mime_type = if known.is_empty() {
+        detect_content_type(contents)
+    } else {
+        known
+    };
+    mime_type.replace("; ", ";")
+}
+
+fn detect_content_type(contents: &[u8]) -> &'static str {
+    if contents.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if contents.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if contents.starts_with(b"GIF87a") || contents.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if contents.starts_with(b"%PDF-") {
+        "application/pdf"
+    } else if contents.starts_with(b"\0asm") {
+        "application/wasm"
+    } else if contents.starts_with(b"PK\x03\x04") {
+        "application/zip"
+    } else if std::str::from_utf8(contents).is_ok()
+        && !contents
+            .iter()
+            .any(|byte| *byte < 0x20 && !matches!(*byte, b'\t' | b'\n' | b'\r' | b'\x0c'))
+    {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
+
 fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -> Vec<u8> {
     let mut parser_options = js_parser::Options::default();
     parser_options.ts.parse = matches!(options.loader, Loader::Ts | Loader::Tsx);
@@ -133,18 +248,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&ast.symbols);
     let renamer = new_no_op_renamer(symbols);
-    js_printer::print(
-        &ast,
-        &renamer,
-        js_printer::Options {
-            line_limit: options.line_limit,
-            minify_syntax: options.minify_syntax,
-            minify_whitespace: options.minify_whitespace,
-            ascii_only: options.ascii_only,
-            ..js_printer::Options::default()
-        },
-    )
-    .js
+    js_printer::print(&ast, &renamer, js_printer_options(options)).js
 }
 
 fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u8> {
@@ -266,6 +370,104 @@ mod tests {
                 }
             )),
             ".card{color:red;margin:0!important}"
+        );
+    }
+
+    #[test]
+    fn transforms_json_into_a_common_js_export() {
+        assert_eq!(
+            code(transform(
+                r#"{"answer": 42, "invalid-identifier": true}"#,
+                TransformOptions {
+                    loader: Loader::Json,
+                    ..TransformOptions::default()
+                }
+            )),
+            "module.exports = { answer: 42, \"invalid-identifier\": true };\n"
+        );
+    }
+
+    #[test]
+    fn transforms_text_base64_and_binary_loaders() {
+        assert_eq!(
+            code(transform(
+                b"\xef\xbb\xbfhello",
+                TransformOptions {
+                    loader: Loader::Text,
+                    ..TransformOptions::default()
+                }
+            )),
+            "module.exports = \"hello\";\n"
+        );
+        assert_eq!(
+            code(transform(
+                "hello",
+                TransformOptions {
+                    loader: Loader::Base64,
+                    ..TransformOptions::default()
+                }
+            )),
+            "module.exports = \"aGVsbG8=\";\n"
+        );
+        assert_eq!(
+            code(transform(
+                "hello",
+                TransformOptions {
+                    loader: Loader::Binary,
+                    ..TransformOptions::default()
+                }
+            )),
+            "module.exports = Uint8Array.fromBase64(\"aGVsbG8=\");\n"
+        );
+    }
+
+    #[test]
+    fn transforms_data_urls_and_empty_input() {
+        assert_eq!(
+            code(transform(
+                "<svg></svg>",
+                TransformOptions {
+                    sourcefile: "icon.svg".into(),
+                    loader: Loader::DataUrl,
+                    ..TransformOptions::default()
+                }
+            )),
+            "module.exports = \"data:image/svg+xml,<svg></svg>\";\n"
+        );
+        assert_eq!(
+            code(transform(
+                [0xff],
+                TransformOptions {
+                    loader: Loader::DataUrl,
+                    ..TransformOptions::default()
+                }
+            )),
+            "module.exports = \"data:application/octet-stream;base64,/w==\";\n"
+        );
+        assert_eq!(
+            code(transform(
+                "ignored",
+                TransformOptions {
+                    loader: Loader::Empty,
+                    ..TransformOptions::default()
+                }
+            )),
+            ""
+        );
+    }
+
+    #[test]
+    fn minifies_data_loader_exports() {
+        assert_eq!(
+            code(transform(
+                r#"{"x": 1}"#,
+                TransformOptions {
+                    loader: Loader::Json,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "module.exports={x:1};\n"
         );
     }
 

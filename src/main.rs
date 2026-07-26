@@ -4,7 +4,10 @@ use std::{
     path::Path,
 };
 
-use esbuild_rs::api::{Loader, TransformOptions, transform};
+use esbuild_rs::{
+    api::{Loader, TransformOptions, transform},
+    internal::cli_helpers,
+};
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
@@ -128,15 +131,24 @@ fn run(arguments: &[String]) -> Result<Output, String> {
 }
 
 fn parse_loader(loader: &str) -> Result<Loader, String> {
+    let loader = cli_helpers::parse_loader(loader)
+        .map_err(|error| format!("{}\n\n{}", error.text, error.note))?;
+    if matches!(loader, Loader::File | Loader::Copy) {
+        let name = loader_name(loader);
+        return Err(format!(
+            "\"--loader={name}\" is not supported when transforming stdin\n\n\
+             Using esbuild to transform stdin only generates one output file, so you cannot use \
+             the \"{name}\" loader since that needs to generate two output files."
+        ));
+    }
+    Ok(loader)
+}
+
+const fn loader_name(loader: Loader) -> &'static str {
     match loader {
-        "css" => Ok(Loader::Css),
-        "global-css" => Ok(Loader::GlobalCss),
-        "js" => Ok(Loader::Js),
-        "jsx" => Ok(Loader::Jsx),
-        "local-css" => Ok(Loader::LocalCss),
-        "ts" => Ok(Loader::Ts),
-        "tsx" => Ok(Loader::Tsx),
-        _ => Err(format!("Invalid loader {loader:?}")),
+        Loader::Copy => "copy",
+        Loader::File => "file",
+        _ => "",
     }
 }
 
@@ -158,7 +170,7 @@ fn help_text() -> String {
         "esbuild-rs {}\n\
          Usage: esbuild [options] [input-file]\n\n\
          Options:\n\
-         \x20\x20--loader=js|jsx|ts|tsx|css\n\
+         \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
          \x20\x20--minify\n\
          \x20\x20--minify-whitespace\n\
          \x20\x20--minify-identifiers\n\
@@ -180,7 +192,11 @@ mod tests {
     #[test]
     fn parses_loader_flags_and_file_extensions() {
         assert_eq!(parse_loader("tsx"), Ok(Loader::Tsx));
+        assert_eq!(parse_loader("json"), Ok(Loader::Json));
+        assert_eq!(parse_loader("dataurl"), Ok(Loader::DataUrl));
         assert!(parse_loader("wat").is_err());
+        assert!(parse_loader("file").is_err());
+        assert!(parse_loader("copy").is_err());
         assert_eq!(loader_from_path("entry.css"), Loader::Css);
         assert_eq!(loader_from_path("entry.ts"), Loader::Ts);
         assert_eq!(loader_from_path("entry.unknown"), Loader::Js);
