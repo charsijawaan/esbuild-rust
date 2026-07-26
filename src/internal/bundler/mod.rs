@@ -156,6 +156,12 @@ pub fn compile_javascript_bundle(
     };
     for chunk_index in 0..prepared.chunks.len() {
         if prepared.chunks[chunk_index].is_css {
+            linker::generate_css_chunk(
+                &prepared.graph,
+                &mut prepared.chunks[chunk_index],
+                options,
+                &output_paths,
+            );
             continue;
         }
         let renamer = linker::rename_symbols_in_chunk(
@@ -2239,6 +2245,89 @@ mod tests {
         assert!(output.contains("console.log(\"bundled\");"));
         assert!(output.starts_with("(() => {\n"));
         assert!(output.ends_with("})();\n"));
+    }
+
+    #[test]
+    fn bundles_css_entry_points_to_output_files() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([("/project/entry.css".into(), ".entry { color: red }".into())]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.css".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert_eq!(compiled.output_files.len(), 1);
+        assert!(compiled.output_files[0].abs_path.ends_with("/entry.css"));
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains(".entry"));
+        assert!(output.contains("color: red"));
+    }
+
+    #[test]
+    fn emits_css_imported_by_javascript_entries() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import './style.css'; console.log('entry')".into(),
+                ),
+                ("/project/style.css".into(), ".style { color: blue }".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::EsModule,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert_eq!(compiled.output_files.len(), 2);
+        let javascript = compiled
+            .output_files
+            .iter()
+            .find(|output| output.abs_path.ends_with("/entry.js"))
+            .expect("JavaScript output");
+        let css = compiled
+            .output_files
+            .iter()
+            .find(|output| output.abs_path.ends_with("/entry.css"))
+            .expect("CSS output");
+        assert!(String::from_utf8_lossy(&javascript.contents).contains("console.log(\"entry\")"));
+        assert!(String::from_utf8_lossy(&css.contents).contains("color: blue"));
     }
 
     #[test]
