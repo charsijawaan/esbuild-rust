@@ -947,6 +947,32 @@ mod tests {
     }
 
     #[test]
+    fn validates_strict_bindings_and_duplicate_parameters() {
+        let (_, ok, log) = parse_source("function sloppy(a, a) {}");
+        assert!(ok);
+        assert!(log.done().is_empty());
+
+        let (_, ok, log) = parse_source(
+            "\"use strict\";\
+             let eval;\
+             let protected;\
+             function strict(arguments, duplicate, duplicate) {}",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 4);
+
+        let (_, ok, log) = parse_source(
+            "function defaults(a, a = 0) {}\
+             function body(eval) { \"use strict\"; with (object) {} }\
+             function invalid(a = 0) { \"use strict\"; }\
+             ({ method(a, a) {} });\
+             class Item { method(a, a) {} }",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 6);
+    }
+
+    #[test]
     fn arrow_parameters_bind_without_creating_an_arguments_symbol() {
         let (ast, ok, log) =
             parse_source("let outer = 1; const fn = (outer, {x}) => outer + x + arguments;");

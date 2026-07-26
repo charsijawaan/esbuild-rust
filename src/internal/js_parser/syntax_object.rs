@@ -188,7 +188,7 @@ fn parse_property(
     };
 
     if lexer.token == Token::OpenParen || kind.is_method_definition() {
-        let function = parse_function_tail(
+        let mut function = parse_function_tail(
             core,
             lexer,
             None,
@@ -208,6 +208,7 @@ fn parse_property(
                 ..FnOrArrowDataParse::default()
             },
         );
+        function.is_unique_formal_parameters = true;
         if kind == PropertyKind::Getter && !function.args.is_empty() {
             core.add_error_range(
                 key_range,

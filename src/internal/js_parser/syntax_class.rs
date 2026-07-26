@@ -217,7 +217,7 @@ fn parse_class_property(
 
     if lexer.token == Token::OpenParen || kind.is_method_definition() {
         let is_constructor = !is_static && key_is_named(&key, "constructor");
-        let function = parse_function_tail(
+        let mut function = parse_function_tail(
             core,
             lexer,
             None,
@@ -238,6 +238,7 @@ fn parse_class_property(
                 ..FnOrArrowDataParse::default()
             },
         );
+        function.is_unique_formal_parameters = true;
         if kind == PropertyKind::Getter && !function.args.is_empty() {
             core.add_error_range(
                 key_range,

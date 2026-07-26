@@ -1,11 +1,14 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 use crate::internal::js_ast::{
     Binding, BindingData, BlockStmt, Class, Expr, ExprData, Function, PropertyFlags, ScopeKind,
-    Stmt, StmtData, for_each_identifier_binding,
+    Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
 };
+use crate::internal::logger::{Loc, Range};
 
-use super::parser_core::ParserCore;
+use super::{parser_core::ParserCore, standalone_helpers::is_simple_parameter_list};
 
 pub(crate) fn visit_top_level_statements(core: &mut ParserCore, statements: &mut [Stmt]) {
     visit_statements(core, statements, true);
@@ -264,8 +267,36 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         core.record_declared_symbol(name.reference);
     }
     core.push_scope_for_visit_pass(ScopeKind::FunctionArgs, function.open_paren_loc);
+    let use_strict_loc = function_body_use_strict(core, &function.body.block.statements);
+    if use_strict_loc.is_some() {
+        crate::internal::js_ast::Scope::recursive_set_strict_mode(
+            core.current_scope
+                .as_ref()
+                .expect("function arguments scope"),
+            StrictModeKind::ExplicitStrict,
+        );
+    }
+    if let Some(name) = function.name {
+        validate_binding_name(core, name.loc, name.reference);
+    }
+    let has_simple_args = is_simple_parameter_list(&function.args, function.has_rest_arg);
+    if let Some(loc) = use_strict_loc
+        && !has_simple_args
+    {
+        core.add_error_range(
+            core.source.range_of_string(loc),
+            "Cannot use a \"use strict\" directive in a function with a non-simple parameter list",
+        );
+    }
+    let check_duplicates =
+        function.is_unique_formal_parameters || !has_simple_args || core.is_strict_mode();
+    let mut duplicate_args = HashMap::new();
     for argument in &mut function.args {
-        record_binding(core, &mut argument.binding);
+        record_binding_with_duplicates(
+            core,
+            &mut argument.binding,
+            check_duplicates.then_some(&mut duplicate_args),
+        );
         visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
         visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
         for decorator in &mut argument.decorators {
@@ -326,6 +357,9 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
         core.current_scope.as_ref().expect("class name scope"),
         crate::internal::js_ast::StrictModeKind::ImplicitStrictClass,
     );
+    if let Some(name) = class.name {
+        validate_binding_name(core, name.loc, name.reference);
+    }
     visit_expr(core, &mut class.extends_or_nil, resolve_identifiers);
     core.push_scope_for_visit_pass(ScopeKind::ClassBody, class.body_loc);
     for property in &mut class.properties {
@@ -385,11 +419,72 @@ fn visit_binding_initializers(
 }
 
 fn record_binding(core: &mut ParserCore, binding: &mut Binding) {
-    for_each_identifier_binding(binding, &mut |_loc, identifier| {
+    record_binding_with_duplicates(core, binding, None);
+}
+
+fn record_binding_with_duplicates(
+    core: &mut ParserCore,
+    binding: &mut Binding,
+    mut duplicates: Option<&mut HashMap<String, Range>>,
+) {
+    for_each_identifier_binding(binding, &mut |loc, identifier| {
         if !ParserCore::is_stored_name_ref(identifier.reference) {
             core.record_declared_symbol(identifier.reference);
+            let symbol_index =
+                usize::try_from(identifier.reference.inner_index).expect("symbol index");
+            let name = core.symbols[symbol_index].original_name.clone();
+            validate_binding_name(core, loc, identifier.reference);
+            if let Some(duplicates) = duplicates.as_deref_mut() {
+                let range = crate::internal::js_lexer::range_of_identifier(&core.source, loc);
+                if duplicates.insert(name.clone(), range).is_some() {
+                    core.add_error_range(
+                        range,
+                        format!(
+                            "{name:?} cannot be bound multiple times in the same parameter list"
+                        ),
+                    );
+                }
+            }
         }
     });
+}
+
+fn validate_binding_name(core: &mut ParserCore, loc: Loc, reference: crate::internal::ast::Ref) {
+    if !core.is_strict_mode() {
+        return;
+    }
+    let symbol_index = usize::try_from(reference.inner_index).expect("symbol index");
+    let name = core.symbols[symbol_index].original_name.clone();
+    let text = if crate::internal::js_lexer::is_strict_mode_reserved_word(&name) {
+        format!("{name:?} is a reserved word and cannot be used in strict mode")
+    } else if matches!(name.as_str(), "eval" | "arguments") {
+        format!("Declarations with the name {name:?} cannot be used in strict mode")
+    } else {
+        return;
+    };
+    core.add_error_range(
+        crate::internal::js_lexer::range_of_identifier(&core.source, loc),
+        text,
+    );
+}
+
+fn function_body_use_strict(core: &ParserCore, statements: &[Stmt]) -> Option<Loc> {
+    for statement in statements {
+        let Some(StmtData::Expr(expression)) = statement.data.as_deref() else {
+            return None;
+        };
+        let Some(ExprData::String(value)) = expression.value.data.as_deref() else {
+            return None;
+        };
+        let start = usize::try_from(statement.loc.start).ok()?;
+        if !matches!(core.source.contents.get(start), Some(b'\'' | b'"')) {
+            return None;
+        }
+        if value.value == "use strict".encode_utf16().collect::<Vec<_>>() {
+            return Some(statement.loc);
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_lines)]
@@ -546,8 +641,28 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
             core.push_next_scope_for_visit_pass(ScopeKind::FunctionArgs);
+            let use_strict_loc = function_body_use_strict(core, &arrow.body.block.statements);
+            if use_strict_loc.is_some() {
+                crate::internal::js_ast::Scope::recursive_set_strict_mode(
+                    core.current_scope.as_ref().expect("arrow arguments scope"),
+                    StrictModeKind::ExplicitStrict,
+                );
+            }
+            if let Some(loc) = use_strict_loc
+                && !is_simple_parameter_list(&arrow.args, arrow.has_rest_arg)
+            {
+                core.add_error_range(
+                    core.source.range_of_string(loc),
+                    "Cannot use a \"use strict\" directive in a function with a non-simple parameter list",
+                );
+            }
+            let mut duplicate_args = HashMap::new();
             for argument in &mut arrow.args {
-                record_binding(core, &mut argument.binding);
+                record_binding_with_duplicates(
+                    core,
+                    &mut argument.binding,
+                    Some(&mut duplicate_args),
+                );
                 visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
                 visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
             }
