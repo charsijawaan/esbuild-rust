@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use crate::internal::ast::{ImportPhase, ImportRecord};
+use crate::internal::ast::{INVALID_REF, ImportPhase, ImportRecord, Ref};
 use crate::internal::compat::JsFeature;
 use crate::internal::config::{LegalComments, MetafileFormat};
 use crate::internal::helpers::{escape_closing_tag, quote_for_json};
@@ -35,6 +35,23 @@ pub struct Options {
     pub legal_comments: LegalComments,
     pub needs_metafile: bool,
     pub metafile_format: MetafileFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequireOrImportMeta {
+    pub wrapper_ref: Ref,
+    pub exports_ref: Ref,
+    pub is_wrapper_async: bool,
+}
+
+impl Default for RequireOrImportMeta {
+    fn default() -> Self {
+        Self {
+            wrapper_ref: INVALID_REF,
+            exports_ref: INVALID_REF,
+            is_wrapper_async: false,
+        }
+    }
 }
 
 #[must_use]

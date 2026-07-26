@@ -8417,6 +8417,32 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// Return the wrapper metadata the JavaScript printer needs when lowering a
+/// linked `require()` or `import()` expression.
+///
+/// # Panics
+///
+/// Panics when `source_index` does not refer to a JavaScript input file.
+#[must_use]
+pub fn require_or_import_meta_for_source(
+    graph: &LinkerGraph,
+    source_index: u32,
+) -> crate::internal::js_printer::RequireOrImportMeta {
+    let file = &graph.files[usize::try_from(source_index).expect("source index fits in usize")];
+    let Some(InputFileRepr::Js(repr)) = file.input_file.repr.as_ref() else {
+        panic!("linked require/import target must be JavaScript");
+    };
+    crate::internal::js_printer::RequireOrImportMeta {
+        wrapper_ref: repr.ast.wrapper_ref,
+        exports_ref: if repr.meta.wrap == WrapKind::Esm {
+            repr.ast.exports_ref
+        } else {
+            INVALID_REF
+        },
+        is_wrapper_async: repr.meta.is_async_or_has_async_dependency,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -8447,9 +8473,10 @@ mod tests {
         path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts,
         prevent_exports_from_being_renamed, print_cross_chunk_bindings,
         propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
-        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
-        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
+        require_or_import_meta_for_source, resolve_export_stars, sort_and_filter_export_aliases,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
+        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
+        wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{
@@ -10896,6 +10923,65 @@ mod tests {
             loader: Loader::Js,
             ..InputFile::default()
         }
+    }
+
+    #[test]
+    fn require_or_import_metadata_distinguishes_common_js_and_esm_wrappers() {
+        let common_js_wrapper = Ref {
+            source_index: 0,
+            inner_index: 1,
+        };
+        let common_js_exports = Ref {
+            source_index: 0,
+            inner_index: 2,
+        };
+        let esm_wrapper = Ref {
+            source_index: 1,
+            inner_index: 3,
+        };
+        let esm_exports = Ref {
+            source_index: 1,
+            inner_index: 4,
+        };
+        let input_files = [
+            js_file(js_ast::Ast {
+                wrapper_ref: common_js_wrapper,
+                exports_ref: common_js_exports,
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                wrapper_ref: esm_wrapper,
+                exports_ref: esm_exports,
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1], &[], false);
+        let Some(InputFileRepr::Js(common_js)) = graph.files[0].input_file.repr.as_mut() else {
+            panic!("JavaScript representation");
+        };
+        common_js.meta.wrap = WrapKind::Cjs;
+        let Some(InputFileRepr::Js(esm)) = graph.files[1].input_file.repr.as_mut() else {
+            panic!("JavaScript representation");
+        };
+        esm.meta.wrap = WrapKind::Esm;
+        esm.meta.is_async_or_has_async_dependency = true;
+
+        assert_eq!(
+            require_or_import_meta_for_source(&graph, 0),
+            crate::internal::js_printer::RequireOrImportMeta {
+                wrapper_ref: common_js_wrapper,
+                exports_ref: crate::internal::ast::INVALID_REF,
+                is_wrapper_async: false,
+            }
+        );
+        assert_eq!(
+            require_or_import_meta_for_source(&graph, 1),
+            crate::internal::js_printer::RequireOrImportMeta {
+                wrapper_ref: esm_wrapper,
+                exports_ref: esm_exports,
+                is_wrapper_async: true,
+            }
+        );
     }
 
     #[test]
