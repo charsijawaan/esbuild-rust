@@ -11,6 +11,7 @@ use crate::internal::{
         KnownAtRule, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, NameToken,
         NamespacedName, PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule,
         SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags,
+        tokens_are_comma_separated,
     },
     css_lexer::{self, TokenKind},
     logger::{Loc, Log, Path, Range, Source},
@@ -644,6 +645,9 @@ impl Parser {
                     token.kind = TokenKind::Number;
                     token.text = "700".into();
                 }
+            }
+            if key_lower == "transform" {
+                minify_transforms(&mut value);
             }
         }
         let important = take_important(&mut value);
@@ -1514,6 +1518,219 @@ fn minify_four_side_shorthand(tokens: &mut Vec<Token>) {
         } else {
             WhitespaceFlags::BEFORE
         };
+    }
+}
+
+fn minify_transforms(tokens: &mut [Token]) {
+    for token in tokens {
+        if token.kind != TokenKind::Function {
+            continue;
+        }
+        let name = token.text.to_ascii_lowercase();
+        let Some(args) = &mut token.children else {
+            continue;
+        };
+        if !tokens_are_comma_separated(args) {
+            continue;
+        }
+        minify_2d_transform(&mut token.text, args, &name);
+        minify_3d_transform(&mut token.text, args, &name);
+        trim_token_boundary_whitespace(args);
+    }
+}
+
+fn minify_2d_transform(text: &mut String, args: &mut Vec<Token>, name: &str) {
+    match name {
+        "matrix" if args.len() == 11 => minify_2d_matrix(text, args),
+        "translate" | "translatey" if args.len() == 1 => {
+            args[0].turn_length_or_percentage_into_number_if_zero();
+        }
+        "translate" if args.len() == 3 => {
+            args[0].turn_length_or_percentage_into_number_if_zero();
+            args[2].turn_length_or_percentage_into_number_if_zero();
+            if args[2].is_zero() {
+                args.truncate(1);
+            } else if args[0].is_zero() {
+                *text = "translateY".into();
+                *args = vec![args[2].clone()];
+            }
+        }
+        "translatex" if args.len() == 1 => {
+            *text = "translate".into();
+            args[0].turn_length_or_percentage_into_number_if_zero();
+        }
+        "scale" if args.len() == 1 => percent_to_number_if_shorter(&mut args[0]),
+        "scale" if args.len() == 3 => {
+            percent_to_number_if_shorter(&mut args[0]);
+            percent_to_number_if_shorter(&mut args[2]);
+            if args[0].equal_ignoring_whitespace(&args[2]) {
+                args.truncate(1);
+            } else if args[2].is_one() {
+                *text = "scaleX".into();
+                args.truncate(1);
+            } else if args[0].is_one() {
+                *text = "scaleY".into();
+                *args = vec![args[2].clone()];
+            }
+        }
+        "scalex" | "scaley" | "scalez" if args.len() == 1 => {
+            percent_to_number_if_shorter(&mut args[0]);
+        }
+        "rotate" | "rotatex" | "rotatey" | "perspective" | "skew" | "skewy" if args.len() == 1 => {
+            args[0].turn_length_into_number_if_zero();
+        }
+        "rotatez" if args.len() == 1 => {
+            *text = "rotate".into();
+            args[0].turn_length_into_number_if_zero();
+        }
+        "skew" if args.len() == 3 => {
+            args[0].turn_length_into_number_if_zero();
+            args[2].turn_length_into_number_if_zero();
+            if args[2].is_zero() {
+                args.truncate(1);
+            }
+        }
+        "skewx" if args.len() == 1 => {
+            *text = "skew".into();
+            args[0].turn_length_into_number_if_zero();
+        }
+        _ => {}
+    }
+}
+
+fn minify_2d_matrix(text: &mut String, args: &mut Vec<Token>) {
+    let (scale_x, skew_y, skew_x, scale_y, translate_x, translate_y) = (
+        args[0].clone(),
+        args[2].clone(),
+        args[4].clone(),
+        args[6].clone(),
+        args[8].clone(),
+        args[10].clone(),
+    );
+    if skew_y.is_zero() && skew_x.is_zero() && translate_x.is_zero() && translate_y.is_zero() {
+        *text = if scale_x.equal_ignoring_whitespace(&scale_y) {
+            *args = vec![scale_x];
+            "scale".into()
+        } else if scale_y.is_one() {
+            *args = vec![scale_x];
+            "scaleX".into()
+        } else if scale_x.is_one() {
+            *args = vec![scale_y];
+            "scaleY".into()
+        } else {
+            *args = vec![scale_x, comma_token(), scale_y];
+            "scale".into()
+        };
+    }
+}
+
+fn minify_3d_transform(text: &mut String, args: &mut Vec<Token>, name: &str) {
+    const ONLY_SCALE: u32 = 0b1000_0000_0000_0000_0111_1011_1101_1110;
+    match name {
+        "matrix3d" if args.len() == 31 => {
+            let mut mask = 0u32;
+            for (index, argument) in args.iter().step_by(2).enumerate() {
+                if argument.is_zero() {
+                    mask |= 1 << index;
+                } else if argument.is_one() {
+                    mask |= (1 << 16) << index;
+                }
+            }
+            if mask & ONLY_SCALE == ONLY_SCALE {
+                let (scale_x, scale_y, scale_z) =
+                    (args[0].clone(), args[10].clone(), args[20].clone());
+                if scale_x.is_one() && scale_y.is_one() {
+                    *text = "scaleZ".into();
+                    *args = vec![scale_z];
+                } else {
+                    *text = "scale3d".into();
+                    *args = vec![scale_x, comma_token(), scale_y, comma_token(), scale_z];
+                }
+            }
+        }
+        "translate3d" if args.len() == 5 => {
+            args[0].turn_length_or_percentage_into_number_if_zero();
+            args[2].turn_length_or_percentage_into_number_if_zero();
+            args[4].turn_length_into_number_if_zero();
+            if args[0].is_zero() && args[2].is_zero() {
+                *text = "translateZ".into();
+                *args = vec![args[4].clone()];
+            }
+        }
+        "translatez" if args.len() == 1 => {
+            args[0].turn_length_into_number_if_zero();
+        }
+        "scale3d" if args.len() == 5 => {
+            percent_to_number_if_shorter(&mut args[0]);
+            percent_to_number_if_shorter(&mut args[2]);
+            percent_to_number_if_shorter(&mut args[4]);
+            if args[0].is_one() && args[2].is_one() {
+                *text = "scaleZ".into();
+                *args = vec![args[4].clone()];
+            }
+        }
+        "rotate3d" if args.len() == 7 => {
+            args[6].turn_length_into_number_if_zero();
+            if args[0].is_one() && args[2].is_zero() && args[4].is_zero() {
+                *text = "rotateX".into();
+                *args = vec![args[6].clone()];
+            } else if args[0].is_zero() && args[2].is_one() && args[4].is_zero() {
+                *text = "rotateY".into();
+                *args = vec![args[6].clone()];
+            }
+        }
+        _ => {}
+    }
+}
+
+fn comma_token() -> Token {
+    Token {
+        kind: TokenKind::Comma,
+        text: ",".into(),
+        ..Token::default()
+    }
+}
+
+fn percent_to_number_if_shorter(token: &mut Token) {
+    if token.kind != TokenKind::Percentage {
+        return;
+    }
+    let text = token.percentage_value();
+    let negative = text.starts_with('-');
+    let unsigned = text.trim_start_matches(['+', '-']);
+    let decimal_index = unsigned.find('.').unwrap_or(unsigned.len());
+    let digits = unsigned.replace('.', "");
+    let shifted_index = i32::try_from(decimal_index).unwrap_or(i32::MAX) - 2;
+    let mut shifted = if shifted_index <= 0 {
+        format!(
+            "0.{}{}",
+            "0".repeat(usize::try_from(-shifted_index).unwrap_or(0)),
+            digits
+        )
+    } else {
+        let index = usize::try_from(shifted_index).unwrap_or(digits.len());
+        if index >= digits.len() {
+            format!("{}{}", digits, "0".repeat(index - digits.len()))
+        } else {
+            format!("{}.{}", &digits[..index], &digits[index..])
+        }
+    };
+    shifted = shifted
+        .trim_start_matches('0')
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .into();
+    if shifted.starts_with('.') {
+        // Keep the leading dot omitted for minified CSS numbers.
+    } else if shifted.is_empty() {
+        shifted = "0".into();
+    }
+    if negative && shifted != "0" {
+        shifted.insert(0, '-');
+    }
+    if shifted.len() < token.text.len() {
+        token.kind = TokenKind::Number;
+        token.text = shifted;
     }
 }
 
