@@ -1077,4 +1077,40 @@ mod tests {
         assert!(matches!(values[1], Some(ExprData::ImportCall(_))));
         assert!(matches!(values[2], Some(ExprData::ImportString(_))));
     }
+
+    #[test]
+    fn converts_constant_require_calls_into_import_records() {
+        let (ast, ok, log) = parse_source(
+            "const loaded = require('one');\
+             const resolved = require.resolve('two');\
+             const runtime = require(name);",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 2);
+        assert_eq!(ast.parts[1].import_record_indices, [0, 1]);
+        assert_eq!(
+            ast.import_records
+                .iter()
+                .map(|record| (record.path.text.as_str(), record.kind))
+                .collect::<Vec<_>>(),
+            [
+                ("one", crate::internal::ast::ImportKind::Require),
+                ("two", crate::internal::ast::ImportKind::RequireResolve)
+            ]
+        );
+        let values = ast.parts[1]
+            .statements
+            .iter()
+            .map(|statement| {
+                let Some(StmtData::Local(local)) = statement.data.as_deref() else {
+                    panic!("expected local statement");
+                };
+                local.declarations[0].value_or_nil.data.as_deref()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(values[0], Some(ExprData::RequireString(_))));
+        assert!(matches!(values[1], Some(ExprData::RequireResolveString(_))));
+        assert!(matches!(values[2], Some(ExprData::Call(_))));
+    }
 }

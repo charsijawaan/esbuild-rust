@@ -249,6 +249,44 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
             for argument in &mut call.args {
                 visit_expr(core, argument, resolve_identifiers);
             }
+            let kind = if is_identifier_named(core, &call.target, "require") {
+                Some(crate::internal::ast::ImportKind::Require)
+            } else if let Some(ExprData::Dot(dot)) = call.target.data.as_deref()
+                && dot.name == "resolve"
+                && is_identifier_named(core, &dot.target, "require")
+            {
+                Some(crate::internal::ast::ImportKind::RequireResolve)
+            } else {
+                None
+            };
+            if let Some(kind) = kind
+                && call.args.len() == 1
+                && let Some(ExprData::String(path)) = call.args[0].data.as_deref()
+            {
+                let import_record_index = core.add_import_record(
+                    kind,
+                    crate::internal::ast::ImportPhase::Evaluation,
+                    core.source.range_of_string(call.args[0].loc),
+                    String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                        &path.value,
+                    ))
+                    .into_owned(),
+                    crate::internal::ast::ImportRecordFlags::default(),
+                );
+                *data = if kind == crate::internal::ast::ImportKind::Require {
+                    ExprData::RequireString(crate::internal::js_ast::RequireStringExpr {
+                        import_record_index,
+                        close_paren_loc: call.close_paren_loc,
+                    })
+                } else {
+                    ExprData::RequireResolveString(
+                        crate::internal::js_ast::RequireResolveStringExpr {
+                            import_record_index,
+                            close_paren_loc: call.close_paren_loc,
+                        },
+                    )
+                };
+            }
         }
         ExprData::Dot(dot) => visit_expr(core, &mut dot.target, resolve_identifiers),
         ExprData::Index(index) => {
@@ -350,4 +388,13 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
         | ExprData::RequireResolveString(_)
         | ExprData::ImportString(_) => {}
     }
+}
+
+fn is_identifier_named(core: &ParserCore, expression: &Expr, expected: &str) -> bool {
+    let Some(ExprData::Identifier(identifier)) = expression.data.as_deref() else {
+        return false;
+    };
+    core.symbols
+        .get(usize::try_from(identifier.reference.inner_index).unwrap_or(usize::MAX))
+        .is_some_and(|symbol| symbol.original_name == expected)
 }
