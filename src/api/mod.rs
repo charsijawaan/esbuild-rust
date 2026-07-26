@@ -6064,6 +6064,36 @@ mod tests {
     }
 
     #[test]
+    fn cleans_up_terminal_returns_switches_and_empty_loops() {
+        assert_eq!(
+            code(transform(
+                "function terminal(){let x=1;return void x}\
+                 function oneCase(arg0){let x=arg0;switch(x){case 0:return 1}}\
+                 function emptyLoop(arg0){let x=arg0;do{}while(x)}",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "function terminal() {\n",
+                "  let x = 1;\n",
+                "}\n",
+                "function oneCase(arg0) {\n",
+                "  if (arg0 === 0)\n",
+                "    return 1;\n",
+                "}\n",
+                "function emptyLoop(arg0) {\n",
+                "  let x = arg0;\n",
+                "  do\n",
+                "    ;\n",
+                "  while (x);\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

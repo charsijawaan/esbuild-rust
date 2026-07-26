@@ -12,7 +12,7 @@ use crate::internal::{
     js_ast::{
         Arg, AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
         ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody,
-        FunctionExpr, IdentifierExpr, IfExpr, LocalKind, ObjectExpr, OpCode, OptionalChain,
+        FunctionExpr, IdentifierExpr, IfExpr, IfStmt, LocalKind, ObjectExpr, OpCode, OptionalChain,
         Property, PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData,
         StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, UnaryExpr,
         for_each_identifier_binding, inline_primitives_into_template,
@@ -651,7 +651,14 @@ fn substitute_single_use_symbol_in_statement(
     let expression = match statement.data.as_deref_mut() {
         Some(StmtData::Expr(statement)) => Some(&mut statement.value),
         Some(StmtData::Throw(statement)) => Some(&mut statement.value),
-        Some(StmtData::Return(statement)) => Some(&mut statement.value_or_nil),
+        Some(StmtData::Return(statement))
+            if !matches!(
+                statement.value_or_nil.data.as_deref(),
+                Some(ExprData::Unary(unary)) if unary.op == OpCode::UnaryVoid
+            ) =>
+        {
+            Some(&mut statement.value_or_nil)
+        }
         Some(StmtData::If(statement)) => Some(&mut statement.test),
         Some(StmtData::Switch(statement)) => Some(&mut statement.test),
         Some(StmtData::Local(statement)) => statement
@@ -1155,6 +1162,42 @@ fn inline_single_use_declarations(core: &mut ParserCore, statements: &mut [Stmt]
     }
 }
 
+fn cleanup_function_body_tail(core: &ParserCore, statements: &mut [Stmt]) {
+    let Some(last) = statements
+        .iter_mut()
+        .rev()
+        .find(|statement| statement.data.is_some())
+    else {
+        return;
+    };
+    let Some(StmtData::Return(return_statement)) = last.data.as_deref() else {
+        return;
+    };
+    if return_statement.value_or_nil.data.is_none() {
+        last.data = None;
+        return;
+    }
+    let Some(ExprData::Unary(unary)) = return_statement.value_or_nil.data.as_deref() else {
+        return;
+    };
+    if unary.op != OpCode::UnaryVoid {
+        return;
+    }
+    let helpers = make_helper_context(|reference| {
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+            == SymbolKind::Unbound
+    });
+    let value = helpers.simplify_unused_expr(&unary.value, core.options.unsupported_js_features);
+    if value.data.is_some() {
+        last.data = Some(Box::new(StmtData::Expr(ExprStmt {
+            value,
+            ..ExprStmt::default()
+        })));
+    } else {
+        last.data = None;
+    }
+}
+
 fn collapse_expression_statements_into_return(statements: &mut Vec<Stmt>) -> bool {
     let Some(StmtData::Return(return_statement)) = statements
         .last()
@@ -1220,6 +1263,9 @@ fn unwrap_single_statement_block(statement: Stmt) -> Stmt {
     let Some(StmtData::Block(block)) = statement.data.as_deref() else {
         return statement;
     };
+    if block.statements.is_empty() {
+        return Stmt::new(statement.loc, StmtData::Empty);
+    }
     if block.statements.len() == 1
         && !super::control_flow::stmts_care_about_scope(&block.statements)
     {
@@ -1273,6 +1319,44 @@ fn minify_control_flow_statement(statement: &mut Stmt) {
             let mut value = value.clone();
             value.body = unwrap_single_statement_block(value.body);
             statement.data = Some(Box::new(StmtData::DoWhile(value)));
+        }
+        Some(StmtData::Switch(value)) if value.cases.len() == 1 => {
+            let case = &value.cases[0];
+            if case.value_or_nil.data.is_none() {
+                return;
+            }
+            let Some(body) = super::standalone_helpers::try_to_inline_case_body(
+                value.body_loc,
+                case.body.clone(),
+                value.close_brace_loc,
+            ) else {
+                return;
+            };
+            let test = match crate::internal::js_ast::check_equality_if_no_side_effects(
+                value.test.data.as_deref(),
+                case.value_or_nil.data.as_deref(),
+                crate::internal::js_ast::EqualityKind::Strict,
+            ) {
+                Some(value) => Expr::new(statement.loc, ExprData::Boolean(value)),
+                None => Expr::new(
+                    value.test.loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: value.test.clone(),
+                        right: case.value_or_nil.clone(),
+                        op: OpCode::BinaryStrictEqual,
+                    }),
+                ),
+            };
+            statement.data = Some(Box::new(StmtData::If(IfStmt {
+                test,
+                yes: super::standalone_helpers::stmts_to_single_stmt(
+                    case.loc,
+                    body,
+                    value.close_brace_loc,
+                ),
+                ..IfStmt::default()
+            })));
+            minify_control_flow_statement(statement);
         }
         _ => {}
     }
@@ -1497,6 +1581,9 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         resolve_identifiers,
     );
     lower_nested_type_script_statements(core, &mut function.body.block.statements, None);
+    if core.options.minify_syntax {
+        cleanup_function_body_tail(core, &mut function.body.block.statements);
+    }
     core.pop_scope();
     core.pop_scope();
     core.visit_loop_depth = old_loop_depth;
@@ -4370,6 +4457,9 @@ fn visit_expr_with_target(
             core.push_scope_for_visit_pass(ScopeKind::FunctionBody, arrow.body.loc);
             visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
             lower_nested_type_script_statements(core, &mut arrow.body.block.statements, None);
+            if core.options.minify_syntax {
+                cleanup_function_body_tail(core, &mut arrow.body.block.statements);
+            }
             core.pop_scope();
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;
