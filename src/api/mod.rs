@@ -207,6 +207,7 @@ pub struct BuildOptions {
     pub main_fields: Vec<String>,
     pub resolve_extensions: Vec<String>,
     pub conditions: Vec<String>,
+    pub node_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -740,6 +741,17 @@ pub fn build(options: BuildOptions) -> BuildResult {
     } else {
         file_system.join(&[file_system.cwd(), &options.tsconfig])
     };
+    let abs_node_paths = options
+        .node_paths
+        .iter()
+        .map(|path| {
+            if file_system.is_abs(path) {
+                path.clone()
+            } else {
+                file_system.join(&[file_system.cwd(), path])
+            }
+        })
+        .collect();
     let mut internal_options = config::Options {
         mode: Mode::Bundle,
         output_format: match options.format {
@@ -800,6 +812,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         extension_order: options.resolve_extensions,
         main_fields: options.main_fields,
         conditions: options.conditions,
+        abs_node_paths,
         global_name,
         public_path: options.public_path,
         entry_path_template: validate_path_template(&options.entry_names),
@@ -1470,6 +1483,46 @@ mod tests {
                 .path
                 .ends_with("/out/custom/nested/application.js")
         );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn resolves_packages_from_configured_node_paths() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-node-path-{unique}"));
+        let global_modules = directory.join("global_modules");
+        std::fs::create_dir_all(global_modules.join("pkg")).expect("create global package");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {value} from 'pkg'; console.log(value)",
+        )
+        .expect("write entry");
+        std::fs::write(
+            global_modules.join("pkg/package.json"),
+            r#"{"exports":"./main.js"}"#,
+        )
+        .expect("write package manifest");
+        std::fs::write(
+            global_modules.join("pkg/main.js"),
+            "export const value = 'global node path'",
+        )
+        .expect("write package module");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            node_paths: vec!["global_modules".into()],
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("\"global node path\""));
+        assert!(!output.contains("from \"pkg\""));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

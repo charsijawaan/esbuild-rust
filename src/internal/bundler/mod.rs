@@ -642,6 +642,7 @@ pub fn resolve_import_records(
                 preserve_symlinks: options.preserve_symlinks,
                 conditions: Some(&options.conditions),
                 package_aliases: Some(&options.package_aliases),
+                node_paths: Some(&options.abs_node_paths),
                 ..ResolverContext::default()
             },
         ) else {
@@ -830,6 +831,7 @@ pub fn scan_bundle(
                 preserve_symlinks: options.preserve_symlinks,
                 conditions: Some(&options.conditions),
                 package_aliases: Some(&options.package_aliases),
+                node_paths: Some(&options.abs_node_paths),
                 ..ResolverContext::default()
             },
         ) else {

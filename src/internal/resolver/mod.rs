@@ -383,6 +383,7 @@ pub struct ResolverContext<'a> {
     pub preserve_symlinks: bool,
     pub conditions: Option<&'a [String]>,
     pub package_aliases: Option<&'a HashMap<String, String>>,
+    pub node_paths: Option<&'a [String]>,
     pub strip_node_prefix_for_import: bool,
     pub strip_node_prefix_for_require: bool,
 }
@@ -727,6 +728,48 @@ fn resolve_file_or_package_core(
             break;
         }
         current = parent;
+    }
+    if let Some(node_paths) = context.node_paths {
+        for node_path in node_paths {
+            let package_dir = file_system.join(&[node_path, package_name]);
+            if let Some(package) = read_package_json(
+                log,
+                file_system,
+                &package_dir,
+                platform,
+                configured_main_fields,
+            ) && let Some(exports) = &package.exports_map
+            {
+                let resolution = handle_package_map_post_conditions(resolve_package_exports(
+                    "/",
+                    &package_subpath,
+                    &exports.root,
+                    &package_conditions(platform, is_require, context.conditions),
+                ));
+                return finalize_package_map_resolution(
+                    log,
+                    file_system,
+                    &package_dir,
+                    &resolution,
+                    extension_order,
+                    platform,
+                    configured_main_fields,
+                    is_require,
+                );
+            }
+            let absolute = file_system.join(&[node_path, import_path]);
+            if let Some(result) = load_as_file_or_directory(
+                log,
+                file_system,
+                &absolute,
+                extension_order,
+                platform,
+                configured_main_fields,
+                is_require,
+            ) {
+                return Some(result);
+            }
+        }
     }
     None
 }
