@@ -2659,6 +2659,177 @@ pub fn lower_common_js_lazy_export<S: BuildHasher>(
     graph.generate_symbol_import_and_use(source_index, 0, module_ref, 1, source_index);
 }
 
+fn generate_esm_lazy_export(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    module_ref: Ref,
+    location: crate::internal::logger::Loc,
+    name: String,
+    alias: String,
+) -> (Ref, u32) {
+    let reference = graph.generate_new_symbol(source_index, SymbolKind::Other, name);
+    let part_index = graph.add_part_to_file(
+        source_index,
+        js_ast::Part {
+            declared_symbols: vec![js_ast::DeclaredSymbol {
+                reference,
+                is_top_level: true,
+            }],
+            can_be_removed_if_unused: true,
+            ..js_ast::Part::default()
+        },
+    );
+    graph.generate_symbol_import_and_use(source_index, part_index, module_ref, 1, source_index);
+    let Some(InputFileRepr::Js(repr)) = graph.files[source_index as usize].input_file.repr.as_mut()
+    else {
+        unreachable!("lazy export lowering requires JavaScript");
+    };
+    repr.meta
+        .top_level_symbol_to_parts_overlay
+        .insert(reference, vec![part_index]);
+    repr.meta.resolved_exports.insert(
+        alias,
+        ExportData {
+            reference,
+            name_loc: location,
+            source_index,
+            ..ExportData::default()
+        },
+    );
+    (reference, part_index)
+}
+
+/// Lower a non-`CommonJS` lazy export to tree-shakeable ES module exports.
+///
+/// Object properties become independent named exports where allowed, while the
+/// original lazy value is retained as the default export. CSS stubs are
+/// populated immediately before lowering.
+///
+/// # Panics
+///
+/// Panics if the source is not a non-`CommonJS` lazy-export JavaScript file
+/// with the expected part shape.
+#[allow(clippy::too_many_lines)]
+pub fn lower_esm_lazy_export<S: BuildHasher>(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    options: &Options,
+    local_names: &HashMap<Ref, String, S>,
+) {
+    let should_populate_css = matches!(
+        graph.files[source_index as usize]
+            .input_file
+            .repr
+            .as_ref(),
+        Some(InputFileRepr::Js(repr)) if repr.css_source_index.is_valid()
+    );
+    if should_populate_css {
+        populate_css_stub_lazy_export(graph, source_index, local_names);
+    }
+
+    let (module_ref, loader, identifier_name, is_entry_point, lazy_value) = {
+        let file = &mut graph.files[source_index as usize];
+        let loader = file.input_file.loader;
+        let identifier_name = file.input_file.source.identifier_name.clone();
+        let is_entry_point = file.is_entry_point();
+        let Some(InputFileRepr::Js(repr)) = file.input_file.repr.as_mut() else {
+            panic!("lazy export lowering requires JavaScript");
+        };
+        assert_ne!(
+            repr.ast.exports_kind,
+            ExportsKind::CommonJs,
+            "ES module lazy export lowering requires non-CommonJS exports"
+        );
+        let module_ref = repr.ast.module_ref;
+        let part = repr.ast.parts.last_mut().expect("lazy export has a part");
+        let [statement] = part.statements.as_mut_slice() else {
+            panic!("lazy export part must contain one statement");
+        };
+        let Some(js_ast::StmtData::LazyExport(export)) = statement.data.as_deref_mut() else {
+            panic!("lazy export part must contain a lazy export");
+        };
+        let lazy_value = std::mem::take(&mut export.value);
+        part.statements.clear();
+        (
+            module_ref,
+            loader,
+            identifier_name,
+            is_entry_point,
+            lazy_value,
+        )
+    };
+
+    if loader != Loader::WithTypeJson
+        && let Some(js_ast::ExprData::Object(object)) = lazy_value.data.as_deref()
+    {
+        for property in &object.properties {
+            let Some(js_ast::ExprData::String(key)) = property.key.data.as_deref() else {
+                continue;
+            };
+            if is_entry_point
+                && !js_ast::is_identifier_utf16(&key.value)
+                && options
+                    .unsupported_js_features
+                    .contains(crate::internal::compat::JsFeature::ARBITRARY_MODULE_NAMESPACE_NAMES)
+            {
+                continue;
+            }
+            let name = String::from_utf8_lossy(&utf16_to_string(&key.value)).into_owned();
+            if name == "default" {
+                continue;
+            }
+            let (reference, part_index) = generate_esm_lazy_export(
+                graph,
+                source_index,
+                module_ref,
+                property.key.loc,
+                name.clone(),
+                name,
+            );
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_mut()
+            else {
+                unreachable!("lazy export lowering requires JavaScript");
+            };
+            repr.ast.parts[part_index as usize].statements = vec![js_ast::Stmt::new(
+                property.key.loc,
+                js_ast::StmtData::Local(js_ast::LocalStmt {
+                    declarations: vec![js_ast::Decl {
+                        binding: identifier_binding(reference),
+                        value_or_nil: property.value_or_nil.clone(),
+                    }],
+                    is_export: true,
+                    ..js_ast::LocalStmt::default()
+                }),
+            )];
+        }
+    }
+
+    let location = lazy_value.loc;
+    let (reference, part_index) = generate_esm_lazy_export(
+        graph,
+        source_index,
+        module_ref,
+        location,
+        format!("{identifier_name}_default"),
+        "default".into(),
+    );
+    let Some(InputFileRepr::Js(repr)) = graph.files[source_index as usize].input_file.repr.as_mut()
+    else {
+        unreachable!("lazy export lowering requires JavaScript");
+    };
+    repr.ast.parts[part_index as usize].statements = vec![js_ast::Stmt::new(
+        location,
+        js_ast::StmtData::ExportDefault(js_ast::ExportDefaultStmt {
+            default_name: LocRef {
+                loc: location,
+                reference,
+            },
+            value: expr_statement(lazy_value),
+        }),
+    )];
+}
+
 /// Find CSS companion files reachable from a JavaScript entry point.
 ///
 /// JavaScript dependencies are traversed once in depth-first postorder, which
@@ -6819,10 +6990,10 @@ mod tests {
         generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
         generate_source_map_for_chunk, has_dynamic_exports_due_to_export_star,
         import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, lower_common_js_lazy_export, mangle_local_css,
-        mark_file_live_for_tree_shaking, match_import_with_export, merge_adjacent_local_stmts,
-        path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts,
-        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        join_with_public_path, lower_common_js_lazy_export, lower_esm_lazy_export,
+        mangle_local_css, mark_file_live_for_tree_shaking, match_import_with_export,
+        merge_adjacent_local_stmts, path_between_chunks, populate_css_stub_lazy_export,
+        prepare_css_asts, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
         recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
         sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
         tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
@@ -6846,6 +7017,7 @@ mod tests {
         },
         helpers::Joiner,
         js_ast::{self, ExportsKind, NamedExport, NamedImport},
+        js_parser,
         logger::{DeferLogKind, Loc, Log, Path, PrettyPaths, Range, Source},
         sourcemap::{
             LineColumnOffset, SourceMapPieces, SourceMapShift, generate_line_offset_tables,
@@ -9640,6 +9812,171 @@ mod tests {
             Some(js_ast::ExprData::Object(_))
         ));
         assert!(stub_repr.ast.uses_module_ref);
+    }
+
+    #[test]
+    fn lowers_esm_lazy_object_exports_into_independent_parts() {
+        let source = Source {
+            index: 1,
+            identifier_name: "data".into(),
+            ..Source::default()
+        };
+        let property = |name: &str, value: f64| js_ast::Property {
+            key: js_ast::Expr::new(
+                Loc::default(),
+                js_ast::ExprData::String(js_ast::StringExpr {
+                    value: crate::internal::helpers::string_to_utf16(name.as_bytes()),
+                    ..js_ast::StringExpr::default()
+                }),
+            ),
+            value_or_nil: js_ast::Expr::new(Loc::default(), js_ast::ExprData::Number(value)),
+            ..js_ast::Property::default()
+        };
+        let value = js_ast::Expr::new(
+            Loc::default(),
+            js_ast::ExprData::Object(js_ast::ObjectExpr {
+                properties: vec![
+                    property("foo", 1.0),
+                    property("not-valid", 2.0),
+                    property("default", 3.0),
+                ],
+                ..js_ast::ObjectExpr::default()
+            }),
+        );
+        let ast = js_parser::lazy_export_ast(
+            Log::new_defer(DeferLogKind::All, HashMap::new()),
+            &source,
+            js_parser::options_from_config(&Options::default()),
+            value,
+            None,
+        );
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            InputFile {
+                repr: Some(InputFileRepr::Js(Box::new(JsRepr {
+                    ast,
+                    ..JsRepr::default()
+                }))),
+                source,
+                loader: Loader::Json,
+                ..InputFile::default()
+            },
+        ];
+        let entry_points = [EntryPoint {
+            source_index: 1,
+            ..EntryPoint::default()
+        }];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1], &entry_points, false);
+        let options = Options {
+            unsupported_js_features:
+                crate::internal::compat::JsFeature::ARBITRARY_MODULE_NAMESPACE_NAMES,
+            ..Options::default()
+        };
+
+        lower_esm_lazy_export(&mut graph, 1, &options, &HashMap::new());
+
+        let Some(InputFileRepr::Js(repr)) = graph.files[1].input_file.repr.as_ref() else {
+            panic!("expected JavaScript");
+        };
+        assert!(repr.ast.parts[1].statements.is_empty());
+        assert_eq!(repr.ast.parts.len(), 4);
+        assert_eq!(
+            repr.meta
+                .resolved_exports
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
+            HashSet::from(["default".into(), "foo".into()])
+        );
+        assert!(repr.ast.parts[2].can_be_removed_if_unused);
+        let Some(js_ast::StmtData::Local(local)) = repr.ast.parts[2].statements[0].data.as_deref()
+        else {
+            panic!("expected named export");
+        };
+        assert!(local.is_export);
+        assert!(matches!(
+            local.declarations[0].value_or_nil.data.as_deref(),
+            Some(js_ast::ExprData::Number(value)) if value.to_bits() == 1.0_f64.to_bits()
+        ));
+        let Some(js_ast::StmtData::ExportDefault(default_export)) =
+            repr.ast.parts[3].statements[0].data.as_deref()
+        else {
+            panic!("expected default export");
+        };
+        assert_eq!(
+            graph
+                .symbols
+                .get(default_export.default_name.reference)
+                .original_name,
+            "data_default"
+        );
+        assert!(matches!(
+            default_export.value.data.as_deref(),
+            Some(js_ast::StmtData::Expr(statement))
+                if matches!(statement.value.data.as_deref(), Some(js_ast::ExprData::Object(_)))
+        ));
+        assert!(repr.ast.uses_module_ref);
+    }
+
+    #[test]
+    fn with_type_json_lazy_exports_only_default() {
+        let source = Source {
+            index: 1,
+            identifier_name: "typed_json".into(),
+            ..Source::default()
+        };
+        let value = js_ast::Expr::new(
+            Loc::default(),
+            js_ast::ExprData::Object(js_ast::ObjectExpr {
+                properties: vec![js_ast::Property {
+                    key: js_ast::Expr::new(
+                        Loc::default(),
+                        js_ast::ExprData::String(js_ast::StringExpr {
+                            value: crate::internal::helpers::string_to_utf16(b"foo"),
+                            ..js_ast::StringExpr::default()
+                        }),
+                    ),
+                    value_or_nil: js_ast::Expr::new(Loc::default(), js_ast::ExprData::Number(1.0)),
+                    ..js_ast::Property::default()
+                }],
+                ..js_ast::ObjectExpr::default()
+            }),
+        );
+        let ast = js_parser::lazy_export_ast(
+            Log::new_defer(DeferLogKind::All, HashMap::new()),
+            &source,
+            js_parser::options_from_config(&Options::default()),
+            value,
+            None,
+        );
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            InputFile {
+                repr: Some(InputFileRepr::Js(Box::new(JsRepr {
+                    ast,
+                    ..JsRepr::default()
+                }))),
+                source,
+                loader: Loader::WithTypeJson,
+                ..InputFile::default()
+            },
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1], &[], false);
+
+        lower_esm_lazy_export(&mut graph, 1, &Options::default(), &HashMap::new());
+
+        let Some(InputFileRepr::Js(repr)) = graph.files[1].input_file.repr.as_ref() else {
+            panic!("expected JavaScript");
+        };
+        assert_eq!(repr.ast.parts.len(), 3);
+        assert_eq!(
+            repr.meta.resolved_exports.keys().collect::<Vec<_>>(),
+            vec![&"default".to_string()]
+        );
+        assert!(matches!(
+            repr.ast.parts[2].statements[0].data.as_deref(),
+            Some(js_ast::StmtData::ExportDefault(_))
+        ));
     }
 
     #[test]
