@@ -5,10 +5,39 @@
 //! used after chunks have been generated.
 
 use crate::internal::{
+    ast::ImportKind,
+    css_ast::{
+        ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
+    },
     fs::Fs,
     helpers::Joiner,
+    logger::{Log, Range},
     sourcemap::{LineColumnOffset, SourceMapShift},
 };
+
+const CIRCULAR_CHUNK_IMPORT_ERROR: &str =
+    "Internal error: generated chunks contain a circular import";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PartRange {
+    pub source_index: u32,
+    pub part_index_begin: u32,
+    pub part_index_end: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ChunkImport {
+    pub chunk_index: u32,
+    pub import_kind: ImportKind,
+}
+
+#[derive(Debug, Default)]
+pub struct ChunkInfo {
+    pub unique_key: String,
+    pub cross_chunk_imports: Vec<ChunkImport>,
+    pub final_rel_path: String,
+    pub intermediate_output: IntermediateOutput,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
@@ -249,6 +278,109 @@ impl<'a> OutputPathContext<'a> {
     }
 }
 
+/// Merge an adjacent part into the final range, or append a new range.
+pub fn append_or_extend_part_range(
+    ranges: &mut Vec<PartRange>,
+    source_index: u32,
+    part_index: u32,
+) {
+    if let Some(range) = ranges.last_mut()
+        && range.source_index == source_index
+        && range.part_index_end == part_index
+    {
+        range.part_index_end = part_index.wrapping_add(1);
+        return;
+    }
+
+    ranges.push(PartRange {
+        source_index,
+        part_index_begin: part_index,
+        part_index_end: part_index.wrapping_add(1),
+    });
+}
+
+/// Reject static cycles in the generated chunk import graph. Dynamic import
+/// cycles are intentionally allowed because they do not imply eager
+/// initialization-order problems.
+pub fn enforce_no_cyclic_chunk_imports(log: &Log, chunks: &[ChunkInfo]) {
+    fn validate(log: &Log, chunks: &[ChunkInfo], chunk_index: usize, colors: &mut [u8]) -> bool {
+        if colors[chunk_index] == 1 {
+            log.add_error(None, Range::default(), CIRCULAR_CHUNK_IMPORT_ERROR);
+            return true;
+        }
+        if colors[chunk_index] == 2 {
+            return false;
+        }
+
+        colors[chunk_index] = 1;
+        for chunk_import in &chunks[chunk_index].cross_chunk_imports {
+            if chunk_import.import_kind != ImportKind::Dynamic {
+                let imported_chunk_index = usize::try_from(chunk_import.chunk_index)
+                    .expect("chunk index must fit in usize");
+                if validate(log, chunks, imported_chunk_index, colors) {
+                    return true;
+                }
+            }
+        }
+        colors[chunk_index] = 2;
+        false
+    }
+
+    let mut colors = vec![0; chunks.len()];
+    for chunk_index in 0..chunks.len() {
+        if validate(log, chunks, chunk_index, &mut colors) {
+            break;
+        }
+    }
+}
+
+#[must_use]
+pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            tokens_equal_ignoring_whitespace(&left.layers, &right.layers)
+                && tokens_equal_ignoring_whitespace(&left.supports, &right.supports)
+                && media_queries_equal_ignoring_whitespace(&left.queries, &right.queries)
+        })
+}
+
+/// Return whether a later import masks an earlier import of the same file.
+///
+/// Layers are handled separately by the linker. For unlayered styles, the
+/// later condition list must be a prefix of the earlier one, and each later
+/// condition must apply everywhere its corresponding earlier condition does.
+#[must_use]
+pub fn is_conditional_import_redundant(
+    earlier: &[ImportConditions],
+    later: &[ImportConditions],
+) -> bool {
+    if later.len() > earlier.len() {
+        return false;
+    }
+
+    for (earlier, later) in earlier.iter().zip(later) {
+        if tokens_equal_ignoring_whitespace(&earlier.layers, &later.layers) {
+            let same_supports =
+                tokens_equal_ignoring_whitespace(&earlier.supports, &later.supports);
+            let same_media =
+                media_queries_equal_ignoring_whitespace(&earlier.queries, &later.queries);
+
+            if same_supports && same_media {
+                continue;
+            }
+            if same_media && later.supports.is_empty() {
+                continue;
+            }
+            if same_supports && later.queries.is_empty() {
+                continue;
+            }
+        }
+        return false;
+    }
+
+    true
+}
+
 /// Join a generated relative path to the configured public path.
 #[must_use]
 pub fn join_with_public_path(public_path: &str, mut rel_path: &str) -> String {
@@ -308,12 +440,21 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        AssetPath, ChunkPath, OutputPathContext, OutputPiece, OutputPieceIndexKind,
-        join_with_public_path, path_between_chunks,
+        AssetPath, ChunkImport, ChunkInfo, ChunkPath, OutputPathContext, OutputPiece,
+        OutputPieceIndexKind, PartRange, append_or_extend_part_range,
+        enforce_no_cyclic_chunk_imports, import_conditions_are_equal,
+        is_conditional_import_redundant, join_with_public_path, path_between_chunks,
     };
     use crate::internal::{
+        ast::ImportKind,
+        css_ast::{
+            ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
+            WhitespaceFlags,
+        },
+        css_lexer::TokenKind,
         fs::{MockKind, mock_fs},
         helpers::Joiner,
+        logger::{DeferLogKind, Loc, Log},
         sourcemap::{LineColumnOffset, SourceMapShift},
     };
 
@@ -481,5 +622,220 @@ mod tests {
             path_between_chunks(&windows, "", r"C:\out", r"D:\out\chunk.js"),
             None
         );
+    }
+
+    #[test]
+    fn adjacent_parts_from_the_same_file_share_a_range() {
+        let mut ranges = Vec::new();
+        append_or_extend_part_range(&mut ranges, 1, 2);
+        append_or_extend_part_range(&mut ranges, 1, 3);
+        append_or_extend_part_range(&mut ranges, 2, 4);
+        append_or_extend_part_range(&mut ranges, 1, 4);
+        assert_eq!(
+            ranges,
+            vec![
+                PartRange {
+                    source_index: 1,
+                    part_index_begin: 2,
+                    part_index_end: 4,
+                },
+                PartRange {
+                    source_index: 2,
+                    part_index_begin: 4,
+                    part_index_end: 5,
+                },
+                PartRange {
+                    source_index: 1,
+                    part_index_begin: 4,
+                    part_index_end: 5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn static_chunk_import_cycles_are_rejected() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let chunks = [
+            ChunkInfo {
+                cross_chunk_imports: vec![ChunkImport {
+                    chunk_index: 1,
+                    import_kind: ImportKind::Stmt,
+                }],
+                ..ChunkInfo::default()
+            },
+            ChunkInfo {
+                cross_chunk_imports: vec![ChunkImport {
+                    chunk_index: 0,
+                    import_kind: ImportKind::Require,
+                }],
+                ..ChunkInfo::default()
+            },
+        ];
+        enforce_no_cyclic_chunk_imports(&log, &chunks);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].data.text,
+            "Internal error: generated chunks contain a circular import"
+        );
+    }
+
+    #[test]
+    fn dynamic_chunk_import_cycles_are_allowed() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let chunks = [
+            ChunkInfo {
+                cross_chunk_imports: vec![ChunkImport {
+                    chunk_index: 1,
+                    import_kind: ImportKind::Dynamic,
+                }],
+                ..ChunkInfo::default()
+            },
+            ChunkInfo {
+                cross_chunk_imports: vec![ChunkImport {
+                    chunk_index: 0,
+                    import_kind: ImportKind::Stmt,
+                }],
+                ..ChunkInfo::default()
+            },
+        ];
+        enforce_no_cyclic_chunk_imports(&log, &chunks);
+        assert!(!log.has_errors());
+    }
+
+    #[test]
+    fn already_validated_chunk_subgraphs_are_not_revisited() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let chunks = [
+            ChunkInfo {
+                cross_chunk_imports: vec![
+                    ChunkImport {
+                        chunk_index: 1,
+                        import_kind: ImportKind::Stmt,
+                    },
+                    ChunkImport {
+                        chunk_index: 2,
+                        import_kind: ImportKind::Stmt,
+                    },
+                ],
+                ..ChunkInfo::default()
+            },
+            ChunkInfo {
+                cross_chunk_imports: vec![ChunkImport {
+                    chunk_index: 2,
+                    import_kind: ImportKind::Stmt,
+                }],
+                ..ChunkInfo::default()
+            },
+            ChunkInfo::default(),
+        ];
+        enforce_no_cyclic_chunk_imports(&log, &chunks);
+        assert!(!log.has_errors());
+    }
+
+    fn token(text: &str) -> Token {
+        Token {
+            text: text.into(),
+            kind: TokenKind::Ident,
+            ..Token::default()
+        }
+    }
+
+    fn media(text: &str) -> MediaQuery {
+        MediaQuery {
+            loc: Loc::default(),
+            data: MediaQueryData::ArbitraryTokens(MediaArbitraryTokensQuery {
+                tokens: vec![token(text)],
+            }),
+        }
+    }
+
+    #[test]
+    fn import_condition_equality_ignores_whitespace() {
+        let mut left_layer = token("layer");
+        left_layer.whitespace = WhitespaceFlags::BEFORE;
+        let mut right_supports = token("supports");
+        right_supports.whitespace = WhitespaceFlags::AFTER;
+        let left = [ImportConditions {
+            layers: vec![left_layer],
+            supports: vec![token("supports")],
+            queries: vec![media("screen")],
+        }];
+        let right = [ImportConditions {
+            layers: vec![token("layer")],
+            supports: vec![right_supports],
+            queries: vec![media("screen")],
+        }];
+        assert!(import_conditions_are_equal(&left, &right));
+
+        let different = [ImportConditions {
+            layers: vec![token("other")],
+            ..right[0].clone()
+        }];
+        assert!(!import_conditions_are_equal(&left, &different));
+    }
+
+    #[test]
+    fn later_import_condition_prefix_masks_earlier_import() {
+        let shared_outer = ImportConditions {
+            supports: vec![token("grid")],
+            ..ImportConditions::default()
+        };
+        let earlier = [
+            shared_outer.clone(),
+            ImportConditions {
+                layers: vec![token("theme")],
+                supports: vec![token("flex")],
+                queries: vec![media("screen")],
+            },
+        ];
+
+        assert!(is_conditional_import_redundant(
+            &earlier,
+            std::slice::from_ref(&shared_outer)
+        ));
+        assert!(is_conditional_import_redundant(
+            &earlier,
+            &[
+                shared_outer.clone(),
+                ImportConditions {
+                    layers: vec![token("theme")],
+                    queries: vec![media("screen")],
+                    ..ImportConditions::default()
+                },
+            ]
+        ));
+        assert!(is_conditional_import_redundant(
+            &earlier,
+            &[
+                shared_outer,
+                ImportConditions {
+                    layers: vec![token("theme")],
+                    supports: vec![token("flex")],
+                    ..ImportConditions::default()
+                },
+            ]
+        ));
+    }
+
+    #[test]
+    fn incompatible_or_longer_import_conditions_are_not_redundant() {
+        let earlier = [ImportConditions {
+            layers: vec![token("theme")],
+            supports: vec![token("flex")],
+            queries: vec![media("screen")],
+        }];
+        assert!(!is_conditional_import_redundant(
+            &earlier,
+            &[ImportConditions {
+                layers: vec![token("other")],
+                ..ImportConditions::default()
+            }]
+        ));
+        assert!(!is_conditional_import_redundant(
+            &earlier,
+            &[earlier[0].clone(), ImportConditions::default(),]
+        ));
     }
 }
