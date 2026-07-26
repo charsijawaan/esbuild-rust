@@ -973,6 +973,39 @@ mod tests {
     }
 
     #[test]
+    fn validates_assignment_targets_and_marks_mutated_symbols() {
+        let (ast, ok, log) = parse_source(
+            "let a, b, c, d;\
+             a = 1;\
+             b += 2;\
+             c++;\
+             [a, , b] = items;\
+             ({value: c, ...d} = object);",
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let entry = ast.parts[1].scopes[0].lock().expect("entry scope");
+        for name in ["a", "b", "c", "d"] {
+            let reference = entry.members[name].reference;
+            assert!(
+                ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                    .flags
+                    .contains(crate::internal::ast::SymbolFlags::COULD_POTENTIALLY_BE_MUTATED),
+                "{name}"
+            );
+        }
+        drop(entry);
+
+        let (_, ok, log) = parse_source("1 = value; ++true;");
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
+
+        let (_, ok, log) = parse_source("\"use strict\"; eval = 1; arguments++; protected;");
+        assert!(ok);
+        assert_eq!(log.done().len(), 3);
+    }
+
+    #[test]
     fn arrow_parameters_bind_without_creating_an_arguments_symbol() {
         let (ast, ok, log) =
             parse_source("let outer = 1; const fn = (outer, {x}) => outer + x + arguments;");

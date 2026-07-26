@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use crate::internal::js_ast::{
-    Binding, BindingData, BlockStmt, Class, Expr, ExprData, Function, PropertyFlags, ScopeKind,
-    Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
+    AssignTarget, Binding, BindingData, BlockStmt, Class, Expr, ExprData, Function, OpCode,
+    PropertyFlags, ScopeKind, Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
 };
 use crate::internal::logger::{Loc, Range};
 
@@ -489,6 +489,34 @@ fn function_body_use_strict(core: &ParserCore, statements: &[Stmt]) -> Option<Lo
 
 #[allow(clippy::too_many_lines)]
 fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers: bool) {
+    visit_expr_with_target(core, expression, resolve_identifiers, AssignTarget::None);
+}
+
+#[allow(clippy::too_many_lines)]
+fn visit_expr_with_target(
+    core: &mut ParserCore,
+    expression: &mut Expr,
+    resolve_identifiers: bool,
+    assign_target: AssignTarget,
+) {
+    if assign_target != AssignTarget::None {
+        let is_pattern = match expression.data.as_deref() {
+            Some(
+                ExprData::Array(_) | ExprData::Object(_) | ExprData::Spread(_) | ExprData::Missing,
+            ) => true,
+            Some(ExprData::Binary(binary)) => binary.op == OpCode::BinaryAssign,
+            _ => false,
+        };
+        if !is_pattern && !core.is_valid_assignment_target(expression, core.is_strict_mode()) {
+            core.add_error_range(
+                Range {
+                    loc: expression.loc,
+                    len: 0,
+                },
+                "Invalid assignment target",
+            );
+        }
+    }
     let Some(data) = expression.data.as_deref_mut() else {
         return;
     };
@@ -500,22 +528,59 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
             if ParserCore::is_stored_name_ref(identifier.reference) {
                 let name = String::from_utf8_lossy(core.load_name_from_ref(identifier.reference))
                     .into_owned();
+                if core.is_strict_mode()
+                    && crate::internal::js_lexer::is_strict_mode_reserved_word(&name)
+                {
+                    core.add_error_range(
+                        crate::internal::js_lexer::range_of_identifier(
+                            &core.source,
+                            expression.loc,
+                        ),
+                        format!("{name:?} is a reserved word and cannot be used in strict mode"),
+                    );
+                }
                 let result = core.find_symbol(expression.loc, &name);
                 identifier.reference = result.reference;
                 identifier.must_keep_due_to_with_stmt = result.is_inside_with_scope;
             } else {
                 core.record_usage(identifier.reference);
             }
+            if assign_target != AssignTarget::None {
+                let symbol_index =
+                    usize::try_from(identifier.reference.inner_index).expect("symbol index");
+                core.symbols[symbol_index].flags |=
+                    crate::internal::ast::SymbolFlags::COULD_POTENTIALLY_BE_MUTATED;
+            }
         }
         ExprData::ImportIdentifier(identifier) => core.record_usage(identifier.reference),
         ExprData::Array(array) => {
             for item in &mut array.items {
-                visit_expr(core, item, resolve_identifiers);
+                visit_expr_with_target(
+                    core,
+                    item,
+                    resolve_identifiers,
+                    if assign_target == AssignTarget::None {
+                        AssignTarget::None
+                    } else {
+                        AssignTarget::Replace
+                    },
+                );
             }
         }
-        ExprData::Unary(unary) => visit_expr(core, &mut unary.value, resolve_identifiers),
+        ExprData::Unary(unary) => visit_expr_with_target(
+            core,
+            &mut unary.value,
+            resolve_identifiers,
+            unary.op.unary_assign_target(),
+        ),
         ExprData::Binary(binary) => {
-            visit_expr(core, &mut binary.left, resolve_identifiers);
+            let left_target =
+                if assign_target != AssignTarget::None && binary.op == OpCode::BinaryAssign {
+                    AssignTarget::Replace
+                } else {
+                    binary.op.binary_assign_target()
+                };
+            visit_expr_with_target(core, &mut binary.left, resolve_identifiers, left_target);
             visit_expr(core, &mut binary.right, resolve_identifiers);
         }
         ExprData::New(new) => {
@@ -578,14 +643,32 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
                 if property.flags.contains(PropertyFlags::IS_COMPUTED) {
                     visit_expr(core, &mut property.key, resolve_identifiers);
                 }
-                visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
+                visit_expr_with_target(
+                    core,
+                    &mut property.value_or_nil,
+                    resolve_identifiers,
+                    if assign_target == AssignTarget::None {
+                        AssignTarget::None
+                    } else {
+                        AssignTarget::Replace
+                    },
+                );
                 visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
                 for decorator in &mut property.decorators {
                     visit_expr(core, &mut decorator.value, resolve_identifiers);
                 }
             }
         }
-        ExprData::Spread(spread) => visit_expr(core, &mut spread.value, resolve_identifiers),
+        ExprData::Spread(spread) => visit_expr_with_target(
+            core,
+            &mut spread.value,
+            resolve_identifiers,
+            if assign_target == AssignTarget::None {
+                AssignTarget::None
+            } else {
+                AssignTarget::Replace
+            },
+        ),
         ExprData::Template(template) => {
             visit_expr(core, &mut template.tag_or_nil, resolve_identifiers);
             for part in &mut template.parts {
