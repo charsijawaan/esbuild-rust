@@ -3897,6 +3897,45 @@ mod tests {
     }
 
     #[test]
+    fn transforms_optional_catch_bindings_and_identifier_arrow_statements() {
+        let source = "try{x()}catch{y()}\nx=>({a:x})";
+        assert_eq!(
+            code(transform(source, TransformOptions::default())),
+            "try {\n  x();\n} catch {\n  y();\n}\n(x2) => ({ a: x2 });\n"
+        );
+        assert_eq!(
+            code(transform(
+                source,
+                TransformOptions {
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "try{x()}catch{y()}x2=>({a:x2});\n"
+        );
+        assert_eq!(
+            code(transform(
+                source,
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "try {\n  x();\n} catch {\n  y();\n}\n"
+        );
+        assert_eq!(
+            code(transform(
+                "const f=x=>({a:x})",
+                TransformOptions {
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const f = (a) => ({ a });\n"
+        );
+    }
+
+    #[test]
     fn defaults_node_env_for_browser_transforms() {
         let development = code(transform(
             "console.log(process.env.NODE_ENV)",

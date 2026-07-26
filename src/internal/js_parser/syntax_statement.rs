@@ -2,7 +2,7 @@
 
 use crate::internal::{
     js_ast::{
-        AwaitExpr, Binding, BindingData, BlockStmt, BreakStmt, Catch, ClassStmt, CommentStmt,
+        Arg, AwaitExpr, Binding, BindingData, BlockStmt, BreakStmt, Catch, ClassStmt, CommentStmt,
         ContinueStmt, Decl, DoWhileStmt, Expr, ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt,
         ForStmt, FunctionStmt, IdentifierBinding, IdentifierExpr, IfStmt, LabelStmt, LocalKind,
         LocalStmt, Precedence, ReturnStmt, Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt,
@@ -14,6 +14,7 @@ use crate::internal::{
 
 use super::{
     parser_core::ParserCore,
+    syntax_arrow::parse_arrow_body,
     syntax_binding::parse_binding,
     syntax_class::parse_class_prefix,
     syntax_expression::{
@@ -288,16 +289,37 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         if lexer.token == Token::Colon {
             return parse_label_statement(core, lexer, loc, name_loc, reference);
         }
-        let value = parse_expression_suffix_with_flags(
-            core,
-            lexer,
+        let expression = if lexer.token == Token::EqualsGreaterThan {
+            parse_arrow_body(
+                core,
+                lexer,
+                name_loc,
+                vec![Arg {
+                    binding: Binding {
+                        loc: name_loc,
+                        data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                            reference,
+                        }))),
+                    },
+                    ..Arg::default()
+                }],
+                false,
+                false,
+                false,
+            )
+        } else {
             Expr::new(
                 name_loc,
                 ExprData::Identifier(IdentifierExpr {
                     reference,
                     ..IdentifierExpr::default()
                 }),
-            ),
+            )
+        };
+        let value = parse_expression_suffix_with_flags(
+            core,
+            lexer,
+            expression,
             Precedence::Lowest,
             true,
             comment_flags,

@@ -4,14 +4,16 @@ use std::collections::{HashMap, HashSet};
 
 use crate::internal::logger::{Loc, Range};
 use crate::internal::{
-    ast::{AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportRecordFlags},
+    ast::{
+        AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportRecordFlags, SymbolKind,
+    },
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
         ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionExpr,
         IdentifierExpr, IfExpr, ObjectExpr, OpCode, Property, PropertyFlags, PropertyKind,
         ScopeKind, Stmt, StmtData, StrictModeKind, StringExpr, for_each_identifier_binding,
-        is_identifier_es5_and_es_next,
+        is_identifier_es5_and_es_next, make_helper_context,
     },
 };
 
@@ -436,6 +438,30 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.pop_scope();
                 if should_drop {
                     statement.data = Some(Box::new(StmtData::Empty));
+                } else if core.options.minify_syntax
+                    && core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                        .use_count_estimate
+                        == 0
+                {
+                    if label.statement.data.is_none() {
+                        statement.data = None;
+                        continue;
+                    }
+                    let mut replacements =
+                        super::control_flow::append_if_or_label_body_preserving_scope(
+                            Vec::new(),
+                            std::mem::take(&mut label.statement),
+                        );
+                    if replacements.is_empty() {
+                        statement.data = None;
+                    } else if replacements.len() == 1 {
+                        *statement = replacements.pop().expect("single replacement");
+                    } else {
+                        statement.data = Some(Box::new(StmtData::Block(BlockStmt {
+                            statements: replacements,
+                            ..BlockStmt::default()
+                        })));
+                    }
                 }
             }
             Some(StmtData::Switch(switch)) => {
@@ -477,12 +503,14 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 );
                 if let Some(catch) = &mut try_statement.catch {
                     core.push_scope_for_visit_pass(ScopeKind::CatchBinding, catch.loc);
-                    record_binding(core, &mut catch.binding_or_nil);
-                    visit_binding_initializers(
-                        core,
-                        &mut catch.binding_or_nil,
-                        resolve_identifiers,
-                    );
+                    if catch.binding_or_nil.data.is_some() {
+                        record_binding(core, &mut catch.binding_or_nil);
+                        visit_binding_initializers(
+                            core,
+                            &mut catch.binding_or_nil,
+                            resolve_identifiers,
+                        );
+                    }
                     visit_block(core, catch.block_loc, &mut catch.block, resolve_identifiers);
                     core.pop_scope();
                 }
@@ -518,6 +546,17 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
         if core.options.minify_syntax {
             minify_constant_if_statement(statement);
             minify_control_flow_statement(statement);
+            if let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() {
+                let helpers = make_helper_context(|reference| {
+                    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                        == SymbolKind::Unbound
+                });
+                expression.value = helpers
+                    .simplify_unused_expr(&expression.value, core.options.unsupported_js_features);
+                if expression.value.data.is_none() {
+                    statement.data = None;
+                }
+            }
         }
         if core.options.drop_console
             && matches!(

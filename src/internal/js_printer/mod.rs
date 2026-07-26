@@ -1828,7 +1828,8 @@ impl Printer<'_> {
                         continue;
                     }
                     self.print_class_key(property);
-                    let is_shorthand = property.flags.contains(PropertyFlags::WAS_SHORTHAND)
+                    let is_shorthand = !property.flags.contains(PropertyFlags::IS_COMPUTED)
+                        && !property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY)
                         && property.initializer_or_nil.data.is_none()
                         && matches!(
                             (
