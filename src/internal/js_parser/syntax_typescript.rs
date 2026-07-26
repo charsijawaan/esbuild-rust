@@ -1,11 +1,17 @@
 use crate::internal::{
+    ast::{INVALID_REF, LocRef, SymbolKind},
+    helpers::string_to_utf16,
     js_ast::{
-        Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, Stmt, StmtData, TypeScriptStmt,
+        EnumStmt, EnumValue, Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, Stmt, StmtData,
+        TypeScriptStmt,
     },
     js_lexer::{Lexer, Token},
 };
 
-use super::{parser_core::ParserCore, syntax_expression::parse_expression_suffix};
+use super::{
+    parser_core::ParserCore,
+    syntax_expression::{parse_expression, parse_expression_suffix},
+};
 
 pub(crate) fn skip_type_parameters(lexer: &mut Lexer) {
     if lexer.token != Token::LessThan {
@@ -140,7 +146,13 @@ pub(crate) fn parse_type_script_statement(
     lexer: &mut Lexer,
     is_export: bool,
 ) -> Option<Stmt> {
-    if !core.options.ts.parse || lexer.token != Token::Identifier {
+    if !core.options.ts.parse {
+        return None;
+    }
+    if lexer.token == Token::Enum {
+        return Some(parse_enum_statement(core, lexer, is_export));
+    }
+    if lexer.token != Token::Identifier {
         return None;
     }
     let loc = lexer.loc();
@@ -232,6 +244,68 @@ pub(crate) fn parse_type_script_statement(
         ));
     }
     None
+}
+
+pub(crate) fn parse_enum_statement(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    is_export: bool,
+) -> Stmt {
+    let loc = lexer.loc();
+    lexer.expect(Token::Enum);
+    let name_loc = lexer.loc();
+    let name_text = String::from_utf8_lossy(lexer.raw()).into_owned();
+    let name = LocRef {
+        loc: name_loc,
+        reference: core.store_name_in_ref(lexer.identifier.clone()),
+    };
+    lexer.expect(Token::Identifier);
+    let argument = core.new_symbol(SymbolKind::Hoisted, format!("_{name_text}"));
+    lexer.expect(Token::OpenBrace);
+    let mut values = Vec::new();
+    while lexer.token != Token::CloseBrace {
+        let value_loc = lexer.loc();
+        let name = if lexer.token == Token::StringLiteral {
+            let name = lexer.string_literal().to_vec();
+            lexer.next();
+            name
+        } else if lexer.is_identifier_or_keyword() {
+            let name = string_to_utf16(lexer.raw());
+            lexer.next();
+            name
+        } else {
+            lexer.expected(Token::Identifier);
+        };
+        let value_or_nil = if lexer.token == Token::Equals {
+            lexer.next();
+            parse_expression(core, lexer, Precedence::Comma, true)
+        } else {
+            Expr::default()
+        };
+        values.push(EnumValue {
+            value_or_nil,
+            name,
+            reference: INVALID_REF,
+            loc: value_loc,
+        });
+        if !matches!(lexer.token, Token::Comma | Token::Semicolon) {
+            break;
+        }
+        lexer.next();
+    }
+    lexer.expect(Token::CloseBrace);
+    if lexer.token == Token::Semicolon {
+        lexer.next();
+    }
+    Stmt::new(
+        loc,
+        StmtData::Enum(EnumStmt {
+            values,
+            name,
+            argument,
+            is_export,
+        }),
+    )
 }
 
 fn skip_balanced_group(lexer: &mut Lexer, open: Token, close: Token) {

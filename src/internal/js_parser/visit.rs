@@ -39,6 +39,13 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             Some(StmtData::Class(class)) => {
                 visit_class(core, &mut class.class, resolve_identifiers);
             }
+            Some(StmtData::Enum(enumeration)) => {
+                core.record_declared_symbol(enumeration.name.reference);
+                core.record_declared_symbol(enumeration.argument);
+                for value in &mut enumeration.values {
+                    visit_expr(core, &mut value.value_or_nil, resolve_identifiers);
+                }
+            }
             Some(StmtData::ExportDefault(export)) => match export.value.data.as_deref_mut() {
                 Some(StmtData::Expr(expression)) => {
                     visit_expr(core, &mut expression.value, resolve_identifiers);

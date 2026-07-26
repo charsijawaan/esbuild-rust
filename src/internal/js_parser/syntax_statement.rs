@@ -333,7 +333,11 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         }
         Token::Const => {
             lexer.next();
-            parse_local_declarations(core, lexer, loc, LocalKind::Const, true, true, true)
+            if core.options.ts.parse && lexer.token == Token::Enum {
+                super::syntax_typescript::parse_enum_statement(core, lexer, false)
+            } else {
+                parse_local_declarations(core, lexer, loc, LocalKind::Const, true, true, true)
+            }
         }
         Token::For => parse_for_statement(core, lexer, loc),
         Token::Break => {

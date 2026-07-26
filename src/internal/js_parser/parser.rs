@@ -103,6 +103,9 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 ) || matches!(
                     statement.data.as_deref(),
                     Some(StmtData::Class(class)) if class.is_export
+                ) || matches!(
+                    statement.data.as_deref(),
+                    Some(StmtData::Enum(enumeration)) if enumeration.is_export
                 )
             });
         if has_esm_exports
@@ -450,6 +453,19 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
                     );
                 }
             }
+            Some(StmtData::Enum(enumeration)) if enumeration.is_export => {
+                let alias = core.symbols[usize::try_from(enumeration.name.reference.inner_index)
+                    .expect("symbol index")]
+                .original_name
+                .clone();
+                record_export(
+                    core,
+                    &mut metadata.named_exports,
+                    enumeration.name.loc,
+                    &alias,
+                    enumeration.name.reference,
+                );
+            }
             _ => {}
         }
     }
@@ -525,6 +541,15 @@ fn declare_top_level_symbols(
                 if let Some(name) = &mut class.class.name {
                     bind_loc_ref(core, name, SymbolKind::Class, &mut declared);
                 }
+            }
+            Some(StmtData::Enum(enumeration)) => {
+                bind_loc_ref(
+                    core,
+                    &mut enumeration.name,
+                    SymbolKind::TsEnum,
+                    &mut declared,
+                );
+                record_top_level_symbol(&mut declared, enumeration.argument);
             }
             Some(StmtData::Import(import)) => {
                 if let Some(name) = &mut import.default_name {
@@ -2770,6 +2795,54 @@ mod tests {
         assert_eq!(import.items.as_ref().map_or(0, Vec::len), 2);
         assert_eq!(ast.named_imports.len(), 2);
         assert!(ast.named_imports.values().all(|item| item.alias == "type"));
+    }
+
+    #[test]
+    fn parses_type_script_enum_declarations() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "enum Color { Red, Green = 2, Blue = 'blue', Computed = make() }\
+             export const enum Flags { A = 1, B }",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].statements.len(), 2);
+        let Some(StmtData::Enum(color)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected enum declaration");
+        };
+        assert_eq!(color.values.len(), 4);
+        assert!(color.values[0].value_or_nil.data.is_none());
+        assert!(matches!(
+            color.values[1].value_or_nil.data.as_deref(),
+            Some(ExprData::Number(2.0))
+        ));
+        assert!(matches!(
+            color.values[2].value_or_nil.data.as_deref(),
+            Some(ExprData::String(_))
+        ));
+        assert!(matches!(
+            color.values[3].value_or_nil.data.as_deref(),
+            Some(ExprData::Call(_))
+        ));
+        assert_eq!(
+            ast.symbols[usize::try_from(color.name.reference.inner_index).expect("symbol index")]
+                .kind,
+            crate::internal::ast::SymbolKind::TsEnum
+        );
+        let Some(StmtData::Enum(flags)) = ast.parts[1].statements[1].data.as_deref() else {
+            panic!("expected exported const enum");
+        };
+        assert!(flags.is_export);
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+        assert!(ast.named_exports.contains_key("Flags"));
+        assert!(
+            ast.parts[1]
+                .declared_symbols
+                .iter()
+                .any(|symbol| symbol.reference == color.argument)
+        );
     }
 
     #[test]

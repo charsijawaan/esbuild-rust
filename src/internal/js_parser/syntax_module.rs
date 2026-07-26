@@ -162,7 +162,7 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
         return statement;
     }
     match lexer.token {
-        Token::Var | Token::Const | Token::Function | Token::Class => {
+        Token::Var | Token::Const | Token::Function | Token::Class | Token::Enum => {
             let mut statement = super::syntax_statement::parse_statement(core, lexer);
             mark_declaration_exported(&mut statement);
             statement
@@ -476,6 +476,7 @@ fn mark_declaration_exported(statement: &mut Stmt) {
         Some(StmtData::Local(local)) => local.is_export = true,
         Some(StmtData::Function(function)) => function.is_export = true,
         Some(StmtData::Class(class)) => class.is_export = true,
+        Some(StmtData::Enum(enumeration)) => enumeration.is_export = true,
         _ => {}
     }
 }
