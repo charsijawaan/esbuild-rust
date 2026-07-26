@@ -162,7 +162,7 @@ impl Printer<'_> {
                 }
             }
             RuleData::Selector(rule) => {
-                self.print_complex_selectors(&rule.selectors);
+                self.print_complex_selectors(&rule.selectors, true);
                 self.print_space();
                 self.print_rule_block(&rule.rules);
             }
@@ -182,7 +182,7 @@ impl Printer<'_> {
                 {
                     self.css.push(b' ');
                 }
-                let has_whitespace_after = self.print_tokens(&rule.value);
+                let has_whitespace_after = self.print_declaration_tokens(&rule.value);
                 if rule.important {
                     if !self.options.minify_whitespace
                         && !rule.value.is_empty()
@@ -236,7 +236,7 @@ impl Printer<'_> {
                 if !rule.start.is_empty() {
                     self.print_space();
                     self.css.push(b'(');
-                    self.print_complex_selectors(&rule.start);
+                    self.print_complex_selectors(&rule.start, false);
                     self.css.push(b')');
                 }
                 if !rule.end.is_empty() {
@@ -246,7 +246,7 @@ impl Printer<'_> {
                         } else {
                             b" to ("
                         });
-                    self.print_complex_selectors(&rule.end);
+                    self.print_complex_selectors(&rule.end, false);
                     self.css.push(b')');
                 }
                 self.print_space();
@@ -305,6 +305,48 @@ impl Printer<'_> {
                 self.css.push(b' ');
             }
             has_whitespace = token.whitespace.contains(WhitespaceFlags::AFTER);
+            self.print_token(token);
+        }
+        if has_whitespace {
+            self.css.push(b' ');
+        }
+        has_whitespace
+    }
+
+    fn print_declaration_tokens(&mut self, tokens: &[Token]) -> bool {
+        let multiline = !self.options.minify_whitespace
+            && tokens
+                .iter()
+                .filter(|token| token.kind == TokenKind::Comma)
+                .count()
+                >= 2;
+        if !multiline {
+            return self.print_tokens(tokens);
+        }
+
+        let mut has_whitespace = tokens
+            .first()
+            .is_some_and(|token| token.whitespace.contains(WhitespaceFlags::BEFORE));
+        let mut previous_was_comma = false;
+        let mut printed_any = false;
+        for token in tokens {
+            if token.kind == TokenKind::Whitespace {
+                has_whitespace = true;
+                continue;
+            }
+            if has_whitespace {
+                if !printed_any || previous_was_comma {
+                    self.css.push(b'\n');
+                    for _ in 0..=self.indent {
+                        self.css.extend_from_slice(b"  ");
+                    }
+                } else {
+                    self.css.push(b' ');
+                }
+            }
+            has_whitespace = token.whitespace.contains(WhitespaceFlags::AFTER);
+            previous_was_comma = token.kind == TokenKind::Comma;
+            printed_any = true;
             self.print_token(token);
         }
         if has_whitespace {
@@ -448,15 +490,17 @@ impl Printer<'_> {
         }
     }
 
-    fn print_complex_selectors(&mut self, selectors: &[ComplexSelector]) {
+    fn print_complex_selectors(&mut self, selectors: &[ComplexSelector], multiline: bool) {
         for (complex_index, complex) in selectors.iter().enumerate() {
             if complex_index > 0 {
-                self.css
-                    .extend_from_slice(if self.options.minify_whitespace {
-                        b","
-                    } else {
-                        b", "
-                    });
+                if self.options.minify_whitespace {
+                    self.css.push(b',');
+                } else if multiline {
+                    self.css.extend_from_slice(b",\n");
+                    self.print_indent();
+                } else {
+                    self.css.extend_from_slice(b", ");
+                }
             }
             for (compound_index, compound) in complex.selectors.iter().enumerate() {
                 if compound.combinator.byte == 0 {
@@ -553,7 +597,7 @@ impl Printer<'_> {
                 {
                     self.css.extend_from_slice(b" of ");
                 }
-                self.print_complex_selectors(&selector.selectors);
+                self.print_complex_selectors(&selector.selectors, false);
                 self.css.push(b')');
             }
         }

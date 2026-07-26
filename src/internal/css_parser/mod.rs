@@ -3,14 +3,14 @@
 use std::collections::HashMap;
 
 use crate::internal::{
-    ast::{ImportKind, ImportRecord, LocRef, Ref, Symbol, SymbolKind},
+    ast::{CharFreq, ImportKind, ImportRecord, LocRef, Ref, Symbol, SymbolKind},
     css_ast::{
         Ast, AtCharsetRule, AtImportRule, AtKeyframesRule, AtLayerRule, AtMediaRule,
-        BadDeclarationRule, ClassSelector, Combinator, ComplexSelector, CompoundSelector,
-        DeclarationRule, HashSelector, ImportConditions, KeyframeBlock, KnownAtRule,
-        MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, NameToken, NamespacedName,
-        PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule, SubclassData,
-        SubclassSelector, Token, UnknownAtRule, WhitespaceFlags,
+        BadDeclarationRule, ClassSelector, Combinator, ComplexSelector, Composes, CompoundSelector,
+        DeclarationRule, HashSelector, ImportConditions, ImportedComposesName, KeyframeBlock,
+        KnownAtRule, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, NameToken,
+        NamespacedName, PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule,
+        SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags,
     },
     css_lexer::{self, TokenKind},
     logger::{Loc, Log, Path, Range, Source},
@@ -21,6 +21,15 @@ pub struct Options {
     pub minify_syntax: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
+    pub symbol_mode: SymbolMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SymbolMode {
+    #[default]
+    Disabled,
+    Global,
+    Local,
 }
 
 #[must_use]
@@ -39,13 +48,44 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
         index: 0,
         import_records: Vec::new(),
         symbols: Vec::new(),
-        css_symbols: HashMap::new(),
+        local_symbols: Vec::new(),
+        local_scope: HashMap::new(),
+        global_scope: HashMap::new(),
+        make_local_symbols: options.symbol_mode == SymbolMode::Local,
+        composes: HashMap::new(),
+        composes_target: None,
     };
     let rules = parser.parse_rule_list(false);
+    let char_freq = if options.minify_identifiers {
+        let mut frequency = CharFreq::default();
+        frequency.scan(&parser.source.contents, 1);
+        for comment in &result.all_comments {
+            frequency.scan(parser.source.text_for_range(*comment), -1);
+        }
+        for record in &parser.import_records {
+            frequency.scan(record.path.text.as_bytes(), -1);
+        }
+        for symbol in &parser.symbols {
+            if symbol.kind == SymbolKind::LocalCss {
+                frequency.scan(
+                    symbol.original_name.as_bytes(),
+                    -i32::try_from(symbol.use_count_estimate).unwrap_or(i32::MAX),
+                );
+            }
+        }
+        Some(frequency)
+    } else {
+        None
+    };
     Ast {
         rules,
         symbols: parser.symbols,
+        char_freq,
         import_records: parser.import_records,
+        local_symbols: parser.local_symbols,
+        local_scope: parser.local_scope,
+        global_scope: parser.global_scope,
+        composes: parser.composes,
         source_map_comment: result.source_map_comment,
         approximate_line_count: result.approximate_line_count,
         ..Ast::default()
@@ -59,7 +99,12 @@ struct Parser {
     index: usize,
     import_records: Vec<ImportRecord>,
     symbols: Vec<Symbol>,
-    css_symbols: HashMap<String, Ref>,
+    local_symbols: Vec<LocRef>,
+    local_scope: HashMap<String, LocRef>,
+    global_scope: HashMap<String, LocRef>,
+    make_local_symbols: bool,
+    composes: HashMap<Ref, Composes>,
+    composes_target: Option<Ref>,
 }
 
 impl Parser {
@@ -76,7 +121,9 @@ impl Parser {
                 TokenKind::Semicolon => self.index += 1,
                 TokenKind::AtKeyword => rules.push(self.parse_at_rule()),
                 _ if stop_at_close_brace && self.starts_declaration() => {
-                    rules.push(self.parse_declaration());
+                    if let Some(rule) = self.parse_declaration() {
+                        rules.push(rule);
+                    }
                 }
                 _ => rules.push(self.parse_qualified_rule()),
             }
@@ -190,7 +237,7 @@ impl Parser {
         let name_token = prelude.first();
         let name = name_token.map_or_else(String::new, |token| token.text.clone());
         let name_loc = name_token.map_or(loc, |token| token.loc);
-        let name_ref = self.new_css_symbol(&name);
+        let name_ref = self.new_css_symbol(&name, name_loc);
         self.index += 1;
         let mut blocks = Vec::new();
         loop {
@@ -236,16 +283,35 @@ impl Parser {
         }
     }
 
-    fn new_css_symbol(&mut self, name: &str) -> Ref {
-        if let Some(reference) = self.css_symbols.get(name).copied() {
+    fn new_css_symbol(&mut self, name: &str, loc: Loc) -> Ref {
+        let existing = if self.make_local_symbols {
+            self.local_scope.get(name)
+        } else {
+            self.global_scope.get(name)
+        };
+        if let Some(reference) = existing.map(|loc_ref| loc_ref.reference) {
+            self.symbols[reference.inner_index as usize].use_count_estimate += 1;
             return reference;
         }
         let reference = Ref {
             source_index: self.source.index,
             inner_index: u32::try_from(self.symbols.len()).expect("CSS symbol count fits in u32"),
         };
-        self.symbols.push(Symbol::new(SymbolKind::GlobalCss, name));
-        self.css_symbols.insert(name.into(), reference);
+        let kind = if self.make_local_symbols {
+            SymbolKind::LocalCss
+        } else {
+            SymbolKind::GlobalCss
+        };
+        let mut symbol = Symbol::new(kind, name);
+        symbol.use_count_estimate = 1;
+        self.symbols.push(symbol);
+        let loc_ref = LocRef { loc, reference };
+        if self.make_local_symbols {
+            self.local_symbols.push(loc_ref);
+            self.local_scope.insert(name.into(), loc_ref);
+        } else {
+            self.global_scope.insert(name.into(), loc_ref);
+        }
         reference
     }
 
@@ -313,8 +379,12 @@ impl Parser {
             };
         }
         self.index += 1;
+        let selectors = self.parse_complex_selectors(&prelude);
+        let old_composes_target = self.composes_target;
+        self.composes_target = selectors.as_deref().and_then(single_class_selector);
         let rules = self.parse_rule_list(true);
-        if let Some(selectors) = self.parse_complex_selectors(&prelude) {
+        self.composes_target = old_composes_target;
+        if let Some(selectors) = selectors {
             Rule {
                 loc,
                 data: RuleData::Selector(SelectorRule {
@@ -401,7 +471,7 @@ impl Parser {
                     if name.kind != TokenKind::Ident {
                         return None;
                     }
-                    let reference = self.new_css_symbol(&name.text);
+                    let reference = self.new_css_symbol(&name.text, name.loc);
                     compound.subclass_selectors.push(SubclassSelector {
                         data: SubclassData::Class(ClassSelector {
                             name: LocRef {
@@ -417,7 +487,7 @@ impl Parser {
                     index += 1;
                 }
                 TokenKind::Hash => {
-                    let reference = self.new_css_symbol(&token.text);
+                    let reference = self.new_css_symbol(&token.text, token.loc);
                     compound.subclass_selectors.push(SubclassSelector {
                         data: SubclassData::Hash(HashSelector {
                             name: LocRef {
@@ -445,6 +515,37 @@ impl Parser {
                     if !matches!(name.kind, TokenKind::Ident | TokenKind::Function) {
                         return None;
                     }
+                    if !is_element
+                        && name.kind == TokenKind::Function
+                        && matches!(name.text.to_ascii_lowercase().as_str(), "global" | "local")
+                    {
+                        let old_make_local_symbols = self.make_local_symbols;
+                        self.make_local_symbols = name.text.eq_ignore_ascii_case("local");
+                        let parsed = self
+                            .parse_complex_selectors(name.children.as_deref().unwrap_or_default());
+                        self.make_local_symbols = old_make_local_symbols;
+                        let parsed = parsed?;
+                        if parsed.len() != 1 || parsed[0].selectors.len() != 1 {
+                            return None;
+                        }
+                        let mut inner = parsed.into_iter().next()?.selectors.into_iter().next()?;
+                        if inner.combinator.byte != 0
+                            || compound.type_selector.is_some() && inner.type_selector.is_some()
+                        {
+                            return None;
+                        }
+                        if compound.type_selector.is_none() {
+                            compound.type_selector = inner.type_selector.take();
+                        }
+                        compound
+                            .nesting_selector_locs
+                            .append(&mut inner.nesting_selector_locs);
+                        compound
+                            .subclass_selectors
+                            .append(&mut inner.subclass_selectors);
+                        index = name_index + 1;
+                        continue;
+                    }
                     compound.subclass_selectors.push(SubclassSelector {
                         data: SubclassData::PseudoClass(PseudoClassSelector {
                             name: name.text.clone(),
@@ -471,7 +572,7 @@ impl Parser {
         }
     }
 
-    fn parse_declaration(&mut self) -> Rule {
+    fn parse_declaration(&mut self) -> Option<Rule> {
         let key_token = self.current();
         let loc = key_token.range.loc;
         let key_text = self.decoded(key_token);
@@ -483,6 +584,21 @@ impl Parser {
         let value_start = self.index;
         let value_end = self.scan_declaration_end();
         let mut value = self.convert_tokens(value_start, value_end);
+        if self.make_local_symbols && key_text.eq_ignore_ascii_case("composes") {
+            self.process_composes(&value);
+            self.index = value_end;
+            if self.current_kind() == TokenKind::Semicolon {
+                self.index += 1;
+            }
+            return None;
+        }
+        match key_text.to_ascii_lowercase().as_str() {
+            "animation" | "-webkit-animation" => self.process_animation_shorthand(&mut value),
+            "animation-name" | "-webkit-animation-name" => {
+                self.process_animation_names(&mut value);
+            }
+            _ => {}
+        }
         let important = take_important(&mut value);
         if !important && let Some(last) = value.last_mut() {
             last.whitespace = if last.whitespace.contains(WhitespaceFlags::BEFORE) {
@@ -495,7 +611,7 @@ impl Parser {
         if self.current_kind() == TokenKind::Semicolon {
             self.index += 1;
         }
-        Rule {
+        Some(Rule {
             loc,
             data: RuleData::Declaration(DeclarationRule {
                 key_text,
@@ -504,7 +620,7 @@ impl Parser {
                 important,
                 ..DeclarationRule::default()
             }),
-        }
+        })
     }
 
     fn starts_declaration(&self) -> bool {
@@ -516,6 +632,173 @@ impl Parser {
             index += 1;
         }
         self.kind_at(index) == TokenKind::Colon
+    }
+
+    fn process_animation_names(&mut self, tokens: &mut [Token]) {
+        for index in 0..tokens.len() {
+            if matches!(tokens[index].kind, TokenKind::Ident | TokenKind::String) {
+                self.mark_animation_name(tokens, index);
+            }
+        }
+    }
+
+    fn process_composes(&mut self, tokens: &[Token]) {
+        let Some(target) = self.composes_target else {
+            return;
+        };
+        let mut names_end = tokens.len();
+        let mut from_global = false;
+        let mut external = None;
+        if tokens.len() >= 2
+            && tokens[tokens.len() - 2].kind == TokenKind::Ident
+            && tokens[tokens.len() - 2].text.eq_ignore_ascii_case("from")
+        {
+            names_end -= 2;
+            let location = &tokens[tokens.len() - 1];
+            match location.kind {
+                TokenKind::Ident if location.text.eq_ignore_ascii_case("global") => {
+                    from_global = true;
+                }
+                TokenKind::String => {
+                    let import_record_index = u32::try_from(self.import_records.len())
+                        .expect("CSS import count fits in u32");
+                    self.import_records.push(ImportRecord {
+                        path: Path {
+                            text: location.text.clone(),
+                            ..Path::default()
+                        },
+                        range: Range {
+                            loc: location.loc,
+                            len: i32::try_from(location.text.len()).unwrap_or(i32::MAX),
+                        },
+                        kind: ImportKind::ComposesFrom,
+                        ..ImportRecord::default()
+                    });
+                    external = Some(import_record_index);
+                }
+                TokenKind::Url => {
+                    if let Some(record) =
+                        self.import_records.get_mut(location.payload_index as usize)
+                    {
+                        record.kind = ImportKind::ComposesFrom;
+                        external = Some(location.payload_index);
+                    }
+                }
+                _ => return,
+            }
+        }
+        if !tokens[..names_end]
+            .iter()
+            .all(|token| token.kind == TokenKind::Ident)
+        {
+            return;
+        }
+        if let Some(import_record_index) = external {
+            let imported_names = tokens[..names_end]
+                .iter()
+                .map(|token| ImportedComposesName {
+                    alias: token.text.clone(),
+                    alias_loc: token.loc,
+                    import_record_index,
+                })
+                .collect::<Vec<_>>();
+            self.composes
+                .entry(target)
+                .or_default()
+                .imported_names
+                .extend(imported_names);
+            return;
+        }
+
+        let old_make_local_symbols = self.make_local_symbols;
+        if from_global {
+            self.make_local_symbols = false;
+        }
+        let names = tokens[..names_end]
+            .iter()
+            .map(|token| LocRef {
+                loc: token.loc,
+                reference: self.new_css_symbol(&token.text, token.loc),
+            })
+            .collect::<Vec<_>>();
+        self.make_local_symbols = old_make_local_symbols;
+        self.composes.entry(target).or_default().names.extend(names);
+    }
+
+    fn process_animation_shorthand(&mut self, tokens: &mut [Token]) {
+        #[derive(Default)]
+        #[allow(clippy::struct_excessive_bools)]
+        struct Found {
+            timing_function: bool,
+            iteration_count: bool,
+            direction: bool,
+            fill_mode: bool,
+            play_state: bool,
+            name: bool,
+        }
+
+        let mut found = Found::default();
+        for index in 0..tokens.len() {
+            match tokens[index].kind {
+                TokenKind::Comma => found = Found::default(),
+                TokenKind::Number if !found.iteration_count => found.iteration_count = true,
+                TokenKind::Ident => {
+                    let lower = tokens[index].text.to_ascii_lowercase();
+                    if !found.timing_function
+                        && matches!(
+                            lower.as_str(),
+                            "linear"
+                                | "ease"
+                                | "ease-in"
+                                | "ease-out"
+                                | "ease-in-out"
+                                | "step-start"
+                                | "step-end"
+                        )
+                    {
+                        found.timing_function = true;
+                    } else if !found.iteration_count && lower == "infinite" {
+                        found.iteration_count = true;
+                    } else if !found.direction
+                        && matches!(
+                            lower.as_str(),
+                            "normal" | "reverse" | "alternate" | "alternate-reverse"
+                        )
+                    {
+                        found.direction = true;
+                    } else if !found.fill_mode
+                        && matches!(lower.as_str(), "none" | "forwards" | "backwards" | "both")
+                    {
+                        found.fill_mode = true;
+                    } else if !found.play_state && matches!(lower.as_str(), "running" | "paused") {
+                        found.play_state = true;
+                    } else if !found.name {
+                        self.mark_animation_name(tokens, index);
+                        found.name = true;
+                    }
+                }
+                TokenKind::String if !found.name => {
+                    self.mark_animation_name(tokens, index);
+                    found.name = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn mark_animation_name(&mut self, tokens: &mut [Token], index: usize) {
+        let token = &tokens[index];
+        let lower = token.text.to_ascii_lowercase();
+        let is_reserved = matches!(
+            lower.as_str(),
+            "none" | "initial" | "inherit" | "unset" | "default" | "revert" | "revert-layer"
+        );
+        if is_reserved && (token.kind == TokenKind::Ident || !self.make_local_symbols) {
+            return;
+        }
+        let reference = self.new_css_symbol(&token.text, token.loc);
+        tokens[index].kind = TokenKind::Symbol;
+        tokens[index].payload_index = reference.inner_index;
     }
 
     fn scan_to_rule_delimiter(&self) -> usize {
@@ -697,6 +980,24 @@ fn compound_is_empty(compound: &CompoundSelector) -> bool {
         && compound.nesting_selector_locs.is_empty()
 }
 
+fn single_class_selector(selectors: &[ComplexSelector]) -> Option<Ref> {
+    if selectors.len() != 1 || selectors[0].selectors.len() != 1 {
+        return None;
+    }
+    let compound = &selectors[0].selectors[0];
+    if compound.combinator.byte != 0
+        || compound.type_selector.is_some()
+        || !compound.nesting_selector_locs.is_empty()
+        || compound.subclass_selectors.len() != 1
+    {
+        return None;
+    }
+    match &compound.subclass_selectors[0].data {
+        SubclassData::Class(class) => Some(class.name.reference),
+        _ => None,
+    }
+}
+
 fn push_compound(selectors: &mut Vec<CompoundSelector>, compound: &mut CompoundSelector) {
     if !compound_is_empty(compound) {
         selectors.push(std::mem::take(compound));
@@ -854,9 +1155,9 @@ fn is_known_block_at_rule(name: &str) -> bool {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use super::{Options, parse};
+    use super::{Options, SymbolMode, parse};
     use crate::internal::{
-        ast::SymbolMap,
+        ast::{ImportKind, SymbolKind, SymbolMap},
         css_printer,
         logger::{DeferLogKind, Log, PrettyPaths, Source},
     };
@@ -1009,5 +1310,42 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn records_local_css_composes_and_removes_the_pragma() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let tree = parse(
+            log.clone(),
+            source(
+                ".foo { composes: bar from \"./other.css\"; color: red }\
+                 .bar { color: blue }",
+            ),
+            Options {
+                symbol_mode: SymbolMode::Local,
+                ..Options::default()
+            },
+        );
+        assert!(log.done().is_empty());
+        assert_eq!(
+            tree.symbols
+                .iter()
+                .filter(|symbol| symbol.kind == SymbolKind::LocalCss)
+                .count(),
+            2
+        );
+        assert_eq!(tree.composes.len(), 1);
+        let composes = tree.composes.values().next().expect("composes entry");
+        assert!(composes.names.is_empty());
+        assert_eq!(composes.imported_names.len(), 1);
+        assert_eq!(composes.imported_names[0].alias, "bar");
+        assert_eq!(tree.import_records.len(), 1);
+        assert_eq!(tree.import_records[0].kind, ImportKind::ComposesFrom);
+        assert_eq!(tree.import_records[0].path.text, "./other.css");
+        let selector = &tree.rules[0];
+        let crate::internal::css_ast::RuleData::Selector(selector) = &selector.data else {
+            panic!("expected selector rule");
+        };
+        assert_eq!(selector.rules.len(), 1);
     }
 }

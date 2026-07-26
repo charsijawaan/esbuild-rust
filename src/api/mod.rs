@@ -1,11 +1,16 @@
 //! Port of esbuild's public `pkg/api` package.
 
-use std::{collections::HashMap, path::Path as FsPath, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path as FsPath,
+    sync::Arc,
+};
 
 use crate::internal::{
-    ast::SymbolMap,
+    ast::{DEFAULT_NAME_MINIFIER_CSS, Ref, SymbolKind, SymbolMap},
     css_parser, css_printer,
     helpers::{encode_string_as_shortest_data_url, mime_type_by_extension, string_to_utf16},
+    js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
     logger::{DeferLogKind, Log, Msg, MsgKind, PrettyPaths, Source},
     renamer::new_no_op_renamer,
@@ -97,7 +102,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
             abs: sourcefile.clone(),
             rel: sourcefile.clone(),
         },
-        identifier_name: sourcefile,
+        identifier_name: generate_non_unique_name_from_path(&sourcefile),
         contents: Arc::from(input.as_ref()),
         ..Source::default()
     };
@@ -288,6 +293,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
 }
 
 fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u8> {
+    let identifier_name = source.identifier_name.clone();
     let tree = css_parser::parse(
         log.clone(),
         source,
@@ -295,14 +301,30 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u
             minify_syntax: options.minify_syntax,
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
+            symbol_mode: match options.loader {
+                Loader::LocalCss => css_parser::SymbolMode::Local,
+                Loader::GlobalCss => css_parser::SymbolMode::Global,
+                _ => css_parser::SymbolMode::Disabled,
+            },
         },
     );
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&tree.symbols);
+    let local_names = if options.loader == Loader::LocalCss {
+        local_css_names(
+            &tree,
+            &symbols,
+            &identifier_name,
+            options.minify_identifiers,
+        )
+    } else {
+        HashMap::new()
+    };
     css_printer::print(
         &tree,
         &symbols,
         css_printer::Options {
+            local_names,
             line_limit: options.line_limit,
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
@@ -310,6 +332,70 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u
         },
     )
     .css
+}
+
+fn local_css_names(
+    tree: &crate::internal::css_ast::Ast,
+    symbols: &SymbolMap,
+    identifier_name: &str,
+    minify_identifiers: bool,
+) -> HashMap<Ref, String> {
+    let global_names = tree
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::GlobalCss)
+        .map(|symbol| symbol.original_name.clone())
+        .collect::<HashSet<_>>();
+    let mut references = tree
+        .local_symbols
+        .iter()
+        .map(|loc_ref| loc_ref.reference)
+        .collect::<Vec<_>>();
+    references.sort_by(|left, right| {
+        symbols
+            .get(*right)
+            .use_count_estimate
+            .cmp(&symbols.get(*left).use_count_estimate)
+            .then_with(|| left.source_index.cmp(&right.source_index))
+            .then_with(|| left.inner_index.cmp(&right.inner_index))
+    });
+
+    let mut names = HashMap::new();
+    let mut used_names = HashSet::new();
+    if minify_identifiers {
+        let minifier =
+            DEFAULT_NAME_MINIFIER_CSS.shuffle_by_char_freq(tree.char_freq.unwrap_or_default());
+        let mut next_name = 0;
+        for reference in references {
+            let mut name = minifier.number_to_minified_name(next_name);
+            while global_names.contains(&name) || used_names.contains(&name) {
+                next_name += 1;
+                name = minifier.number_to_minified_name(next_name);
+            }
+            used_names.insert(name.clone());
+            names.insert(reference, name);
+        }
+    } else {
+        let mut name_counts = HashMap::<String, u32>::new();
+        for reference in references {
+            let symbol = symbols.get(reference);
+            let mut name = format!("{identifier_name}_{}", symbol.original_name);
+            if global_names.contains(&name) || used_names.contains(&name) {
+                let prefix = name;
+                let tries = name_counts.entry(prefix.clone()).or_insert(1);
+                loop {
+                    *tries += 1;
+                    name = format!("{prefix}{tries}");
+                    if !global_names.contains(&name) && !used_names.contains(&name) {
+                        break;
+                    }
+                }
+            }
+            used_names.insert(name.clone());
+            names.insert(reference, name);
+        }
+    }
+    names
 }
 
 fn public_messages(messages: Vec<Msg>) -> (Vec<Message>, Vec<Message>) {
@@ -456,6 +542,71 @@ mod tests {
                 }
             )),
             ".card{color:red;margin:0!important}"
+        );
+    }
+
+    #[test]
+    fn scopes_and_minifies_local_css_names() {
+        let input = ".card { color: red } #root .card { color: blue }";
+        assert_eq!(
+            code(transform(
+                input,
+                TransformOptions {
+                    sourcefile: "entry.module.css".into(),
+                    loader: Loader::LocalCss,
+                    ..TransformOptions::default()
+                }
+            )),
+            ".entry_card {\n\
+             \x20\x20color: red;\n\
+             }\n\
+             #entry_root .entry_card {\n\
+             \x20\x20color: blue;\n\
+             }\n"
+        );
+        assert_eq!(
+            code(transform(
+                input,
+                TransformOptions {
+                    sourcefile: "entry.module.css".into(),
+                    loader: Loader::LocalCss,
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            ".o {\n\
+             \x20\x20color: red;\n\
+             }\n\
+             #l .o {\n\
+             \x20\x20color: blue;\n\
+             }\n"
+        );
+    }
+
+    #[test]
+    fn scopes_local_css_animation_and_explicit_selector_modes() {
+        assert_eq!(
+            code(transform(
+                "@keyframes fade { from { opacity: 0 } }\
+                 .fade { animation: fade 1s }\
+                 :global(.external) .local, :local(.forced) {}",
+                TransformOptions {
+                    sourcefile: "entry.module.css".into(),
+                    loader: Loader::LocalCss,
+                    ..TransformOptions::default()
+                }
+            )),
+            "@keyframes entry_fade {\n\
+             \x20\x20from {\n\
+             \x20\x20\x20\x20opacity: 0;\n\
+             \x20\x20}\n\
+             }\n\
+             .entry_fade {\n\
+             \x20\x20animation: entry_fade 1s;\n\
+             }\n\
+             .external .entry_local,\n\
+             .entry_forced {\n\
+             }\n"
         );
     }
 
