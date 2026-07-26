@@ -19,7 +19,7 @@ use crate::internal::{
         SideEffectsKind,
     },
     helpers::{encode_string_as_shortest_data_url, mime_type_by_extension, string_to_utf16},
-    js_ast::{self, ExportsKind, Expr, ExprData, StringExpr},
+    js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
     js_parser::{self, HelperCall},
     logger::{self, LineColumnTracker, Log, Range, Source},
     resolver::{self, ResolveResult, ResolverContext},
@@ -393,7 +393,11 @@ pub fn resolve_import_records(
 /// # Panics
 ///
 /// Panics if a source index cannot fit into the host's address space.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 pub fn scan_bundle(
     log: &Log,
     file_system: &dyn Fs,
@@ -417,6 +421,7 @@ pub fn scan_bundle(
 
     let mut pending = Vec::new();
     let mut queued = HashSet::from([runtime::SOURCE_INDEX]);
+    let mut resolution_slots: HashMap<u32, Vec<Option<ResolveResult>>> = HashMap::new();
     for entry_point in entry_points {
         let input_path = if file_system.is_abs(&entry_point.input_path)
             || entry_point.input_path.starts_with("./")
@@ -455,7 +460,7 @@ pub fn scan_bundle(
             );
             continue;
         }
-        let path = resolved.path_pair.primary;
+        let path = resolved.path_pair.primary.clone();
         let source_index = caches
             .source_index_cache
             .get(path.clone(), SourceIndexKind::Normal);
@@ -465,13 +470,13 @@ pub fn scan_bundle(
             output_path_was_auto_generated: entry_point.output_path.is_empty(),
         });
         if queued.insert(source_index) {
-            pending.push((path, source_index));
+            pending.push((path, source_index, resolved));
         }
     }
 
     let mut cursor = 0;
     while cursor < pending.len() {
-        let (path, source_index) = pending[cursor].clone();
+        let (path, source_index, resolve_metadata) = pending[cursor].clone();
         cursor += 1;
         let loader = if path.is_disabled() {
             Loader::Empty
@@ -504,13 +509,52 @@ pub fn scan_bundle(
             contents: Arc::from(contents.into_bytes()),
             ..Source::default()
         };
-        let mut result =
-            parse_file_with_unique_key_prefix(log, source, loader, options, unique_key_prefix);
+        let mut file_options = options.clone();
+        resolve_metadata
+            .ts_config_jsx
+            .apply_to(&mut file_options.jsx);
+        if let Some(ts_config) = &resolve_metadata.ts_config {
+            file_options.ts.config = *ts_config;
+        }
+        if let Some(ts_always_strict) = &resolve_metadata.ts_always_strict {
+            file_options.ts_always_strict = Some(Arc::new(ts_always_strict.clone()));
+        }
+        file_options.module_type_data.module_type = if source.key_path.text.ends_with(".mjs") {
+            ModuleType::EsmMjs
+        } else if source.key_path.text.ends_with(".mts") {
+            ModuleType::EsmMts
+        } else if source.key_path.text.ends_with(".cjs") {
+            ModuleType::CommonJsCjs
+        } else if source.key_path.text.ends_with(".cts") {
+            ModuleType::CommonJsCts
+        } else if [".js", ".jsx", ".ts", ".tsx"]
+            .iter()
+            .any(|extension| source.key_path.text.ends_with(extension))
+        {
+            resolve_metadata.module_type_data.module_type
+        } else {
+            ModuleType::Unknown
+        };
+        let mut result = parse_file_with_unique_key_prefix(
+            log,
+            source,
+            loader,
+            &file_options,
+            unique_key_prefix,
+        );
+        if result.file.input_file.side_effects.kind == SideEffectsKind::HasSideEffects
+            && let Some(side_effects_data) = &resolve_metadata.primary_side_effects_data
+        {
+            result.file.input_file.side_effects = SideEffects {
+                data: Some(side_effects_data.clone()),
+                kind: SideEffectsKind::NoSideEffectsPackageJson,
+            };
+        }
         resolve_import_records(
             log,
             file_system,
             &caches.source_index_cache,
-            options,
+            &file_options,
             &mut result,
         );
 
@@ -518,19 +562,16 @@ pub fn scan_bundle(
             if resolve_result.path_pair.is_external {
                 continue;
             }
-            for dependency_path in [
-                &resolve_result.path_pair.primary,
-                &resolve_result.path_pair.secondary,
-            ] {
-                if dependency_path.text.is_empty() {
-                    continue;
-                }
-                let dependency_index = caches
-                    .source_index_cache
-                    .get(dependency_path.clone(), SourceIndexKind::Normal);
-                if queued.insert(dependency_index) {
-                    pending.push((dependency_path.clone(), dependency_index));
-                }
+            let dependency_path = &resolve_result.path_pair.primary;
+            let dependency_index = caches
+                .source_index_cache
+                .get(dependency_path.clone(), SourceIndexKind::Normal);
+            if queued.insert(dependency_index) {
+                pending.push((
+                    dependency_path.clone(),
+                    dependency_index,
+                    resolve_result.clone(),
+                ));
             }
         }
 
@@ -541,11 +582,61 @@ pub fn scan_bundle(
                 .resize_with(needed_length, ScannerFile::default);
         }
         if result.ok {
+            resolution_slots.insert(source_index, std::mem::take(&mut result.resolve_results));
             bundle.files[usize::try_from(source_index).expect("source index fits usize")] =
                 result.file;
         }
     }
+    finalize_scan_import_records(&mut bundle.files, &resolution_slots);
     bundle
+}
+
+fn finalize_scan_import_records(
+    files: &mut [ScannerFile],
+    resolution_slots: &HashMap<u32, Vec<Option<ResolveResult>>>,
+) {
+    let visited: HashMap<logger::Path, u32> = files
+        .iter()
+        .filter(|file| !file.input_file.source.key_path.text.is_empty())
+        .map(|file| {
+            (
+                file.input_file.source.key_path.clone(),
+                file.input_file.source.index,
+            )
+        })
+        .collect();
+    let copy_source_indices: HashSet<u32> = files
+        .iter()
+        .filter_map(|file| {
+            matches!(file.input_file.repr, Some(InputFileRepr::Copy(_)))
+                .then_some(file.input_file.source.index)
+        })
+        .collect();
+
+    for (source_index, slots) in resolution_slots {
+        let Some(records) = files
+            .get_mut(usize::try_from(*source_index).expect("source index fits usize"))
+            .and_then(|file| file.input_file.repr.as_mut())
+            .and_then(InputFileRepr::import_records_mut)
+        else {
+            continue;
+        };
+        for (record, resolve_result) in records.iter_mut().zip(slots) {
+            if let Some(resolve_result) = resolve_result
+                && resolve_result.path_pair.has_secondary()
+                && let Some(secondary_source_index) =
+                    visited.get(&resolve_result.path_pair.secondary)
+            {
+                record.source_index = Index32::new(*secondary_source_index);
+            }
+            if record.source_index.is_valid()
+                && copy_source_indices.contains(&record.source_index.get_index())
+            {
+                record.copy_source_index = record.source_index;
+                record.source_index = Index32::default();
+            }
+        }
+    }
 }
 
 fn lazy_export_string(
@@ -1569,5 +1660,150 @@ mod tests {
             log.done()[0].data.text,
             "Could not resolve \"/project/missing.js\""
         );
+    }
+
+    #[test]
+    fn scan_applies_package_metadata_before_parsing() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import 'metadata-package'".into(),
+                ),
+                (
+                    "/project/node_modules/metadata-package/package.json".into(),
+                    r#"{"main":"index.js","sideEffects":false,"type":"module"}"#.into(),
+                ),
+                (
+                    "/project/node_modules/metadata-package/index.js".into(),
+                    "console.log('loaded')".into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into()],
+            platform: Platform::Node,
+            ..Options::default()
+        };
+        let bundle = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        let package = bundle
+            .files
+            .iter()
+            .find(|file| file.input_file.source.key_path.text.ends_with("/index.js"))
+            .expect("package input");
+        assert_eq!(
+            package.input_file.side_effects.kind,
+            SideEffectsKind::NoSideEffectsPackageJson
+        );
+        assert!(package.input_file.side_effects.data.is_some());
+        let Some(InputFileRepr::Js(repr)) = &package.input_file.repr else {
+            panic!("expected package JavaScript");
+        };
+        assert_eq!(repr.ast.exports_kind, ExportsKind::Esm);
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn scan_avoids_dual_package_hazards_and_relocates_copy_imports() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import value from 'dual'; require('dual'); import './asset.txt'".into(),
+                ),
+                (
+                    "/project/node_modules/dual/package.json".into(),
+                    r#"{"main":"main.js","module":"module.js"}"#.into(),
+                ),
+                (
+                    "/project/node_modules/dual/main.js".into(),
+                    "module.exports = 1".into(),
+                ),
+                (
+                    "/project/node_modules/dual/module.js".into(),
+                    "export default 1".into(),
+                ),
+                ("/project/asset.txt".into(), "asset".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into()],
+            platform: Platform::Browser,
+            extension_to_loader: HashMap::from([
+                (".js".into(), Loader::Js),
+                (".txt".into(), Loader::Copy),
+            ]),
+            ..Options::default()
+        };
+        let bundle = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        let entry = bundle
+            .files
+            .iter()
+            .find(|file| file.input_file.source.key_path.text == "/project/entry.js")
+            .expect("entry input");
+        let records = entry
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+            .expect("entry import records");
+        let main_index = bundle
+            .files
+            .iter()
+            .find(|file| file.input_file.source.key_path.text.ends_with("/main.js"))
+            .expect("CommonJS package path")
+            .input_file
+            .source
+            .index;
+        let dual_records = records
+            .iter()
+            .filter(|record| record.path.text == "dual")
+            .collect::<Vec<_>>();
+        assert_eq!(dual_records.len(), 2);
+        assert!(
+            dual_records
+                .iter()
+                .all(|record| record.source_index.get_index() == main_index)
+        );
+        let asset_record = records
+            .iter()
+            .find(|record| record.path.text == "./asset.txt")
+            .expect("copy import");
+        assert!(!asset_record.source_index.is_valid());
+        assert!(asset_record.copy_source_index.is_valid());
+        let copied = &bundle.files[asset_record.copy_source_index.get_index() as usize];
+        assert!(matches!(
+            copied.input_file.repr,
+            Some(InputFileRepr::Copy(_))
+        ));
+        assert!(log.done().is_empty());
     }
 }

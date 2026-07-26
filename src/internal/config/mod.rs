@@ -856,7 +856,7 @@ pub type MangleCache = HashMap<String, Arc<dyn Any + Send + Sync>>;
 pub type ExclusiveMangleCacheUpdate =
     Arc<dyn Fn(&mut MangleCache, &mut HashMap<String, bool>) + Send + Sync>;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Options {
     pub module_type_data: crate::internal::js_ast::ModuleTypeData,
