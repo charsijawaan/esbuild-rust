@@ -2,13 +2,14 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    hash::BuildHasher,
     sync::Arc,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
-    ast::{AssertOrWithKeyword, ImportKind, ImportRecordFlags, Index32},
+    ast::{AssertOrWithKeyword, ImportKind, ImportRecordFlags, Index32, Ref},
     cache::{CacheSet, SourceIndexCache, SourceIndexKind},
     compat::{CssFeature, JsFeature},
     config::{
@@ -27,6 +28,7 @@ use crate::internal::{
     },
     js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
     js_parser::{self, HelperCall},
+    linker,
     logger::{self, LineColumnTracker, Log, Range, Source},
     resolver::{self, ResolveResult, ResolverContext},
     runtime,
@@ -60,6 +62,42 @@ pub struct TlaCheck {
 pub struct ScannedBundle {
     pub files: Vec<ScannerFile>,
     pub entry_points: Vec<GraphEntryPoint>,
+}
+
+/// Convert scanner output directly into the prepared linker graph and chunks.
+///
+/// # Panics
+///
+/// Panics when scanner output violates linker invariants or the runtime module
+/// is missing required exports.
+#[must_use]
+pub fn prepare_linker_graph<S: BuildHasher>(
+    bundle: &ScannedBundle,
+    options: &Options,
+    unique_key_prefix: &str,
+    local_names: &HashMap<Ref, String, S>,
+) -> linker::PreparedLinkerGraph {
+    let input_files: Vec<_> = bundle
+        .files
+        .iter()
+        .map(|file| file.input_file.clone())
+        .collect();
+    let reachable_files: Vec<_> = input_files
+        .iter()
+        .enumerate()
+        .filter_map(|(source_index, file)| {
+            file.repr.as_ref()?;
+            Some(u32::try_from(source_index).expect("source index fits in u32"))
+        })
+        .collect();
+    linker::prepare_linker_graph(
+        &input_files,
+        &reachable_files,
+        &bundle.entry_points,
+        options,
+        unique_key_prefix,
+        local_names,
+    )
 }
 
 #[derive(Clone, Debug, Default)]

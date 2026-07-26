@@ -8670,7 +8670,7 @@ mod tests {
         is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
         lower_esm_lazy_export, mangle_local_css, mangle_props, mark_file_live_for_tree_shaking,
         match_import_with_export, maybe_correct_export_typo, merge_adjacent_local_stmts,
-        path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts, prepare_linker_graph,
+        path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts,
         prevent_exports_from_being_renamed, print_cross_chunk_bindings,
         propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
         require_or_import_meta_for_source, resolve_export_stars, runtime_symbol_ref,
@@ -11402,15 +11402,16 @@ mod tests {
         assert!(runtime_result.ok);
         assert!(entry_result.ok);
         assert!(log.done().is_empty());
-        let input_files = [runtime_result.file.input_file, entry_result.file.input_file];
-
-        let prepared = prepare_linker_graph(
-            &input_files,
-            &[0, 1],
-            &[EntryPoint {
+        let scanned = crate::internal::bundler::ScannedBundle {
+            files: vec![runtime_result.file, entry_result.file],
+            entry_points: vec![EntryPoint {
                 source_index: 1,
                 ..EntryPoint::default()
             }],
+        };
+
+        let prepared = crate::internal::bundler::prepare_linker_graph(
+            &scanned,
             &options,
             PREFIX,
             &HashMap::new(),
