@@ -195,6 +195,7 @@ pub struct MatchImportResult {
 pub struct ImportMatchIssue {
     pub import_ref: Ref,
     pub result: MatchImportResult,
+    pub suggestion: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1384,6 +1385,33 @@ pub fn match_import_with_export(
     (result, re_exports)
 }
 
+/// Suggest an obvious one-character correction for a missing export.
+pub fn maybe_correct_export_typo(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    name: &str,
+) -> Option<String> {
+    let Some(InputFileRepr::Js(repr)) = graph.files[source_index as usize].input_file.repr.as_mut()
+    else {
+        return None;
+    };
+    if repr.meta.resolved_export_typos.is_none() {
+        let mut valid = repr
+            .meta
+            .resolved_exports
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        valid.sort_unstable();
+        repr.meta.resolved_export_typos = Some(crate::internal::helpers::TypoDetector::new(&valid));
+    }
+    repr.meta
+        .resolved_export_typos
+        .as_ref()
+        .and_then(|detector| detector.maybe_correct_typo(name))
+        .map(str::to_owned)
+}
+
 /// Match and bind all named imports in one file in deterministic symbol order.
 /// Cycles and ambiguities are returned for the diagnostic layer.
 ///
@@ -1392,6 +1420,7 @@ pub fn match_import_with_export(
 /// Panics when the source or its import symbols violate linker graph
 /// invariants.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn bind_imports_to_exports_for_file(
     graph: &mut LinkerGraph,
     source_index: u32,
@@ -1476,10 +1505,27 @@ pub fn bind_imports_to_exports_for_file(
                     graph.symbols.get_mut(import_ref).import_item_status =
                         ImportItemStatus::Missing;
                 }
-                issues.push(ImportMatchIssue { import_ref, result });
+                let alias = {
+                    let Some(InputFileRepr::Js(repr)) =
+                        graph.files[source_index as usize].input_file.repr.as_ref()
+                    else {
+                        unreachable!();
+                    };
+                    repr.ast.named_imports[&import_ref].alias.clone()
+                };
+                let suggestion = maybe_correct_export_typo(graph, result.source_index, &alias);
+                issues.push(ImportMatchIssue {
+                    import_ref,
+                    result,
+                    suggestion,
+                });
             }
             MatchImportKind::Cycle | MatchImportKind::Ambiguous => {
-                issues.push(ImportMatchIssue { import_ref, result });
+                issues.push(ImportMatchIssue {
+                    import_ref,
+                    result,
+                    suggestion: None,
+                });
             }
             _ => {}
         }
@@ -8261,13 +8307,13 @@ mod tests {
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
         lower_esm_lazy_export, mangle_local_css, mangle_props, mark_file_live_for_tree_shaking,
-        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
-        populate_css_stub_lazy_export, prepare_css_asts, prevent_exports_from_being_renamed,
-        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
-        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
-        wrap_rules_with_conditions,
+        match_import_with_export, maybe_correct_export_typo, merge_adjacent_local_stmts,
+        path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts,
+        prevent_exports_from_being_renamed, print_cross_chunk_bindings,
+        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
+        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{
@@ -13021,6 +13067,27 @@ mod tests {
         );
         assert_eq!(result.kind, MatchImportKind::NoMatch);
         assert_eq!(result.source_index, 1);
+    }
+
+    #[test]
+    fn missing_export_typo_correction_is_cached_per_file() {
+        let exported_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let input_files = [js_file(js_ast::Ast {
+            symbols: vec![Symbol::new(SymbolKind::Other, "foobar")],
+            named_exports: HashMap::from([("foobar".into(), named_export(exported_ref))]),
+            ..js_ast::Ast::default()
+        })];
+        let mut graph = clone_linker_graph(&input_files, &[0], &[], false);
+
+        assert_eq!(
+            maybe_correct_export_typo(&mut graph, 0, "foobr"),
+            Some("foobar".into())
+        );
+        assert_eq!(maybe_correct_export_typo(&mut graph, 0, "other"), None);
+        assert!(js_repr(&graph, 0).meta.resolved_export_typos.is_some());
     }
 
     #[test]
