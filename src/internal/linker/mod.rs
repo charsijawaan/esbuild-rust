@@ -4,8 +4,11 @@
 //! the output-piece representation and the final path substitution machinery
 //! used after chunks have been generated.
 
+use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
+
 use crate::internal::{
-    ast::ImportKind,
+    ast::{ImportKind, Ref},
     css_ast::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
     },
@@ -37,6 +40,24 @@ pub struct ChunkInfo {
     pub cross_chunk_imports: Vec<ChunkImport>,
     pub final_rel_path: String,
     pub intermediate_output: IntermediateOutput,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CrossChunkImportItem {
+    pub export_alias: String,
+    pub reference: Ref,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CrossChunkImport {
+    pub sorted_import_items: Vec<CrossChunkImportItem>,
+    pub chunk_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StableRef {
+    pub stable_source_index: u32,
+    pub reference: Ref,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -381,6 +402,64 @@ pub fn is_conditional_import_redundant(
     true
 }
 
+/// Sort imports first by source chunk and then by the finalized export alias.
+///
+/// # Panics
+///
+/// Panics when an imported reference has no finalized export alias in its
+/// source chunk, matching the linker's internal invariant.
+#[must_use]
+pub fn sorted_cross_chunk_imports<ImportHasher: BuildHasher, ExportHasher: BuildHasher>(
+    imports_from_other_chunks: HashMap<u32, Vec<CrossChunkImportItem>, ImportHasher>,
+    exports_to_other_chunks: &[HashMap<Ref, String, ExportHasher>],
+) -> Vec<CrossChunkImport> {
+    let mut result = Vec::with_capacity(imports_from_other_chunks.len());
+
+    for (other_chunk_index, mut import_items) in imports_from_other_chunks {
+        let exports = &exports_to_other_chunks[other_chunk_index as usize];
+        for item in &mut import_items {
+            item.export_alias = exports
+                .get(&item.reference)
+                .expect("cross-chunk import must have a finalized export alias")
+                .clone();
+        }
+        import_items.sort_unstable_by(|left, right| left.export_alias.cmp(&right.export_alias));
+        result.push(CrossChunkImport {
+            chunk_index: other_chunk_index,
+            sorted_import_items: import_items,
+        });
+    }
+
+    result.sort_unstable_by_key(|item| item.chunk_index);
+    result
+}
+
+/// Sort cross-chunk exports using DFS-stable source indices instead of
+/// concurrently allocated graph source indices.
+///
+/// # Panics
+///
+/// Panics when an export reference points outside `stable_source_indices`.
+#[must_use]
+pub fn sorted_cross_chunk_export_items<Hasher: BuildHasher>(
+    export_refs: &HashSet<Ref, Hasher>,
+    stable_source_indices: &[u32],
+) -> Vec<StableRef> {
+    let mut result: Vec<_> = export_refs
+        .iter()
+        .map(|reference| StableRef {
+            stable_source_index: stable_source_indices[reference.source_index as usize],
+            reference: *reference,
+        })
+        .collect();
+    result.sort_unstable_by(|left, right| {
+        left.stable_source_index
+            .cmp(&right.stable_source_index)
+            .then_with(|| left.reference.inner_index.cmp(&right.reference.inner_index))
+    });
+    result
+}
+
 /// Join a generated relative path to the configured public path.
 #[must_use]
 pub fn join_with_public_path(public_path: &str, mut rel_path: &str) -> String {
@@ -437,16 +516,17 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use super::{
-        AssetPath, ChunkImport, ChunkInfo, ChunkPath, OutputPathContext, OutputPiece,
-        OutputPieceIndexKind, PartRange, append_or_extend_part_range,
-        enforce_no_cyclic_chunk_imports, import_conditions_are_equal,
+        AssetPath, ChunkImport, ChunkInfo, ChunkPath, CrossChunkImport, CrossChunkImportItem,
+        OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, StableRef,
+        append_or_extend_part_range, enforce_no_cyclic_chunk_imports, import_conditions_are_equal,
         is_conditional_import_redundant, join_with_public_path, path_between_chunks,
+        sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
     };
     use crate::internal::{
-        ast::ImportKind,
+        ast::{ImportKind, Ref},
         css_ast::{
             ImportConditions, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, Token,
             WhitespaceFlags,
@@ -837,5 +917,131 @@ mod tests {
             &earlier,
             &[earlier[0].clone(), ImportConditions::default(),]
         ));
+    }
+
+    #[test]
+    fn cross_chunk_imports_are_sorted_by_chunk_then_alias() {
+        let refs = [
+            Ref {
+                source_index: 3,
+                inner_index: 0,
+            },
+            Ref {
+                source_index: 4,
+                inner_index: 0,
+            },
+            Ref {
+                source_index: 5,
+                inner_index: 0,
+            },
+        ];
+        let imports = HashMap::from([
+            (
+                2,
+                vec![
+                    CrossChunkImportItem {
+                        reference: refs[0],
+                        ..CrossChunkImportItem::default()
+                    },
+                    CrossChunkImportItem {
+                        reference: refs[1],
+                        ..CrossChunkImportItem::default()
+                    },
+                ],
+            ),
+            (
+                0,
+                vec![CrossChunkImportItem {
+                    reference: refs[2],
+                    ..CrossChunkImportItem::default()
+                }],
+            ),
+        ]);
+        let exports = [
+            HashMap::from([(refs[2], "middle".into())]),
+            HashMap::new(),
+            HashMap::from([(refs[0], "zebra".into()), (refs[1], "alpha".into())]),
+        ];
+        assert_eq!(
+            sorted_cross_chunk_imports(imports, &exports),
+            vec![
+                CrossChunkImport {
+                    chunk_index: 0,
+                    sorted_import_items: vec![CrossChunkImportItem {
+                        export_alias: "middle".into(),
+                        reference: refs[2],
+                    }],
+                },
+                CrossChunkImport {
+                    chunk_index: 2,
+                    sorted_import_items: vec![
+                        CrossChunkImportItem {
+                            export_alias: "alpha".into(),
+                            reference: refs[1],
+                        },
+                        CrossChunkImportItem {
+                            export_alias: "zebra".into(),
+                            reference: refs[0],
+                        },
+                    ],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cross_chunk_exports_use_stable_dfs_source_order() {
+        let refs = HashSet::from([
+            Ref {
+                source_index: 0,
+                inner_index: 7,
+            },
+            Ref {
+                source_index: 2,
+                inner_index: 3,
+            },
+            Ref {
+                source_index: 1,
+                inner_index: 9,
+            },
+            Ref {
+                source_index: 2,
+                inner_index: 1,
+            },
+        ]);
+        let stable_source_indices = [2, 0, 1];
+        assert_eq!(
+            sorted_cross_chunk_export_items(&refs, &stable_source_indices),
+            vec![
+                StableRef {
+                    stable_source_index: 0,
+                    reference: Ref {
+                        source_index: 1,
+                        inner_index: 9,
+                    },
+                },
+                StableRef {
+                    stable_source_index: 1,
+                    reference: Ref {
+                        source_index: 2,
+                        inner_index: 1,
+                    },
+                },
+                StableRef {
+                    stable_source_index: 1,
+                    reference: Ref {
+                        source_index: 2,
+                        inner_index: 3,
+                    },
+                },
+                StableRef {
+                    stable_source_index: 2,
+                    reference: Ref {
+                        source_index: 0,
+                        inner_index: 7,
+                    },
+                },
+            ]
+        );
     }
 }
