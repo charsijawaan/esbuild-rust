@@ -1422,7 +1422,7 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("create test directory");
         std::fs::write(
             directory.join("entry.js"),
-            "console.log(process.env.NODE_ENV, DEBUG)",
+            "console.log(process.env.NODE_ENV, process[\"env\"][\"NODE_ENV\"], DEBUG)",
         )
         .expect("write entry file");
 
@@ -1441,7 +1441,7 @@ mod tests {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(
-            output.contains("console.log(\"production\", false)"),
+            output.contains("console.log(\"production\", \"production\", false)"),
             "{output}"
         );
         assert!(!output.contains("process.env.NODE_ENV"));

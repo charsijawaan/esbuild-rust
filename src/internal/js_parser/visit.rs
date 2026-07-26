@@ -803,6 +803,21 @@ fn dot_chain_parts(core: &ParserCore, expression: &Expr, tail: &str) -> Option<V
                 parts.push(dot.name.clone());
                 true
             }
+            Some(ExprData::Index(index)) => {
+                let Some(ExprData::String(string)) = index.index.data.as_deref() else {
+                    return false;
+                };
+                if !append(core, &index.target, parts) {
+                    return false;
+                }
+                parts.push(
+                    String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                        &string.value,
+                    ))
+                    .into_owned(),
+                );
+                true
+            }
             _ => false,
         }
     }
@@ -1150,6 +1165,33 @@ fn visit_expr_with_target(
         ExprData::Index(index) => {
             visit_expr(core, &mut index.target, resolve_identifiers);
             visit_expr(core, &mut index.index, resolve_identifiers);
+            if assign_target == AssignTarget::None
+                && let Some(ExprData::String(string)) = index.index.data.as_deref()
+            {
+                let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                    &string.value,
+                ))
+                .into_owned();
+                if let Some(parts) = dot_chain_parts(core, &index.target, &name)
+                    && let Some(define) = core
+                        .options
+                        .defines
+                        .as_ref()
+                        .and_then(|defines| defines.dot_defines.get(&name))
+                        .and_then(|defines| {
+                            defines
+                                .iter()
+                                .find(|define| define.key_parts == parts)
+                                .and_then(|define| define.define_expr.as_ref())
+                        })
+                        .cloned()
+                    && let Some(replacement) =
+                        instantiate_define_expr(core, expression.loc, &define)
+                {
+                    *data = replacement;
+                    return;
+                }
+            }
             let replacement = if assign_target == AssignTarget::None {
                 let reference = match index.target.data.as_deref() {
                     Some(ExprData::Identifier(identifier)) => Some(identifier.reference),
