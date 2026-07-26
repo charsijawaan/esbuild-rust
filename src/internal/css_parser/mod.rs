@@ -10,7 +10,7 @@ use crate::internal::{
         DeclarationRule, HashSelector, ImportConditions, ImportedComposesName, KeyframeBlock,
         KnownAtRule, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, NameToken,
         NamespacedName, PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule,
-        SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags,
+        SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags, rules_equal,
         tokens_are_comma_separated,
     },
     css_lexer::{self, TokenKind},
@@ -138,6 +138,7 @@ impl Parser {
                     RuleData::Selector(selector) if selector.rules.is_empty()
                 )
             });
+            merge_adjacent_selector_rules(&mut rules);
         }
         rules
     }
@@ -1057,6 +1058,157 @@ fn compound_is_empty(compound: &CompoundSelector) -> bool {
         && compound.subclass_selectors.is_empty()
         && compound.nesting_selector_locs.is_empty()
 }
+
+fn merge_adjacent_selector_rules(rules: &mut Vec<Rule>) {
+    let mut previous_selector_index: Option<usize> = None;
+    let mut index = 0;
+    while index < rules.len() {
+        let current = match &rules[index].data {
+            RuleData::Selector(selector) => selector.clone(),
+            RuleData::Comment(_) => {
+                index += 1;
+                continue;
+            }
+            _ => {
+                previous_selector_index = None;
+                index += 1;
+                continue;
+            }
+        };
+        if let Some(previous_index) = previous_selector_index
+            && let RuleData::Selector(previous) = &mut rules[previous_index].data
+            && rules_equal(&current.rules, &previous.rules, None)
+            && selectors_are_safe_to_merge(&current.selectors)
+            && selectors_are_safe_to_merge(&previous.selectors)
+        {
+            for selector in current.selectors {
+                if !previous
+                    .selectors
+                    .iter()
+                    .any(|existing| selector.equal(existing, None))
+                {
+                    previous.selectors.push(selector);
+                }
+            }
+            rules.remove(index);
+            continue;
+        }
+        previous_selector_index = Some(index);
+        index += 1;
+    }
+}
+
+fn selectors_are_safe_to_merge(selectors: &[ComplexSelector]) -> bool {
+    selectors.iter().all(|complex| {
+        complex.selectors.iter().all(|compound| {
+            compound.nesting_selector_locs.is_empty()
+                && compound.combinator.byte == 0
+                && compound.type_selector.as_ref().is_none_or(|type_selector| {
+                    type_selector.namespace_prefix.is_none()
+                        && (type_selector.name.kind != TokenKind::Ident
+                            || SAFE_TYPE_SELECTORS.contains(&type_selector.name.text.as_str()))
+                })
+                && compound
+                    .subclass_selectors
+                    .iter()
+                    .all(|subclass| match &subclass.data {
+                        SubclassData::Hash(_) | SubclassData::Class(_) => true,
+                        SubclassData::Attribute(attribute) => attribute.matcher_modifier == 0,
+                        SubclassData::PseudoClass(pseudo) => {
+                            !pseudo.is_element
+                                && pseudo.args.is_empty()
+                                && matches!(
+                                    pseudo.name.as_str(),
+                                    "active" | "first-child" | "hover" | "link" | "visited"
+                                )
+                        }
+                        SubclassData::PseudoWithSelectorList(_) => false,
+                    })
+        })
+    })
+}
+
+const SAFE_TYPE_SELECTORS: &[&str] = &[
+    "a",
+    "abbr",
+    "address",
+    "area",
+    "b",
+    "base",
+    "blockquote",
+    "body",
+    "br",
+    "button",
+    "caption",
+    "cite",
+    "code",
+    "col",
+    "colgroup",
+    "dd",
+    "del",
+    "dfn",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "embed",
+    "fieldset",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "hr",
+    "html",
+    "i",
+    "iframe",
+    "img",
+    "input",
+    "ins",
+    "kbd",
+    "label",
+    "legend",
+    "li",
+    "link",
+    "map",
+    "menu",
+    "meta",
+    "noscript",
+    "object",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "pre",
+    "q",
+    "ruby",
+    "s",
+    "samp",
+    "script",
+    "select",
+    "small",
+    "span",
+    "strong",
+    "style",
+    "sub",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "textarea",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "u",
+    "ul",
+    "var",
+];
 
 fn single_class_selector(selectors: &[ComplexSelector]) -> Option<Ref> {
     if selectors.len() != 1 || selectors[0].selectors.len() != 1 {
