@@ -1204,6 +1204,409 @@ fn reverse_resolve_package_target<S: BuildHasher>(
     }
 }
 
+pub struct PnpData {
+    fallback_exclusion_list: HashMap<String, HashMap<String, bool>>,
+    fallback_pool: HashMap<String, PnpIdentAndReference>,
+    ignore_pattern_data: Option<regex::Regex>,
+    pub invalid_ignore_pattern_data: String,
+    package_registry_data: HashMap<String, HashMap<String, PnpPackage>>,
+    package_locators_by_locations: HashMap<String, PnpPackageLocatorByLocation>,
+    enable_top_level_fallback: bool,
+    pub abs_path: String,
+    pub abs_dir_path: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PnpIdentAndReference {
+    ident: String,
+    reference: String,
+    span: Range,
+}
+
+#[derive(Clone, Debug, Default)]
+#[allow(clippy::struct_field_names)]
+struct PnpPackage {
+    package_dependencies: HashMap<String, PnpIdentAndReference>,
+    package_location: String,
+    package_dependencies_range: Range,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PnpPackageLocatorByLocation {
+    locator: PnpIdentAndReference,
+    discard_from_lookup: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PnpStatus {
+    #[default]
+    ErrorGeneric,
+    ErrorDependencyNotFound,
+    ErrorUnfulfilledPeerDependency,
+    Success,
+    Skipped,
+}
+
+impl PnpStatus {
+    #[must_use]
+    pub const fn is_error(self) -> bool {
+        matches!(
+            self,
+            Self::ErrorGeneric
+                | Self::ErrorDependencyNotFound
+                | Self::ErrorUnfulfilledPeerDependency
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PnpResult {
+    pub status: PnpStatus,
+    pub package_dir_path: String,
+    pub package_ident: String,
+    pub package_subpath: String,
+    pub error_ident: String,
+    pub error_range: Range,
+}
+
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn compile_yarn_pnp_data(abs_path: &str, abs_dir_path: &str, json: &Expr) -> PnpData {
+    let mut data = PnpData {
+        fallback_exclusion_list: HashMap::new(),
+        fallback_pool: HashMap::new(),
+        ignore_pattern_data: None,
+        invalid_ignore_pattern_data: String::new(),
+        package_registry_data: HashMap::new(),
+        package_locators_by_locations: HashMap::new(),
+        enable_top_level_fallback: false,
+        abs_path: abs_path.to_string(),
+        abs_dir_path: abs_dir_path.to_string(),
+    };
+
+    if let Some((value, _)) = get_property(json, "enableTopLevelFallback")
+        && let Some(enabled) = get_bool(value)
+    {
+        data.enable_top_level_fallback = enabled;
+    }
+    if let Some((value, _)) = get_property(json, "fallbackExclusionList")
+        && let Some(ExprData::Array(entries)) = value.data.as_deref()
+    {
+        for entry in &entries.items {
+            let Some(ExprData::Array(tuple)) = entry.data.as_deref() else {
+                continue;
+            };
+            if tuple.items.len() != 2 {
+                continue;
+            }
+            let Some(ident) = get_string_or_null(&tuple.items[0]) else {
+                continue;
+            };
+            let Some(ExprData::Array(references)) = tuple.items[1].data.as_deref() else {
+                continue;
+            };
+            data.fallback_exclusion_list.insert(
+                ident,
+                references
+                    .items
+                    .iter()
+                    .filter_map(get_string)
+                    .map(|reference| (reference, true))
+                    .collect(),
+            );
+        }
+    }
+    if let Some((value, _)) = get_property(json, "fallbackPool")
+        && let Some(ExprData::Array(entries)) = value.data.as_deref()
+    {
+        for entry in &entries.items {
+            let Some(ExprData::Array(tuple)) = entry.data.as_deref() else {
+                continue;
+            };
+            if tuple.items.len() == 2
+                && let Some(ident) = get_string(&tuple.items[0])
+                && let Some(target) = get_pnp_dependency_target(&tuple.items[1])
+            {
+                data.fallback_pool.insert(ident, target);
+            }
+        }
+    }
+    if let Some((value, _)) = get_property(json, "ignorePatternData")
+        && let Some(mut pattern) = get_string(value)
+    {
+        for unsupported in [
+            r"(?!\.)",
+            r"(?!(?:^|\/)\.)",
+            r"(?!\.{1,2}(?:\/|$))",
+            r"(?!(?:^|\/)\.{1,2}(?:\/|$))",
+        ] {
+            pattern = pattern.replace(unsupported, "");
+        }
+        match regex::Regex::new(&pattern) {
+            Ok(regex) => data.ignore_pattern_data = Some(regex),
+            Err(_) => data.invalid_ignore_pattern_data = pattern,
+        }
+    }
+    if let Some((value, _)) = get_property(json, "packageRegistryData")
+        && let Some(ExprData::Array(idents)) = value.data.as_deref()
+    {
+        for ident_entry in &idents.items {
+            let Some(ExprData::Array(ident_tuple)) = ident_entry.data.as_deref() else {
+                continue;
+            };
+            if ident_tuple.items.len() != 2 {
+                continue;
+            }
+            let Some(package_ident) = get_string_or_null(&ident_tuple.items[0]) else {
+                continue;
+            };
+            let Some(ExprData::Array(references)) = ident_tuple.items[1].data.as_deref() else {
+                continue;
+            };
+            let mut packages = HashMap::new();
+            for reference_entry in &references.items {
+                let Some(ExprData::Array(reference_tuple)) = reference_entry.data.as_deref() else {
+                    continue;
+                };
+                if reference_tuple.items.len() != 2 {
+                    continue;
+                }
+                let Some(package_reference) = get_string_or_null(&reference_tuple.items[0]) else {
+                    continue;
+                };
+                let package = &reference_tuple.items[1];
+                let Some((location_value, _)) = get_property(package, "packageLocation") else {
+                    continue;
+                };
+                let Some(package_location) = get_string(location_value) else {
+                    continue;
+                };
+                let Some((dependencies_value, _)) = get_property(package, "packageDependencies")
+                else {
+                    continue;
+                };
+                let Some(ExprData::Array(dependencies)) = dependencies_value.data.as_deref() else {
+                    continue;
+                };
+                let mut package_dependencies = HashMap::new();
+                for dependency in &dependencies.items {
+                    let Some(ExprData::Array(tuple)) = dependency.data.as_deref() else {
+                        continue;
+                    };
+                    if tuple.items.len() == 2
+                        && let Some(ident) = get_string(&tuple.items[0])
+                        && let Some(target) = get_pnp_dependency_target(&tuple.items[1])
+                    {
+                        package_dependencies.insert(ident, target);
+                    }
+                }
+                let discard_from_lookup = get_property(package, "discardFromLookup")
+                    .and_then(|(value, _)| get_bool(value))
+                    .unwrap_or(false);
+                packages.insert(
+                    package_reference.clone(),
+                    PnpPackage {
+                        package_dependencies,
+                        package_location: package_location.clone(),
+                        package_dependencies_range: Range {
+                            loc: dependencies_value.loc,
+                            len: dependencies.close_bracket_loc.start + 1
+                                - dependencies_value.loc.start,
+                        },
+                    },
+                );
+                data.package_locators_by_locations
+                    .entry(package_location)
+                    .and_modify(|entry| {
+                        entry.discard_from_lookup &= discard_from_lookup;
+                        if !discard_from_lookup {
+                            entry.locator = PnpIdentAndReference {
+                                ident: package_ident.clone(),
+                                reference: package_reference.clone(),
+                                ..PnpIdentAndReference::default()
+                            };
+                        }
+                    })
+                    .or_insert_with(|| PnpPackageLocatorByLocation {
+                        locator: PnpIdentAndReference {
+                            ident: package_ident.clone(),
+                            reference: package_reference,
+                            ..PnpIdentAndReference::default()
+                        },
+                        discard_from_lookup,
+                    });
+            }
+            data.package_registry_data.insert(package_ident, packages);
+        }
+    }
+    data
+}
+
+impl PnpData {
+    #[must_use]
+    pub fn resolve_to_unqualified(
+        &self,
+        specifier: &str,
+        parent_url: &str,
+        file_system: &dyn Fs,
+    ) -> PnpResult {
+        let Some((ident, module_path)) = parse_bare_identifier(specifier) else {
+            return PnpResult::default();
+        };
+        let Some(parent_locator) = self.find_locator(parent_url, file_system) else {
+            return PnpResult {
+                status: PnpStatus::Skipped,
+                ..PnpResult::default()
+            };
+        };
+        let Some(parent_package) =
+            self.get_package(&parent_locator.ident, &parent_locator.reference)
+        else {
+            return PnpResult::default();
+        };
+        let mut target = parent_package.package_dependencies.get(ident).cloned();
+        if target
+            .as_ref()
+            .is_none_or(|target| target.reference.is_empty())
+            && self.enable_top_level_fallback
+            && !self
+                .fallback_exclusion_list
+                .get(&parent_locator.ident)
+                .is_some_and(|references| {
+                    references
+                        .get(&parent_locator.reference)
+                        .copied()
+                        .unwrap_or(false)
+                })
+        {
+            target = self.resolve_via_fallback(ident);
+        }
+        let Some(target) = target else {
+            return PnpResult {
+                status: PnpStatus::ErrorDependencyNotFound,
+                error_ident: ident.to_string(),
+                error_range: parent_package.package_dependencies_range,
+                ..PnpResult::default()
+            };
+        };
+        if target.reference.is_empty() {
+            return PnpResult {
+                status: PnpStatus::ErrorUnfulfilledPeerDependency,
+                error_ident: ident.to_string(),
+                error_range: target.span,
+                ..PnpResult::default()
+            };
+        }
+        let dependency_package = if target.ident.is_empty() {
+            self.get_package(ident, &target.reference)
+        } else {
+            self.get_package(&target.ident, &target.reference)
+        };
+        let Some(dependency_package) = dependency_package else {
+            return PnpResult::default();
+        };
+        let mut base = self.abs_dir_path.clone();
+        let windows = !base.starts_with('/');
+        if windows {
+            base = format!("/{}", base.replace('\\', "/"));
+        }
+        let mut package_dir_path = posix_path_join(&base, &dependency_package.package_location);
+        if windows {
+            package_dir_path = package_dir_path
+                .strip_prefix('/')
+                .unwrap_or(&package_dir_path)
+                .to_string();
+        }
+        PnpResult {
+            status: PnpStatus::Success,
+            package_dir_path,
+            package_ident: ident.to_string(),
+            package_subpath: module_path.to_string(),
+            ..PnpResult::default()
+        }
+    }
+
+    fn find_locator(&self, module_url: &str, file_system: &dyn Fs) -> Option<PnpIdentAndReference> {
+        let mut relative = file_system.rel(&self.abs_dir_path, module_url)?;
+        relative = relative.replace('\\', "/");
+        relative = relative.strip_prefix("./").unwrap_or(&relative).to_string();
+        if self
+            .ignore_pattern_data
+            .as_ref()
+            .is_some_and(|pattern| pattern.is_match(&relative))
+        {
+            return None;
+        }
+        if !relative.ends_with('/') {
+            relative.push('/');
+        }
+        if !relative.starts_with("./") && !relative.starts_with("../") {
+            relative = format!("./{relative}");
+        }
+        loop {
+            if let Some(entry) = self.package_locators_by_locations.get(&relative)
+                && !entry.discard_from_lookup
+            {
+                return Some(entry.locator.clone());
+            }
+            let without_slash = relative.strip_suffix('/').unwrap_or(&relative);
+            let last_slash = without_slash.rfind('/')?;
+            relative.truncate(last_slash + 1);
+            if relative.is_empty() {
+                return None;
+            }
+        }
+    }
+
+    fn resolve_via_fallback(&self, ident: &str) -> Option<PnpIdentAndReference> {
+        self.get_package("", "")
+            .and_then(|package| package.package_dependencies.get(ident))
+            .cloned()
+            .or_else(|| self.fallback_pool.get(ident).cloned())
+    }
+
+    fn get_package(&self, ident: &str, reference: &str) -> Option<&PnpPackage> {
+        self.package_registry_data.get(ident)?.get(reference)
+    }
+}
+
+fn get_string_or_null(expression: &Expr) -> Option<String> {
+    match expression.data.as_deref()? {
+        ExprData::Null => Some(String::new()),
+        ExprData::String(_) => get_string(expression),
+        _ => None,
+    }
+}
+
+fn get_pnp_dependency_target(expression: &Expr) -> Option<PnpIdentAndReference> {
+    match expression.data.as_deref()? {
+        ExprData::Null => Some(PnpIdentAndReference {
+            span: Range {
+                loc: expression.loc,
+                len: 4,
+            },
+            ..PnpIdentAndReference::default()
+        }),
+        ExprData::String(_) => Some(PnpIdentAndReference {
+            reference: get_string(expression)?,
+            span: Range {
+                loc: expression.loc,
+                ..Range::default()
+            },
+            ..PnpIdentAndReference::default()
+        }),
+        ExprData::Array(array) if array.items.len() == 2 => Some(PnpIdentAndReference {
+            ident: get_string(&array.items[0])?,
+            reference: get_string(&array.items[1])?,
+            span: Range {
+                loc: expression.loc,
+                len: array.close_bracket_loc.start + 1 - expression.loc.start,
+            },
+        }),
+        _ => None,
+    }
+}
+
 type ExtendsCallback<'a> = dyn FnMut(&str, Range) -> Option<TsConfigJson> + 'a;
 
 #[allow(clippy::too_many_lines)]
@@ -1735,8 +2138,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        DataUrl, DebugMeta, MimeType, PackageMapKind, PackageMapStatus, PathPair, TsConfigJson,
-        TsConfigPath, TsConfigPaths, find_invalid_package_segment, globstar_to_escaped_regexp,
+        DataUrl, DebugMeta, MimeType, PackageMapKind, PackageMapStatus, PathPair, PnpStatus,
+        TsConfigJson, TsConfigPath, TsConfigPaths, compile_yarn_pnp_data,
+        find_invalid_package_segment, globstar_to_escaped_regexp,
         handle_package_map_post_conditions, is_valid_tsconfig_path_no_base_url_pattern,
         match_tsconfig_path_candidates, parse_bare_identifier, parse_esm_package_name,
         parse_imports_exports_map, parse_tsconfig_json, resolve_package_exports,
@@ -2313,6 +2717,69 @@ mod tests {
         assert!(
             reverse_resolve_package_exports("./private.js", &exports.root, &HashMap::new())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn compiles_and_resolves_yarn_pnp_manifests() {
+        let contents = r#"{
+          "enableTopLevelFallback": true,
+          "fallbackPool": [["fallback", "npm:1"]],
+          "packageRegistryData": [
+            [null, [[null, {
+              "packageLocation": "./",
+              "packageDependencies": [
+                ["foo", "npm:1"],
+                ["alias", ["foo", "npm:1"]],
+                ["peer", null]
+              ]
+            }]]],
+            ["foo", [["npm:1", {
+              "packageLocation": "./.yarn/foo/",
+              "packageDependencies": []
+            }]]],
+            ["fallback", [["npm:1", {
+              "packageLocation": "./.yarn/fallback/",
+              "packageDependencies": []
+            }]]]
+          ]
+        }"#;
+        let source = Source {
+            contents: Arc::from(contents.as_bytes()),
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let (json, ok) = parse_json(log, source, JsonOptions::default());
+        assert!(ok);
+        let manifest = compile_yarn_pnp_data("/project/.pnp.data.json", "/project/", &json);
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+
+        let foo =
+            manifest.resolve_to_unqualified("foo/subpath", "/project/src/index.js", &file_system);
+        assert_eq!(foo.status, PnpStatus::Success);
+        assert_eq!(foo.package_dir_path, "/project/.yarn/foo");
+        assert_eq!(foo.package_subpath, "/subpath");
+
+        let alias = manifest.resolve_to_unqualified("alias", "/project/index.js", &file_system);
+        assert_eq!(alias.status, PnpStatus::Success);
+        assert_eq!(alias.package_dir_path, "/project/.yarn/foo");
+        assert_eq!(alias.package_ident, "alias");
+
+        assert_eq!(
+            manifest
+                .resolve_to_unqualified("peer", "/project/index.js", &file_system)
+                .status,
+            PnpStatus::ErrorUnfulfilledPeerDependency
+        );
+        let fallback =
+            manifest.resolve_to_unqualified("fallback", "/project/index.js", &file_system);
+        assert_eq!(fallback.status, PnpStatus::Success);
+        assert_eq!(fallback.package_dir_path, "/project/.yarn/fallback");
+        assert_eq!(
+            manifest
+                .resolve_to_unqualified("foo", "/outside/index.js", &file_system)
+                .status,
+            PnpStatus::Skipped
         );
     }
 }
