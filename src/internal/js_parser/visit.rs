@@ -1157,7 +1157,7 @@ fn class_field_initializer_is_safe_to_move(expression: &Expr) -> bool {
         Some(ExprData::Array(value)) => value
             .items
             .iter()
-            .all(class_field_initializer_is_safe_to_move),
+            .all(|item| item.data.is_none() || class_field_initializer_is_safe_to_move(item)),
         Some(ExprData::Unary(value)) => class_field_initializer_is_safe_to_move(&value.value),
         Some(ExprData::Binary(value)) => {
             class_field_initializer_is_safe_to_move(&value.left)
@@ -1191,7 +1191,8 @@ fn class_field_initializer_is_safe_to_move(expression: &Expr) -> bool {
         }),
         Some(ExprData::Spread(value)) => class_field_initializer_is_safe_to_move(&value.value),
         Some(ExprData::Template(value)) => {
-            class_field_initializer_is_safe_to_move(&value.tag_or_nil)
+            (value.tag_or_nil.data.is_none()
+                || class_field_initializer_is_safe_to_move(&value.tag_or_nil))
                 && value
                     .parts
                     .iter()
@@ -1201,7 +1202,8 @@ fn class_field_initializer_is_safe_to_move(expression: &Expr) -> bool {
         Some(ExprData::Annotation(value)) => class_field_initializer_is_safe_to_move(&value.value),
         Some(ExprData::Await(value)) => class_field_initializer_is_safe_to_move(&value.value),
         Some(ExprData::Yield(value)) => {
-            class_field_initializer_is_safe_to_move(&value.value_or_nil)
+            value.value_or_nil.data.is_none()
+                || class_field_initializer_is_safe_to_move(&value.value_or_nil)
         }
         Some(ExprData::If(value)) => {
             class_field_initializer_is_safe_to_move(&value.test)
@@ -1210,7 +1212,8 @@ fn class_field_initializer_is_safe_to_move(expression: &Expr) -> bool {
         }
         Some(ExprData::ImportCall(value)) => {
             class_field_initializer_is_safe_to_move(&value.expr)
-                && class_field_initializer_is_safe_to_move(&value.options_or_nil)
+                && (value.options_or_nil.data.is_none()
+                    || class_field_initializer_is_safe_to_move(&value.options_or_nil))
         }
         Some(
             ExprData::Super

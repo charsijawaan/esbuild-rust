@@ -4218,7 +4218,10 @@ mod tests {
             generated.contains("constructor() {\n    this.initialized = createValue();"),
             "{generated}"
         );
+    }
 
+    #[test]
+    fn lowers_only_capture_safe_type_script_class_fields() {
         let capture_sensitive = code(transform(
             "const outer = 1; class Foo { initialized = outer; constructor() { let outer = 2 } }",
             TransformOptions {
@@ -4234,6 +4237,19 @@ mod tests {
         assert!(
             !capture_sensitive.contains("this.initialized = outer;"),
             "{capture_sensitive}"
+        );
+
+        let literal_template = code(transform(
+            "class Foo { message = `hello`; constructor(id: number) { use(id) } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            literal_template.contains("this.message = \"hello\";"),
+            "{literal_template}"
         );
 
         let define_fields = code(transform(
