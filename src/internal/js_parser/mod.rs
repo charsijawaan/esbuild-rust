@@ -13,6 +13,7 @@ mod parser_types;
 mod source_map;
 mod standalone_helpers;
 mod symbols;
+mod syntax_arrow;
 mod syntax_expression;
 mod syntax_function;
 mod syntax_import;

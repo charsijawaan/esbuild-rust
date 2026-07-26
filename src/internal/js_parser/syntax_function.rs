@@ -12,6 +12,7 @@ use crate::internal::{
 use super::{
     parser_core::ParserCore,
     parser_types::{AwaitOrYield, FnOrArrowDataParse},
+    syntax_arrow::parse_arrow_body,
     syntax_expression::parse_expression,
     syntax_statement::parse_block,
 };
@@ -35,6 +36,29 @@ pub(crate) fn parse_async_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
     lexer.next();
     if !lexer.has_newline_before && lexer.token == Token::Function {
         return Some(parse_function_after_keyword(core, lexer, loc, true));
+    }
+    if !lexer.has_newline_before && lexer.token == Token::Identifier {
+        let arg_loc = lexer.loc();
+        let arg_reference = core.store_name_in_ref(lexer.identifier.clone());
+        lexer.next();
+        if lexer.token == Token::EqualsGreaterThan {
+            return Some(parse_arrow_body(
+                core,
+                lexer,
+                loc,
+                vec![Arg {
+                    binding: Binding {
+                        loc: arg_loc,
+                        data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                            reference: arg_reference,
+                        }))),
+                    },
+                    ..Arg::default()
+                }],
+                true,
+                false,
+            ));
+        }
     }
 
     Some(Expr::new(

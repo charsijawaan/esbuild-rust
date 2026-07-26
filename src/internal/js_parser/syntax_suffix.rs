@@ -200,7 +200,7 @@ pub(crate) fn parse_high_precedence_suffix_chain(
     mut left: Expr,
     minimum_precedence: Precedence,
     is_new_target: bool,
-    mut parse_nested: impl FnMut(&mut ParserCore, &mut Lexer) -> Expr,
+    mut parse_nested: impl FnMut(&mut ParserCore, &mut Lexer, Precedence) -> Expr,
 ) -> Expr {
     let mut optional_chain = OptionalChain::None;
     let mut report_optional_chain_in_new_target = is_new_target;
@@ -259,7 +259,7 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                 match lexer.token {
                     Token::OpenBracket => {
                         lexer.next();
-                        let index = parse_nested(core, lexer);
+                        let index = parse_nested(core, lexer, Precedence::Lowest);
                         let close_bracket_loc = lexer.loc();
                         lexer.expect(Token::CloseBracket);
                         left = Expr::new(
@@ -283,7 +283,9 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                             CallKind::Normal
                         };
                         let (args, close_paren_loc, is_multi_line) =
-                            parse_call_args(lexer, |lexer| parse_nested(core, lexer));
+                            parse_call_args(lexer, |lexer| {
+                                parse_nested(core, lexer, Precedence::Comma)
+                            });
                         left = Expr::new(
                             left.loc,
                             ExprData::Call(CallExpr {
@@ -320,7 +322,7 @@ pub(crate) fn parse_high_precedence_suffix_chain(
             }
             Token::OpenBracket => {
                 lexer.next();
-                let index = parse_nested(core, lexer);
+                let index = parse_nested(core, lexer, Precedence::Lowest);
                 let close_bracket_loc = lexer.loc();
                 lexer.expect(Token::CloseBracket);
                 left = Expr::new(
@@ -345,7 +347,7 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                     CallKind::Normal
                 };
                 let (args, close_paren_loc, is_multi_line) =
-                    parse_call_args(lexer, |lexer| parse_nested(core, lexer));
+                    parse_call_args(lexer, |lexer| parse_nested(core, lexer, Precedence::Comma));
                 left = Expr::new(
                     left.loc,
                     ExprData::Call(CallExpr {
@@ -361,8 +363,10 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                 optional_chain = old_optional_chain;
             }
             Token::NoSubstitutionTemplateLiteral | Token::TemplateHead => {
-                left = parse_tagged_template_suffix(left, lexer, |lexer| parse_nested(core, lexer))
-                    .expect("template token was checked");
+                left = parse_tagged_template_suffix(left, lexer, |lexer| {
+                    parse_nested(core, lexer, Precedence::Lowest)
+                })
+                .expect("template token was checked");
             }
             Token::MinusMinus if !lexer.has_newline_before => {
                 if minimum_precedence >= Precedence::Postfix {
@@ -452,7 +456,7 @@ mod tests {
             left,
             crate::internal::js_ast::Precedence::Lowest,
             false,
-            |_, lexer| {
+            |_, lexer, _| {
                 let loc = lexer.loc();
                 let value = lexer.number;
                 lexer.next();

@@ -7,6 +7,11 @@ use crate::internal::{
 
 use super::{
     parser_core::ParserCore,
+    syntax_arrow::{
+        is_async_arrow_call, parse_arrow_after_parenthesized_expression,
+        parse_async_arrow_from_call, parse_empty_parenthesized_arrow,
+        parse_identifier_or_arrow_prefix,
+    },
     syntax_function::{parse_async_prefix, parse_function_prefix},
     syntax_import::parse_import_prefix,
     syntax_literals::{
@@ -45,8 +50,11 @@ pub(crate) fn parse_expression_suffix(
         left,
         minimum_precedence,
         false,
-        |core, lexer| parse_expression(core, lexer, Precedence::Lowest, true),
+        |core, lexer, precedence| parse_expression(core, lexer, precedence, true),
     );
+    if lexer.token == Token::EqualsGreaterThan && is_async_arrow_call(core, &left) {
+        return parse_async_arrow_from_call(core, lexer, left);
+    }
 
     let mut previous_operator = None;
     loop {
@@ -139,6 +147,9 @@ fn parse_prefix(
     ) {
         return expr;
     }
+    if let Some(expr) = parse_identifier_or_arrow_prefix(core, lexer, minimum_precedence) {
+        return expr;
+    }
     if let Some(expr) = parse_simple_prefix(core, lexer) {
         return expr;
     }
@@ -175,10 +186,20 @@ fn parse_prefix(
         })
         .expect("object token was checked"),
         Token::OpenParen => {
+            let paren_loc = lexer.loc();
             lexer.next();
+            if lexer.token == Token::CloseParen {
+                return parse_empty_parenthesized_arrow(core, lexer, paren_loc)
+                    .unwrap_or_else(|| lexer.unexpected());
+            }
             let expr = parse_expression(core, lexer, Precedence::Lowest, true);
             lexer.expect(Token::CloseParen);
-            expr
+            if lexer.token == Token::EqualsGreaterThan {
+                parse_arrow_after_parenthesized_expression(core, lexer, paren_loc, expr)
+                    .expect("arrow token was checked")
+            } else {
+                expr
+            }
         }
         _ => parse_unary_prefix(lexer, |lexer| {
             parse_expression(core, lexer, Precedence::Prefix, allow_in)
@@ -195,7 +216,7 @@ fn parse_new_target(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
         target,
         Precedence::Member,
         true,
-        |core, lexer| parse_expression(core, lexer, Precedence::Lowest, true),
+        |core, lexer, precedence| parse_expression(core, lexer, precedence, true),
     );
     target
 }
