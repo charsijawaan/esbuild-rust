@@ -1041,6 +1041,52 @@ fn visit_expr_with_target(
         ExprData::Index(index) => {
             visit_expr(core, &mut index.target, resolve_identifiers);
             visit_expr(core, &mut index.index, resolve_identifiers);
+            let replacement = if assign_target == AssignTarget::None {
+                let reference = match index.target.data.as_deref() {
+                    Some(ExprData::Identifier(identifier)) => Some(identifier.reference),
+                    _ => None,
+                };
+                let name = match index.index.data.as_deref() {
+                    Some(ExprData::String(string)) => Some(
+                        String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                            &string.value,
+                        ))
+                        .into_owned(),
+                    ),
+                    _ => None,
+                };
+                reference
+                    .zip(name)
+                    .and_then(|(reference, name)| {
+                        core.ts_enums
+                            .get(&reference)
+                            .and_then(|values| values.get(&name))
+                            .cloned()
+                            .map(|value| (name, value))
+                    })
+                    .map(|(name, value)| {
+                        let value = if value.is_string {
+                            Expr::new(
+                                expression.loc,
+                                ExprData::String(crate::internal::js_ast::StringExpr {
+                                    value: value.string,
+                                    ..crate::internal::js_ast::StringExpr::default()
+                                }),
+                            )
+                        } else {
+                            Expr::new(expression.loc, ExprData::Number(value.number))
+                        };
+                        ExprData::InlinedEnum(crate::internal::js_ast::InlinedEnumExpr {
+                            value,
+                            comment: name,
+                        })
+                    })
+            } else {
+                None
+            };
+            if let Some(replacement) = replacement {
+                *data = replacement;
+            }
         }
         ExprData::Object(object) => {
             report_duplicate_properties(core, &object.properties, DuplicatePropertiesIn::Object);
