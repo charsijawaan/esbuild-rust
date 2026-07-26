@@ -1525,7 +1525,7 @@ impl Printer<'_> {
             self.output.push(b'{');
             self.print_optional_space();
         } else {
-            self.output.push(b' ');
+            self.print_optional_space();
         }
         self.output
             .extend_from_slice(attributes.keyword.as_str().as_bytes());
@@ -1533,7 +1533,7 @@ impl Printer<'_> {
             self.output.push(b':');
             self.print_optional_space();
         } else {
-            self.output.push(b' ');
+            self.print_optional_space();
         }
         self.output.push(b'{');
         if !attributes.entries.is_empty() {

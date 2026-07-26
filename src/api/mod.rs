@@ -185,6 +185,15 @@ fn transform_base_renamer(
                 );
             }
         }
+        let mut imported_symbols = top_level_symbols
+            .iter()
+            .copied()
+            .filter(|stable| {
+                symbols.get(stable.reference).kind == crate::internal::ast::SymbolKind::Import
+            })
+            .collect::<Vec<_>>();
+        crate::internal::renamer::sort_stable_symbol_counts(&mut imported_symbols);
+        renamer.allocate_top_level_symbol_slots(&imported_symbols);
         let keep_name_slots = keep_name_use_count.map(|use_count| {
             renamer.accumulate_synthetic_default_nested_slot(1, 2);
             renamer.accumulate_synthetic_default_nested_slot(2, 2);
@@ -3920,6 +3929,16 @@ mod tests {
             )),
             "const fn = ({ x: n }) => ({ x: n });\n"
         );
+        assert_eq!(
+            code(transform(
+                "import def, {x as y, z} from 'pkg'; console.log(def, y, z)",
+                TransformOptions {
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "import o, { x as e, z as f } from \"pkg\";\nconsole.log(o, e, f);\n"
+        );
     }
 
     #[test]
@@ -3943,6 +3962,16 @@ mod tests {
                 }
             )),
             "function f(){foo();let x=1;bar(x)}\n"
+        );
+        assert_eq!(
+            code(transform(
+                "import data from './x.json' with {type: 'json'}; console.log(data)",
+                TransformOptions {
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "import data from\"./x.json\"with{type:\"json\"};console.log(data);\n"
         );
     }
 
