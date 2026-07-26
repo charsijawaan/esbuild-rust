@@ -1920,6 +1920,115 @@ pub fn finalize_part_dependencies_for_file(graph: &mut LinkerGraph, source_index
     graph.files[source_index as usize].input_file.repr = Some(InputFileRepr::Js(repr));
 }
 
+/// Bind matched imports to their declaring parts and merge symbol identities.
+///
+/// This is the first half of upstream linker scan step 6.
+///
+/// # Panics
+///
+/// Panics when matched imports or their declaring parts violate linker graph
+/// invariants.
+pub fn bind_imports_to_parts_for_file(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    export_runtime_ref: Ref,
+) {
+    let (needs_export_runtime, wrap, exports_kind, exports_ref, module_ref, wrapper_ref) = {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            panic!("import source must be JavaScript");
+        };
+        (
+            repr.meta.needs_export_symbol_from_runtime,
+            repr.meta.wrap,
+            repr.ast.exports_kind,
+            repr.ast.exports_ref,
+            repr.ast.module_ref,
+            repr.ast.wrapper_ref,
+        )
+    };
+    if needs_export_runtime {
+        graph.generate_symbol_import_and_use(
+            source_index,
+            js_ast::NS_EXPORT_PART_INDEX,
+            export_runtime_ref,
+            1,
+            crate::internal::runtime::SOURCE_INDEX,
+        );
+    }
+
+    let imports_to_bind = {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            unreachable!("import source was checked above");
+        };
+        repr.meta.imports_to_bind.clone()
+    };
+    for (import_ref, import_data) in imports_to_bind {
+        let declaring_parts = {
+            let Some(InputFileRepr::Js(repr)) = graph.files[import_data.source_index as usize]
+                .input_file
+                .repr
+                .as_ref()
+            else {
+                panic!("import target must be JavaScript");
+            };
+            repr.top_level_symbol_to_parts(import_data.reference)
+                .unwrap_or_default()
+                .to_vec()
+        };
+        let local_parts_with_uses = {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_ref()
+            else {
+                unreachable!("import source was checked above");
+            };
+            repr.ast
+                .named_imports
+                .get(&import_ref)
+                .map(|named_import| named_import.local_parts_with_uses.clone())
+                .unwrap_or_default()
+        };
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_mut()
+        else {
+            unreachable!("import source was checked above");
+        };
+        for part_index in local_parts_with_uses {
+            let part = &mut repr.ast.parts[part_index as usize];
+            part.dependencies
+                .extend(
+                    declaring_parts
+                        .iter()
+                        .map(|&declaring_part_index| js_ast::Dependency {
+                            source_index: import_data.source_index,
+                            part_index: declaring_part_index,
+                        }),
+                );
+            part.dependencies
+                .extend(import_data.re_exports.iter().copied());
+        }
+        graph
+            .symbols
+            .merge_symbols(import_ref, import_data.reference);
+    }
+
+    let identifier_name = graph.files[source_index as usize]
+        .input_file
+        .source
+        .identifier_name
+        .clone();
+    if wrap == WrapKind::Esm {
+        graph.symbols.get_mut(wrapper_ref).original_name = format!("init_{identifier_name}");
+    }
+    if wrap != WrapKind::Cjs && exports_kind != ExportsKind::CommonJs {
+        graph.symbols.get_mut(exports_ref).original_name = format!("{identifier_name}_exports");
+        graph.symbols.get_mut(module_ref).original_name = format!("{identifier_name}_module");
+    }
+}
+
 /// Create the synthetic wrapper part used by wrapped `CommonJS` and ESM files.
 ///
 /// # Panics
@@ -7397,11 +7506,12 @@ mod tests {
         OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, PreparedCssAst,
         RuntimeReExportContext, StableRef, add_exports_for_export_star, advance_import_tracker,
         append_or_extend_part_range, assemble_css_chunk, assemble_javascript_chunk,
-        assign_chunk_path_templates, bind_imports_to_exports_for_file, classify_module_wrappers,
-        compile_part_range_for_chunk, compile_prepared_css_asts, compute_chunks,
-        compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
-        convert_stmts_for_chunk, create_exports_for_file, create_wrapper_for_file,
-        enforce_no_cyclic_chunk_imports, finalize_chunk_paths, finalize_javascript_chunk_outputs,
+        assign_chunk_path_templates, bind_imports_to_exports_for_file,
+        bind_imports_to_parts_for_file, classify_module_wrappers, compile_part_range_for_chunk,
+        compile_prepared_css_asts, compute_chunks, compute_cross_chunk_dependencies,
+        compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
+        create_exports_for_file, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
+        finalize_chunk_paths, finalize_javascript_chunk_outputs,
         finalize_part_dependencies_for_file, find_imported_css_files_in_js_order,
         find_imported_files_in_css_order, generate_code_for_lazy_exports,
         generate_cross_chunk_stmts, generate_css_chunk, generate_css_module_exports,
@@ -12897,6 +13007,112 @@ mod tests {
             repr.ast.named_imports[&enum_import_ref].local_parts_with_uses,
             [1]
         );
+    }
+
+    #[test]
+    fn binds_imports_to_declaring_parts_and_merges_symbols() {
+        let import_ref = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let exports_ref = Ref {
+            source_index: 1,
+            inner_index: 1,
+        };
+        let module_ref = Ref {
+            source_index: 1,
+            inner_index: 2,
+        };
+        let wrapper_ref = Ref {
+            source_index: 1,
+            inner_index: 3,
+        };
+        let target_ref = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let mut source_file = js_file(js_ast::Ast {
+            symbols: vec![
+                Symbol::new(SymbolKind::Import, "value"),
+                Symbol::new(SymbolKind::Other, "exports"),
+                Symbol::new(SymbolKind::Other, "module"),
+                Symbol::new(SymbolKind::Other, "require_entry"),
+            ],
+            exports_ref,
+            module_ref,
+            wrapper_ref,
+            exports_kind: ExportsKind::Esm,
+            named_imports: HashMap::from([(
+                import_ref,
+                NamedImport {
+                    local_parts_with_uses: vec![1],
+                    ..NamedImport::default()
+                },
+            )]),
+            parts: vec![js_ast::Part::default(), js_ast::Part::default()],
+            ..js_ast::Ast::default()
+        });
+        source_file.source.identifier_name = "entry".into();
+        let input_files = [
+            js_file(js_ast::Ast::default()),
+            source_file,
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "value")],
+                parts: vec![js_ast::Part {
+                    declared_symbols: vec![js_ast::DeclaredSymbol {
+                        reference: target_ref,
+                        is_top_level: true,
+                    }],
+                    ..js_ast::Part::default()
+                }],
+                top_level_symbol_to_parts_from_parser: HashMap::from([(target_ref, vec![0])]),
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2, 3], &[], false);
+        let Some(InputFileRepr::Js(repr)) = graph.files[1].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta.wrap = WrapKind::Esm;
+        repr.meta.imports_to_bind.insert(
+            import_ref,
+            crate::internal::graph::ImportData {
+                re_exports: vec![js_ast::Dependency {
+                    source_index: 3,
+                    part_index: 0,
+                }],
+                source_index: 2,
+                reference: target_ref,
+                ..crate::internal::graph::ImportData::default()
+            },
+        );
+
+        bind_imports_to_parts_for_file(&mut graph, 1, crate::internal::ast::INVALID_REF);
+
+        assert_eq!(
+            js_repr(&graph, 1).ast.parts[1].dependencies,
+            [
+                js_ast::Dependency {
+                    source_index: 2,
+                    part_index: 0,
+                },
+                js_ast::Dependency {
+                    source_index: 3,
+                    part_index: 0,
+                },
+            ]
+        );
+        assert_eq!(graph.symbols.follow_symbols_const(import_ref), target_ref);
+        assert_eq!(graph.symbols.get(wrapper_ref).original_name, "init_entry");
+        assert_eq!(
+            graph.symbols.get(exports_ref).original_name,
+            "entry_exports"
+        );
+        assert_eq!(graph.symbols.get(module_ref).original_name, "entry_module");
     }
 
     #[test]
