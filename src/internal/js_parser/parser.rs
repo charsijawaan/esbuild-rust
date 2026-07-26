@@ -5,13 +5,13 @@ use std::{
 
 use crate::internal::{
     ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, LocRef, Ref, SymbolKind},
-    helpers::utf16_to_string,
+    helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         Ast, Binding, BindingData, CallExpr, CallKind, ClauseItem, Decl, DeclaredSymbol, DotExpr,
-        ExportsKind, Expr, ExprData, IdentifierBinding, IdentifierExpr, ImportStmt, LazyExportStmt,
-        LocalKind, LocalStmt, NamedExport, NamedImport, Part, Scope, ScopeKind, Stmt, StmtData,
-        StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, for_each_identifier_binding,
-        make_helper_context,
+        ExportsKind, Expr, ExprData, ExprStmt, IdentifierBinding, IdentifierExpr, ImportStmt,
+        LazyExportStmt, LocalKind, LocalStmt, NamedExport, NamedImport, Part, Scope, ScopeKind,
+        Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr,
+        for_each_identifier_binding, make_helper_context,
     },
     js_lexer::{Lexer, LexerPanic, Token},
     logger::{Loc, Log, Path, Source},
@@ -325,7 +325,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         core.hoist_symbols();
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
-        let (mut parts, module_metadata, uses_exports_ref, uses_module_ref) =
+        let (mut parts, mut module_metadata, uses_exports_ref, uses_module_ref) =
             if core.options.tree_shaking {
                 build_tree_shaking_parts(&mut core, statements, declared_symbols_by_statement)
             } else {
@@ -338,6 +338,9 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 );
                 visit_top_level_statements(&mut core, &mut statements);
                 statements = lower_type_script_statements(&mut core, statements);
+                if core.options.keep_names && core.source.key_path.text != "<runtime>" {
+                    apply_keep_names_to_statements(&mut core, &mut statements);
+                }
                 let uses_exports_ref = core
                     .symbol_uses
                     .get(&core.exports_ref)
@@ -368,6 +371,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 }
                 (parts, module_metadata, uses_exports_ref, uses_module_ref)
             };
+        insert_runtime_import_part(&mut core, &mut module_metadata, &mut parts);
         insert_generated_import_parts(&core, &module_metadata, &mut parts);
         insert_generated_define_parts(&core, &mut parts);
         assert_eq!(
@@ -539,6 +543,87 @@ fn insert_generated_import_parts(
     }
 }
 
+fn insert_runtime_import_part(
+    core: &mut ParserCore,
+    metadata: &mut ModuleMetadata,
+    parts: &mut Vec<Part>,
+) {
+    if core.runtime_imports.is_empty() || core.options.omit_runtime_for_tests {
+        return;
+    }
+
+    let mut imports: Vec<(String, LocRef)> = core.runtime_imports.drain().collect();
+    imports.sort_by(|left, right| left.0.cmp(&right.0));
+    let namespace_ref = core.new_symbol(SymbolKind::Other, "import_runtime");
+    core.module_scope
+        .as_ref()
+        .expect("runtime imports require a module scope")
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .generated
+        .push(namespace_ref);
+    let import_record_index =
+        u32::try_from(core.import_records.len()).expect("import record count fits in u32");
+    core.import_records.push(ImportRecord {
+        path: Path {
+            text: "<runtime>".into(),
+            namespace: "file".into(),
+            ..Path::default()
+        },
+        source_index: Index32::new(runtime::SOURCE_INDEX),
+        kind: ImportKind::Stmt,
+        ..ImportRecord::default()
+    });
+
+    let mut declared_symbols = vec![DeclaredSymbol {
+        reference: namespace_ref,
+        is_top_level: true,
+    }];
+    let items = imports
+        .into_iter()
+        .map(|(alias, item)| {
+            declared_symbols.push(DeclaredSymbol {
+                reference: item.reference,
+                is_top_level: true,
+            });
+            metadata.named_imports.insert(
+                item.reference,
+                NamedImport {
+                    alias: alias.clone(),
+                    alias_loc: item.loc,
+                    namespace_ref,
+                    import_record_index,
+                    ..NamedImport::default()
+                },
+            );
+            ClauseItem {
+                alias,
+                alias_loc: item.loc,
+                name: item,
+                ..ClauseItem::default()
+            }
+        })
+        .collect();
+    parts.insert(
+        1,
+        Part {
+            statements: vec![Stmt::new(
+                Loc::default(),
+                StmtData::Import(ImportStmt {
+                    items: Some(items),
+                    namespace_ref,
+                    import_record_index,
+                    is_single_line: true,
+                    ..ImportStmt::default()
+                }),
+            )],
+            import_record_indices: vec![import_record_index],
+            declared_symbols,
+            ..Part::default()
+        },
+    );
+}
+
 fn insert_generated_define_parts(core: &ParserCore, parts: &mut Vec<Part>) {
     let Some(defines) = core.options.defines.as_ref() else {
         return;
@@ -640,13 +725,18 @@ fn build_tree_shaking_parts(
         let first_generated_import_record = core.import_records.len();
         visit_top_level_statements(core, std::slice::from_mut(&mut statement));
         let mut statements = lower_context.lower_statements(core, vec![statement]);
+        if core.options.keep_names && core.source.key_path.text != "<runtime>" {
+            apply_keep_names_to_statements(core, &mut statements);
+        }
         if core.options.tree_shaking {
             let helpers = make_helper_context(|reference| {
                 core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
                     == SymbolKind::Unbound
             });
             for statement in &mut statements {
-                if let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() {
+                if let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut()
+                    && !expression.is_from_class_or_fn_that_can_be_removed_if_unused
+                {
                     expression.value = helpers.simplify_unused_expr(
                         &expression.value,
                         core.options.unsupported_js_features,
@@ -745,6 +835,160 @@ fn build_tree_shaking_parts(
     }
 
     (ordered_parts, metadata, uses_exports_ref, uses_module_ref)
+}
+
+fn keep_name_expression(core: &mut ParserCore, value: Expr, name: &str) -> Expr {
+    let loc = value.loc;
+    let mut call = core.call_runtime(
+        loc,
+        "__name",
+        vec![
+            value,
+            Expr::new(
+                loc,
+                ExprData::String(StringExpr {
+                    value: string_to_utf16(name.as_bytes()),
+                    ..StringExpr::default()
+                }),
+            ),
+        ],
+    );
+    if let Some(ExprData::Call(call)) = call.data.as_deref_mut() {
+        call.can_be_unwrapped_if_unused = true;
+    }
+    call
+}
+
+fn keep_declaration_name_statement(core: &mut ParserCore, loc: Loc, reference: Ref) -> Stmt {
+    let name = core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+        .original_name
+        .clone();
+    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].flags |=
+        crate::internal::ast::SymbolFlags::DID_KEEP_NAME;
+    Stmt::new(
+        loc,
+        StmtData::Expr(ExprStmt {
+            value: core.call_runtime(
+                loc,
+                "__name",
+                vec![
+                    Expr::new(
+                        loc,
+                        ExprData::Identifier(IdentifierExpr {
+                            reference,
+                            ..IdentifierExpr::default()
+                        }),
+                    ),
+                    Expr::new(
+                        loc,
+                        ExprData::String(StringExpr {
+                            value: string_to_utf16(name.as_bytes()),
+                            ..StringExpr::default()
+                        }),
+                    ),
+                ],
+            ),
+            is_from_class_or_fn_that_can_be_removed_if_unused: true,
+        }),
+    )
+}
+
+fn class_has_static_name(class: &crate::internal::js_ast::Class) -> bool {
+    class.properties.iter().any(|property| {
+        property
+            .flags
+            .contains(crate::internal::js_ast::PropertyFlags::IS_STATIC)
+            && matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::String(value)) if utf16_to_string(&value.value) == b"name"
+            )
+    })
+}
+
+fn keep_inferred_declaration_name(core: &mut ParserCore, value: &mut Expr, reference: Ref) {
+    let can_keep_name = match value.data.as_deref() {
+        Some(ExprData::Function(function)) => function.function.name.is_none(),
+        Some(ExprData::Class(class)) => {
+            class.class.name.is_none() && !class_has_static_name(&class.class)
+        }
+        Some(ExprData::Arrow(_)) => true,
+        _ => false,
+    };
+    if can_keep_name {
+        let name = core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+            .original_name
+            .clone();
+        *value = keep_name_expression(core, std::mem::take(value), &name);
+    }
+}
+
+fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>) {
+    let mut result = Vec::with_capacity(statements.len());
+    for mut statement in std::mem::take(statements) {
+        let mut name_to_keep = None;
+        if let Some(data) = statement.data.as_deref_mut() {
+            match data {
+                StmtData::Block(block) => {
+                    apply_keep_names_to_statements(core, &mut block.statements);
+                }
+                StmtData::Function(function) => {
+                    apply_keep_names_to_statements(
+                        core,
+                        &mut function.function.body.block.statements,
+                    );
+                    name_to_keep = function.function.name.map(|name| name.reference);
+                }
+                StmtData::Class(class) => {
+                    for property in &mut class.class.properties {
+                        if let Some(block) = &mut property.class_static_block {
+                            apply_keep_names_to_statements(core, &mut block.block.statements);
+                        }
+                    }
+                    if !class_has_static_name(&class.class) {
+                        name_to_keep = class.class.name.map(|name| name.reference);
+                    }
+                }
+                StmtData::Local(local) => {
+                    for declaration in &mut local.declarations {
+                        let Some(BindingData::Identifier(binding)) =
+                            declaration.binding.data.as_deref()
+                        else {
+                            continue;
+                        };
+                        keep_inferred_declaration_name(
+                            core,
+                            &mut declaration.value_or_nil,
+                            binding.reference,
+                        );
+                    }
+                }
+                StmtData::Namespace(namespace) => {
+                    apply_keep_names_to_statements(core, &mut namespace.statements);
+                }
+                StmtData::Try(try_statement) => {
+                    apply_keep_names_to_statements(core, &mut try_statement.block.statements);
+                    if let Some(catch) = &mut try_statement.catch {
+                        apply_keep_names_to_statements(core, &mut catch.block.statements);
+                    }
+                    if let Some(finally) = &mut try_statement.finally {
+                        apply_keep_names_to_statements(core, &mut finally.block.statements);
+                    }
+                }
+                StmtData::Switch(switch) => {
+                    for case in &mut switch.cases {
+                        apply_keep_names_to_statements(core, &mut case.body);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let loc = statement.loc;
+        result.push(statement);
+        if let Some(reference) = name_to_keep {
+            result.push(keep_declaration_name_statement(core, loc, reference));
+        }
+    }
+    *statements = result;
 }
 
 fn top_level_import_record_indices(statement: &Stmt) -> Vec<u32> {

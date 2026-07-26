@@ -80,6 +80,7 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
     let mut out_extensions = HashMap::new();
     let mut defines = HashMap::new();
     let mut pure = Vec::new();
+    let mut keep_names = false;
     let mut main_fields = Vec::new();
     let mut resolve_extensions = Vec::new();
     let mut conditions = Vec::new();
@@ -360,6 +361,10 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
             pure.push(value.into());
             continue;
         }
+        if argument == "--keep-names" {
+            keep_names = true;
+            continue;
+        }
         if let Some(loader) = argument.strip_prefix("--loader=") {
             options.loader = parse_loader(loader)?;
             continue;
@@ -495,6 +500,7 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
             out_extension: out_extensions,
             define: defines,
             pure,
+            keep_names,
             main_fields,
             resolve_extensions,
             conditions,
@@ -573,6 +579,7 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
     options.jsx_development = jsx_development;
     options.jsx_side_effects = jsx_side_effects;
     options.pure = pure;
+    options.keep_names = keep_names;
     let input = if let Some(path) = input_paths.pop() {
         if options.sourcefile.is_empty() {
             options.sourcefile.clone_from(&path);
@@ -668,6 +675,7 @@ fn help_text() -> String {
          \x20\x20--out-extension:.js=.mjs\n\
          \x20\x20--define:KEY=VALUE\n\
          \x20\x20--pure:CALL\n\
+         \x20\x20--keep-names\n\
          \x20\x20--main-fields=FIELDS\n\
          \x20\x20--resolve-extensions=EXTENSIONS\n\
          \x20\x20--conditions=CONDITIONS\n\
@@ -963,6 +971,21 @@ mod tests {
         assert!(output.contains("keep();"));
         assert!(output.contains("console.log(\"live\")"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn keeps_names_for_transforms() {
+        let Output::Code(output) = run_with_stdin(
+            &["--keep-names".into()],
+            Some(b"const PreservedArrow = () => {}; console.log(PreservedArrow.name)"),
+        )
+        .expect("transform succeeds") else {
+            panic!("expected transformed code");
+        };
+        let output = String::from_utf8(output).expect("transform output is UTF-8");
+        assert!(output.contains("Object.defineProperty"));
+        assert!(output.contains("\"PreservedArrow\""));
+        assert!(output.contains("console.log(PreservedArrow.name)"));
     }
 
     #[test]

@@ -17,10 +17,116 @@ use crate::internal::{
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
     logger::{DeferLogKind, Log, Msg, MsgKind, PrettyPaths, Source},
-    renamer::new_no_op_renamer,
+    renamer::{Renamer, new_no_op_renamer},
     resolver,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+struct TransformRenamer {
+    symbols: SymbolMap,
+    overrides: HashMap<Ref, String>,
+}
+
+impl Renamer for TransformRenamer {
+    fn name_for_symbol(&self, reference: Ref) -> String {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.overrides
+            .get(&reference)
+            .cloned()
+            .unwrap_or_else(|| self.symbols.get(reference).original_name.clone())
+    }
+
+    fn namespace_alias_for_symbol(
+        &self,
+        reference: Ref,
+    ) -> Option<crate::internal::ast::NamespaceAlias> {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).namespace_alias.clone()
+    }
+}
+
+fn transform_keep_name_renamer(
+    ast: &crate::internal::js_ast::Ast,
+    symbols: SymbolMap,
+    keep_names: bool,
+) -> (TransformRenamer, String) {
+    let mut overrides = HashMap::new();
+    let mut helper_name = String::new();
+    if keep_names {
+        let helper_refs = ast
+            .named_imports
+            .iter()
+            .filter_map(|(reference, import)| (import.alias == "__name").then_some(*reference))
+            .chain(
+                ast.module_scope
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|scope| {
+                        scope
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .generated
+                            .clone()
+                    })
+                    .filter(|reference| {
+                        ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                            .original_name
+                            == "__name"
+                    }),
+            )
+            .collect::<Vec<_>>();
+        if !helper_refs.is_empty() {
+            let helper_indices = helper_refs
+                .iter()
+                .map(|reference| reference.inner_index)
+                .collect::<HashSet<_>>();
+            let used_names = ast
+                .symbols
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    !helper_indices.contains(&u32::try_from(*index).expect("symbol index fits u32"))
+                })
+                .map(|(_, symbol)| symbol.original_name.as_str())
+                .collect::<HashSet<_>>();
+            helper_name = "__name".into();
+            let mut suffix = 2;
+            while used_names.contains(helper_name.as_str()) {
+                helper_name = format!("__name{suffix}");
+                suffix += 1;
+            }
+            overrides.extend(
+                helper_refs
+                    .into_iter()
+                    .map(|reference| (reference, helper_name.clone())),
+            );
+        }
+    }
+    (TransformRenamer { symbols, overrides }, helper_name)
+}
+
+fn prepend_keep_name_helper(code: &mut Vec<u8>, helper_name: &str, minify_whitespace: bool) {
+    if helper_name.is_empty() {
+        return;
+    }
+    let helper = if minify_whitespace {
+        format!(
+            "var {helper_name}=(target,value)=>Object.defineProperty(target,\"name\",{{value,configurable:true}});"
+        )
+    } else {
+        format!(
+            "var {helper_name} = (target, value) => Object.defineProperty(target, \"name\", {{ value, configurable: true }});\n"
+        )
+    };
+    let insertion = if code.starts_with(b"#!") {
+        code.iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(code.len(), |index| index + 1)
+    } else {
+        0
+    };
+    code.splice(insertion..insertion, helper.bytes());
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u16)]
@@ -57,6 +163,7 @@ pub struct TransformOptions {
     pub jsx_development: bool,
     pub jsx_side_effects: bool,
     pub pure: Vec<String>,
+    pub keep_names: bool,
     pub banner: String,
     pub footer: String,
     pub line_limit: usize,
@@ -206,6 +313,7 @@ pub struct BuildOptions {
     pub out_extension: HashMap<String, String>,
     pub define: HashMap<String, String>,
     pub pure: Vec<String>,
+    pub keep_names: bool,
     pub main_fields: Vec<String>,
     pub resolve_extensions: Vec<String>,
     pub conditions: Vec<String>,
@@ -828,6 +936,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         drop_debugger: options.drop_debugger,
         drop_labels: options.drop_labels,
         ignore_dce_annotations: options.ignore_annotations,
+        keep_names: options.keep_names,
         js_banner: options.banner,
         js_footer: options.footer,
         external_settings,
@@ -1146,14 +1255,17 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     parser_options.drop_debugger = options.drop_debugger;
     parser_options.drop_labels.clone_from(&options.drop_labels);
     parser_options.ignore_dce_annotations = options.ignore_annotations;
+    parser_options.keep_names = options.keep_names;
     let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
     if !ok {
         return Vec::new();
     }
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&ast.symbols);
-    let renamer = new_no_op_renamer(symbols);
-    js_printer::print(&ast, &renamer, js_printer_options(options)).js
+    let (renamer, helper_name) = transform_keep_name_renamer(&ast, symbols, options.keep_names);
+    let mut code = js_printer::print(&ast, &renamer, js_printer_options(options)).js;
+    prepend_keep_name_helper(&mut code, &helper_name, options.minify_whitespace);
+    code
 }
 
 fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Vec<u8> {
@@ -2788,6 +2900,53 @@ mod tests {
         assert!(output.contains("sideEffect();"));
         assert!(output.contains("other();"));
         assert!(output.contains("console.log(\"live\")"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn keeps_function_and_class_names() {
+        let transformed = code(transform(
+            "var __name = 1; function LongFunction() {} class LongClass {} class Shadowed { static name = 'custom' } const LongArrow = () => {}; const Different = function Inner() {}; const AnonymousShadowed = class { static name = 'custom' }; console.log(LongFunction.name, LongClass.name, Shadowed.name, LongArrow.name, Different.name, AnonymousShadowed.name, __name)",
+            TransformOptions {
+                keep_names: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(transformed.starts_with("var __name2 = (target, value) =>"));
+        assert!(transformed.contains("__name2(LongFunction, \"LongFunction\")"));
+        assert!(transformed.contains("__name2(LongClass, \"LongClass\")"));
+        assert!(transformed.contains("__name2(() =>"));
+        assert!(transformed.contains("\"LongArrow\")"));
+        assert!(transformed.contains("__name2(function Inner()"));
+        assert!(transformed.contains("\"Inner\")"));
+        assert!(!transformed.contains("__name2(Shadowed"));
+        assert!(!transformed.contains("\"AnonymousShadowed\")"));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-keep-names-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.js"),
+            "function DeadFunction() {} function LongFunctionName() {} class LongClassName {} const LongArrowName = () => {}; console.log(LongFunctionName.name, LongClassName.name, LongArrowName.name)",
+        )
+        .expect("write entry file");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            minify_identifiers: true,
+            keep_names: true,
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("\"LongFunctionName\""));
+        assert!(output.contains("\"LongClassName\""));
+        assert!(output.contains("\"LongArrowName\""));
+        assert!(!output.contains("DeadFunction"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

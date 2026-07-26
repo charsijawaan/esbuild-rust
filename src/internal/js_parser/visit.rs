@@ -9,7 +9,7 @@ use crate::internal::{
     js_ast::{
         AssignTarget, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class, DotExpr, Expr,
         ExprData, Function, IdentifierExpr, ObjectExpr, OpCode, PropertyFlags, PropertyKind,
-        ScopeKind, Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
+        ScopeKind, Stmt, StmtData, StrictModeKind, StringExpr, for_each_identifier_binding,
     },
 };
 
@@ -891,6 +891,7 @@ fn visit_expr_with_target(
     let Some(data) = expression.data.as_deref_mut() else {
         return;
     };
+    let mut keep_name = None;
     match data {
         ExprData::Identifier(identifier) => {
             if !resolve_identifiers {
@@ -1403,8 +1404,39 @@ fn visit_expr_with_target(
         }
         ExprData::Function(function) => {
             visit_function(core, &mut function.function, resolve_identifiers);
+            if core.options.keep_names
+                && let Some(name) = function.function.name
+            {
+                keep_name = Some(
+                    core.symbols
+                        [usize::try_from(name.reference.inner_index).expect("symbol index")]
+                    .original_name
+                    .clone(),
+                );
+            }
         }
-        ExprData::Class(class) => visit_class(core, &mut class.class, resolve_identifiers),
+        ExprData::Class(class) => {
+            visit_class(core, &mut class.class, resolve_identifiers);
+            let has_static_name = class.class.properties.iter().any(|property| {
+                property.flags.contains(PropertyFlags::IS_STATIC)
+                    && matches!(
+                        property.key.data.as_deref(),
+                        Some(ExprData::String(value))
+                            if utf16_to_string(&value.value) == b"name"
+                    )
+            });
+            if core.options.keep_names
+                && !has_static_name
+                && let Some(name) = class.class.name
+            {
+                keep_name = Some(
+                    core.symbols
+                        [usize::try_from(name.reference.inner_index).expect("symbol index")]
+                    .original_name
+                    .clone(),
+                );
+            }
+        }
         ExprData::Arrow(arrow) => {
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
@@ -1728,6 +1760,28 @@ fn visit_expr_with_target(
                 core.add_error_range(new_target.range, "Cannot use \"new.target\" here:");
             }
         }
+    }
+    if let Some(name) = keep_name {
+        let loc = expression.loc;
+        let original = std::mem::take(expression);
+        let mut call = core.call_runtime(
+            loc,
+            "__name",
+            vec![
+                original,
+                Expr::new(
+                    loc,
+                    ExprData::String(StringExpr {
+                        value: crate::internal::helpers::string_to_utf16(name.as_bytes()),
+                        ..StringExpr::default()
+                    }),
+                ),
+            ],
+        );
+        if let Some(ExprData::Call(call)) = call.data.as_deref_mut() {
+            call.can_be_unwrapped_if_unused = true;
+        }
+        *expression = call;
     }
 }
 
