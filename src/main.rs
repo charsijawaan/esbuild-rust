@@ -7,7 +7,8 @@ use std::{
 use esbuild_rs::{
     api::{
         BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
-        BuildTreeShaking, Loader, Packages, TransformOptions, build, transform,
+        BuildSourcesContent, BuildTreeShaking, Loader, Packages, TransformOptions, build,
+        transform,
     },
     internal::cli_helpers,
 };
@@ -56,6 +57,8 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut splitting = false;
     let mut preserve_symlinks = false;
     let mut sourcemap = BuildSourceMap::None;
+    let mut source_root = String::new();
+    let mut sources_content = BuildSourcesContent::Include;
     let mut legal_comments = BuildLegalComments::Inline;
     let mut tree_shaking = BuildTreeShaking::Default;
     let mut jsx = BuildJsx::Transform;
@@ -125,6 +128,18 @@ fn run(arguments: &[String]) -> Result<Output, String> {
                 "inline" => BuildSourceMap::Inline,
                 "both" => BuildSourceMap::InlineAndExternal,
                 _ => return Err(format!("Invalid source map setting {value:?}")),
+            };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--source-root=") {
+            source_root = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--sources-content=") {
+            sources_content = match value {
+                "true" => BuildSourcesContent::Include,
+                "false" => BuildSourcesContent::Exclude,
+                _ => return Err(format!("Invalid sources content setting {value:?}")),
             };
             continue;
         }
@@ -399,6 +414,8 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             chunk_names,
             asset_names,
             sourcemap,
+            source_root,
+            sources_content,
             legal_comments,
             line_limit: options.line_limit,
             tree_shaking,
@@ -565,6 +582,8 @@ fn help_text() -> String {
          \x20\x20--splitting\n\
          \x20\x20--preserve-symlinks\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
+         \x20\x20--source-root=PATH\n\
+         \x20\x20--sources-content=true|false\n\
          \x20\x20--legal-comments=none|inline|eof|linked|external\n\
          \x20\x20--tree-shaking=true|false\n\
          \x20\x20--jsx=transform|preserve|automatic\n\
@@ -635,6 +654,7 @@ mod tests {
         assert!(run(&["--platform=wat".into()]).is_err());
         assert!(run(&["--packages=wat".into()]).is_err());
         assert!(run(&["--sourcemap=wat".into()]).is_err());
+        assert!(run(&["--sources-content=wat".into()]).is_err());
         assert!(run(&["--tree-shaking=wat".into()]).is_err());
         assert!(run(&["--jsx=wat".into()]).is_err());
         assert!(run(&["--jsx-side-effects=wat".into()]).is_err());
@@ -832,6 +852,8 @@ mod tests {
         let Output::Text(output) = run(&[
             "--bundle".into(),
             "--sourcemap".into(),
+            "--source-root=https://cdn.example/source/".into(),
+            "--sources-content=false".into(),
             format!("--outdir={}", output_directory.display()),
             entry.to_string_lossy().into_owned(),
         ])
@@ -845,6 +867,8 @@ mod tests {
         let source_map =
             std::fs::read_to_string(output_directory.join("entry.js.map")).expect("read map");
         assert!(source_map.contains("\"version\": 3"));
+        assert!(source_map.contains("\"sourceRoot\": \"https://cdn.example/source/\""));
+        assert!(!source_map.contains("\"sourcesContent\""));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

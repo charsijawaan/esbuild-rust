@@ -117,6 +117,13 @@ pub enum BuildSourceMap {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BuildSourcesContent {
+    #[default]
+    Include,
+    Exclude,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BuildLegalComments {
     #[default]
     Inline,
@@ -167,6 +174,8 @@ pub struct BuildOptions {
     pub chunk_names: String,
     pub asset_names: String,
     pub sourcemap: BuildSourceMap,
+    pub source_root: String,
+    pub sources_content: BuildSourcesContent,
     pub legal_comments: BuildLegalComments,
     pub line_limit: usize,
     pub tree_shaking: BuildTreeShaking,
@@ -732,6 +741,8 @@ pub fn build(options: BuildOptions) -> BuildResult {
             BuildSourceMap::Inline => config::SourceMap::Inline,
             BuildSourceMap::InlineAndExternal => config::SourceMap::InlineAndExternal,
         },
+        source_root: options.source_root,
+        exclude_sources_content: options.sources_content == BuildSourcesContent::Exclude,
         legal_comments: match options.legal_comments {
             BuildLegalComments::Inline => config::LegalComments::Inline,
             BuildLegalComments::None => config::LegalComments::None,
@@ -1234,7 +1245,8 @@ mod tests {
 
     use super::{
         BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
-        BuildTreeShaking, Loader, Packages, TransformOptions, build, transform,
+        BuildSourcesContent, BuildTreeShaking, Loader, Packages, TransformOptions, build,
+        transform,
     };
 
     fn code(result: super::TransformResult) -> String {
@@ -1478,6 +1490,8 @@ mod tests {
             abs_working_dir: directory.to_string_lossy().into_owned(),
             format: BuildFormat::EsModule,
             sourcemap: BuildSourceMap::Linked,
+            source_root: "https://cdn.example/source/".into(),
+            sources_content: BuildSourcesContent::Exclude,
             ..BuildOptions::default()
         });
 
@@ -1500,6 +1514,8 @@ mod tests {
         let source_map = String::from_utf8_lossy(&source_map.contents);
         assert!(source_map.contains("\"version\": 3"));
         assert!(source_map.contains("entry.js"));
+        assert!(source_map.contains("\"sourceRoot\": \"https://cdn.example/source/\""));
+        assert!(!source_map.contains("\"sourcesContent\""));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
