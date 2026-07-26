@@ -666,6 +666,8 @@ impl Parser {
             "list-style-type" if value.len() == 1 => {
                 self.process_list_style_type(&mut value[0]);
             }
+            "container" => self.process_container_shorthand(&mut value),
+            "container-name" => self.process_container_names(&mut value),
             _ => {}
         }
         if self.minify_syntax {
@@ -957,6 +959,47 @@ impl Parser {
     }
 
     fn mark_list_style_name(&mut self, tokens: &mut [Token], index: usize) {
+        let reference = self.new_css_symbol(&tokens[index].text, tokens[index].loc);
+        tokens[index].kind = TokenKind::Symbol;
+        tokens[index].payload_index = reference.inner_index;
+    }
+
+    fn process_container_shorthand(&mut self, tokens: &mut [Token]) {
+        for (index, token) in tokens.iter().enumerate() {
+            if token.kind == TokenKind::Ident {
+                continue;
+            }
+            if token.kind == TokenKind::DelimSlash
+                && index + 2 == tokens.len()
+                && tokens[index + 1].kind == TokenKind::Ident
+            {
+                break;
+            }
+            return;
+        }
+        let name_count = tokens
+            .iter()
+            .position(|token| token.kind != TokenKind::Ident)
+            .unwrap_or(tokens.len());
+        for index in 0..name_count {
+            self.mark_container_name(tokens, index);
+        }
+    }
+
+    fn process_container_names(&mut self, tokens: &mut [Token]) {
+        if !tokens.iter().all(|token| token.kind == TokenKind::Ident) {
+            return;
+        }
+        for index in 0..tokens.len() {
+            self.mark_container_name(tokens, index);
+        }
+    }
+
+    fn mark_container_name(&mut self, tokens: &mut [Token], index: usize) {
+        let lower = tokens[index].text.to_ascii_lowercase();
+        if lower == "none" || CSS_WIDE_AND_RESERVED_KEYWORDS.contains(&lower.as_str()) {
+            return;
+        }
         let reference = self.new_css_symbol(&tokens[index].text, tokens[index].loc);
         tokens[index].kind = TokenKind::Symbol;
         tokens[index].payload_index = reference.inner_index;

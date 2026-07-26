@@ -715,6 +715,24 @@ mod tests {
     }
 
     #[test]
+    fn processes_local_css_container_names() {
+        assert_eq!(
+            code(transform(
+                "div { container-name: NONE initial } div { container-name: local1 local2 } div { container: none } div { container: NONE / size } div { container: local1 local2 } div { container: local1 local2 / size } div { container: local1 / size extra } div { container-name: local1 / size }",
+                TransformOptions {
+                    sourcefile: "entry.module.css".into(),
+                    loader: Loader::LocalCss,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "div{container-name:NONE initial}div{container-name:i n}div{container:none}div{container:NONE/size}div{container:i n}div{container:i n/size}div{container:local1/size extra}div{container-name:local1/size}\n"
+        );
+    }
+
+    #[test]
     fn minifies_css_transforms() {
         assert_eq!(
             code(transform(
