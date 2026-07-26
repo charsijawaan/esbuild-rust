@@ -604,7 +604,7 @@ mod tests {
     use crate::internal::{
         js_ast::{ExprData, StmtData},
         js_parser::Options,
-        logger::{DeferLogKind, Log, Source},
+        logger::{DeferLogKind, Log, MsgKind, Source},
     };
 
     fn parse_source(text: &str) -> (crate::internal::js_ast::Ast, bool, Log) {
@@ -1143,6 +1143,51 @@ mod tests {
         let (_, ok, log) = parse_source("\"use strict\"; eval = 1; arguments++; protected;");
         assert!(ok);
         assert_eq!(log.done().len(), 3);
+    }
+
+    #[test]
+    fn reports_writes_to_constants_and_imports() {
+        let (_, ok, log) = parse_source("const value = 1; value = 2;");
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Warning);
+
+        let (_, ok, log) = parse_source("import {value} from 'package'; value = 2;");
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Error);
+
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"const value = 1; value = 2;"[..]),
+            identifier_name: "entry".to_owned(),
+            ..Source::default()
+        };
+        let (_, ok) = parse(
+            log.clone(),
+            source,
+            Options {
+                mode: crate::internal::config::Mode::Bundle,
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Error);
+    }
+
+    #[test]
+    fn rejects_bare_delete_in_strict_scopes() {
+        let (_, ok, log) = parse_source(
+            "delete sloppy;\
+             function nested() { \"use strict\"; delete value; delete object.value; }\
+             class Item { method() { delete classValue; } }",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
     }
 
     #[test]

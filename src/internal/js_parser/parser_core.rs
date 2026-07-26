@@ -19,7 +19,7 @@ use crate::internal::{
         SymbolUse, for_each_identifier_binding,
     },
     js_lexer::{MaybeSubstring, range_of_identifier},
-    logger::{LineColumnTracker, Loc, Log, Path, Range, Source},
+    logger::{LineColumnTracker, Loc, Log, MsgId, MsgKind, Path, Range, Source},
 };
 
 use super::{
@@ -1270,6 +1270,18 @@ impl ParserCore {
     pub(crate) fn add_error_range(&mut self, range: Range, text: impl Into<String>) {
         if let Some(log) = &self.log {
             log.add_error(Some(&mut self.tracker), range, text);
+        }
+    }
+
+    pub(crate) fn add_warning_range(&mut self, range: Range, text: impl Into<String>) {
+        if let Some(log) = &self.log {
+            log.add_id(
+                MsgId::None,
+                MsgKind::Warning,
+                Some(&mut self.tracker),
+                range,
+                text,
+            );
         }
     }
 

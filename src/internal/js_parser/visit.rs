@@ -548,6 +548,28 @@ fn visit_expr_with_target(
             if assign_target != AssignTarget::None {
                 let symbol_index =
                     usize::try_from(identifier.reference.inner_index).expect("symbol index");
+                let symbol_kind = core.symbols[symbol_index].kind;
+                let symbol_name = core.symbols[symbol_index].original_name.clone();
+                let range =
+                    crate::internal::js_lexer::range_of_identifier(&core.source, expression.loc);
+                match symbol_kind {
+                    crate::internal::ast::SymbolKind::Const => {
+                        let text =
+                            format!("Cannot assign to {symbol_name:?} because it is a constant");
+                        if core.options.mode == crate::internal::config::Mode::Bundle {
+                            core.add_error_range(range, text);
+                        } else {
+                            core.add_warning_range(range, text);
+                        }
+                    }
+                    crate::internal::ast::SymbolKind::Import => {
+                        core.add_error_range(
+                            range,
+                            format!("Cannot assign to {symbol_name:?} because it is an import"),
+                        );
+                    }
+                    _ => {}
+                }
                 core.symbols[symbol_index].flags |=
                     crate::internal::ast::SymbolFlags::COULD_POTENTIALLY_BE_MUTATED;
             }
@@ -567,12 +589,26 @@ fn visit_expr_with_target(
                 );
             }
         }
-        ExprData::Unary(unary) => visit_expr_with_target(
-            core,
-            &mut unary.value,
-            resolve_identifiers,
-            unary.op.unary_assign_target(),
-        ),
+        ExprData::Unary(unary) => {
+            if unary.op == OpCode::UnaryDelete
+                && core.is_strict_mode()
+                && matches!(unary.value.data.as_deref(), Some(ExprData::Identifier(_)))
+            {
+                core.add_error_range(
+                    Range {
+                        loc: expression.loc,
+                        len: 6,
+                    },
+                    "Delete of a bare identifier cannot be used in strict mode",
+                );
+            }
+            visit_expr_with_target(
+                core,
+                &mut unary.value,
+                resolve_identifiers,
+                unary.op.unary_assign_target(),
+            );
+        }
         ExprData::Binary(binary) => {
             let left_target =
                 if assign_target != AssignTarget::None && binary.op == OpCode::BinaryAssign {
