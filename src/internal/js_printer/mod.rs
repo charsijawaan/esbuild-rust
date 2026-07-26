@@ -717,7 +717,14 @@ impl Printer<'_> {
                 self.print_indent();
                 self.output.extend_from_slice(b"return");
                 if return_statement.value_or_nil.data.is_some() {
-                    self.output.push(b' ');
+                    if !self.options.minify_whitespace
+                        || !matches!(
+                            return_statement.value_or_nil.data.as_deref(),
+                            Some(ExprData::Arrow(_))
+                        )
+                    {
+                        self.output.push(b' ');
+                    }
                     self.print_expr_at(&return_statement.value_or_nil, Precedence::Lowest);
                 }
                 self.output.push(b';');
@@ -1424,7 +1431,11 @@ impl Printer<'_> {
             self.output.push(b'*');
         }
         if let Some(name) = function.name {
-            self.output.push(b' ');
+            if function.is_generator {
+                self.print_optional_space();
+            } else {
+                self.output.push(b' ');
+            }
             self.print_identifier(&self.renamer.name_for_symbol(name.reference));
         }
         self.print_function_arguments(function);
@@ -1842,11 +1853,12 @@ impl Printer<'_> {
                 self.print_expr_at(&await_expression.value, Precedence::Prefix);
             }
             ExprData::Yield(yield_expression) => {
-                self.output.extend_from_slice(if yield_expression.is_star {
-                    b"yield* "
+                if yield_expression.is_star {
+                    self.output.extend_from_slice(b"yield*");
+                    self.print_optional_space();
                 } else {
-                    b"yield "
-                });
+                    self.output.extend_from_slice(b"yield ");
+                }
                 self.print_expr_at(&yield_expression.value_or_nil, Precedence::Yield);
             }
             ExprData::Function(function) => self.print_function(&function.function),
@@ -3175,7 +3187,9 @@ mod tests {
         let source = Source {
             contents: Arc::from(
                 b"function add(a, b = 1) { return a + b; }\
-                  const twice = (value) => value * 2;"
+                  const twice = (value) => value * 2;\
+                  async function load(){await work();return()=>1}\
+                  function* values(){yield 1;yield* other}"
                     .as_slice(),
             ),
             identifier_name: "entry".into(),
@@ -3193,7 +3207,30 @@ mod tests {
             "function add(a, b = 1) {\n\
              \x20\x20return a + b;\n\
              }\n\
-             const twice = (value) => value * 2;\n"
+             const twice = (value) => value * 2;\n\
+             async function load() {\n\
+             \x20\x20await work();\n\
+             \x20\x20return () => 1;\n\
+             }\n\
+             function* values() {\n\
+             \x20\x20yield 1;\n\
+             \x20\x20yield* other;\n\
+             }\n"
+        );
+        assert_eq!(
+            String::from_utf8(
+                print(
+                    &ast,
+                    &renamer,
+                    Options {
+                        minify_whitespace: true,
+                        ..Options::default()
+                    },
+                )
+                .js,
+            )
+            .expect("printer output is UTF-8"),
+            "function add(a,b=1){return a+b}const twice=(value)=>value*2;async function load(){await work();return()=>1}function*values(){yield 1;yield*other}"
         );
     }
 
