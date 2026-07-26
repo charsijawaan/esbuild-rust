@@ -13,7 +13,7 @@ use crate::internal::{
         Arg, AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
         ClassStaticBlock, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody,
         FunctionExpr, IdentifierExpr, IfExpr, IfStmt, LocalKind, ObjectExpr, OpCode, OptionalChain,
-        Property, PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData,
+        Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind, Stmt, StmtData,
         StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, UnaryExpr,
         for_each_identifier_binding, inline_primitives_into_template,
         inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
@@ -155,6 +155,9 @@ fn keep_inferred_name(core: &mut ParserCore, expression: &mut Expr, name: Option
 
 pub(crate) fn visit_top_level_statements(core: &mut ParserCore, statements: &mut [Stmt]) {
     visit_statements(core, statements, true);
+    if core.options.minify_syntax {
+        merge_adjacent_returns(core, statements);
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -328,6 +331,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
                 visit_expr(core, &mut loop_statement.test, resolve_identifiers);
+                if core.options.minify_syntax {
+                    optimize_loop_body(core, &mut loop_statement.body);
+                }
             }
             Some(StmtData::While(loop_statement)) => {
                 visit_expr(core, &mut loop_statement.test, resolve_identifiers);
@@ -339,6 +345,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
+                if core.options.minify_syntax {
+                    optimize_loop_body(core, &mut loop_statement.body);
+                }
             }
             Some(StmtData::With(with_statement)) => {
                 if core.is_strict_mode() {
@@ -379,6 +388,15 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     &mut return_statement.value_or_nil,
                     resolve_identifiers,
                 );
+                if core.options.minify_syntax
+                    && !core.visit_is_async_generator
+                    && matches!(
+                        return_statement.value_or_nil.data.as_deref(),
+                        Some(ExprData::Undefined)
+                    )
+                {
+                    return_statement.value_or_nil.data = None;
+                }
             }
             Some(StmtData::For(loop_statement)) => {
                 core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
@@ -393,6 +411,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
+                if core.options.minify_syntax {
+                    optimize_loop_body(core, &mut loop_statement.body);
+                }
                 core.pop_scope();
             }
             Some(StmtData::ForIn(loop_statement)) => {
@@ -407,6 +428,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
+                if core.options.minify_syntax {
+                    optimize_loop_body(core, &mut loop_statement.body);
+                }
                 core.pop_scope();
             }
             Some(StmtData::ForOf(loop_statement)) => {
@@ -421,6 +445,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
                 core.visit_loop_depth -= 1;
+                if core.options.minify_syntax {
+                    optimize_loop_body(core, &mut loop_statement.body);
+                }
                 core.pop_scope();
             }
             Some(StmtData::Label(label)) => {
@@ -1198,6 +1225,335 @@ fn cleanup_function_body_tail(core: &ParserCore, statements: &mut [Stmt]) {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImplicitJumpKind {
+    Return,
+    Continue,
+}
+
+fn is_implicit_jump(statement: &Stmt, kind: ImplicitJumpKind) -> bool {
+    match (kind, statement.data.as_deref()) {
+        (ImplicitJumpKind::Return, Some(StmtData::Return(statement))) => {
+            statement.value_or_nil.data.is_none()
+        }
+        (ImplicitJumpKind::Continue, Some(StmtData::Continue(statement))) => {
+            statement.label.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn merge_adjacent_expression_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
+    let mut result: Vec<Stmt> = Vec::with_capacity(statements.len());
+    for statement in statements {
+        let Some(data) = statement.data.as_deref() else {
+            continue;
+        };
+        if let Some(StmtData::Expr(previous)) =
+            result.last_mut().and_then(|item| item.data.as_deref_mut())
+            && let StmtData::Expr(current) = data
+        {
+            previous.value = join_with_comma(previous.value.clone(), current.value.clone());
+            previous.is_from_class_or_fn_that_can_be_removed_if_unused &=
+                current.is_from_class_or_fn_that_can_be_removed_if_unused;
+            continue;
+        }
+        result.push(statement);
+    }
+    result
+}
+
+fn mangle_implicit_jump_if(core: &ParserCore, loc: Loc, test: Expr, yes: Stmt) -> Stmt {
+    let helpers = make_helper_context(|reference| {
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+            == SymbolKind::Unbound
+    });
+    match yes.data.as_deref() {
+        Some(StmtData::Expr(expression)) => {
+            let value = if let Some(ExprData::Binary(comma)) = test.data.as_deref()
+                && comma.op == OpCode::BinaryComma
+            {
+                join_with_comma(
+                    comma.left.clone(),
+                    Expr::new(
+                        comma.right.loc,
+                        ExprData::Binary(BinaryExpr {
+                            left: comma.right.clone(),
+                            right: expression.value.clone(),
+                            op: OpCode::BinaryLogicalAnd,
+                        }),
+                    ),
+                )
+            } else if let Some(ExprData::Unary(unary)) = test.data.as_deref()
+                && unary.op == OpCode::UnaryNot
+            {
+                Expr::new(
+                    loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: unary.value.clone(),
+                        right: expression.value.clone(),
+                        op: OpCode::BinaryLogicalOr,
+                    }),
+                )
+            } else {
+                Expr::new(
+                    loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: test,
+                        right: expression.value.clone(),
+                        op: OpCode::BinaryLogicalAnd,
+                    }),
+                )
+            };
+            let value = helpers.simplify_unused_expr(&value, core.options.unsupported_js_features);
+            if value.data.is_some() {
+                Stmt::new(
+                    loc,
+                    StmtData::Expr(ExprStmt {
+                        value,
+                        ..ExprStmt::default()
+                    }),
+                )
+            } else {
+                Stmt::default()
+            }
+        }
+        Some(StmtData::Empty) | None => {
+            let value = helpers.simplify_unused_expr(&test, core.options.unsupported_js_features);
+            if value.data.is_some() {
+                Stmt::new(
+                    loc,
+                    StmtData::Expr(ExprStmt {
+                        value,
+                        ..ExprStmt::default()
+                    }),
+                )
+            } else {
+                Stmt::default()
+            }
+        }
+        _ => Stmt::new(
+            loc,
+            StmtData::If(IfStmt {
+                test,
+                yes,
+                ..IfStmt::default()
+            }),
+        ),
+    }
+}
+
+fn optimize_implicit_jumps(core: &ParserCore, statements: &mut [Stmt], kind: ImplicitJumpKind) {
+    for statement_index in 0..statements.len() {
+        let Some(StmtData::If(statement)) = statements[statement_index].data.as_deref() else {
+            continue;
+        };
+        let statement = statement.clone();
+        if !is_implicit_jump(&statement.yes, kind) {
+            continue;
+        }
+
+        let mut body = Vec::new();
+        if statement.no_or_nil.data.is_some() {
+            body = super::control_flow::append_if_or_label_body_preserving_scope(
+                body,
+                statement.no_or_nil.clone(),
+            );
+        }
+        body.extend(statements[statement_index + 1..].iter().cloned());
+        if super::control_flow::stmts_care_about_scope(&body) {
+            continue;
+        }
+
+        optimize_implicit_jumps(core, &mut body, kind);
+        let mut body = merge_adjacent_expression_statements(body);
+        merge_adjacent_returns(core, &mut body);
+        body.retain(|statement| statement.data.is_some());
+        let helpers = make_helper_context(|reference| {
+            core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                == SymbolKind::Unbound
+        });
+        let mut inverted = helpers.simplify_boolean_expr(&Expr::new(
+            statement.test.loc,
+            ExprData::Unary(UnaryExpr {
+                value: statement.test.clone(),
+                op: OpCode::UnaryNot,
+                ..UnaryExpr::default()
+            }),
+        ));
+        if let Some(previous_index) = (0..statement_index)
+            .rev()
+            .find(|&index| statements[index].data.is_some())
+            && let Some(StmtData::Expr(previous)) = statements[previous_index].data.as_deref()
+        {
+            inverted = join_with_comma(previous.value.clone(), inverted);
+            statements[previous_index].data = None;
+        }
+        let yes = super::standalone_helpers::stmts_to_single_stmt(
+            statement.yes.loc,
+            body,
+            Loc::default(),
+        );
+        statements[statement_index] =
+            mangle_implicit_jump_if(core, statements[statement_index].loc, inverted, yes);
+        for statement in &mut statements[statement_index + 1..] {
+            statement.data = None;
+        }
+        return;
+    }
+}
+
+fn trim_trailing_continue(statement: &mut Stmt) {
+    match statement.data.as_deref_mut() {
+        Some(StmtData::Continue(continue_statement)) if continue_statement.label.is_none() => {
+            statement.data = Some(Box::new(StmtData::Empty));
+        }
+        Some(StmtData::Block(block)) => {
+            if let Some(last) = block
+                .statements
+                .iter_mut()
+                .rev()
+                .find(|statement| statement.data.is_some())
+                && matches!(
+                    last.data.as_deref(),
+                    Some(StmtData::Continue(statement)) if statement.label.is_none()
+                )
+            {
+                last.data = None;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn optimize_loop_body(core: &ParserCore, statement: &mut Stmt) {
+    if let Some(StmtData::Block(block)) = statement.data.as_deref_mut() {
+        optimize_implicit_jumps(core, &mut block.statements, ImplicitJumpKind::Continue);
+    }
+    trim_trailing_continue(statement);
+}
+
+fn return_value_or_undefined(statement: &Stmt) -> Option<Expr> {
+    let StmtData::Return(statement) = statement.data.as_deref()? else {
+        return None;
+    };
+    Some(if statement.value_or_nil.data.is_some() {
+        statement.value_or_nil.clone()
+    } else {
+        Expr::new(statement.value_or_nil.loc, ExprData::Undefined)
+    })
+}
+
+fn collapse_if_with_return_branches(core: &ParserCore, statement: &mut Stmt) -> bool {
+    let Some(StmtData::If(if_statement)) = statement.data.as_deref() else {
+        return false;
+    };
+    if if_statement.no_or_nil.data.is_none() {
+        return false;
+    }
+    let Some(yes) = return_value_or_undefined(&if_statement.yes) else {
+        return false;
+    };
+    let Some(no) = return_value_or_undefined(&if_statement.no_or_nil) else {
+        return false;
+    };
+    let helpers = make_helper_context(|reference| {
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+            == SymbolKind::Unbound
+    });
+    let test = helpers.simplify_boolean_expr(&if_statement.test);
+    let value = helpers.mangle_if_expr(
+        test.loc,
+        &IfExpr { test, yes, no },
+        core.options.unsupported_js_features,
+    );
+    statement.data = Some(Box::new(StmtData::Return(ReturnStmt {
+        value_or_nil: value,
+    })));
+    true
+}
+
+fn merge_adjacent_returns(core: &ParserCore, statements: &mut [Stmt]) {
+    for statement in statements.iter_mut() {
+        collapse_if_with_return_branches(core, statement);
+    }
+
+    let mut is_dead = false;
+    for statement in statements.iter_mut() {
+        if is_dead && !super::dead_control_flow::should_keep_stmt_in_dead_control_flow(statement) {
+            statement.data = None;
+            continue;
+        }
+        if matches!(
+            statement.data.as_deref(),
+            Some(
+                StmtData::Return(_)
+                    | StmtData::Throw(_)
+                    | StmtData::Break(_)
+                    | StmtData::Continue(_)
+            )
+        ) {
+            is_dead = true;
+        }
+    }
+
+    loop {
+        let mut non_empty = statements
+            .iter()
+            .enumerate()
+            .filter(|(_, statement)| statement.data.is_some())
+            .map(|(index, _)| index)
+            .rev();
+        let Some(last_index) = non_empty.next() else {
+            break;
+        };
+        let Some(previous_index) = non_empty.next() else {
+            break;
+        };
+        let Some(StmtData::Return(last_return)) = statements[last_index].data.as_deref().cloned()
+        else {
+            break;
+        };
+
+        let replacement = match statements[previous_index].data.as_deref() {
+            Some(StmtData::Expr(previous)) if last_return.value_or_nil.data.is_some() => {
+                Some(ReturnStmt {
+                    value_or_nil: join_with_comma(previous.value.clone(), last_return.value_or_nil),
+                })
+            }
+            Some(StmtData::If(previous)) if previous.no_or_nil.data.is_none() => {
+                let Some(yes) = return_value_or_undefined(&previous.yes) else {
+                    break;
+                };
+                let no = if last_return.value_or_nil.data.is_some() {
+                    last_return.value_or_nil
+                } else {
+                    Expr::new(statements[last_index].loc, ExprData::Undefined)
+                };
+                let helpers = make_helper_context(|reference| {
+                    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                        == SymbolKind::Unbound
+                });
+                let test = helpers.simplify_boolean_expr(&previous.test);
+                let value = helpers.mangle_if_expr(
+                    test.loc,
+                    &IfExpr { test, yes, no },
+                    core.options.unsupported_js_features,
+                );
+                Some(ReturnStmt {
+                    value_or_nil: value,
+                })
+            }
+            _ => None,
+        };
+        let Some(replacement) = replacement else {
+            break;
+        };
+        statements[previous_index].data = Some(Box::new(StmtData::Return(replacement)));
+        statements[last_index].data = None;
+    }
+}
+
 fn collapse_expression_statements_into_return(statements: &mut Vec<Stmt>) -> bool {
     let Some(StmtData::Return(return_statement)) = statements
         .last()
@@ -1263,18 +1619,63 @@ fn unwrap_single_statement_block(statement: Stmt) -> Stmt {
     let Some(StmtData::Block(block)) = statement.data.as_deref() else {
         return statement;
     };
-    if block.statements.is_empty() {
+    let mut non_empty = block
+        .statements
+        .iter()
+        .filter(|statement| statement.data.is_some());
+    let Some(first) = non_empty.next() else {
         return Stmt::new(statement.loc, StmtData::Empty);
-    }
-    if block.statements.len() == 1
-        && !super::control_flow::stmts_care_about_scope(&block.statements)
-    {
-        return block.statements[0].clone();
+    };
+    if non_empty.next().is_none() && !super::control_flow::stmt_cares_about_scope(first) {
+        return first.clone();
     }
     statement
 }
 
+fn prepare_if_statement_for_minification(value: &mut IfStmt) {
+    value.yes = unwrap_single_statement_block(std::mem::take(&mut value.yes));
+    if value.no_or_nil.data.is_some() {
+        value.no_or_nil = unwrap_single_statement_block(std::mem::take(&mut value.no_or_nil));
+    }
+    if matches!(value.yes.data.as_deref(), Some(StmtData::Empty) | None)
+        && value.no_or_nil.data.is_some()
+    {
+        if let Some(ExprData::Unary(unary)) = value.test.data.as_deref()
+            && unary.op == OpCode::UnaryNot
+        {
+            value.test = unary.value.clone();
+        } else {
+            value.test = Expr::new(
+                value.test.loc,
+                ExprData::Unary(UnaryExpr {
+                    value: value.test.clone(),
+                    op: OpCode::UnaryNot,
+                    ..UnaryExpr::default()
+                }),
+            );
+        }
+        value.yes = std::mem::take(&mut value.no_or_nil);
+    }
+    if value.no_or_nil.data.is_none()
+        && let Some(StmtData::If(inner)) = value.yes.data.as_deref()
+        && inner.no_or_nil.data.is_none()
+    {
+        value.test = Expr::new(
+            value.test.loc,
+            ExprData::Binary(BinaryExpr {
+                left: value.test.clone(),
+                right: inner.test.clone(),
+                op: OpCode::BinaryLogicalAnd,
+            }),
+        );
+        value.yes = inner.yes.clone();
+    }
+}
+
 fn minify_control_flow_statement(statement: &mut Stmt) {
+    if let Some(StmtData::If(value)) = statement.data.as_deref_mut() {
+        prepare_if_statement_for_minification(value);
+    }
     match statement.data.as_deref() {
         Some(StmtData::If(value)) => {
             let Some(yes) = statement_to_expr(&value.yes) else {
@@ -1530,6 +1931,10 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
     let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
     let old_new_target_allowed = std::mem::replace(&mut core.visit_new_target_allowed, true);
+    let old_is_async_generator = std::mem::replace(
+        &mut core.visit_is_async_generator,
+        function.is_async && function.is_generator,
+    );
     if let Some(name) = function.name
         && !ParserCore::is_stored_name_ref(name.reference)
     {
@@ -1582,6 +1987,12 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     );
     lower_nested_type_script_statements(core, &mut function.body.block.statements, None);
     if core.options.minify_syntax {
+        optimize_implicit_jumps(
+            core,
+            &mut function.body.block.statements,
+            ImplicitJumpKind::Return,
+        );
+        merge_adjacent_returns(core, &mut function.body.block.statements);
         cleanup_function_body_tail(core, &mut function.body.block.statements);
     }
     core.pop_scope();
@@ -1589,6 +2000,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     core.visit_loop_depth = old_loop_depth;
     core.visit_switch_depth = old_switch_depth;
     core.visit_new_target_allowed = old_new_target_allowed;
+    core.visit_is_async_generator = old_is_async_generator;
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4426,6 +4838,8 @@ fn visit_expr_with_target(
         ExprData::Arrow(arrow) => {
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
+            let old_is_async_generator =
+                std::mem::replace(&mut core.visit_is_async_generator, false);
             core.push_next_scope_for_visit_pass(ScopeKind::FunctionArgs);
             let use_strict_loc = function_body_use_strict(core, &arrow.body.block.statements);
             if use_strict_loc.is_some() {
@@ -4458,12 +4872,24 @@ fn visit_expr_with_target(
             visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
             lower_nested_type_script_statements(core, &mut arrow.body.block.statements, None);
             if core.options.minify_syntax {
+                optimize_implicit_jumps(
+                    core,
+                    &mut arrow.body.block.statements,
+                    ImplicitJumpKind::Return,
+                );
+                merge_adjacent_returns(core, &mut arrow.body.block.statements);
                 cleanup_function_body_tail(core, &mut arrow.body.block.statements);
+                arrow
+                    .body
+                    .block
+                    .statements
+                    .retain(|statement| statement.data.is_some());
             }
             core.pop_scope();
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;
             core.visit_switch_depth = old_switch_depth;
+            core.visit_is_async_generator = old_is_async_generator;
             if core.options.minify_syntax
                 && collapse_expression_statements_into_return(&mut arrow.body.block.statements)
             {

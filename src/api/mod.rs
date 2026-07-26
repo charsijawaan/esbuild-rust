@@ -6094,6 +6094,47 @@ mod tests {
     }
 
     #[test]
+    fn mangles_implicit_and_adjacent_jumps_like_esbuild() {
+        assert_eq!(
+            code(transform(
+                "function chain(){a=b;if(a)return a;if(b)c=b;return c}\
+                 function nested(){if(y){if(z)return}}\
+                 function empty(x){if(!x.y){}else return x}\
+                 function implicit(x){if(!x.y)return undefined;return x}\
+                 let arrow=()=>{x();return y};\
+                 async function* preserve(){return undefined}\
+                 while(x){t();if(y)continue;z()}",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "function chain() {\n",
+                "  return a = b, a || (b && (c = b), c);\n",
+                "}\n",
+                "function nested() {\n",
+                "  y && z;\n",
+                "}\n",
+                "function empty(x2) {\n",
+                "  if (x2.y)\n",
+                "    return x2;\n",
+                "}\n",
+                "function implicit(x2) {\n",
+                "  if (x2.y)\n",
+                "    return x2;\n",
+                "}\n",
+                "let arrow = () => (x(), y);\n",
+                "async function* preserve() {\n",
+                "  return void 0;\n",
+                "}\n",
+                "for (; x; )\n",
+                "  t(), !y && z();\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(
