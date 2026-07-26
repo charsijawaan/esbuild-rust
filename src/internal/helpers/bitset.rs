@@ -6,6 +6,12 @@ pub struct BitSet {
     entries: Vec<u8>,
 }
 
+impl Default for BitSet {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
 impl BitSet {
     #[must_use]
     pub fn new(bit_count: usize) -> Self {

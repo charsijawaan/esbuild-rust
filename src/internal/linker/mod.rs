@@ -15,7 +15,7 @@ use crate::internal::{
     },
     fs::Fs,
     graph::{ExportData, ImportData, InputFileRepr, LinkerGraph, SideEffectsKind, WrapKind},
-    helpers::Joiner,
+    helpers::{BitSet, Joiner},
     js_ast::ExportsKind,
     logger::{Log, Range},
     sourcemap::{LineColumnOffset, SourceMapShift},
@@ -40,9 +40,16 @@ pub struct ChunkImport {
 #[derive(Debug, Default)]
 pub struct ChunkInfo {
     pub unique_key: String,
+    pub files_with_parts_in_chunk: HashSet<u32>,
+    pub entry_bits: BitSet,
     pub cross_chunk_imports: Vec<ChunkImport>,
+    pub files_in_chunk_in_order: Vec<u32>,
+    pub parts_in_chunk_in_order: Vec<PartRange>,
     pub final_rel_path: String,
     pub intermediate_output: IntermediateOutput,
+    pub entry_point_bit: usize,
+    pub source_index: u32,
+    pub is_entry_point: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1884,6 +1891,251 @@ pub fn tree_shaking_and_code_splitting(graph: &mut LinkerGraph, options: &Option
 }
 
 #[must_use]
+/// # Panics
+///
+/// Panics when a resolved internal JavaScript import points to a non-JavaScript
+/// representation.
+pub fn should_include_part(
+    graph: &LinkerGraph,
+    repr: &crate::internal::graph::JsRepr,
+    part: &crate::internal::js_ast::Part,
+) -> bool {
+    if part.statements.len() == 1
+        && let Some(crate::internal::js_ast::StmtData::Import(statement)) =
+            part.statements[0].data.as_deref()
+    {
+        let record = &repr.ast.import_records[statement.import_record_index as usize];
+        if record.source_index.is_valid() {
+            let Some(InputFileRepr::Js(other)) = graph.files
+                [record.source_index.get_index() as usize]
+                .input_file
+                .repr
+                .as_ref()
+            else {
+                panic!("internal JavaScript import must target JavaScript");
+            };
+            if other.meta.wrap == WrapKind::None {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Linearize files and live parts in dependency-first JavaScript order.
+///
+/// # Panics
+///
+/// Panics when chunk membership, imports, or parts violate linker graph
+/// invariants.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn find_imported_parts_in_js_order(
+    graph: &LinkerGraph,
+    options: &Options,
+    chunk: &ChunkInfo,
+) -> (Vec<u32>, Vec<PartRange>) {
+    #[allow(clippy::too_many_arguments)]
+    fn visit(
+        graph: &LinkerGraph,
+        options: &Options,
+        chunk: &ChunkInfo,
+        source_index: u32,
+        visited: &mut HashSet<u32>,
+        files: &mut Vec<u32>,
+        prefix: &mut Vec<PartRange>,
+        parts: &mut Vec<PartRange>,
+    ) {
+        if !visited.insert(source_index) {
+            return;
+        }
+        let file = &graph.files[source_index as usize];
+        let Some(InputFileRepr::Js(repr)) = file.input_file.repr.as_ref() else {
+            return;
+        };
+        let mut is_file_in_this_chunk = chunk.entry_bits == file.entry_bits;
+        let can_file_be_split = repr.meta.wrap == WrapKind::None;
+
+        if can_file_be_split
+            && is_file_in_this_chunk
+            && repr.ast.parts[crate::internal::js_ast::NS_EXPORT_PART_INDEX as usize].is_live
+        {
+            append_or_extend_part_range(
+                parts,
+                source_index,
+                crate::internal::js_ast::NS_EXPORT_PART_INDEX,
+            );
+        }
+
+        for (part_index, part) in repr.ast.parts.iter().enumerate() {
+            let is_part_in_this_chunk = is_file_in_this_chunk && part.is_live;
+            for &record_index in &part.import_record_indices {
+                let record = &repr.ast.import_records[record_index as usize];
+                if record.source_index.is_valid()
+                    && (record.kind == ImportKind::Stmt || is_part_in_this_chunk)
+                {
+                    if is_external_dynamic_import(graph, options, record, source_index) {
+                        continue;
+                    }
+                    visit(
+                        graph,
+                        options,
+                        chunk,
+                        record.source_index.get_index(),
+                        visited,
+                        files,
+                        prefix,
+                        parts,
+                    );
+                }
+            }
+
+            if is_part_in_this_chunk {
+                is_file_in_this_chunk = true;
+                let part_index = u32::try_from(part_index).expect("part index fits in u32");
+                if can_file_be_split
+                    && part_index != crate::internal::js_ast::NS_EXPORT_PART_INDEX
+                    && should_include_part(graph, repr, part)
+                {
+                    if source_index == crate::internal::runtime::SOURCE_INDEX {
+                        append_or_extend_part_range(prefix, source_index, part_index);
+                    } else {
+                        append_or_extend_part_range(parts, source_index, part_index);
+                    }
+                }
+            }
+        }
+
+        if is_file_in_this_chunk {
+            files.push(source_index);
+            if !can_file_be_split {
+                prefix.push(PartRange {
+                    source_index,
+                    part_index_begin: 0,
+                    part_index_end: u32::try_from(repr.ast.parts.len())
+                        .expect("part count fits in u32"),
+                });
+            }
+        }
+    }
+
+    let mut sorted: Vec<_> = chunk
+        .files_with_parts_in_chunk
+        .iter()
+        .map(|&source_index| {
+            (
+                graph.files[source_index as usize].distance_from_entry_point,
+                graph.stable_source_indices[source_index as usize],
+                source_index,
+            )
+        })
+        .collect();
+    sorted.sort_unstable();
+
+    let mut visited = HashSet::new();
+    let mut files = Vec::new();
+    let mut prefix = Vec::new();
+    let mut parts = Vec::new();
+    if graph.files.len() > crate::internal::runtime::SOURCE_INDEX as usize {
+        visit(
+            graph,
+            options,
+            chunk,
+            crate::internal::runtime::SOURCE_INDEX,
+            &mut visited,
+            &mut files,
+            &mut prefix,
+            &mut parts,
+        );
+    }
+    for (_, _, source_index) in sorted {
+        visit(
+            graph,
+            options,
+            chunk,
+            source_index,
+            &mut visited,
+            &mut files,
+            &mut prefix,
+            &mut parts,
+        );
+    }
+    prefix.extend(parts);
+    (files, prefix)
+}
+
+/// Group live JavaScript files into chunks by identical entry-point bitsets.
+///
+/// CSS companion chunks and path templates are added by later linker stages.
+///
+/// # Panics
+///
+/// Panics when entry points or live files violate linker graph invariants.
+#[must_use]
+pub fn compute_js_chunks(
+    graph: &mut LinkerGraph,
+    options: &Options,
+    unique_key_prefix: &str,
+) -> Vec<ChunkInfo> {
+    let entry_points = graph.entry_points().to_vec();
+    let mut chunks_by_key: HashMap<Vec<u8>, ChunkInfo> = HashMap::new();
+
+    for (entry_point_bit, entry_point) in entry_points.iter().enumerate() {
+        if !matches!(
+            graph.files[entry_point.source_index as usize]
+                .input_file
+                .repr
+                .as_ref(),
+            Some(InputFileRepr::Js(_))
+        ) {
+            continue;
+        }
+        let mut entry_bits = BitSet::new(entry_points.len());
+        entry_bits.set_bit(entry_point_bit);
+        chunks_by_key.insert(
+            entry_bits.as_bytes().to_vec(),
+            ChunkInfo {
+                entry_bits,
+                is_entry_point: true,
+                source_index: entry_point.source_index,
+                entry_point_bit,
+                ..ChunkInfo::default()
+            },
+        );
+    }
+
+    for source_index in graph.reachable_files.clone() {
+        let file = &graph.files[source_index as usize];
+        if file.is_live && matches!(file.input_file.repr.as_ref(), Some(InputFileRepr::Js(_))) {
+            let key = file.entry_bits.as_bytes().to_vec();
+            chunks_by_key
+                .entry(key)
+                .or_insert_with(|| ChunkInfo {
+                    entry_bits: file.entry_bits.clone(),
+                    ..ChunkInfo::default()
+                })
+                .files_with_parts_in_chunk
+                .insert(source_index);
+        }
+    }
+
+    let mut chunks: Vec<_> = chunks_by_key.into_iter().collect();
+    chunks.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let mut chunks: Vec<_> = chunks.into_iter().map(|(_, chunk)| chunk).collect();
+
+    for (chunk_index, chunk) in chunks.iter_mut().enumerate() {
+        chunk.unique_key = format!("{unique_key_prefix}C{chunk_index:08}");
+        if chunk.is_entry_point {
+            graph.files[chunk.source_index as usize].entry_point_chunk_index =
+                u32::try_from(chunk_index).expect("chunk index fits in u32");
+        }
+        (chunk.files_in_chunk_in_order, chunk.parts_in_chunk_in_order) =
+            find_imported_parts_in_js_order(graph, options, chunk);
+    }
+    chunks
+}
+
+#[must_use]
 pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
@@ -2051,13 +2303,13 @@ mod tests {
         CrossChunkImportItem, ImportStatus, ImportTracker, MatchImportKind, OutputPathContext,
         OutputPiece, OutputPieceIndexKind, PartRange, StableRef, add_exports_for_export_star,
         advance_import_tracker, append_or_extend_part_range, bind_imports_to_exports_for_file,
-        classify_module_wrappers, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
-        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, mark_file_live_for_tree_shaking,
-        match_import_with_export, path_between_chunks, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
-        tree_shaking_and_code_splitting,
+        classify_module_wrappers, compute_js_chunks, create_wrapper_for_file,
+        enforce_no_cyclic_chunk_imports, has_dynamic_exports_due_to_export_star,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, mark_file_live_for_tree_shaking, match_import_with_export,
+        path_between_chunks, propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, tree_shaking_and_code_splitting,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -4378,5 +4630,112 @@ mod tests {
         assert_eq!(graph.files[0].distance_from_entry_point, 0);
         assert_eq!(graph.files[2].distance_from_entry_point, 0);
         assert_eq!(graph.files[1].distance_from_entry_point, 1);
+    }
+
+    #[test]
+    fn live_files_are_grouped_into_deterministic_js_chunks() {
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(2),
+                    kind: ImportKind::Stmt,
+                    ..ImportRecord::default()
+                }],
+                parts: vec![js_ast::Part {
+                    import_record_indices: vec![0],
+                    dependencies: vec![js_ast::Dependency {
+                        source_index: 0,
+                        part_index: 0,
+                    }],
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(2),
+                    kind: ImportKind::Stmt,
+                    ..ImportRecord::default()
+                }],
+                parts: vec![js_ast::Part {
+                    import_record_indices: vec![0],
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let entry_points = [
+            EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            },
+            EntryPoint {
+                source_index: 3,
+                ..EntryPoint::default()
+            },
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2, 3], &entry_points, true);
+        let options = Options {
+            code_splitting: true,
+            tree_shaking: true,
+            ..Options::default()
+        };
+        tree_shaking_and_code_splitting(&mut graph, &options);
+        let chunks = compute_js_chunks(&mut graph, &options, PREFIX);
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].unique_key, "UNIQUEC00000000");
+        assert_eq!(chunks[1].unique_key, "UNIQUEC00000001");
+        assert_eq!(chunks[2].unique_key, "UNIQUEC00000002");
+        assert!(chunks[0].is_entry_point);
+        assert_eq!(chunks[0].source_index, 1);
+        assert_eq!(chunks[0].entry_bits.as_bytes(), &[1]);
+        assert_eq!(chunks[0].files_with_parts_in_chunk, HashSet::from([0, 1]));
+        assert_eq!(chunks[0].files_in_chunk_in_order, [0, 1]);
+        assert!(chunks[1].is_entry_point);
+        assert_eq!(chunks[1].source_index, 3);
+        assert_eq!(chunks[1].entry_bits.as_bytes(), &[2]);
+        assert_eq!(chunks[1].files_with_parts_in_chunk, HashSet::from([3]));
+        assert!(!chunks[2].is_entry_point);
+        assert_eq!(chunks[2].entry_bits.as_bytes(), &[3]);
+        assert_eq!(chunks[2].files_with_parts_in_chunk, HashSet::from([2]));
+        assert_eq!(graph.files[1].entry_point_chunk_index, 0);
+        assert_eq!(graph.files[3].entry_point_chunk_index, 1);
+    }
+
+    #[test]
+    fn empty_entry_points_still_get_chunks() {
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                parts: vec![js_ast::Part::default()],
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(
+            &input_files,
+            &[0, 1],
+            &[EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            }],
+            false,
+        );
+        let chunks = compute_js_chunks(&mut graph, &Options::default(), PREFIX);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].is_entry_point);
+        assert!(chunks[0].files_with_parts_in_chunk.is_empty());
+        assert!(chunks[0].files_in_chunk_in_order.is_empty());
     }
 }
