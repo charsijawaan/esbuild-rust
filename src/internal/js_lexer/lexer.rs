@@ -1,5 +1,8 @@
-use std::ops::{BitOr, BitOrAssign};
-use std::panic::panic_any;
+use std::{
+    ops::{BitOr, BitOrAssign},
+    panic::{panic_any, set_hook, take_hook},
+    sync::Once,
+};
 
 use crate::internal::{
     ast::{AssertOrWithEntry, Index32},
@@ -92,6 +95,20 @@ enum IdentifierKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LexerPanic;
+
+static INSTALL_LEXER_PANIC_HOOK: Once = Once::new();
+
+pub(crate) fn lexer_panic() -> ! {
+    INSTALL_LEXER_PANIC_HOOK.call_once(|| {
+        let previous_hook = take_hook();
+        set_hook(Box::new(move |info| {
+            if !info.payload().is::<LexerPanic>() {
+                previous_hook(info);
+            }
+        }));
+    });
+    panic_any(LexerPanic);
+}
 
 #[derive(Clone)]
 #[allow(clippy::struct_excessive_bools)]
@@ -341,7 +358,7 @@ impl Lexer {
                 "\"await\" can only be used inside an \"async\" function",
                 notes,
             );
-            panic_any(LexerPanic);
+            lexer_panic();
         }
         let found = if self.start == self.source.contents.len() {
             "end of file".to_owned()
@@ -357,7 +374,7 @@ impl Lexer {
             format!("Expected {text}{} but found {found}", self.error_suffix),
             suggestion,
         );
-        panic_any(LexerPanic);
+        lexer_panic();
     }
 
     /// Report that a token was expected.
@@ -384,7 +401,7 @@ impl Lexer {
             self.range(),
             format!("Unexpected {found}{}", self.error_suffix),
         );
-        panic_any(LexerPanic);
+        lexer_panic();
     }
 
     /// Require and consume a token.
@@ -747,7 +764,7 @@ impl Lexer {
                                         "Expected \"*/\" to terminate multi-line comment",
                                         vec![note],
                                     );
-                                    panic_any(LexerPanic);
+                                    lexer_panic();
                                 }
                                 None | Some(_) => self.step(),
                             }
@@ -844,7 +861,7 @@ impl Lexer {
                 },
                 "Unterminated regular expression",
             );
-            panic_any(LexerPanic);
+            lexer_panic();
         }
         self.step();
     }
@@ -1173,7 +1190,7 @@ impl Lexer {
                                         "Expected \"*/\" to terminate multi-line comment",
                                         vec![note],
                                     );
-                                    panic_any(LexerPanic);
+                                    lexer_panic();
                                 }
                                 None | Some(_) => self.step(),
                             }
@@ -1433,7 +1450,7 @@ impl Lexer {
             },
             "Unterminated string literal",
         );
-        panic_any(LexerPanic);
+        lexer_panic();
     }
 
     fn scan_identifier(&mut self) {
@@ -1778,7 +1795,7 @@ impl Lexer {
             },
             message,
         );
-        panic_any(LexerPanic);
+        lexer_panic();
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1928,7 +1945,7 @@ impl Lexer {
                                     },
                                     "Unicode escape sequence is out of range",
                                 );
-                                panic_any(LexerPanic);
+                                lexer_panic();
                             }
                             code_point = if variable_value < 0 {
                                 u32::try_from(variable_value.rem_euclid(65_536))

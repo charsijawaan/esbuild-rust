@@ -1,4 +1,4 @@
-use std::{collections::HashMap, panic::panic_any};
+use std::collections::HashMap;
 
 use crate::internal::{
     helpers::string_to_utf16,
@@ -6,7 +6,7 @@ use crate::internal::{
         DotExpr, Expr, ExprData, IdentifierExpr, JsxElementExpr, JsxTextExpr, Precedence, Property,
         PropertyFlags, PropertyKind, SpreadExpr, StringExpr,
     },
-    js_lexer::{Lexer, LexerPanic, Token},
+    js_lexer::{Lexer, Token, lexer_panic},
     logger::{Loc, Range},
 };
 
@@ -51,7 +51,7 @@ fn parse_jsx_namespaced_name(core: &mut ParserCore, lexer: &mut Lexer) -> (Range
                 },
                 format!("Expected identifier after {name:?} in namespaced JSX name"),
             );
-            panic_any(LexerPanic);
+            lexer_panic();
         }
         let second = lexer.range();
         name.push_str(&String::from_utf8_lossy(&lexer.identifier.string));
@@ -115,7 +115,7 @@ fn parse_jsx_tag(core: &mut ParserCore, lexer: &mut Lexer) -> (Range, String, Ex
                 },
                 "Unexpected \"-\"",
             );
-            panic_any(LexerPanic);
+            lexer_panic();
         }
         tag_text.push('.');
         tag_text.push_str(&member);
@@ -349,7 +349,7 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                         tag_or_fragment_help_text(&start_text)
                     ),
                 );
-                panic_any(LexerPanic);
+                lexer_panic();
             }
             _ => lexer.unexpected(),
         }
