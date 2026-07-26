@@ -3,7 +3,7 @@
 use crate::internal::{
     compat::JsFeature,
     helpers::utf16_to_string,
-    js_ast::{Expr, ExprData, NameOfSymbolExpr, StringExpr},
+    js_ast::{Expr, ExprData, NameOfSymbolExpr, OpCode, StringExpr, UnaryExpr, is_property_access},
     js_lexer::{CommentBefore, Lexer, MaybeSubstring, Token},
     logger::Loc,
 };
@@ -62,6 +62,42 @@ pub(crate) fn parse_regular_expression_literal(lexer: &mut Lexer) -> Expr {
     Expr::new(loc, ExprData::RegExp(value))
 }
 
+pub(crate) fn parse_unary_prefix(
+    lexer: &mut Lexer,
+    mut parse_operand: impl FnMut(&mut Lexer) -> Expr,
+) -> Option<Expr> {
+    let loc = lexer.loc();
+    let (op, check_exponentiation) = match lexer.token {
+        Token::Void => (OpCode::UnaryVoid, true),
+        Token::Typeof => (OpCode::UnaryTypeof, true),
+        Token::Delete => (OpCode::UnaryDelete, true),
+        Token::Plus => (OpCode::UnaryPositive, true),
+        Token::Minus => (OpCode::UnaryNegative, true),
+        Token::Tilde => (OpCode::UnaryComplement, true),
+        Token::Exclamation => (OpCode::UnaryNot, true),
+        Token::MinusMinus => (OpCode::UnaryPreDecrement, false),
+        Token::PlusPlus => (OpCode::UnaryPreIncrement, false),
+        _ => return None,
+    };
+    lexer.next();
+    let value = parse_operand(lexer);
+    if check_exponentiation && lexer.token == Token::AsteriskAsterisk {
+        lexer.unexpected();
+    }
+    let was_identifier = matches!(value.data.as_deref(), Some(ExprData::Identifier(_)));
+    let was_property_access = is_property_access(&value);
+    Some(Expr::new(
+        loc,
+        ExprData::Unary(UnaryExpr {
+            value,
+            op,
+            was_originally_typeof_identifier: op == OpCode::UnaryTypeof && was_identifier,
+            was_originally_delete_of_identifier_or_property_access: op == OpCode::UnaryDelete
+                && (was_identifier || was_property_access),
+        }),
+    ))
+}
+
 pub(crate) fn parse_string_literal(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
     let loc = lexer.loc();
     let text = lexer.string_literal().to_vec();
@@ -112,7 +148,7 @@ mod tests {
 
     use super::{
         parse_big_int_or_string_if_unsupported, parse_numeric_literal,
-        parse_regular_expression_literal, parse_string_literal,
+        parse_regular_expression_literal, parse_string_literal, parse_unary_prefix,
     };
     use crate::internal::{
         config::TsOptions,
@@ -215,6 +251,29 @@ mod tests {
             expr.data.as_deref(),
             Some(ExprData::RegExp(value)) if value == "/a[b/]c/gi"
         ));
+        assert_eq!(lexer.token, Token::Plus);
+    }
+
+    #[test]
+    fn parses_unary_prefix_metadata() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"typeof 1 + 2"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source, TsOptions::default());
+        let expr = parse_unary_prefix(&mut lexer, |lexer| {
+            let loc = lexer.loc();
+            let value = lexer.number;
+            lexer.next();
+            crate::internal::js_ast::Expr::new(loc, ExprData::Number(value))
+        })
+        .expect("expected unary prefix");
+        let Some(ExprData::Unary(unary)) = expr.data.as_deref() else {
+            panic!("expected unary expression");
+        };
+        assert_eq!(unary.op, crate::internal::js_ast::OpCode::UnaryTypeof);
+        assert!(!unary.was_originally_typeof_identifier);
         assert_eq!(lexer.token, Token::Plus);
     }
 }
