@@ -18,7 +18,7 @@ use crate::internal::{
         ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr,
         ThrowStmt, UnaryExpr, for_each_identifier_binding, inline_primitives_into_template,
         inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
-        is_primitive_literal, join_with_comma, make_helper_context,
+        is_primitive_literal, join_with_comma, make_helper_context, mangle_object_spread,
     },
 };
 
@@ -4554,6 +4554,16 @@ fn visit_expr_with_target(
                 resolve_identifiers,
                 unary.op.unary_assign_target(),
             );
+            if core.options.minify_syntax && unary.op == OpCode::UnaryVoid {
+                let helpers = make_helper_context(|reference| {
+                    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                        == SymbolKind::Unbound
+                });
+                if helpers.expr_can_be_removed_if_unused(&unary.value) {
+                    *data = ExprData::Undefined;
+                    return;
+                }
+            }
             if core.should_fold_type_script_constant_expressions {
                 let number = crate::internal::js_ast::to_number_without_side_effects(
                     unary.value.data.as_deref(),
@@ -4963,7 +4973,9 @@ fn visit_expr_with_target(
             if assign_target == AssignTarget::None {
                 report_duplicate_proto_properties(core, &object.properties);
             }
+            let mut has_spread = false;
             for property in &mut object.properties {
+                has_spread |= property.kind == PropertyKind::Spread;
                 if assign_target == AssignTarget::None && property.initializer_or_nil.data.is_some()
                 {
                     core.add_error_range(
@@ -5024,6 +5036,9 @@ fn visit_expr_with_target(
                 for decorator in &mut property.decorators {
                     visit_expr(core, &mut decorator.value, resolve_identifiers);
                 }
+            }
+            if core.options.minify_syntax && has_spread && assign_target == AssignTarget::None {
+                object.properties = mangle_object_spread(&object.properties);
             }
         }
         ExprData::Spread(spread) => visit_expr_with_target(
@@ -5248,13 +5263,17 @@ fn visit_expr_with_target(
         }
         ExprData::JsxElement(element) => {
             visit_expr(core, &mut element.tag_or_nil, resolve_identifiers);
+            let mut has_spread = false;
             for property in &mut element.properties {
-                if property.kind != PropertyKind::Spread
-                    && property.flags.contains(PropertyFlags::IS_COMPUTED)
-                {
+                if property.kind == PropertyKind::Spread {
+                    has_spread = true;
+                } else if property.flags.contains(PropertyFlags::IS_COMPUTED) {
                     visit_expr(core, &mut property.key, resolve_identifiers);
                 }
                 visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
+            }
+            if core.options.minify_syntax && has_spread {
+                element.properties = mangle_object_spread(&element.properties);
             }
             for child in &mut element.nullable_children {
                 visit_expr(core, child, resolve_identifiers);

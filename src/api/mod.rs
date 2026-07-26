@@ -6293,6 +6293,26 @@ mod tests {
     }
 
     #[test]
+    fn simplifies_object_spreads_like_esbuild() {
+        assert_eq!(
+            code(transform(
+                "x={a,...{},b};y={a,...{b,...c,d},e};\
+                 z={a,...{b,get c(){return q++},d},e};\
+                 p={a,...true,...void 0,b};keep={a,...void side(),b}",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "x = { a, b }, y = { a, b, ...c, d, e }, z = { a, b, ...{ get c() {\n",
+                "  return q++;\n",
+                "}, d }, e }, p = { a, b }, keep = { a, ...void side(), b };\n",
+            )
+        );
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(
