@@ -7,6 +7,7 @@ use crate::internal::{
 
 use super::{
     parser_core::ParserCore,
+    syntax_import::parse_import_prefix,
     syntax_literals::{
         parse_array_prefix, parse_big_int_or_string_if_unsupported, parse_numeric_literal,
         parse_regular_expression_literal, parse_simple_prefix, parse_string_literal,
@@ -98,6 +99,10 @@ fn parse_prefix(core: &mut ParserCore, lexer: &mut Lexer, allow_in: bool) -> Exp
         return expr;
     }
     match lexer.token {
+        Token::Import => parse_import_prefix(core, lexer, |core, lexer| {
+            parse_expression(core, lexer, Precedence::Comma, true)
+        })
+        .expect("import token was checked"),
         Token::StringLiteral | Token::NoSubstitutionTemplateLiteral => {
             parse_string_literal(core, lexer)
         }

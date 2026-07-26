@@ -14,6 +14,7 @@ mod source_map;
 mod standalone_helpers;
 mod symbols;
 mod syntax_expression;
+mod syntax_import;
 mod syntax_literals;
 mod syntax_suffix;
 

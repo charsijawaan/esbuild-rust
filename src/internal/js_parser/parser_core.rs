@@ -52,6 +52,7 @@ pub(crate) struct ParserCore {
     pub(crate) reg_exp_ref: Ref,
     pub(crate) big_int_ref: Ref,
     pub(crate) legacy_octal_literals: HashMap<Loc, Range>,
+    pub(crate) esm_import_meta: Range,
 }
 
 impl ParserCore {
@@ -80,6 +81,7 @@ impl ParserCore {
             reg_exp_ref: INVALID_REF,
             big_int_ref: INVALID_REF,
             legacy_octal_literals: HashMap::new(),
+            esm_import_meta: Range::default(),
         }
     }
 
