@@ -146,15 +146,50 @@ impl MinifyRenamer {
     pub fn accumulate_symbol_count(
         &mut self,
         top_level_symbols: &mut Vec<StableSymbolCount>,
-        mut reference: Ref,
+        reference: Ref,
         count: u32,
         stable_source_indices: &[u32],
     ) {
+        self.accumulate_symbol_count_impl(
+            top_level_symbols,
+            reference,
+            count,
+            stable_source_indices,
+            true,
+        );
+    }
+
+    pub fn accumulate_symbol_declaration_count(
+        &mut self,
+        top_level_symbols: &mut Vec<StableSymbolCount>,
+        reference: Ref,
+        count: u32,
+        stable_source_indices: &[u32],
+    ) {
+        self.accumulate_symbol_count_impl(
+            top_level_symbols,
+            reference,
+            count,
+            stable_source_indices,
+            false,
+        );
+    }
+
+    fn accumulate_symbol_count_impl(
+        &mut self,
+        top_level_symbols: &mut Vec<StableSymbolCount>,
+        mut reference: Ref,
+        count: u32,
+        stable_source_indices: &[u32],
+        follow_namespace_alias: bool,
+    ) {
         reference = self.symbols.follow_symbols_const(reference);
         let mut symbol = self.symbols.get(reference);
-        while let Some(alias) = &symbol.namespace_alias {
-            reference = self.symbols.follow_symbols_const(alias.namespace_ref);
-            symbol = self.symbols.get(reference);
+        if follow_namespace_alias {
+            while let Some(alias) = &symbol.namespace_alias {
+                reference = self.symbols.follow_symbols_const(alias.namespace_ref);
+                symbol = self.symbols.get(reference);
+            }
         }
 
         let namespace = symbol.slot_namespace();

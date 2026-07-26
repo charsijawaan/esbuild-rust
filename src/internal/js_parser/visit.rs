@@ -2979,6 +2979,7 @@ fn visit_expr_with_target(
                 && let Some(replacement) =
                     crate::internal::js_ast::const_value_to_expr(expression.loc, value).data
             {
+                core.ignore_usage(identifier.reference);
                 *data = *replacement;
                 return;
             }

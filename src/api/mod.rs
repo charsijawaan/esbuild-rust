@@ -177,7 +177,7 @@ fn transform_base_renamer(
         for part in &ast.parts {
             renamer.accumulate_symbol_use_counts(&mut top_level_symbols, &part.symbol_uses, &[0]);
             for declared in &part.declared_symbols {
-                renamer.accumulate_symbol_count(
+                renamer.accumulate_symbol_declaration_count(
                     &mut top_level_symbols,
                     declared.reference,
                     1,
@@ -5842,6 +5842,38 @@ mod tests {
             );
             assert_eq!(result.errors.len(), 1, "{input}: {:?}", result.errors);
             assert_eq!(result.errors[0].text, "Expected \";\" but found \"N\"");
+        }
+    }
+
+    #[test]
+    fn minifies_typescript_namespace_aliases_like_esbuild() {
+        for (input, expected) in [
+            (
+                "namespace foo{export let foo=123;console.log(foo)}",
+                "var foo;(o=>(o.foo=123,console.log(o.foo)))(foo||={});\n",
+            ),
+            (
+                "namespace N{export namespace N{export const x=1}}",
+                "var N;(a=>{let e;(p=>p.x=1)(e=a.N||={})})(N||={});\n",
+            ),
+            (
+                "namespace N{export const x=1;export function f(){return x}console.log(x,f())}",
+                "var N;(e=>{e.x=1;function o(){return 1}e.f=o,console.log(1,o())})(N||={});\n",
+            ),
+        ] {
+            assert_eq!(
+                code(transform(
+                    input,
+                    TransformOptions {
+                        loader: Loader::Ts,
+                        minify_syntax: true,
+                        minify_identifiers: true,
+                        minify_whitespace: true,
+                        ..TransformOptions::default()
+                    }
+                )),
+                expected
+            );
         }
     }
 

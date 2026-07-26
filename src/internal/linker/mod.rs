@@ -6687,7 +6687,7 @@ pub fn rename_symbols_in_chunk(
                     &graph.stable_source_indices,
                 );
                 for declared in &part.declared_symbols {
-                    renamer.accumulate_symbol_count(
+                    renamer.accumulate_symbol_declaration_count(
                         &mut file_symbols,
                         declared.reference,
                         1,

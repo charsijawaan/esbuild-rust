@@ -323,7 +323,6 @@ fn namespace_export_assignment(
     reference: Ref,
 ) -> Stmt {
     let name = symbol_name(core, reference);
-    core.record_usage(argument);
     core.record_usage(reference);
     Stmt::new(
         loc,
