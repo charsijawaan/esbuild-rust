@@ -368,20 +368,276 @@ pub fn globstar_to_escaped_regexp(glob: &str) -> (String, bool) {
 #[must_use]
 pub fn sort_package_expansion_keys<'a>(keys: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
     let mut keys: Vec<_> = keys.into_iter().collect();
-    keys.sort_by(|left, right| {
-        let left_star = left.find('*');
-        let right_star = right.find('*');
-        let left_base_length = left_star.unwrap_or(left.len());
-        let right_base_length = right_star.unwrap_or(right.len());
-        right_base_length
-            .cmp(&left_base_length)
-            .then_with(|| match (left_star, right_star) {
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (Some(_), None) => std::cmp::Ordering::Less,
-                _ => right.len().cmp(&left.len()),
-            })
-    });
+    keys.sort_by(|left, right| package_expansion_key_cmp(left, right));
     keys
+}
+
+fn package_expansion_key_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_star = left.find('*');
+    let right_star = right.find('*');
+    let left_base_length = left_star.unwrap_or(left.len());
+    let right_base_length = right_star.unwrap_or(right.len());
+    right_base_length
+        .cmp(&left_base_length)
+        .then_with(|| match (left_star, right_star) {
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            _ => right.len().cmp(&left.len()),
+        })
+}
+
+#[derive(Clone, Debug)]
+pub struct PackageMap {
+    pub root: PackageMapEntry,
+    pub property_key: String,
+    pub property_key_loc: Loc,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PackageMapKind {
+    #[default]
+    Null,
+    String,
+    Array,
+    Object,
+    Invalid,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PackageMapEntry {
+    pub string: String,
+    pub array: Vec<PackageMapEntry>,
+    pub map: Vec<PackageMapProperty>,
+    pub expansion_keys: Vec<PackageMapProperty>,
+    pub first_token: Range,
+    pub kind: PackageMapKind,
+}
+
+impl PackageMapEntry {
+    #[must_use]
+    pub fn value_for_key(&self, key: &str) -> Option<&Self> {
+        self.map
+            .iter()
+            .find(|property| property.key == key)
+            .map(|property| &property.value)
+    }
+
+    #[must_use]
+    pub fn keys_start_with_dot(&self) -> bool {
+        self.map
+            .first()
+            .is_some_and(|property| property.key.starts_with('.'))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PackageMapProperty {
+    pub key: String,
+    pub value: PackageMapEntry,
+    pub key_range: Range,
+}
+
+#[must_use]
+pub fn parse_imports_exports_map(
+    source: &Source,
+    log: &Log,
+    json: &Expr,
+    property_key: &str,
+    property_key_loc: Loc,
+) -> Option<PackageMap> {
+    let mut tracker = LineColumnTracker::new(Some(source));
+    let root = visit_package_map_entry(source, log, &mut tracker, json);
+    if root.kind == PackageMapKind::Null {
+        return None;
+    }
+    Some(PackageMap {
+        root,
+        property_key: property_key.to_string(),
+        property_key_loc,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn visit_package_map_entry(
+    source: &Source,
+    log: &Log,
+    tracker: &mut LineColumnTracker,
+    expression: &Expr,
+) -> PackageMapEntry {
+    match expression.data.as_deref() {
+        Some(ExprData::Null) => PackageMapEntry {
+            kind: PackageMapKind::Null,
+            first_token: range_of_identifier(source, expression.loc),
+            ..PackageMapEntry::default()
+        },
+        Some(ExprData::String(string)) => PackageMapEntry {
+            kind: PackageMapKind::String,
+            first_token: source.range_of_string(expression.loc),
+            string: String::from_utf8_lossy(&utf16_to_string(&string.value)).into_owned(),
+            ..PackageMapEntry::default()
+        },
+        Some(ExprData::Array(array)) => PackageMapEntry {
+            kind: PackageMapKind::Array,
+            first_token: Range {
+                loc: expression.loc,
+                len: 1,
+            },
+            array: array
+                .items
+                .iter()
+                .map(|item| visit_package_map_entry(source, log, tracker, item))
+                .collect(),
+            ..PackageMapEntry::default()
+        },
+        Some(ExprData::Object(object)) => {
+            let first_token = Range {
+                loc: expression.loc,
+                len: 1,
+            };
+            let mut map: Vec<PackageMapProperty> = Vec::with_capacity(object.properties.len());
+            let mut expansion_keys = Vec::new();
+            let mut is_conditional_sugar = None;
+            let mut found_default: Option<Range> = None;
+            let mut found_import: Option<Range> = None;
+            let mut found_require: Option<Range> = None;
+            let mut dead_ranges = Vec::new();
+            let mut dead_reason = "";
+            let mut dead_notes = Vec::new();
+
+            for property in &object.properties {
+                let key = get_string(&property.key).unwrap_or_default();
+                let key_range = source.range_of_string(property.key.loc);
+                let current_is_conditional_sugar = !key.starts_with('.');
+                if let Some(previous_kind) = is_conditional_sugar
+                    && previous_kind != current_is_conditional_sugar
+                {
+                    let previous = map.last().expect("mixed object has a previous key");
+                    let note = tracker.msg_data(
+                        previous.key_range,
+                        format!(
+                            "The key {key:?} is incompatible with the previous key {:?}:",
+                            previous.key
+                        ),
+                    );
+                    log.add_id_with_notes(
+                        MsgId::PackageJsonInvalidImportsOrExports,
+                        MsgKind::Warning,
+                        Some(tracker),
+                        key_range,
+                        "This object cannot contain keys that both start with \".\" and don't start with \".\"",
+                        vec![note],
+                    );
+                    return PackageMapEntry {
+                        kind: PackageMapKind::Invalid,
+                        first_token,
+                        ..PackageMapEntry::default()
+                    };
+                }
+                is_conditional_sugar = Some(current_is_conditional_sugar);
+
+                if found_default.is_some() || (found_import.is_some() && found_require.is_some()) {
+                    dead_ranges.push(key_range);
+                    if dead_reason.is_empty() && key != "default" {
+                        if let Some(range) = found_default {
+                            dead_reason = "\"default\"";
+                            dead_notes = vec![tracker.msg_data(
+                                range,
+                                "The \"default\" condition comes earlier and will always be chosen:",
+                            )];
+                        } else {
+                            dead_reason = "both \"import\" and \"require\"";
+                            dead_notes = vec![
+                                tracker.msg_data(
+                                    found_import.expect("import condition"),
+                                    "The \"import\" condition comes earlier and will be used for all \"import\" statements:",
+                                ),
+                                tracker.msg_data(
+                                    found_require.expect("require condition"),
+                                    "The \"require\" condition comes earlier and will be used for all \"require\" calls:",
+                                ),
+                            ];
+                        }
+                    }
+                } else {
+                    match key.as_str() {
+                        "default" => found_default = Some(key_range),
+                        "import" => found_import = Some(key_range),
+                        "require" => found_require = Some(key_range),
+                        _ => {}
+                    }
+                }
+
+                let entry = PackageMapProperty {
+                    key: key.clone(),
+                    value: visit_package_map_entry(source, log, tracker, &property.value_or_nil),
+                    key_range,
+                };
+                if key.ends_with('/') || key.contains('*') {
+                    expansion_keys.push(entry.clone());
+                }
+                map.push(entry);
+            }
+
+            expansion_keys.sort_by(|left, right| package_expansion_key_cmp(&left.key, &right.key));
+            if !dead_reason.is_empty() {
+                let kind = if is_inside_node_modules(&source.key_path.text) {
+                    MsgKind::Debug
+                } else {
+                    MsgKind::Warning
+                };
+                let conditions = dead_ranges
+                    .iter()
+                    .map(|range| String::from_utf8_lossy(source.text_for_range(*range)))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                let (condition_word, comes_word) = if dead_ranges.len() > 1 {
+                    ("conditions", "they come")
+                } else {
+                    ("condition", "it comes")
+                };
+                log.add_id_with_notes(
+                    MsgId::PackageJsonDeadCondition,
+                    kind,
+                    Some(tracker),
+                    dead_ranges[0],
+                    format!(
+                        "The {condition_word} {conditions} here will never be used as {comes_word} after {dead_reason}"
+                    ),
+                    dead_notes,
+                );
+            }
+
+            PackageMapEntry {
+                kind: PackageMapKind::Object,
+                first_token,
+                map,
+                expansion_keys,
+                ..PackageMapEntry::default()
+            }
+        }
+        data => {
+            let first_token = match data {
+                Some(ExprData::Boolean(_)) => range_of_identifier(source, expression.loc),
+                Some(ExprData::Number(_)) => source.range_of_number(expression.loc),
+                _ => Range {
+                    loc: expression.loc,
+                    ..Range::default()
+                },
+            };
+            log.add_id(
+                MsgId::PackageJsonInvalidImportsOrExports,
+                MsgKind::Warning,
+                Some(tracker),
+                first_token,
+                "This value must be a string, an object, an array, or null",
+            );
+            PackageMapEntry {
+                kind: PackageMapKind::Invalid,
+                first_token,
+                ..PackageMapEntry::default()
+            }
+        }
+    }
 }
 
 type ExtendsCallback<'a> = dyn FnMut(&str, Range) -> Option<TsConfigJson> + 'a;
@@ -915,15 +1171,16 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        DataUrl, DebugMeta, MimeType, PathPair, TsConfigJson, TsConfigPath, TsConfigPaths,
-        find_invalid_package_segment, globstar_to_escaped_regexp,
+        DataUrl, DebugMeta, MimeType, PackageMapKind, PathPair, TsConfigJson, TsConfigPath,
+        TsConfigPaths, find_invalid_package_segment, globstar_to_escaped_regexp,
         is_valid_tsconfig_path_no_base_url_pattern, match_tsconfig_path_candidates,
-        parse_bare_identifier, parse_esm_package_name, parse_tsconfig_json,
-        sort_package_expansion_keys,
+        parse_bare_identifier, parse_esm_package_name, parse_imports_exports_map,
+        parse_tsconfig_json, sort_package_expansion_keys,
     };
     use crate::internal::{
         config::{MaybeBool, TsJsx, TsTarget},
         fs::{MockKind, mock_fs},
+        js_parser::{JsonOptions, parse_json},
         logger::{DeferLogKind, Loc, Log, Path, PrettyPaths, Range, Source},
     };
 
@@ -1259,6 +1516,76 @@ mod tests {
         assert_eq!(
             sort_package_expansion_keys(["./foo/", "./foo*", "./foo*bar", "./*"]),
             vec!["./foo/", "./foo*bar", "./foo*", "./*"]
+        );
+    }
+
+    #[test]
+    fn parses_ordered_package_maps_and_sorts_expansions() {
+        let contents = r#"{"./foo*":"a","./foo*bar":"b","./foo/":"c"}"#;
+        let source = Source {
+            contents: Arc::from(contents.as_bytes()),
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let (json, ok) = parse_json(log.clone(), source.clone(), JsonOptions::default());
+        assert!(ok);
+        let map = parse_imports_exports_map(&source, &log, &json, "exports", Loc::default())
+            .expect("package map");
+        assert_eq!(map.root.kind, PackageMapKind::Object);
+        assert!(map.root.keys_start_with_dot());
+        assert_eq!(
+            map.root
+                .expansion_keys
+                .iter()
+                .map(|property| property.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["./foo/", "./foo*bar", "./foo*"]
+        );
+        assert_eq!(
+            map.root
+                .value_for_key("./foo*bar")
+                .expect("map value")
+                .string,
+            "b"
+        );
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn package_maps_reject_mixed_keys_and_warn_for_dead_conditions() {
+        for (contents, expected_kind) in [
+            (
+                r#"{"./subpath":"./file.js","default":"./other.js"}"#,
+                PackageMapKind::Invalid,
+            ),
+            (
+                r#"{"default":"./file.js","browser":"./other.js"}"#,
+                PackageMapKind::Object,
+            ),
+            ("true", PackageMapKind::Invalid),
+        ] {
+            let source = Source {
+                contents: Arc::from(contents.as_bytes()),
+                ..Source::default()
+            };
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let (json, ok) = parse_json(log.clone(), source.clone(), JsonOptions::default());
+            assert!(ok);
+            let map = parse_imports_exports_map(&source, &log, &json, "exports", Loc::default())
+                .expect("non-null map");
+            assert_eq!(map.root.kind, expected_kind);
+            assert_eq!(log.done().len(), 1);
+        }
+
+        let source = Source {
+            contents: Arc::from(&b"null"[..]),
+            ..Source::default()
+        };
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let (json, ok) = parse_json(log.clone(), source.clone(), JsonOptions::default());
+        assert!(ok);
+        assert!(
+            parse_imports_exports_map(&source, &log, &json, "exports", Loc::default()).is_none()
         );
     }
 }
