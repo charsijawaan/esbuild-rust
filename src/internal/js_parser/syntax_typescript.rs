@@ -41,6 +41,75 @@ pub(crate) fn skip_type_parameters(lexer: &mut Lexer) {
     }
 }
 
+pub(crate) fn try_skip_type_arguments_in_expression(lexer: &mut Lexer) -> bool {
+    if lexer.token != Token::LessThan {
+        return false;
+    }
+    let old_lexer = lexer.clone();
+    lexer.is_log_disabled = true;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        skip_type_parameters(lexer);
+        type_arguments_can_be_followed_by(lexer)
+    }));
+    match result {
+        Ok(true) => {
+            lexer.is_log_disabled = old_lexer.is_log_disabled;
+            true
+        }
+        Ok(false) => {
+            *lexer = old_lexer;
+            false
+        }
+        Err(payload) if payload.is::<crate::internal::js_lexer::LexerPanic>() => {
+            *lexer = old_lexer;
+            false
+        }
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn type_arguments_can_be_followed_by(lexer: &Lexer) -> bool {
+    if lexer.has_newline_before {
+        return true;
+    }
+    matches!(
+        lexer.token,
+        Token::OpenParen
+            | Token::NoSubstitutionTemplateLiteral
+            | Token::TemplateHead
+            | Token::QuestionDot
+            | Token::Dot
+            | Token::Comma
+            | Token::Semicolon
+            | Token::Colon
+            | Token::Question
+            | Token::CloseParen
+            | Token::CloseBracket
+            | Token::CloseBrace
+            | Token::EndOfFile
+            | Token::QuestionQuestion
+            | Token::BarBar
+            | Token::AmpersandAmpersand
+            | Token::Bar
+            | Token::Caret
+            | Token::Ampersand
+            | Token::EqualsEquals
+            | Token::ExclamationEquals
+            | Token::EqualsEqualsEquals
+            | Token::ExclamationEqualsEquals
+            | Token::Instanceof
+            | Token::In
+            | Token::LessThanEquals
+            | Token::LessThanLessThan
+            | Token::Asterisk
+            | Token::Slash
+            | Token::Percent
+            | Token::AsteriskAsterisk
+    ) || lexer.token.is_assign()
+        || lexer.is_contextual_keyword(b"as")
+        || lexer.is_contextual_keyword(b"satisfies")
+}
+
 pub(crate) fn skip_class_implements_clause(lexer: &mut Lexer) {
     if !lexer.is_contextual_keyword(b"implements") {
         return;

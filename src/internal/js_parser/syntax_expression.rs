@@ -61,6 +61,20 @@ pub(crate) fn parse_expression_suffix(
     let mut previous_operator = None;
     loop {
         if core.options.ts.parse
+            && lexer.token == Token::LessThan
+            && super::syntax_typescript::try_skip_type_arguments_in_expression(lexer)
+        {
+            left = parse_high_precedence_suffix_chain(
+                core,
+                lexer,
+                left,
+                minimum_precedence,
+                false,
+                |core, lexer, precedence| parse_expression(core, lexer, precedence, true),
+            );
+            continue;
+        }
+        if core.options.ts.parse
             && (lexer.is_contextual_keyword(b"as") || lexer.is_contextual_keyword(b"satisfies"))
         {
             lexer.next();
@@ -170,6 +184,10 @@ fn parse_prefix(
         return expr;
     }
     match lexer.token {
+        Token::LessThan if core.options.ts.parse => {
+            super::syntax_typescript::skip_type_parameters(lexer);
+            parse_expression(core, lexer, Precedence::Prefix, allow_in)
+        }
         Token::Class => parse_class_prefix(core, lexer).expect("class token was checked"),
         Token::Function => parse_function_prefix(core, lexer).expect("function token was checked"),
         Token::New => parse_new_prefix(core, lexer, parse_new_target, |core, lexer| {

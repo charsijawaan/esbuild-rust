@@ -2966,6 +2966,7 @@ mod tests {
         let (ast, ok, log) = parse_source_with_options(
             "const typed = input as Payload;\
              const checked = config satisfies Options;\
+             const angled = <Map<Key, Value>>input;\
              typed!.field;\
              (handler as Handler)(typed);\
              const sum = input as number + 1;",
@@ -2987,24 +2988,64 @@ mod tests {
             checked.declarations[0].value_or_nil.data.as_deref(),
             Some(ExprData::Identifier(_))
         ));
+        let Some(StmtData::Local(angled)) = ast.parts[1].statements[2].data.as_deref() else {
+            panic!("expected angle-bracket assertion");
+        };
         assert!(matches!(
-            ast.parts[1].statements[2].data.as_deref(),
-            Some(StmtData::Expr(statement))
-                if matches!(statement.value.data.as_deref(), Some(ExprData::Dot(_)))
+            angled.declarations[0].value_or_nil.data.as_deref(),
+            Some(ExprData::Identifier(_))
         ));
         assert!(matches!(
             ast.parts[1].statements[3].data.as_deref(),
             Some(StmtData::Expr(statement))
-                if matches!(statement.value.data.as_deref(), Some(ExprData::Call(_)))
+                if matches!(statement.value.data.as_deref(), Some(ExprData::Dot(_)))
         ));
         assert!(matches!(
             ast.parts[1].statements[4].data.as_deref(),
+            Some(StmtData::Expr(statement))
+                if matches!(statement.value.data.as_deref(), Some(ExprData::Call(_)))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[5].data.as_deref(),
             Some(StmtData::Local(local))
                 if matches!(
                     local.declarations[0].value_or_nil.data.as_deref(),
                     Some(ExprData::Binary(binary))
                         if binary.op == crate::internal::js_ast::OpCode::BinaryAdd
                 )
+        ));
+    }
+
+    #[test]
+    fn erases_type_arguments_in_expressions_with_backtracking() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "const called = handler<Result>(input);\
+             const made = new Box<Item>(input);\
+             const instantiated = handler<Result>;\
+             const compared = a < b > c;",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let values = ast.parts[1]
+            .statements
+            .iter()
+            .map(|statement| {
+                let Some(StmtData::Local(local)) = statement.data.as_deref() else {
+                    panic!("expected local declaration");
+                };
+                local.declarations[0].value_or_nil.data.as_deref()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(values[0], Some(ExprData::Call(_))));
+        assert!(matches!(values[1], Some(ExprData::New(_))));
+        assert!(matches!(values[2], Some(ExprData::Identifier(_))));
+        assert!(matches!(
+            values[3],
+            Some(ExprData::Binary(binary))
+                if binary.op == crate::internal::js_ast::OpCode::BinaryGreaterThan
         ));
     }
 

@@ -34,6 +34,9 @@ pub(crate) fn parse_new_prefix(
     }
 
     let target = parse_target(core, lexer);
+    if core.options.ts.parse {
+        super::syntax_typescript::try_skip_type_arguments_in_expression(lexer);
+    }
     let (args, close_paren_loc, is_multi_line) = if lexer.token == Token::OpenParen {
         parse_call_args(lexer, |lexer| parse_argument(core, lexer))
     } else {

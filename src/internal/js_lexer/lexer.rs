@@ -93,6 +93,7 @@ enum IdentifierKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LexerPanic;
 
+#[derive(Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Lexer {
     pub legal_comments_before_token: Vec<Range>,
