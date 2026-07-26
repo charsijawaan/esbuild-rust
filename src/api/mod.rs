@@ -1,8 +1,9 @@
 //! Port of esbuild's public `pkg/api` package.
 
 use std::{
+    any::Any,
     collections::{HashMap, HashSet},
-    fs as std_fs,
+    fmt, fs as std_fs,
     io::{self, Write as _},
     path::{Path as FsPath, PathBuf},
     sync::Arc,
@@ -21,7 +22,10 @@ use crate::internal::{
     },
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
-    logger::{DeferLogKind, Log, Msg, MsgKind, Path, PrettyPaths, Source},
+    logger::{
+        DeferLogKind, Log, Msg, MsgData, MsgKind, MsgLocation, OutputOptions, Path, PrettyPaths,
+        Source, TerminalInfo, msg_id_to_string, string_to_maximum_msg_id,
+    },
     renamer::{Renamer, new_no_op_renamer},
     resolver,
     sourcemap::{Chunk as SourceMapChunk, LineColumnOffset, generate_line_offset_tables},
@@ -194,19 +198,127 @@ pub struct TransformOptions {
     pub tsconfig_raw: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MessageKind {
+    #[default]
     Error,
     Warning,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Message {
-    pub text: String,
-    pub kind: MessageKind,
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Location {
+    pub file: String,
+    pub namespace: String,
+    pub line: usize,
+    pub column: usize,
+    pub length: usize,
+    pub line_text: String,
+    pub suggestion: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Note {
+    pub text: String,
+    pub location: Option<Location>,
+}
+
+#[derive(Clone, Default)]
+pub struct Message {
+    pub id: String,
+    pub plugin_name: String,
+    pub text: String,
+    pub location: Option<Location>,
+    pub notes: Vec<Note>,
+    pub detail: Option<Arc<dyn Any + Send + Sync>>,
+    pub kind: MessageKind,
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Message")
+            .field("id", &self.id)
+            .field("plugin_name", &self.plugin_name)
+            .field("text", &self.text)
+            .field("location", &self.location)
+            .field("notes", &self.notes)
+            .field("detail", &self.detail.as_ref().map(|_| "<opaque>"))
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FormatMessagesOptions {
+    pub terminal_width: usize,
+    pub kind: MessageKind,
+    pub color: bool,
+}
+
+#[must_use]
+pub fn format_messages(messages: Vec<Message>, options: FormatMessagesOptions) -> Vec<String> {
+    let kind = match options.kind {
+        MessageKind::Error => MsgKind::Error,
+        MessageKind::Warning => MsgKind::Warning,
+    };
+    messages
+        .into_iter()
+        .map(|message| {
+            Msg {
+                notes: message
+                    .notes
+                    .into_iter()
+                    .map(|note| MsgData {
+                        text: note.text,
+                        location: note.location.map(internal_location),
+                        ..MsgData::default()
+                    })
+                    .collect(),
+                plugin_name: message.plugin_name,
+                data: MsgData {
+                    user_detail: message.detail,
+                    location: message.location.map(internal_location),
+                    text: message.text,
+                    ..MsgData::default()
+                },
+                kind,
+                id: string_to_maximum_msg_id(&message.id),
+            }
+            .to_string_lossy(
+                &OutputOptions {
+                    include_source: true,
+                    ..OutputOptions::default()
+                },
+                TerminalInfo {
+                    use_color_escapes: options.color,
+                    width: options.terminal_width,
+                    ..TerminalInfo::default()
+                },
+            )
+        })
+        .collect()
+}
+
+fn internal_location(location: Location) -> MsgLocation {
+    MsgLocation {
+        file: PrettyPaths {
+            abs: location.file.clone(),
+            rel: location.file,
+        },
+        namespace: if location.namespace.is_empty() {
+            "file".into()
+        } else {
+            location.namespace
+        },
+        line_text: location.line_text.into_bytes(),
+        suggestion: location.suggestion,
+        line: location.line,
+        column: location.column,
+        length: location.length,
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct TransformResult {
     pub errors: Vec<Message>,
     pub warnings: Vec<Message>,
@@ -394,7 +506,7 @@ pub struct BuildOutputFile {
     pub executable: bool,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct BuildResult {
     pub errors: Vec<Message>,
     pub warnings: Vec<Message>,
@@ -711,6 +823,7 @@ fn write_build_output_files(
                     output_files.len()
                 ),
                 kind: MessageKind::Error,
+                ..Message::default()
             }];
         }
         return io::stdout()
@@ -720,6 +833,7 @@ fn write_build_output_files(
                 vec![Message {
                     text: format!("Could not write to stdout: {error}"),
                     kind: MessageKind::Error,
+                    ..Message::default()
                 }]
             });
     }
@@ -736,6 +850,7 @@ fn write_build_output_files(
                     path.display()
                 ),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
             continue;
         }
@@ -748,6 +863,7 @@ fn write_build_output_files(
                     parent.display()
                 ),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
             continue;
         }
@@ -755,6 +871,7 @@ fn write_build_output_files(
             errors.push(Message {
                 text: format!("Could not write output file {}: {error}", path.display()),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
             continue;
         }
@@ -772,6 +889,7 @@ fn write_build_output_files(
                             path.display()
                         ),
                         kind: MessageKind::Error,
+                        ..Message::default()
                     });
                 }
             }
@@ -794,6 +912,7 @@ fn validate_externals(
                         "External path {path:?} cannot have more than one \"*\" wildcard"
                     ),
                     kind: MessageKind::Error,
+                    ..Message::default()
                 });
                 continue;
             }
@@ -900,6 +1019,7 @@ fn validate_build_loaders(
             errors.push(Message {
                 text: format!("Invalid file extension: {extension:?}"),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
         }
         result.insert(extension.clone(), build_loader(loader));
@@ -925,6 +1045,7 @@ fn validate_output_extensions(
                 errors.push(Message {
                     text: format!("Invalid output extension key: {kind:?}"),
                     kind: MessageKind::Error,
+                    ..Message::default()
                 });
                 continue;
             }
@@ -933,6 +1054,7 @@ fn validate_output_extensions(
             errors.push(Message {
                 text: format!("Invalid output extension: {extension:?}"),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
         } else {
             target.clone_from(extension);
@@ -954,6 +1076,7 @@ fn validate_resolve_extensions(extensions: &[String]) -> Result<(), Vec<Message>
         .map(|extension| Message {
             text: format!("Invalid file extension: {extension:?}"),
             kind: MessageKind::Error,
+            ..Message::default()
         })
         .collect::<Vec<_>>();
     if errors.is_empty() {
@@ -1164,6 +1287,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
                 errors: vec![Message {
                     text: error.message,
                     kind: MessageKind::Error,
+                    ..Message::default()
                 }],
                 ..BuildResult::default()
             };
@@ -1186,6 +1310,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             errors: vec![Message {
                 text: text.into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             }],
             ..BuildResult::default()
         };
@@ -1199,6 +1324,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             errors.push(Message {
                 text: "Cannot use an external source map without an output path".into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
         }
         if matches!(
@@ -1208,6 +1334,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             errors.push(Message {
                 text: "Cannot use linked or external legal comments without an output path".into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
         }
         if options
@@ -1218,6 +1345,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             errors.push(Message {
                 text: "Cannot use the \"file\" loader without an output path".into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
         }
         if options
@@ -1228,6 +1356,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             errors.push(Message {
                 text: "Cannot use the \"copy\" loader without an output path".into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
         }
         if !errors.is_empty() {
@@ -1243,12 +1372,14 @@ pub fn build(options: BuildOptions) -> BuildResult {
             errors.push(Message {
                 text: "Cannot use \"external\" without \"bundle\"".into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
         }
         if !options.alias.is_empty() {
             errors.push(Message {
                 text: "Cannot use \"alias\" without \"bundle\"".into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             });
         }
         if !errors.is_empty() {
@@ -1481,6 +1612,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             errors: vec![Message {
                 text: "Splitting currently only works with the \"esm\" format".into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             }],
             ..BuildResult::default()
         };
@@ -1587,6 +1719,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
                 .map(|(_, issue)| Message {
                     text: format!("Could not resolve imported symbol {:?}", issue.result.alias),
                     kind: MessageKind::Error,
+                    ..Message::default()
                 }),
         );
     }
@@ -1636,6 +1769,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
             errors: vec![Message {
                 text: "Cannot transform with linked legal comments".into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             }],
             ..TransformResult::default()
         };
@@ -1645,6 +1779,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
             errors: vec![Message {
                 text: "Cannot transform with linked source maps".into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             }],
             ..TransformResult::default()
         };
@@ -1655,6 +1790,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
                 text: "Must use \"sourcefile\" with \"sourcemap\" to set the original file name"
                     .into(),
                 kind: MessageKind::Error,
+                ..Message::default()
             }],
             ..TransformResult::default()
         };
@@ -1670,6 +1806,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
                 errors: vec![Message {
                     text: format!("Do not know how to load path: {sourcefile}"),
                     kind: MessageKind::Error,
+                    ..Message::default()
                 }],
                 ..TransformResult::default()
             };
@@ -1719,6 +1856,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
                 errors: vec![Message {
                     text: message,
                     kind: MessageKind::Error,
+                    ..Message::default()
                 }],
                 ..TransformResult::default()
             };
@@ -2197,21 +2335,45 @@ fn public_messages(messages: Vec<Msg>) -> (Vec<Message>, Vec<Message>) {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     for message in messages {
-        let public = Message {
-            text: message.data.text,
-            kind: if message.kind == MsgKind::Error {
-                MessageKind::Error
-            } else {
-                MessageKind::Warning
-            },
+        let kind = match message.kind {
+            MsgKind::Error => MessageKind::Error,
+            MsgKind::Warning => MessageKind::Warning,
+            MsgKind::Info | MsgKind::Note | MsgKind::Debug | MsgKind::Verbose => continue,
         };
-        if public.kind == MessageKind::Error {
-            errors.push(public);
-        } else if message.kind == MsgKind::Warning {
-            warnings.push(public);
+        let public = Message {
+            id: msg_id_to_string(message.id).into(),
+            plugin_name: message.plugin_name,
+            text: message.data.text,
+            location: message.data.location.map(public_location),
+            notes: message
+                .notes
+                .into_iter()
+                .map(|note| Note {
+                    text: note.text,
+                    location: note.location.map(public_location),
+                })
+                .collect(),
+            detail: message.data.user_detail,
+            kind,
+        };
+        match kind {
+            MessageKind::Error => errors.push(public),
+            MessageKind::Warning => warnings.push(public),
         }
     }
     (errors, warnings)
+}
+
+fn public_location(location: MsgLocation) -> Location {
+    Location {
+        file: location.file.rel,
+        namespace: location.namespace,
+        line: location.line,
+        column: location.column,
+        length: location.length,
+        line_text: String::from_utf8_lossy(&location.line_text).into_owned(),
+        suggestion: location.suggestion,
+    }
 }
 
 fn add_banner_and_footer(mut code: Vec<u8>, banner: &str, footer: &str) -> Vec<u8> {
@@ -2287,6 +2449,42 @@ mod tests {
         assert!(
             super::analyze_metafile("not json", super::AnalyzeMetafileOptions::default())
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn formats_public_messages() {
+        let formatted = super::format_messages(
+            vec![
+                super::Message {
+                    text: "This is an error".into(),
+                    ..super::Message::default()
+                },
+                super::Message {
+                    text: "Another error".into(),
+                    location: Some(super::Location {
+                        file: "file.js".into(),
+                        ..super::Location::default()
+                    }),
+                    ..super::Message::default()
+                },
+            ],
+            super::FormatMessagesOptions::default(),
+        );
+        assert_eq!(formatted.len(), 2);
+        assert_eq!(
+            formatted[0],
+            format!(
+                "{} [ERROR] This is an error\n\n",
+                crate::internal::logger::MsgKind::Error.icon()
+            )
+        );
+        assert_eq!(
+            formatted[1],
+            format!(
+                "{} [ERROR] Another error\n\n    file.js:0:0:\n      0 │ \n        ╵ ^\n\n",
+                crate::internal::logger::MsgKind::Error.icon()
+            )
         );
     }
 
@@ -4418,6 +4616,12 @@ mod tests {
         );
         assert_eq!(invalid.errors.len(), 1);
         assert_eq!(invalid.errors[0].text, "Unexpected \"=\"");
+        let location = invalid.errors[0].location.as_ref().expect("error location");
+        assert_eq!(location.file, "<stdin>");
+        assert_eq!(location.line, 1);
+        assert_eq!(location.column, 13);
+        assert_eq!(location.length, 0);
+        assert_eq!(location.line_text, "({ invalid = function() {} });");
     }
 
     #[test]
