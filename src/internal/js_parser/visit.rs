@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::internal::logger::{Loc, Range};
 use crate::internal::{
@@ -830,19 +830,29 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
     let is_derived = class.extends_or_nil.data.is_some();
     let has_constructor = class_constructor_index(class).is_some();
     let allow_any_initializer = !has_constructor || class_constructor_is_binding_free(class);
+    let constructor_binding_names = class_constructor_binding_names(core, class);
     let lower_private_fields = class.properties.iter().any(|property| {
         !matches!(
             property.key.data.as_deref(),
             Some(ExprData::PrivateIdentifier(_))
-        ) && class_field_can_be_moved(property, allow_any_initializer)
+        ) && class_field_can_be_moved(
+            core,
+            property,
+            allow_any_initializer,
+            &constructor_binding_names,
+        )
     });
 
     let mut assignments = Vec::new();
     let mut private_declarations = Vec::new();
     class.properties.retain_mut(|property| {
-        let Some((assignment, keep_private_declaration)) =
-            take_class_field_assignment(property, lower_private_fields, allow_any_initializer)
-        else {
+        let Some((assignment, keep_private_declaration)) = take_class_field_assignment(
+            core,
+            property,
+            lower_private_fields,
+            allow_any_initializer,
+            &constructor_binding_names,
+        ) else {
             return true;
         };
         assignments.push(assignment);
@@ -972,6 +982,122 @@ fn class_constructor_is_binding_free(class: &Class) -> bool {
             .any(statement_contains_binding)
 }
 
+fn class_constructor_binding_names(core: &ParserCore, class: &Class) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let Some(index) = class_constructor_index(class) else {
+        return names;
+    };
+    let Some(ExprData::Function(function)) = class.properties[index].value_or_nil.data.as_deref()
+    else {
+        return names;
+    };
+    for argument in &function.function.args {
+        collect_binding_names(core, &argument.binding, &mut names);
+    }
+    for statement in &function.function.body.block.statements {
+        collect_statement_binding_names(core, statement, &mut names);
+    }
+    names
+}
+
+fn collect_binding_names(core: &ParserCore, binding: &Binding, names: &mut HashSet<String>) {
+    match binding.data.as_deref() {
+        Some(BindingData::Identifier(identifier)) => {
+            names.insert(symbol_name(core, identifier.reference));
+        }
+        Some(BindingData::Array(array)) => {
+            for item in &array.items {
+                collect_binding_names(core, &item.binding, names);
+            }
+        }
+        Some(BindingData::Object(object)) => {
+            for property in &object.properties {
+                collect_binding_names(core, &property.value, names);
+            }
+        }
+        Some(BindingData::Missing) | None => {}
+    }
+}
+
+fn collect_statement_binding_names(
+    core: &ParserCore,
+    statement: &Stmt,
+    names: &mut HashSet<String>,
+) {
+    match statement.data.as_deref() {
+        Some(StmtData::Local(local)) => {
+            for declaration in &local.declarations {
+                collect_binding_names(core, &declaration.binding, names);
+            }
+        }
+        Some(StmtData::Function(function)) => {
+            if let Some(name) = function.function.name {
+                names.insert(symbol_name(core, name.reference));
+            }
+        }
+        Some(StmtData::Class(class)) => {
+            if let Some(name) = class.class.name {
+                names.insert(symbol_name(core, name.reference));
+            }
+        }
+        Some(StmtData::Block(value)) => {
+            for statement in &value.statements {
+                collect_statement_binding_names(core, statement, names);
+            }
+        }
+        Some(StmtData::If(value)) => {
+            collect_statement_binding_names(core, &value.yes, names);
+            collect_statement_binding_names(core, &value.no_or_nil, names);
+        }
+        Some(StmtData::For(value)) => {
+            collect_statement_binding_names(core, &value.init_or_nil, names);
+            collect_statement_binding_names(core, &value.body, names);
+        }
+        Some(StmtData::ForIn(value)) => {
+            collect_statement_binding_names(core, &value.init, names);
+            collect_statement_binding_names(core, &value.body, names);
+        }
+        Some(StmtData::ForOf(value)) => {
+            collect_statement_binding_names(core, &value.init, names);
+            collect_statement_binding_names(core, &value.body, names);
+        }
+        Some(StmtData::DoWhile(value)) => {
+            collect_statement_binding_names(core, &value.body, names);
+        }
+        Some(StmtData::While(value)) => {
+            collect_statement_binding_names(core, &value.body, names);
+        }
+        Some(StmtData::With(value)) => collect_statement_binding_names(core, &value.body, names),
+        Some(StmtData::Label(value)) => {
+            collect_statement_binding_names(core, &value.statement, names);
+        }
+        Some(StmtData::Try(value)) => {
+            for statement in &value.block.statements {
+                collect_statement_binding_names(core, statement, names);
+            }
+            if let Some(catch) = &value.catch {
+                collect_binding_names(core, &catch.binding_or_nil, names);
+                for statement in &catch.block.statements {
+                    collect_statement_binding_names(core, statement, names);
+                }
+            }
+            if let Some(finally) = &value.finally {
+                for statement in &finally.block.statements {
+                    collect_statement_binding_names(core, statement, names);
+                }
+            }
+        }
+        Some(StmtData::Switch(value)) => {
+            for case in &value.cases {
+                for statement in &case.body {
+                    collect_statement_binding_names(core, statement, names);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn statement_contains_binding(statement: &Stmt) -> bool {
     match statement.data.as_deref() {
         Some(
@@ -1003,7 +1129,12 @@ fn statement_contains_binding(statement: &Stmt) -> bool {
     }
 }
 
-fn class_field_can_be_moved(property: &Property, allow_any_initializer: bool) -> bool {
+fn class_field_can_be_moved(
+    core: &ParserCore,
+    property: &Property,
+    allow_any_initializer: bool,
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
     if property.kind != PropertyKind::Field
         || property.flags.contains(PropertyFlags::IS_STATIC)
         || !property.decorators.is_empty()
@@ -1016,14 +1147,22 @@ fn class_field_can_be_moved(property: &Property, allow_any_initializer: bool) ->
         &property.value_or_nil
     };
     initializer.data.is_some()
-        && (allow_any_initializer || class_field_initializer_is_safe_to_move(initializer))
+        && (allow_any_initializer
+            || class_field_initializer_is_safe_to_move(initializer)
+            || !class_field_initializer_has_binding_collision(
+                core,
+                initializer,
+                constructor_binding_names,
+            ))
         && class_field_assignment_target(property).is_some()
 }
 
 fn take_class_field_assignment(
+    core: &ParserCore,
     property: &mut Property,
     lower_private_fields: bool,
     allow_any_initializer: bool,
+    constructor_binding_names: &HashSet<String>,
 ) -> Option<(Stmt, bool)> {
     let is_private = matches!(
         property.key.data.as_deref(),
@@ -1032,7 +1171,12 @@ fn take_class_field_assignment(
     if is_private && !lower_private_fields {
         return None;
     }
-    if !class_field_can_be_moved(property, allow_any_initializer) {
+    if !class_field_can_be_moved(
+        core,
+        property,
+        allow_any_initializer,
+        constructor_binding_names,
+    ) {
         return None;
     }
     let target = class_field_assignment_target(property)?;
@@ -1225,6 +1369,192 @@ fn class_field_initializer_is_safe_to_move(expression: &Expr) -> bool {
             | ExprData::PrivateIdentifier(_)
             | ExprData::NameOfSymbol(_)
             | ExprData::JsxElement(_),
+        )
+        | None => false,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn class_field_initializer_has_binding_collision(
+    core: &ParserCore,
+    expression: &Expr,
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
+    let collides = |reference| constructor_binding_names.contains(&symbol_name(core, reference));
+    match expression.data.as_deref() {
+        Some(ExprData::Identifier(value)) => collides(value.reference),
+        Some(ExprData::ImportIdentifier(value)) => collides(value.reference),
+        Some(ExprData::NameOfSymbol(value)) => collides(value.reference),
+        Some(ExprData::Array(value)) => value.items.iter().any(|item| {
+            class_field_initializer_has_binding_collision(core, item, constructor_binding_names)
+        }),
+        Some(ExprData::Unary(value)) => class_field_initializer_has_binding_collision(
+            core,
+            &value.value,
+            constructor_binding_names,
+        ),
+        Some(ExprData::Binary(value)) => {
+            class_field_initializer_has_binding_collision(
+                core,
+                &value.left,
+                constructor_binding_names,
+            ) || class_field_initializer_has_binding_collision(
+                core,
+                &value.right,
+                constructor_binding_names,
+            )
+        }
+        Some(ExprData::New(value)) => {
+            class_field_initializer_has_binding_collision(
+                core,
+                &value.target,
+                constructor_binding_names,
+            ) || value.args.iter().any(|argument| {
+                class_field_initializer_has_binding_collision(
+                    core,
+                    argument,
+                    constructor_binding_names,
+                )
+            })
+        }
+        Some(ExprData::Call(value)) => {
+            class_field_initializer_has_binding_collision(
+                core,
+                &value.target,
+                constructor_binding_names,
+            ) || value.args.iter().any(|argument| {
+                class_field_initializer_has_binding_collision(
+                    core,
+                    argument,
+                    constructor_binding_names,
+                )
+            })
+        }
+        Some(ExprData::Dot(value)) => class_field_initializer_has_binding_collision(
+            core,
+            &value.target,
+            constructor_binding_names,
+        ),
+        Some(ExprData::Index(value)) => {
+            class_field_initializer_has_binding_collision(
+                core,
+                &value.target,
+                constructor_binding_names,
+            ) || class_field_initializer_has_binding_collision(
+                core,
+                &value.index,
+                constructor_binding_names,
+            )
+        }
+        Some(ExprData::Object(value)) => value.properties.iter().any(|property| {
+            class_field_initializer_has_binding_collision(
+                core,
+                &property.key,
+                constructor_binding_names,
+            ) || class_field_initializer_has_binding_collision(
+                core,
+                &property.value_or_nil,
+                constructor_binding_names,
+            ) || class_field_initializer_has_binding_collision(
+                core,
+                &property.initializer_or_nil,
+                constructor_binding_names,
+            ) || property.decorators.iter().any(|decorator| {
+                class_field_initializer_has_binding_collision(
+                    core,
+                    &decorator.value,
+                    constructor_binding_names,
+                )
+            })
+        }),
+        Some(ExprData::Spread(value)) => class_field_initializer_has_binding_collision(
+            core,
+            &value.value,
+            constructor_binding_names,
+        ),
+        Some(ExprData::Template(value)) => {
+            class_field_initializer_has_binding_collision(
+                core,
+                &value.tag_or_nil,
+                constructor_binding_names,
+            ) || value.parts.iter().any(|part| {
+                class_field_initializer_has_binding_collision(
+                    core,
+                    &part.value,
+                    constructor_binding_names,
+                )
+            })
+        }
+        Some(ExprData::InlinedEnum(value)) => class_field_initializer_has_binding_collision(
+            core,
+            &value.value,
+            constructor_binding_names,
+        ),
+        Some(ExprData::Annotation(value)) => class_field_initializer_has_binding_collision(
+            core,
+            &value.value,
+            constructor_binding_names,
+        ),
+        Some(ExprData::Await(value)) => class_field_initializer_has_binding_collision(
+            core,
+            &value.value,
+            constructor_binding_names,
+        ),
+        Some(ExprData::Yield(value)) => class_field_initializer_has_binding_collision(
+            core,
+            &value.value_or_nil,
+            constructor_binding_names,
+        ),
+        Some(ExprData::If(value)) => {
+            class_field_initializer_has_binding_collision(
+                core,
+                &value.test,
+                constructor_binding_names,
+            ) || class_field_initializer_has_binding_collision(
+                core,
+                &value.yes,
+                constructor_binding_names,
+            ) || class_field_initializer_has_binding_collision(
+                core,
+                &value.no,
+                constructor_binding_names,
+            )
+        }
+        Some(ExprData::ImportCall(value)) => {
+            class_field_initializer_has_binding_collision(
+                core,
+                &value.expr,
+                constructor_binding_names,
+            ) || class_field_initializer_has_binding_collision(
+                core,
+                &value.options_or_nil,
+                constructor_binding_names,
+            )
+        }
+        Some(
+            ExprData::Arrow(_)
+            | ExprData::Function(_)
+            | ExprData::Class(_)
+            | ExprData::JsxElement(_),
+        ) => true,
+        Some(
+            ExprData::Boolean(_)
+            | ExprData::Super
+            | ExprData::Null
+            | ExprData::Undefined
+            | ExprData::This
+            | ExprData::NewTarget(_)
+            | ExprData::ImportMeta(_)
+            | ExprData::PrivateIdentifier(_)
+            | ExprData::JsxText(_)
+            | ExprData::Missing
+            | ExprData::Number(_)
+            | ExprData::BigInt(_)
+            | ExprData::String(_)
+            | ExprData::RegExp(_)
+            | ExprData::RequireString(_)
+            | ExprData::RequireResolveString(_)
+            | ExprData::ImportString(_),
         )
         | None => false,
     }

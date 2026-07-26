@@ -4239,6 +4239,23 @@ mod tests {
             "{capture_sensitive}"
         );
 
+        let non_colliding = code(transform(
+            "class Foo { initialized = createValue(); constructor(id: number) { use(id) } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            non_colliding.contains("this.initialized = createValue();"),
+            "{non_colliding}"
+        );
+        assert!(
+            !non_colliding.contains("\n  initialized = createValue();"),
+            "{non_colliding}"
+        );
+
         let literal_template = code(transform(
             "class Foo { message = `hello`; constructor(id: number) { use(id) } }",
             TransformOptions {
