@@ -198,8 +198,8 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             Some(StmtData::Enum(enumeration)) => {
                 core.record_declared_symbol(enumeration.name.reference);
-                core.record_declared_symbol(enumeration.argument);
                 core.push_scope_for_visit_pass(ScopeKind::Entry, statement.loc);
+                core.record_declared_symbol(enumeration.argument);
                 let mut next_numeric_value = 0.0;
                 let mut has_numeric_value = true;
                 let mut constants = HashMap::new();
@@ -264,8 +264,8 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             Some(StmtData::Namespace(namespace)) => {
                 core.record_declared_symbol(namespace.name.reference);
-                core.record_declared_symbol(namespace.argument);
                 core.push_scope_for_visit_pass(ScopeKind::Entry, statement.loc);
+                core.record_declared_symbol(namespace.argument);
                 visit_statements(core, &mut namespace.statements, resolve_identifiers);
                 lower_nested_type_script_statements(
                     core,

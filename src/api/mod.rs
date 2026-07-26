@@ -5902,6 +5902,34 @@ mod tests {
     }
 
     #[test]
+    fn reuses_typescript_closure_argument_names_in_sibling_scopes() {
+        for (input, expected) in [
+            (
+                "enum E{A};enum E{B};console.log(E)",
+                "var E=(E2=>{E2[E2[\"A\"]=0]=\"A\";return E2})(E||{});;\
+                 var E=(E2=>{E2[E2[\"B\"]=0]=\"B\";return E2})(E||{});;\
+                 console.log(E);\n",
+            ),
+            (
+                "namespace N{let a=1};namespace N{let b=2}",
+                "var N;(N2=>{let a=1})(N||(N={}));;(N2=>{let b=2})(N||(N={}));\n",
+            ),
+        ] {
+            assert_eq!(
+                code(transform(
+                    input,
+                    TransformOptions {
+                        loader: Loader::Ts,
+                        minify_whitespace: true,
+                        ..TransformOptions::default()
+                    }
+                )),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn minifies_return_keyword_spacing_like_esbuild() {
         assert_eq!(
             code(transform(

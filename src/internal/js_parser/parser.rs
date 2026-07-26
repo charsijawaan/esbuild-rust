@@ -1506,7 +1506,6 @@ fn declare_top_level_symbols(
                     SymbolKind::TsEnum,
                     &mut declared,
                 );
-                record_top_level_symbol(&mut declared, enumeration.argument);
             }
             Some(StmtData::Namespace(namespace)) => {
                 bind_loc_ref(
@@ -1515,7 +1514,6 @@ fn declare_top_level_symbols(
                     SymbolKind::TsNamespace,
                     &mut declared,
                 );
-                record_top_level_symbol(&mut declared, namespace.argument);
             }
             Some(StmtData::Import(import)) => {
                 if let Some(name) = &mut import.default_name {
