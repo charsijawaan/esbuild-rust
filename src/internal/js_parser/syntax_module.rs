@@ -38,6 +38,12 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
             }),
         );
     }
+    if !core.is_current_scope_module_scope() {
+        core.add_error_range(
+            crate::internal::logger::Range { loc, len: 6 },
+            "An import declaration can only be used at the top level of a module",
+        );
+    }
 
     let mut statement = ImportStmt::default();
     let mut was_bare = false;
@@ -106,6 +112,12 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
 pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
     lexer.expect(Token::Export);
+    if !core.is_current_scope_module_scope() {
+        core.add_error_range(
+            crate::internal::logger::Range { loc, len: 6 },
+            "An export declaration can only be used at the top level of a module",
+        );
+    }
     match lexer.token {
         Token::Var | Token::Const | Token::Function | Token::Class => {
             let mut statement = super::syntax_statement::parse_statement(core, lexer);

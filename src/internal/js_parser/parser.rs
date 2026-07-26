@@ -839,6 +839,29 @@ mod tests {
     }
 
     #[test]
+    fn static_module_declarations_require_module_scope() {
+        let (ast, ok, log) = parse_source(
+            "function nested() {\
+               import value from 'package';\
+               export const item = 1;\
+               import('dynamic');\
+               import.meta.url;\
+             }",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
+        assert_eq!(ast.import_records.len(), 2);
+        assert_eq!(
+            ast.import_records
+                .iter()
+                .map(|record| record.path.text.as_str())
+                .collect::<Vec<_>>(),
+            ["package", "dynamic"]
+        );
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+    }
+
+    #[test]
     fn top_level_bindings_are_declared_before_commonjs_symbols() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let source = Source {

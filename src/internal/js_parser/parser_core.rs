@@ -326,6 +326,13 @@ impl ParserCore {
         })
     }
 
+    pub(crate) fn is_current_scope_module_scope(&self) -> bool {
+        self.current_scope
+            .as_ref()
+            .zip(self.module_scope.as_ref())
+            .is_some_and(|(current, module)| Arc::ptr_eq(current, module))
+    }
+
     pub(crate) fn is_inside_function_scope(&self) -> bool {
         let mut scope = self.current_scope.clone();
         while let Some(current) = scope {
