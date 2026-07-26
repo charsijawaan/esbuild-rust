@@ -929,6 +929,53 @@ pub fn build(options: BuildOptions) -> BuildResult {
             ..BuildResult::default()
         };
     }
+    if options.outdir.is_empty() && options.outfile.is_empty() {
+        let mut errors = Vec::new();
+        if !matches!(
+            options.sourcemap,
+            BuildSourceMap::None | BuildSourceMap::Inline
+        ) {
+            errors.push(Message {
+                text: "Cannot use an external source map without an output path".into(),
+                kind: MessageKind::Error,
+            });
+        }
+        if matches!(
+            options.legal_comments,
+            BuildLegalComments::Linked | BuildLegalComments::External
+        ) {
+            errors.push(Message {
+                text: "Cannot use linked or external legal comments without an output path".into(),
+                kind: MessageKind::Error,
+            });
+        }
+        if options
+            .loader
+            .values()
+            .any(|loader| *loader == Loader::File)
+        {
+            errors.push(Message {
+                text: "Cannot use the \"file\" loader without an output path".into(),
+                kind: MessageKind::Error,
+            });
+        }
+        if options
+            .loader
+            .values()
+            .any(|loader| *loader == Loader::Copy)
+        {
+            errors.push(Message {
+                text: "Cannot use the \"copy\" loader without an output path".into(),
+                kind: MessageKind::Error,
+            });
+        }
+        if !errors.is_empty() {
+            return BuildResult {
+                errors,
+                ..BuildResult::default()
+            };
+        }
+    }
     if !bundle {
         let mut errors = Vec::new();
         if !options.external.is_empty() {
@@ -2024,6 +2071,53 @@ mod tests {
                 .map(|message| message.text.as_str()),
             Some("Splitting currently only works with the \"esm\" format")
         );
+    }
+
+    #[test]
+    fn validates_build_options_that_need_output_paths() {
+        let source_map = super::build(BuildOptions {
+            sourcemap: BuildSourceMap::External,
+            ..BuildOptions::default()
+        });
+        assert_eq!(
+            source_map
+                .errors
+                .first()
+                .map(|message| message.text.as_str()),
+            Some("Cannot use an external source map without an output path")
+        );
+
+        let legal_comments = super::build(BuildOptions {
+            legal_comments: BuildLegalComments::Linked,
+            ..BuildOptions::default()
+        });
+        assert_eq!(
+            legal_comments
+                .errors
+                .first()
+                .map(|message| message.text.as_str()),
+            Some("Cannot use linked or external legal comments without an output path")
+        );
+
+        for (loader, expected) in [
+            (
+                Loader::File,
+                "Cannot use the \"file\" loader without an output path",
+            ),
+            (
+                Loader::Copy,
+                "Cannot use the \"copy\" loader without an output path",
+            ),
+        ] {
+            let result = super::build(BuildOptions {
+                loader: HashMap::from([(".asset".into(), loader)]),
+                ..BuildOptions::default()
+            });
+            assert_eq!(
+                result.errors.first().map(|message| message.text.as_str()),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
