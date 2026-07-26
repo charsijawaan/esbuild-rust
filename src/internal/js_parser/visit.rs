@@ -49,10 +49,14 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             Some(StmtData::Enum(enumeration)) => {
                 core.record_declared_symbol(enumeration.name.reference);
                 core.record_declared_symbol(enumeration.argument);
+                core.push_scope_for_visit_pass(ScopeKind::Entry, statement.loc);
                 let mut next_numeric_value = 0.0;
                 let mut has_numeric_value = true;
                 let mut constants = HashMap::new();
                 for value in &mut enumeration.values {
+                    if value.reference != crate::internal::ast::INVALID_REF {
+                        core.record_declared_symbol(value.reference);
+                    }
                     visit_expr(core, &mut value.value_or_nil, resolve_identifiers);
                     let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
                         &value.name,
@@ -60,38 +64,44 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     .into_owned();
                     match value.value_or_nil.data.as_deref() {
                         Some(ExprData::Number(number)) => {
-                            constants.insert(
-                                name,
-                                crate::internal::js_ast::TsEnumValue {
-                                    number: *number,
-                                    ..crate::internal::js_ast::TsEnumValue::default()
-                                },
-                            );
+                            let constant = crate::internal::js_ast::TsEnumValue {
+                                number: *number,
+                                ..crate::internal::js_ast::TsEnumValue::default()
+                            };
+                            if value.reference != crate::internal::ast::INVALID_REF {
+                                core.ts_enum_values_by_ref
+                                    .insert(value.reference, constant.clone());
+                            }
+                            constants.insert(name, constant);
                             next_numeric_value = *number + 1.0;
                             has_numeric_value = true;
                         }
                         Some(ExprData::String(string)) => {
-                            constants.insert(
-                                name,
-                                crate::internal::js_ast::TsEnumValue {
-                                    string: string.value.clone(),
-                                    is_string: true,
-                                    ..crate::internal::js_ast::TsEnumValue::default()
-                                },
-                            );
+                            let constant = crate::internal::js_ast::TsEnumValue {
+                                string: string.value.clone(),
+                                is_string: true,
+                                ..crate::internal::js_ast::TsEnumValue::default()
+                            };
+                            if value.reference != crate::internal::ast::INVALID_REF {
+                                core.ts_enum_values_by_ref
+                                    .insert(value.reference, constant.clone());
+                            }
+                            constants.insert(name, constant);
                             has_numeric_value = false;
                         }
                         Some(_) => has_numeric_value = false,
                         None if has_numeric_value => {
                             value.value_or_nil =
                                 Expr::new(value.loc, ExprData::Number(next_numeric_value));
-                            constants.insert(
-                                name,
-                                crate::internal::js_ast::TsEnumValue {
-                                    number: next_numeric_value,
-                                    ..crate::internal::js_ast::TsEnumValue::default()
-                                },
-                            );
+                            let constant = crate::internal::js_ast::TsEnumValue {
+                                number: next_numeric_value,
+                                ..crate::internal::js_ast::TsEnumValue::default()
+                            };
+                            if value.reference != crate::internal::ast::INVALID_REF {
+                                core.ts_enum_values_by_ref
+                                    .insert(value.reference, constant.clone());
+                            }
+                            constants.insert(name, constant);
                             next_numeric_value += 1.0;
                         }
                         None => {
@@ -99,6 +109,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                         }
                     }
                 }
+                core.pop_scope();
                 core.ts_enums.insert(enumeration.name.reference, constants);
             }
             Some(StmtData::Namespace(namespace)) => {
@@ -809,6 +820,30 @@ fn visit_expr_with_target(
                 }
                 core.symbols[symbol_index].flags |=
                     crate::internal::ast::SymbolFlags::COULD_POTENTIALLY_BE_MUTATED;
+            } else if let Some(value) = core
+                .ts_enum_values_by_ref
+                .get(&identifier.reference)
+                .cloned()
+            {
+                let comment = core.symbols
+                    [usize::try_from(identifier.reference.inner_index).expect("symbol index")]
+                .original_name
+                .clone();
+                let value = if value.is_string {
+                    Expr::new(
+                        expression.loc,
+                        ExprData::String(crate::internal::js_ast::StringExpr {
+                            value: value.string,
+                            ..crate::internal::js_ast::StringExpr::default()
+                        }),
+                    )
+                } else {
+                    Expr::new(expression.loc, ExprData::Number(value.number))
+                };
+                *data = ExprData::InlinedEnum(crate::internal::js_ast::InlinedEnumExpr {
+                    value,
+                    comment,
+                });
             }
         }
         ExprData::ImportIdentifier(identifier) => core.record_usage(identifier.reference),

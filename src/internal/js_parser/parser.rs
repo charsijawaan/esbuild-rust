@@ -3203,7 +3203,7 @@ mod tests {
         let mut options = Options::default();
         options.ts.parse = true;
         let (ast, ok, log) = parse_source_with_options(
-            "enum Color { Red, Green = 2, Blue = 'blue', Computed = make() }\
+            "enum Color { Red, Green = 2, Yellow = Green, Blue = 'blue', Computed = make() }\
              const red = Color.Red;\
              const blue = Color.Blue;\
              Color.Red = 3;\
@@ -3216,7 +3216,7 @@ mod tests {
         let Some(StmtData::Enum(color)) = ast.parts[1].statements[0].data.as_deref() else {
             panic!("expected enum declaration");
         };
-        assert_eq!(color.values.len(), 4);
+        assert_eq!(color.values.len(), 5);
         assert!(matches!(
             color.values[0].value_or_nil.data.as_deref(),
             Some(ExprData::Number(0.0))
@@ -3227,10 +3227,16 @@ mod tests {
         ));
         assert!(matches!(
             color.values[2].value_or_nil.data.as_deref(),
-            Some(ExprData::String(_))
+            Some(ExprData::InlinedEnum(value))
+                if matches!(value.value.data.as_deref(), Some(ExprData::Number(2.0)))
+                    && value.comment == "Green"
         ));
         assert!(matches!(
             color.values[3].value_or_nil.data.as_deref(),
+            Some(ExprData::String(_))
+        ));
+        assert!(matches!(
+            color.values[4].value_or_nil.data.as_deref(),
             Some(ExprData::Call(_))
         ));
         assert_eq!(

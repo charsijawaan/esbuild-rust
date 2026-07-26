@@ -3,7 +3,7 @@ use crate::internal::{
     helpers::string_to_utf16,
     js_ast::{
         EnumStmt, EnumValue, Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, Stmt, StmtData,
-        TsNamespaceScope, TypeScriptStmt,
+        TsNamespaceMember, TsNamespaceMemberData, TsNamespaceScope, TypeScriptStmt,
     },
     js_lexer::{Lexer, Token},
 };
@@ -593,25 +593,63 @@ pub(crate) fn parse_enum_statement(
     let name_text = String::from_utf8_lossy(lexer.raw()).into_owned();
     let name = LocRef {
         loc: name_loc,
-        reference: core.store_name_in_ref(lexer.identifier.clone()),
+        reference: core.declare_symbol(SymbolKind::TsEnum, name_loc, &name_text),
     };
     lexer.expect(Token::Identifier);
     let argument = core.new_symbol(SymbolKind::Hoisted, format!("_{name_text}"));
+    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Entry, loc);
+    core.current_scope
+        .as_ref()
+        .expect("enum scope")
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .ts_namespace = Some(TsNamespaceScope {
+        argument_ref: argument,
+        is_enum_scope: true,
+        ..TsNamespaceScope::default()
+    });
+    let old_context = core.fn_or_arrow_data_parse;
+    core.fn_or_arrow_data_parse.is_this_disallowed = true;
     lexer.expect(Token::OpenBrace);
     let mut values = Vec::new();
     while lexer.token != Token::CloseBrace {
         let value_loc = lexer.loc();
-        let name = if lexer.token == Token::StringLiteral {
-            let name = lexer.string_literal().to_vec();
+        let value_name = if lexer.token == Token::StringLiteral {
+            let value_name = lexer.string_literal().to_vec();
             lexer.next();
-            name
+            value_name
         } else if lexer.is_identifier_or_keyword() {
-            let name = string_to_utf16(lexer.raw());
+            let value_name = string_to_utf16(lexer.raw());
             lexer.next();
-            name
+            value_name
         } else {
             lexer.expected(Token::Identifier);
         };
+        let member_name =
+            String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(&value_name))
+                .into_owned();
+        let reference = if crate::internal::js_ast::is_identifier_utf16(&value_name) {
+            core.declare_symbol(SymbolKind::Other, value_loc, &member_name)
+        } else {
+            INVALID_REF
+        };
+        core.current_scope
+            .as_ref()
+            .expect("enum scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ts_namespace
+            .as_mut()
+            .expect("enum namespace metadata")
+            .exported_members
+            .insert(
+                member_name,
+                TsNamespaceMember {
+                    data: TsNamespaceMemberData::Property,
+                    loc: value_loc,
+                    is_enum_value: true,
+                },
+            );
         let value_or_nil = if lexer.token == Token::Equals {
             lexer.next();
             parse_expression(core, lexer, Precedence::Comma, true)
@@ -620,8 +658,8 @@ pub(crate) fn parse_enum_statement(
         };
         values.push(EnumValue {
             value_or_nil,
-            name,
-            reference: INVALID_REF,
+            name: value_name,
+            reference,
             loc: value_loc,
         });
         if !matches!(lexer.token, Token::Comma | Token::Semicolon) {
@@ -630,6 +668,8 @@ pub(crate) fn parse_enum_statement(
         lexer.next();
     }
     lexer.expect(Token::CloseBrace);
+    core.fn_or_arrow_data_parse = old_context;
+    core.pop_scope();
     if lexer.token == Token::Semicolon {
         lexer.next();
     }
