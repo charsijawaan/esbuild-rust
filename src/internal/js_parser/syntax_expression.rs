@@ -15,6 +15,7 @@ use super::{
     syntax_class::parse_class_prefix,
     syntax_function::{parse_async_prefix, parse_function_prefix},
     syntax_import::parse_import_prefix,
+    syntax_jsx::parse_jsx_element_prefix,
     syntax_literals::{
         parse_array_prefix, parse_big_int_or_string_if_unsupported, parse_numeric_literal,
         parse_regular_expression_literal, parse_simple_prefix, parse_string_literal,
@@ -150,6 +151,9 @@ fn parse_prefix(
         return expr;
     }
     if let Some(expr) = parse_identifier_or_arrow_prefix(core, lexer, minimum_precedence) {
+        return expr;
+    }
+    if let Some(expr) = parse_jsx_element_prefix(core, lexer) {
         return expr;
     }
     if let Some(expr) = parse_simple_prefix(core, lexer) {

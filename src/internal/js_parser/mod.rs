@@ -20,6 +20,7 @@ mod syntax_class;
 mod syntax_expression;
 mod syntax_function;
 mod syntax_import;
+mod syntax_jsx;
 mod syntax_literals;
 mod syntax_module;
 mod syntax_new;

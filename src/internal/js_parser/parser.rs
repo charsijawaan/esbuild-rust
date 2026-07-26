@@ -628,13 +628,20 @@ mod tests {
     };
 
     fn parse_source(text: &str) -> (crate::internal::js_ast::Ast, bool, Log) {
+        parse_source_with_options(text, Options::default())
+    }
+
+    fn parse_source_with_options(
+        text: &str,
+        options: Options,
+    ) -> (crate::internal::js_ast::Ast, bool, Log) {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let source = Source {
             contents: Arc::from(text.as_bytes()),
             identifier_name: "entry".to_owned(),
             ..Source::default()
         };
-        let (ast, ok) = parse(log.clone(), source, Options::default());
+        let (ast, ok) = parse(log.clone(), source, options);
         (ast, ok, log)
     }
 
@@ -2108,6 +2115,94 @@ mod tests {
             assert!(ok, "{source}");
             assert_eq!(log.done().len(), 1, "{source}");
         }
+    }
+
+    #[test]
+    fn parses_jsx_elements_attributes_children_and_fragments() {
+        let mut options = Options::default();
+        options.jsx.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "const view = <Panel title=\"Hi\" disabled {...props}>\
+               <span>{name}</span>\
+               <>{...items}</>\
+             </Panel>;",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Local(local)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected local statement");
+        };
+        let Some(ExprData::JsxElement(element)) =
+            local.declarations[0].value_or_nil.data.as_deref()
+        else {
+            panic!("expected JSX element");
+        };
+        assert!(matches!(
+            element.tag_or_nil.data.as_deref(),
+            Some(ExprData::Identifier(_))
+        ));
+        assert_eq!(element.properties.len(), 3);
+        assert_eq!(element.nullable_children.len(), 2);
+        assert!(matches!(
+            element.nullable_children[0].data.as_deref(),
+            Some(ExprData::JsxElement(child))
+                if matches!(child.tag_or_nil.data.as_deref(), Some(ExprData::String(_)))
+        ));
+        assert!(matches!(
+            element.nullable_children[1].data.as_deref(),
+            Some(ExprData::JsxElement(fragment)) if fragment.tag_or_nil.data.is_none()
+        ));
+        for name in ["Panel", "props", "name", "items"] {
+            let usage = ast.parts[1]
+                .symbol_uses
+                .iter()
+                .find(|(reference, _)| {
+                    ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                        .original_name
+                        == name
+                })
+                .map(|(_, usage)| usage)
+                .expect("JSX reference symbol");
+            assert_eq!(usage.count_estimate, 1, "{name}");
+        }
+
+        let mut options = Options::default();
+        options.jsx.parse = true;
+        options.jsx.preserve = true;
+        let (ast, ok, log) = parse_source_with_options("<div>Hello &amp; world</div>;", options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected JSX expression statement");
+        };
+        let Some(ExprData::JsxElement(element)) = statement.value.data.as_deref() else {
+            panic!("expected JSX element");
+        };
+        assert!(matches!(
+            element.nullable_children[0].data.as_deref(),
+            Some(ExprData::JsxText(text)) if text.raw == "Hello &amp; world"
+        ));
+
+        let mut options = Options::default();
+        options.jsx.parse = true;
+        let (_, ok, log) = parse_source_with_options("<One></Two>;", options);
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+
+        let mut options = Options::default();
+        options.jsx.parse = true;
+        let (_, ok, log) = parse_source_with_options("<div value value />;", options);
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Warning);
+
+        let (_, ok, log) = parse_source("<div />;");
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Error);
     }
 
     #[test]

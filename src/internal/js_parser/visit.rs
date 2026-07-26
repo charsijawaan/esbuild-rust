@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use crate::internal::js_ast::{
     AssignTarget, Binding, BindingData, BlockStmt, Class, Expr, ExprData, Function, OpCode,
-    PropertyFlags, ScopeKind, Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
+    PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData, StrictModeKind,
+    for_each_identifier_binding,
 };
 use crate::internal::logger::{Loc, Range};
 
@@ -1006,6 +1007,20 @@ fn visit_expr_with_target(
             core.visit_loop_depth = old_loop_depth;
             core.visit_switch_depth = old_switch_depth;
         }
+        ExprData::JsxElement(element) => {
+            visit_expr(core, &mut element.tag_or_nil, resolve_identifiers);
+            for property in &mut element.properties {
+                if property.kind != PropertyKind::Spread
+                    && property.flags.contains(PropertyFlags::IS_COMPUTED)
+                {
+                    visit_expr(core, &mut property.key, resolve_identifiers);
+                }
+                visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
+            }
+            for child in &mut element.nullable_children {
+                visit_expr(core, child, resolve_identifiers);
+            }
+        }
         ExprData::Boolean(_)
         | ExprData::Super
         | ExprData::Null
@@ -1013,7 +1028,6 @@ fn visit_expr_with_target(
         | ExprData::This
         | ExprData::ImportMeta(_)
         | ExprData::NameOfSymbol(_)
-        | ExprData::JsxElement(_)
         | ExprData::JsxText(_)
         | ExprData::Missing
         | ExprData::BigInt(_)
