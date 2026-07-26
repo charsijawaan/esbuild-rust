@@ -828,18 +828,19 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
         return;
     }
     let is_derived = class.extends_or_nil.data.is_some();
+    let has_constructor = class_constructor_index(class).is_some();
     let lower_private_fields = class.properties.iter().any(|property| {
         !matches!(
             property.key.data.as_deref(),
             Some(ExprData::PrivateIdentifier(_))
-        ) && class_field_can_be_moved(property)
+        ) && class_field_can_be_moved(property, !has_constructor)
     });
 
     let mut assignments = Vec::new();
     let mut private_declarations = Vec::new();
     class.properties.retain_mut(|property| {
         let Some((assignment, keep_private_declaration)) =
-            take_class_field_assignment(property, lower_private_fields)
+            take_class_field_assignment(property, lower_private_fields, !has_constructor)
         else {
             return true;
         };
@@ -952,7 +953,7 @@ fn class_constructor_index(class: &Class) -> Option<usize> {
     })
 }
 
-fn class_field_can_be_moved(property: &Property) -> bool {
+fn class_field_can_be_moved(property: &Property, allow_any_initializer: bool) -> bool {
     if property.kind != PropertyKind::Field
         || property.flags.contains(PropertyFlags::IS_STATIC)
         || !property.decorators.is_empty()
@@ -965,13 +966,14 @@ fn class_field_can_be_moved(property: &Property) -> bool {
         &property.value_or_nil
     };
     initializer.data.is_some()
-        && class_field_initializer_is_safe_to_move(initializer)
+        && (allow_any_initializer || class_field_initializer_is_safe_to_move(initializer))
         && class_field_assignment_target(property).is_some()
 }
 
 fn take_class_field_assignment(
     property: &mut Property,
     lower_private_fields: bool,
+    allow_any_initializer: bool,
 ) -> Option<(Stmt, bool)> {
     let is_private = matches!(
         property.key.data.as_deref(),
@@ -980,7 +982,7 @@ fn take_class_field_assignment(
     if is_private && !lower_private_fields {
         return None;
     }
-    if !class_field_can_be_moved(property) {
+    if !class_field_can_be_moved(property, allow_any_initializer) {
         return None;
     }
     let target = class_field_assignment_target(property)?;

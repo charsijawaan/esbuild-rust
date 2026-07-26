@@ -4206,6 +4206,19 @@ mod tests {
             "{ordered}"
         );
 
+        let generated = code(transform(
+            "class Foo { initialized = createValue() }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            generated.contains("constructor() {\n    this.initialized = createValue();"),
+            "{generated}"
+        );
+
         let define_fields = code(transform(
             "class Foo { foo }",
             TransformOptions {
@@ -4238,7 +4251,7 @@ mod tests {
         );
 
         let generated_derived = code(transform(
-            "class Foo extends Base { initialized = 1 }",
+            "class Foo extends Base { initialized = createValue() }",
             TransformOptions {
                 loader: Loader::Ts,
                 tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
@@ -4246,8 +4259,9 @@ mod tests {
             },
         ));
         assert!(
-            generated_derived
-                .contains("constructor() {\n    super(...arguments);\n    this.initialized = 1;"),
+            generated_derived.contains(
+                "constructor() {\n    super(...arguments);\n    this.initialized = createValue();"
+            ),
             "{generated_derived}"
         );
 
