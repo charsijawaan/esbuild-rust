@@ -3069,12 +3069,17 @@ pub fn assemble_css_chunk(
     let mut metadata_inputs = Vec::new();
     let mut metadata_imports = Vec::new();
     let mut legal_comment_list = Vec::new();
+    let mut source_map_results = Vec::new();
+    let mut previous_offset = LineColumnOffset::default();
     chunk.external_legal_comments.clear();
     chunk.metadata_imports.clear();
     chunk.metadata_inputs.clear();
+    chunk.source_map_results.clear();
 
     if !options.css_banner.is_empty() {
+        previous_offset.advance_string(&options.css_banner);
         joiner.add_string(options.css_banner.clone());
+        previous_offset.advance_string("\n");
         joiner.add_string("\n");
     }
 
@@ -3098,6 +3103,7 @@ pub fn assemble_css_chunk(
             },
         );
         if !charset.css.is_empty() {
+            previous_offset.advance_bytes(&charset.css);
             joiner.add_bytes(charset.css);
             newline_before_comment = true;
         }
@@ -3133,6 +3139,7 @@ pub fn assemble_css_chunk(
             && item.source_index.is_valid()
         {
             if newline_before_comment {
+                previous_offset.advance_string("\n");
                 joiner.add_string("\n");
             }
             let source_index = item.source_index.get_index();
@@ -3141,10 +3148,39 @@ pub fn assemble_css_chunk(
                 .source
                 .pretty_paths
                 .select(options.code_path_style);
-            joiner.add_string(format!("/* {path} */\n"));
+            let comment = format!("/* {path} */\n");
+            previous_offset.advance_string(&comment);
+            joiner.add_string(comment);
         }
         if !item.css.is_empty() {
             newline_before_comment = true;
+            let generated_offset = previous_offset;
+            if options.source_map != SourceMapMode::None && item.source_index.is_valid() {
+                if item.source_map_chunk.should_ignore {
+                    previous_offset.advance_bytes(&item.css);
+                    if source_map_results
+                        .last()
+                        .is_none_or(|result: &CompileResultForSourceMap| !result.is_null_entry)
+                    {
+                        source_map_results.push(CompileResultForSourceMap {
+                            generated_offset,
+                            source_index: item.source_index.get_index(),
+                            is_null_entry: true,
+                            ..CompileResultForSourceMap::default()
+                        });
+                    }
+                } else {
+                    source_map_results.push(CompileResultForSourceMap {
+                        source_map_chunk: item.source_map_chunk.clone(),
+                        generated_offset,
+                        source_index: item.source_index.get_index(),
+                        is_null_entry: false,
+                    });
+                    previous_offset = LineColumnOffset::default();
+                }
+            } else {
+                previous_offset.advance_bytes(&item.css);
+            }
             joiner.add_bytes(item.css.clone());
         }
     }
@@ -3173,6 +3209,7 @@ pub fn assemble_css_chunk(
     chunk.intermediate_output = output_paths.break_joiner_into_pieces(joiner);
     chunk.metadata_imports = metadata_imports;
     chunk.metadata_inputs = metadata_inputs;
+    chunk.source_map_results = source_map_results;
 }
 
 /// Discover symbol edges that cross JavaScript chunk boundaries and assign
@@ -5895,7 +5932,7 @@ pub fn finalize_chunk_paths(
     }
 }
 
-fn append_javascript_source_map_outputs(
+fn append_source_map_outputs(
     file_system: &dyn Fs,
     chunk: &mut ChunkInfo,
     options: &Options,
@@ -5909,6 +5946,11 @@ fn append_javascript_source_map_outputs(
     }
     let source_map = std::mem::take(&mut chunk.output_source_map).finalize(shifts);
     let source_map_rel_path = format!("{}.map", chunk.final_rel_path);
+    let (comment_prefix, comment_suffix) = if chunk.is_css {
+        ("/*", " */")
+    } else {
+        ("//", "")
+    };
     match options.source_map {
         SourceMapMode::LinkedWithComment => {
             let import_path = path_between_chunks(
@@ -5921,15 +5963,17 @@ fn append_javascript_source_map_outputs(
             let import_path = import_path.strip_prefix("./").unwrap_or(&import_path);
             joiner.ensure_newline_at_end();
             joiner.add_string(format!(
-                "//# sourceMappingURL={}\n",
-                escape_url_path(import_path)
+                "{comment_prefix}# sourceMappingURL={}{comment_suffix}\n",
+                escape_url_path(import_path),
             ));
         }
         SourceMapMode::Inline | SourceMapMode::InlineAndExternal => {
             joiner.ensure_newline_at_end();
-            joiner.add_string("//# sourceMappingURL=data:application/json;base64,");
+            joiner.add_string(format!(
+                "{comment_prefix}# sourceMappingURL=data:application/json;base64,"
+            ));
             joiner.add_string(STANDARD.encode(&source_map));
-            joiner.add_string("\n");
+            joiner.add_string(format!("{comment_suffix}\n"));
         }
         SourceMapMode::ExternalWithoutComment | SourceMapMode::None => {}
     }
@@ -6192,7 +6236,7 @@ pub fn finalize_javascript_chunk_outputs(
             });
         }
 
-        append_javascript_source_map_outputs(
+        append_source_map_outputs(
             file_system,
             chunk,
             options,
@@ -9462,6 +9506,72 @@ mod tests {
             outputs[1]
                 .json_metadata_chunk
                 .contains("\"/project/style.css\"")
+        );
+    }
+
+    #[test]
+    fn composes_and_emits_css_source_maps() {
+        let mut stylesheet = css_file(vec![], vec![], vec![]);
+        stylesheet.source.index = 1;
+        stylesheet.source.contents = b".app{color:red}".to_vec().into();
+        stylesheet.source.pretty_paths = PrettyPaths {
+            abs: "/project/style.css".into(),
+            rel: "style.css".into(),
+        };
+        let Some(InputFileRepr::Css(repr)) = stylesheet.repr.as_mut() else {
+            panic!("expected CSS");
+        };
+        repr.ast.approximate_line_count = 1;
+        repr.ast.rules = vec![Rule {
+            data: RuleData::Comment(crate::internal::css_ast::CommentRule {
+                text: ".app{color:red}".into(),
+            }),
+            loc: Loc::default(),
+        }];
+        let input_files = [js_file(js_ast::Ast::default()), stylesheet];
+        let graph = clone_linker_graph(&input_files, &[0, 1], &[], false);
+        let options = Options {
+            abs_output_dir: "/out".into(),
+            source_map: SourceMapMode::LinkedWithComment,
+            ..Options::default()
+        };
+        let prepared = prepare_css_asts(
+            &graph,
+            &[super::CssImportOrder {
+                kind: CssImportKind::SourceIndex,
+                source_index: 1,
+                ..super::CssImportOrder::default()
+            }],
+            &options,
+        );
+        let compiled = compile_prepared_css_asts(&graph, &prepared, &options);
+        assert!(!compiled[0].source_map_chunk.should_ignore);
+        let mut chunk = ChunkInfo {
+            unique_key: "UNIQUEC00000000".into(),
+            final_template: vec![PathTemplate {
+                data: "app.css".into(),
+                ..PathTemplate::default()
+            }],
+            is_css: true,
+            ..ChunkInfo::default()
+        };
+        assemble_css_chunk(&graph, &mut chunk, &compiled, &options, &context(&[], &[]));
+        assert_eq!(chunk.source_map_results.len(), 1);
+        let outputs = finalize_javascript_chunk_outputs(
+            &mock_fs(&HashMap::new(), MockKind::Unix, "/"),
+            &graph,
+            std::slice::from_mut(&mut chunk),
+            &[],
+            &options,
+        );
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].abs_path, "/out/app.css.map");
+        assert!(outputs[0].contents.starts_with(b"{\n  \"version\": 3,"));
+        assert_eq!(outputs[1].abs_path, "/out/app.css");
+        assert!(
+            outputs[1]
+                .contents
+                .ends_with(b"/*# sourceMappingURL=app.css.map */\n")
         );
     }
 
