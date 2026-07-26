@@ -4,11 +4,11 @@ use std::{
 };
 
 use crate::internal::{
-    ast::{Ref, SymbolKind},
+    ast::{ImportRecordFlags, Ref, SymbolKind},
     helpers::utf16_to_string,
     js_ast::{
-        Ast, DeclaredSymbol, ExportsKind, ExprData, LocalKind, Part, Scope, ScopeKind, Stmt,
-        StmtData, StrictModeKind, for_each_identifier_binding,
+        Ast, DeclaredSymbol, ExportsKind, ExprData, LocalKind, NamedExport, NamedImport, Part,
+        Scope, ScopeKind, Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
     },
     js_lexer::{Lexer, LexerPanic, Token},
     logger::{Loc, Log, Source},
@@ -99,6 +99,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             0,
             "visit pass must consume every parse-pass scope"
         );
+        let module_metadata = scan_module_metadata(&mut core, &mut statements);
         let module_scope = core
             .module_scope
             .clone()
@@ -154,6 +155,9 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             mangled_props: core.mangled_props,
             reserved_props: core.reserved_props,
             import_records: core.import_records,
+            named_imports: module_metadata.named_imports,
+            named_exports: module_metadata.named_exports,
+            export_star_import_records: module_metadata.export_star_import_records,
             source_map_comment: lexer.source_mapping_url.clone(),
             exports_ref: core.exports_ref,
             module_ref: core.module_ref,
@@ -170,6 +174,243 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         Ok(()) => (result, true),
         Err(payload) if payload.downcast_ref::<LexerPanic>().is_some() => (result, false),
         Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+#[derive(Default)]
+struct ModuleMetadata {
+    named_imports: HashMap<Ref, NamedImport>,
+    named_exports: HashMap<String, NamedExport>,
+    export_star_import_records: Vec<u32>,
+}
+
+#[allow(clippy::too_many_lines)]
+fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> ModuleMetadata {
+    let mut metadata = ModuleMetadata::default();
+    for statement in statements {
+        match statement.data.as_deref_mut() {
+            Some(StmtData::Import(import)) => {
+                let record = &mut core.import_records
+                    [usize::try_from(import.import_record_index).expect("import record index")];
+                if import.star_name_loc.is_some() {
+                    record.flags |= ImportRecordFlags::CONTAINS_IMPORT_STAR;
+                }
+                if import.default_name.is_some() {
+                    record.flags |= ImportRecordFlags::CONTAINS_DEFAULT_ALIAS;
+                }
+                if core.options.mode != crate::internal::config::Mode::PassThrough {
+                    if let Some(default_name) = import.default_name {
+                        metadata.named_imports.insert(
+                            default_name.reference,
+                            NamedImport {
+                                alias: "default".into(),
+                                alias_loc: default_name.loc,
+                                namespace_ref: import.namespace_ref,
+                                import_record_index: import.import_record_index,
+                                ..NamedImport::default()
+                            },
+                        );
+                    }
+                    if let Some(star_loc) = import.star_name_loc {
+                        metadata.named_imports.insert(
+                            import.namespace_ref,
+                            NamedImport {
+                                alias_loc: star_loc,
+                                namespace_ref: crate::internal::ast::INVALID_REF,
+                                import_record_index: import.import_record_index,
+                                alias_is_star: true,
+                                ..NamedImport::default()
+                            },
+                        );
+                    }
+                    if let Some(items) = &import.items {
+                        for item in items {
+                            metadata.named_imports.insert(
+                                item.name.reference,
+                                NamedImport {
+                                    alias: item.alias.clone(),
+                                    alias_loc: item.alias_loc,
+                                    namespace_ref: import.namespace_ref,
+                                    import_record_index: import.import_record_index,
+                                    ..NamedImport::default()
+                                },
+                            );
+                            if item.alias == "default" {
+                                record.flags |= ImportRecordFlags::CONTAINS_DEFAULT_ALIAS;
+                            } else if item.alias == "__esModule" {
+                                record.flags |= ImportRecordFlags::CONTAINS_ES_MODULE_ALIAS;
+                            }
+                        }
+                    }
+                }
+            }
+            Some(StmtData::ExportDefault(export)) => {
+                record_export(
+                    core,
+                    &mut metadata.named_exports,
+                    export.default_name.loc,
+                    "default",
+                    export.default_name.reference,
+                );
+            }
+            Some(StmtData::ExportClause(export)) => {
+                for item in &mut export.items {
+                    if ParserCore::is_stored_name_ref(item.name.reference) {
+                        let name =
+                            String::from_utf8_lossy(core.load_name_from_ref(item.name.reference))
+                                .into_owned();
+                        item.name.reference = core.find_symbol(item.name.loc, &name).reference;
+                    }
+                    record_export(
+                        core,
+                        &mut metadata.named_exports,
+                        item.alias_loc,
+                        &item.alias,
+                        item.name.reference,
+                    );
+                }
+            }
+            Some(StmtData::ExportStar(export)) => {
+                let record = &mut core.import_records
+                    [usize::try_from(export.import_record_index).expect("import record index")];
+                if let Some(alias) = &export.alias {
+                    record.flags |= ImportRecordFlags::CONTAINS_IMPORT_STAR;
+                    metadata.named_imports.insert(
+                        export.namespace_ref,
+                        NamedImport {
+                            alias_loc: alias.loc,
+                            namespace_ref: crate::internal::ast::INVALID_REF,
+                            import_record_index: export.import_record_index,
+                            alias_is_star: true,
+                            is_exported: true,
+                            ..NamedImport::default()
+                        },
+                    );
+                    record_export(
+                        core,
+                        &mut metadata.named_exports,
+                        alias.loc,
+                        &alias.original_name,
+                        export.namespace_ref,
+                    );
+                } else {
+                    metadata
+                        .export_star_import_records
+                        .push(export.import_record_index);
+                }
+            }
+            Some(StmtData::ExportFrom(export)) => {
+                let mut flags = ImportRecordFlags::default();
+                for item in &mut export.items {
+                    if ParserCore::is_stored_name_ref(item.name.reference) {
+                        item.name.reference =
+                            core.new_symbol(SymbolKind::Import, item.original_name.clone());
+                    }
+                    metadata.named_imports.insert(
+                        item.name.reference,
+                        NamedImport {
+                            alias: item.original_name.clone(),
+                            alias_loc: item.name.loc,
+                            namespace_ref: export.namespace_ref,
+                            import_record_index: export.import_record_index,
+                            is_exported: true,
+                            ..NamedImport::default()
+                        },
+                    );
+                    record_export(
+                        core,
+                        &mut metadata.named_exports,
+                        item.name.loc,
+                        &item.alias,
+                        item.name.reference,
+                    );
+                    if item.original_name == "default" {
+                        flags |= ImportRecordFlags::CONTAINS_DEFAULT_ALIAS;
+                    } else if item.original_name == "__esModule" {
+                        flags |= ImportRecordFlags::CONTAINS_ES_MODULE_ALIAS;
+                    }
+                }
+                core.import_records
+                    [usize::try_from(export.import_record_index).expect("import record index")]
+                .flags |= flags;
+            }
+            Some(StmtData::Local(local)) if local.is_export => {
+                for declaration in &mut local.declarations {
+                    for_each_identifier_binding(
+                        &mut declaration.binding,
+                        &mut |loc, identifier| {
+                            let alias =
+                                core.symbols[usize::try_from(identifier.reference.inner_index)
+                                    .expect("symbol index")]
+                                .original_name
+                                .clone();
+                            record_export(
+                                core,
+                                &mut metadata.named_exports,
+                                loc,
+                                &alias,
+                                identifier.reference,
+                            );
+                        },
+                    );
+                }
+            }
+            Some(StmtData::Function(function)) if function.is_export => {
+                if let Some(name) = function.function.name {
+                    let alias = core.symbols
+                        [usize::try_from(name.reference.inner_index).expect("symbol index")]
+                    .original_name
+                    .clone();
+                    record_export(
+                        core,
+                        &mut metadata.named_exports,
+                        name.loc,
+                        &alias,
+                        name.reference,
+                    );
+                }
+            }
+            Some(StmtData::Class(class)) if class.is_export => {
+                if let Some(name) = class.class.name {
+                    let alias = core.symbols
+                        [usize::try_from(name.reference.inner_index).expect("symbol index")]
+                    .original_name
+                    .clone();
+                    record_export(
+                        core,
+                        &mut metadata.named_exports,
+                        name.loc,
+                        &alias,
+                        name.reference,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    metadata
+}
+
+fn record_export(
+    core: &mut ParserCore,
+    exports: &mut HashMap<String, NamedExport>,
+    loc: Loc,
+    alias: &str,
+    reference: Ref,
+) {
+    if exports.contains_key(alias) {
+        core.add_error_range(
+            crate::internal::logger::Range { loc, len: 0 },
+            format!("Multiple exports with the same name {alias:?}"),
+        );
+    } else {
+        exports.insert(
+            alias.into(),
+            NamedExport {
+                reference,
+                alias_loc: loc,
+            },
+        );
     }
 }
 
@@ -719,5 +960,80 @@ mod tests {
         );
         assert_eq!(ast.parts[1].symbol_uses[&hoisted].count_estimate, 1);
         assert_eq!(ast.parts[1].symbol_uses[&unbound_lexical].count_estimate, 1);
+    }
+
+    #[test]
+    fn builds_linker_facing_named_import_and_export_metadata() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"import d, {x as y} from 'pkg';\
+                   import * as ns from 'ns';\
+                   export {y as z};\
+                   export {default as renamed} from 'other';\
+                   export * from 'star';\
+                   export * as all from 'all';\
+                   export default 1;"[..],
+            ),
+            identifier_name: "entry".to_owned(),
+            ..Source::default()
+        };
+        let (ast, ok) = parse(
+            log.clone(),
+            source,
+            Options {
+                mode: crate::internal::config::Mode::ConvertFormat,
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.named_imports.len(), 5);
+        assert_eq!(
+            ast.named_exports
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            ["z", "renamed", "all", "default"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(ast.export_star_import_records, [3]);
+        assert!(
+            ast.import_records[0]
+                .flags
+                .contains(crate::internal::ast::ImportRecordFlags::CONTAINS_DEFAULT_ALIAS)
+        );
+        assert!(
+            ast.import_records[1]
+                .flags
+                .contains(crate::internal::ast::ImportRecordFlags::CONTAINS_IMPORT_STAR)
+        );
+        assert!(
+            ast.import_records[2]
+                .flags
+                .contains(crate::internal::ast::ImportRecordFlags::CONTAINS_DEFAULT_ALIAS)
+        );
+        assert!(
+            ast.import_records[4]
+                .flags
+                .contains(crate::internal::ast::ImportRecordFlags::CONTAINS_IMPORT_STAR)
+        );
+        assert!(
+            ast.named_imports
+                .values()
+                .any(|import| import.alias == "x" && !import.is_exported)
+        );
+        assert!(
+            ast.named_imports
+                .values()
+                .any(|import| import.alias == "default" && import.is_exported)
+        );
+        assert!(
+            ast.named_imports
+                .values()
+                .any(|import| import.alias_is_star && import.is_exported)
+        );
     }
 }
