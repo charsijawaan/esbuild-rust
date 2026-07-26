@@ -93,6 +93,11 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
         visit_top_level_statements(&mut core, &mut statements);
+        assert_eq!(
+            core.remaining_scope_count(),
+            0,
+            "visit pass must consume every parse-pass scope"
+        );
         let module_scope = core
             .module_scope
             .clone()
@@ -621,5 +626,30 @@ mod tests {
                 .expect("block parent"),
             &ast.parts[1].scopes[0]
         ));
+    }
+
+    #[test]
+    fn resolves_nested_function_and_block_identifier_uses() {
+        let (ast, ok, log) =
+            parse_source("function outer(a) { let b = a; { let a = b; use(a, b); } return a; }");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let argument_a = ast.parts[1].scopes[1].lock().expect("args scope").members["a"].reference;
+        let body_b = ast.parts[1].scopes[2].lock().expect("body scope").members["b"].reference;
+        let block_a = ast.parts[1].scopes[3].lock().expect("block scope").members["a"].reference;
+        assert_ne!(argument_a, block_a);
+        assert_eq!(ast.parts[1].symbol_uses[&argument_a].count_estimate, 2);
+        assert_eq!(ast.parts[1].symbol_uses[&body_b].count_estimate, 2);
+        assert_eq!(ast.parts[1].symbol_uses[&block_a].count_estimate, 1);
+        let use_ref = ast
+            .symbols
+            .iter()
+            .position(|symbol| symbol.original_name == "use")
+            .map(|index| crate::internal::ast::Ref {
+                source_index: 0,
+                inner_index: u32::try_from(index).expect("symbol index"),
+            })
+            .expect("unbound use symbol");
+        assert_eq!(ast.parts[1].symbol_uses[&use_ref].count_estimate, 1);
     }
 }

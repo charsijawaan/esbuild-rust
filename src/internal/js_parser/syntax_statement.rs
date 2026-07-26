@@ -497,7 +497,7 @@ fn function_declaration_from_expression(core: &mut ParserCore, loc: Loc, express
     let Some(data) = expression.data else {
         unreachable!("function parser always returns expression data");
     };
-    let ExprData::Function(function) = *data else {
+    let ExprData::Function(mut function) = *data else {
         unreachable!("function declaration requires a function expression");
     };
     if function.function.name.is_none() {
@@ -505,6 +505,17 @@ fn function_declaration_from_expression(core: &mut ParserCore, loc: Loc, express
             Range { loc, len: 8 },
             "A function declaration must have a name",
         );
+    }
+    if let Some(name) = &mut function.function.name
+        && ParserCore::is_stored_name_ref(name.reference)
+    {
+        let text = String::from_utf8_lossy(core.load_name_from_ref(name.reference)).into_owned();
+        let kind = if function.function.is_async || function.function.is_generator {
+            crate::internal::ast::SymbolKind::GeneratorOrAsyncFunction
+        } else {
+            crate::internal::ast::SymbolKind::HoistedFunction
+        };
+        name.reference = core.declare_symbol(kind, name.loc, &text);
     }
     Stmt::new(
         loc,
@@ -519,7 +530,7 @@ fn class_declaration_from_expression(core: &mut ParserCore, loc: Loc, expression
     let Some(data) = expression.data else {
         unreachable!("class parser always returns expression data");
     };
-    let ExprData::Class(class) = *data else {
+    let ExprData::Class(mut class) = *data else {
         unreachable!("class declaration requires a class expression");
     };
     if class.class.name.is_none() {
@@ -527,6 +538,13 @@ fn class_declaration_from_expression(core: &mut ParserCore, loc: Loc, expression
             Range { loc, len: 5 },
             "A class declaration must have a name",
         );
+    }
+    if let Some(name) = &mut class.class.name
+        && ParserCore::is_stored_name_ref(name.reference)
+    {
+        let text = String::from_utf8_lossy(core.load_name_from_ref(name.reference)).into_owned();
+        name.reference =
+            core.declare_symbol(crate::internal::ast::SymbolKind::Class, name.loc, &text);
     }
     Stmt::new(
         loc,

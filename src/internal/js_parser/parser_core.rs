@@ -239,6 +239,19 @@ impl ParserCore {
         self.scopes_for_current_part.push(order.scope);
     }
 
+    pub(crate) fn push_next_scope_for_visit_pass(&mut self, kind: ScopeKind) {
+        let loc = self
+            .scopes_in_order
+            .first()
+            .expect("visit pass generated more scopes than parse pass")
+            .loc;
+        self.push_scope_for_visit_pass(kind, loc);
+    }
+
+    pub(crate) fn remaining_scope_count(&self) -> usize {
+        self.scopes_in_order.len()
+    }
+
     pub(crate) fn prepare_for_visit_pass(
         &mut self,
         has_esm_exports: bool,
