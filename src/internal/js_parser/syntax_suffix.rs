@@ -396,6 +396,10 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                     }),
                 );
             }
+            Token::Exclamation if core.options.ts.parse && !lexer.has_newline_before => {
+                lexer.next();
+                optional_chain = old_optional_chain;
+            }
             _ => return left,
         }
     }

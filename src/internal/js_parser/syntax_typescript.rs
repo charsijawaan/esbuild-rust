@@ -70,6 +70,69 @@ pub(crate) fn skip_type_annotation(lexer: &mut Lexer, stop_tokens: &[Token]) {
     }
 }
 
+pub(crate) fn skip_type_assertion(lexer: &mut Lexer) {
+    let mut delimiters = Vec::new();
+    let mut has_type_token = false;
+    loop {
+        if delimiters.is_empty()
+            && has_type_token
+            && matches!(
+                lexer.token,
+                Token::Comma
+                    | Token::Semicolon
+                    | Token::CloseBrace
+                    | Token::CloseBracket
+                    | Token::CloseParen
+                    | Token::Question
+                    | Token::Colon
+                    | Token::Equals
+                    | Token::Plus
+                    | Token::Minus
+                    | Token::Asterisk
+                    | Token::AsteriskAsterisk
+                    | Token::Slash
+                    | Token::Percent
+                    | Token::AmpersandAmpersand
+                    | Token::BarBar
+                    | Token::QuestionQuestion
+                    | Token::EqualsEquals
+                    | Token::EqualsEqualsEquals
+                    | Token::ExclamationEquals
+                    | Token::ExclamationEqualsEquals
+                    | Token::Instanceof
+                    | Token::In
+                    | Token::PlusPlus
+                    | Token::MinusMinus
+                    | Token::Exclamation
+                    | Token::OpenParen
+            )
+        {
+            return;
+        }
+        if delimiters.is_empty() && lexer.token.is_assign() {
+            return;
+        }
+        match lexer.token {
+            Token::OpenParen => delimiters.push(Token::CloseParen),
+            Token::OpenBracket => delimiters.push(Token::CloseBracket),
+            Token::OpenBrace => delimiters.push(Token::CloseBrace),
+            Token::LessThan => delimiters.push(Token::GreaterThan),
+            token if delimiters.last() == Some(&token) => {
+                delimiters.pop();
+            }
+            Token::EndOfFile => {
+                if let Some(expected) = delimiters.last().copied() {
+                    lexer.expected(expected);
+                }
+                return;
+            }
+            _ => {}
+        }
+        has_type_token = true;
+        lexer.next();
+    }
+}
+
 pub(crate) fn parse_type_script_statement(
     core: &mut ParserCore,
     lexer: &mut Lexer,

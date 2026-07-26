@@ -60,6 +60,13 @@ pub(crate) fn parse_expression_suffix(
 
     let mut previous_operator = None;
     loop {
+        if core.options.ts.parse
+            && (lexer.is_contextual_keyword(b"as") || lexer.is_contextual_keyword(b"satisfies"))
+        {
+            lexer.next();
+            super::syntax_typescript::skip_type_assertion(lexer);
+            continue;
+        }
         if lexer.token == Token::Question && Precedence::Conditional > minimum_precedence {
             lexer.next();
             if core.options.ts.parse && lexer.token == Token::Colon {

@@ -2672,6 +2672,55 @@ mod tests {
     }
 
     #[test]
+    fn erases_type_script_expression_assertions() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "const typed = input as Payload;\
+             const checked = config satisfies Options;\
+             typed!.field;\
+             (handler as Handler)(typed);\
+             const sum = input as number + 1;",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Local(typed)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected typed declaration");
+        };
+        assert!(matches!(
+            typed.declarations[0].value_or_nil.data.as_deref(),
+            Some(ExprData::Identifier(_))
+        ));
+        let Some(StmtData::Local(checked)) = ast.parts[1].statements[1].data.as_deref() else {
+            panic!("expected satisfies declaration");
+        };
+        assert!(matches!(
+            checked.declarations[0].value_or_nil.data.as_deref(),
+            Some(ExprData::Identifier(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[2].data.as_deref(),
+            Some(StmtData::Expr(statement))
+                if matches!(statement.value.data.as_deref(), Some(ExprData::Dot(_)))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[3].data.as_deref(),
+            Some(StmtData::Expr(statement))
+                if matches!(statement.value.data.as_deref(), Some(ExprData::Call(_)))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[4].data.as_deref(),
+            Some(StmtData::Local(local))
+                if matches!(
+                    local.declarations[0].value_or_nil.data.as_deref(),
+                    Some(ExprData::Binary(binary))
+                        if binary.op == crate::internal::js_ast::OpCode::BinaryAdd
+                )
+        ));
+    }
+
+    #[test]
     fn for_loops_keep_lexical_bindings_in_a_loop_scope() {
         let (ast, ok, log) =
             parse_source("for (let item of items) { item; } item; for (let i = 0; i < 1; i++) {}");
