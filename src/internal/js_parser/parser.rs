@@ -36,6 +36,16 @@ const MODULE_SCOPE_LOC: Loc = Loc { start: -1 };
 pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
     let mut result = Ast::default();
     let parsed = catch_unwind(AssertUnwindSafe(|| {
+        let mut options = options;
+        if options.jsx.factory.parts.is_empty() {
+            options.jsx.factory.parts = vec!["React".into(), "createElement".into()];
+        }
+        if options.jsx.fragment.parts.is_empty() && options.jsx.fragment.constant.data.is_none() {
+            options.jsx.fragment.parts = vec!["React".into(), "Fragment".into()];
+        }
+        if options.jsx.import_source.is_empty() {
+            options.jsx.import_source = "react".into();
+        }
         let mut lexer = Lexer::new(log.clone(), source.clone(), options.ts.clone());
         let mut core = ParserCore::new_with_log(source, options, log);
         core.push_scope_for_parse_pass(ScopeKind::Entry, MODULE_SCOPE_LOC);
@@ -2121,6 +2131,7 @@ mod tests {
     fn parses_jsx_elements_attributes_children_and_fragments() {
         let mut options = Options::default();
         options.jsx.parse = true;
+        options.jsx.preserve = true;
         let (ast, ok, log) = parse_source_with_options(
             "const view = <Panel title=\"Hi\" disabled {...props}>\
                <span>{name}</span>\
@@ -2203,6 +2214,52 @@ mod tests {
         let messages = log.done();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].kind, MsgKind::Error);
+    }
+
+    #[test]
+    fn lowers_classic_jsx_to_factory_calls() {
+        let mut options = Options::default();
+        options.jsx.parse = true;
+        let (ast, ok, log) =
+            parse_source_with_options("<div id={value}><Widget /></div>;", options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let Some(StmtData::Expr(statement)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected expression statement");
+        };
+        let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
+            panic!("expected lowered JSX call");
+        };
+        assert_eq!(call.args.len(), 3);
+        assert!(matches!(
+            call.target.data.as_deref(),
+            Some(ExprData::Dot(dot)) if dot.name == "createElement"
+        ));
+        assert!(matches!(
+            call.args[0].data.as_deref(),
+            Some(ExprData::String(_))
+        ));
+        assert!(matches!(
+            call.args[1].data.as_deref(),
+            Some(ExprData::Object(object)) if object.properties.len() == 1
+        ));
+        assert!(matches!(
+            call.args[2].data.as_deref(),
+            Some(ExprData::Call(child)) if child.args.len() == 2
+        ));
+        for (name, count) in [("React", 2), ("value", 1), ("Widget", 1)] {
+            let usage = ast.parts[1]
+                .symbol_uses
+                .iter()
+                .find(|(reference, _)| {
+                    ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                        .original_name
+                        == name
+                })
+                .map(|(_, usage)| usage)
+                .expect("lowered JSX reference symbol");
+            assert_eq!(usage.count_estimate, count, "{name}");
+        }
     }
 
     #[test]

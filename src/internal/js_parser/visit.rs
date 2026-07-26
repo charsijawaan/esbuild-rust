@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use crate::internal::js_ast::{
-    AssignTarget, Binding, BindingData, BlockStmt, Class, Expr, ExprData, Function, OpCode,
-    PropertyFlags, PropertyKind, ScopeKind, Stmt, StmtData, StrictModeKind,
-    for_each_identifier_binding,
+    AssignTarget, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class, DotExpr, Expr,
+    ExprData, Function, IdentifierExpr, ObjectExpr, OpCode, PropertyFlags, PropertyKind, ScopeKind,
+    Stmt, StmtData, StrictModeKind, for_each_identifier_binding,
 };
 use crate::internal::logger::{Loc, Range};
 
@@ -1020,6 +1020,45 @@ fn visit_expr_with_target(
             for child in &mut element.nullable_children {
                 visit_expr(core, child, resolve_identifiers);
             }
+            if !core.options.jsx.preserve && !core.options.jsx.automatic_runtime {
+                let mut children = std::mem::take(&mut element.nullable_children);
+                children.retain(|child| child.data.is_some());
+                if element.tag_or_nil.data.is_none() {
+                    element.tag_or_nil =
+                        instantiate_jsx_define(core, expression.loc, true, resolve_identifiers);
+                }
+                let mut args = vec![element.tag_or_nil.clone()];
+                if element.properties.is_empty() {
+                    args.push(Expr::new(element.tag_or_nil.loc, ExprData::Null));
+                } else {
+                    args.push(Expr::new(
+                        element.tag_or_nil.loc,
+                        ExprData::Object(ObjectExpr {
+                            properties: std::mem::take(&mut element.properties),
+                            is_single_line: element.is_tag_single_line,
+                            ..ObjectExpr::default()
+                        }),
+                    ));
+                }
+                args.extend(children);
+                let target =
+                    instantiate_jsx_define(core, expression.loc, false, resolve_identifiers);
+                let kind = if matches!(target.data.as_deref(), Some(ExprData::Dot(_))) {
+                    CallKind::TargetWasOriginallyPropertyAccess
+                } else {
+                    CallKind::Normal
+                };
+                *data = ExprData::Call(CallExpr {
+                    target,
+                    args,
+                    close_paren_loc: element.close_loc,
+                    kind,
+                    is_multi_line: !element.is_tag_single_line,
+                    can_be_unwrapped_if_unused: !core.options.ignore_dce_annotations
+                        && !core.options.jsx.side_effects,
+                    ..CallExpr::default()
+                });
+            }
         }
         ExprData::Boolean(_)
         | ExprData::Super
@@ -1066,6 +1105,51 @@ fn visit_expr_with_target(
             }
         }
     }
+}
+
+fn instantiate_jsx_define(
+    core: &mut ParserCore,
+    loc: Loc,
+    is_fragment: bool,
+    resolve_identifiers: bool,
+) -> Expr {
+    let define = if is_fragment {
+        core.options.jsx.fragment.clone()
+    } else {
+        core.options.jsx.factory.clone()
+    };
+    if define.constant.data.is_some() {
+        let mut value = define.constant;
+        value.loc = loc;
+        visit_expr(core, &mut value, resolve_identifiers);
+        return value;
+    }
+    let Some(first) = define.parts.first() else {
+        return Expr::new(loc, ExprData::Undefined);
+    };
+    let reference = core.store_name_in_ref(
+        crate::internal::js_lexer::MaybeSubstring::from_allocated(first.as_bytes().to_vec()),
+    );
+    let mut value = Expr::new(
+        loc,
+        ExprData::Identifier(IdentifierExpr {
+            reference,
+            ..IdentifierExpr::default()
+        }),
+    );
+    for part in &define.parts[1..] {
+        value = Expr::new(
+            loc,
+            ExprData::Dot(DotExpr {
+                target: value,
+                name: part.clone(),
+                name_loc: loc,
+                ..DotExpr::default()
+            }),
+        );
+    }
+    visit_expr(core, &mut value, resolve_identifiers);
+    value
 }
 
 fn is_identifier_named(core: &ParserCore, expression: &Expr, expected: &str) -> bool {
