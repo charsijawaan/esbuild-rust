@@ -654,6 +654,22 @@ mod tests {
     }
 
     #[test]
+    fn minifies_named_css_colors() {
+        assert_eq!(
+            code(transform(
+                "a { color: aliceblue; background-color: rebeccapurple; outline-color: darkslategrey; caret-color: navy; fill: fuchsia; stroke: transparent }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{color:#f0f8ff;background-color:#639;outline-color:#2f4f4f;caret-color:navy;fill:#f0f;stroke:transparent}\n"
+        );
+    }
+
+    #[test]
     fn scopes_and_minifies_local_css_names() {
         let input = ".card { color: red } #root .card { color: blue }";
         assert_eq!(
