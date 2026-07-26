@@ -4,8 +4,8 @@ use crate::internal::{
     compat::JsFeature,
     helpers::utf16_to_string,
     js_ast::{
-        ArrayExpr, Expr, ExprData, IdentifierExpr, NameOfSymbolExpr, OpCode, SpreadExpr,
-        StringExpr, UnaryExpr, is_property_access,
+        ArrayExpr, Expr, ExprData, IdentifierExpr, NameOfSymbolExpr, ObjectExpr, OpCode, Property,
+        PropertyKind, SpreadExpr, StringExpr, UnaryExpr, is_property_access,
     },
     js_lexer::{CommentBefore, Lexer, MaybeSubstring, Token},
     logger::Loc,
@@ -95,6 +95,66 @@ pub(crate) fn parse_array_prefix(
             close_bracket_loc,
             is_single_line,
             ..ArrayExpr::default()
+        }),
+    ))
+}
+
+pub(crate) fn parse_object_prefix(
+    lexer: &mut Lexer,
+    mut parse_value: impl FnMut(&mut Lexer) -> Expr,
+    mut parse_property: impl FnMut(&mut Lexer) -> Option<Property>,
+) -> Option<Expr> {
+    if lexer.token != Token::OpenBrace {
+        return None;
+    }
+    let loc = lexer.loc();
+    lexer.next();
+    let mut is_single_line = !lexer.has_newline_before;
+    let mut properties = Vec::new();
+    let mut comma_after_spread = Loc::default();
+
+    while lexer.token != Token::CloseBrace {
+        if lexer.token == Token::DotDotDot {
+            let dot_loc = lexer.loc();
+            lexer.next();
+            properties.push(Property {
+                kind: PropertyKind::Spread,
+                loc: dot_loc,
+                value_or_nil: parse_value(lexer),
+                ..Property::default()
+            });
+            if lexer.token == Token::Comma {
+                comma_after_spread = lexer.loc();
+            }
+        } else if let Some(property) = parse_property(lexer) {
+            properties.push(property);
+        }
+
+        if lexer.token != Token::Comma {
+            break;
+        }
+        if lexer.has_newline_before {
+            is_single_line = false;
+        }
+        lexer.next();
+        if lexer.has_newline_before {
+            is_single_line = false;
+        }
+    }
+
+    if lexer.has_newline_before {
+        is_single_line = false;
+    }
+    let close_brace_loc = lexer.loc();
+    lexer.expect(Token::CloseBrace);
+    Some(Expr::new(
+        loc,
+        ExprData::Object(ObjectExpr {
+            properties,
+            comma_after_spread,
+            close_brace_loc,
+            is_single_line,
+            ..ObjectExpr::default()
         }),
     ))
 }
@@ -237,12 +297,12 @@ mod tests {
 
     use super::{
         parse_array_prefix, parse_big_int_or_string_if_unsupported, parse_numeric_literal,
-        parse_regular_expression_literal, parse_simple_prefix, parse_string_literal,
-        parse_unary_prefix,
+        parse_object_prefix, parse_regular_expression_literal, parse_simple_prefix,
+        parse_string_literal, parse_unary_prefix,
     };
     use crate::internal::{
         config::TsOptions,
-        js_ast::ExprData,
+        js_ast::{Expr, ExprData, Property, PropertyKind, StringExpr},
         js_lexer::{Lexer, Token},
         js_parser::Options,
         logger::{DeferLogKind, Log, Source},
@@ -419,6 +479,54 @@ mod tests {
             Some(ExprData::Spread(_))
         ));
         assert!(array.comma_after_spread.start > 0);
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_object_properties_spreads_and_layout_metadata() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"{a: 1, ...2,}"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source, TsOptions::default());
+        let parse_number = |lexer: &mut Lexer| {
+            let loc = lexer.loc();
+            let value = lexer.number;
+            lexer.next();
+            Expr::new(loc, ExprData::Number(value))
+        };
+        let object = parse_object_prefix(&mut lexer, parse_number, |lexer| {
+            let loc = lexer.loc();
+            let name = lexer.identifier.string.clone();
+            lexer.next();
+            lexer.expect(Token::Colon);
+            let value_loc = lexer.loc();
+            let value = lexer.number;
+            lexer.next();
+            Some(Property {
+                key: Expr::new(
+                    loc,
+                    ExprData::String(StringExpr {
+                        value: String::from_utf8(name)
+                            .expect("identifier is UTF-8")
+                            .encode_utf16()
+                            .collect(),
+                        ..StringExpr::default()
+                    }),
+                ),
+                value_or_nil: Expr::new(value_loc, ExprData::Number(value)),
+                kind: PropertyKind::Field,
+                ..Property::default()
+            })
+        })
+        .expect("expected object");
+        let Some(ExprData::Object(object)) = object.data.as_deref() else {
+            panic!("expected object expression");
+        };
+        assert_eq!(object.properties.len(), 2);
+        assert_eq!(object.properties[1].kind, PropertyKind::Spread);
+        assert!(object.comma_after_spread.start > 0);
         assert_eq!(lexer.token, Token::EndOfFile);
     }
 }
