@@ -29,6 +29,7 @@ mod syntax_private;
 mod syntax_statement;
 mod syntax_suffix;
 mod syntax_super;
+mod syntax_typescript;
 mod syntax_yield_await;
 mod visit;
 

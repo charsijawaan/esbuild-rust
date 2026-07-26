@@ -1,0 +1,153 @@
+use crate::internal::{
+    js_ast::{Stmt, StmtData, TypeScriptStmt},
+    js_lexer::{Lexer, Token},
+};
+
+use super::parser_core::ParserCore;
+
+pub(crate) fn parse_type_script_statement(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    is_export: bool,
+) -> Option<Stmt> {
+    if !core.options.ts.parse || lexer.token != Token::Identifier {
+        return None;
+    }
+    let loc = lexer.loc();
+    if lexer.is_contextual_keyword(b"interface") {
+        lexer.next();
+        lexer.expect(Token::Identifier);
+        while lexer.token != Token::OpenBrace {
+            if lexer.token == Token::EndOfFile {
+                lexer.expected(Token::OpenBrace);
+            }
+            lexer.next();
+        }
+        skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
+        if lexer.token == Token::Semicolon {
+            lexer.next();
+        }
+        return Some(Stmt::new(
+            loc,
+            StmtData::TypeScript(TypeScriptStmt::default()),
+        ));
+    }
+    if lexer.is_contextual_keyword(b"type") {
+        lexer.next();
+        if is_export && matches!(lexer.token, Token::OpenBrace | Token::Asterisk) {
+            if lexer.token == Token::OpenBrace {
+                skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
+            } else {
+                lexer.next();
+            }
+            if lexer.is_contextual_keyword(b"from") {
+                lexer.next();
+                lexer.expect(Token::StringLiteral);
+            }
+            lexer.expect_or_insert_semicolon();
+            return Some(Stmt::new(
+                loc,
+                StmtData::TypeScript(TypeScriptStmt::default()),
+            ));
+        }
+        lexer.expect(Token::Identifier);
+        let mut depth = 0_usize;
+        while lexer.token != Token::Equals || depth > 0 {
+            match lexer.token {
+                Token::OpenParen | Token::OpenBracket | Token::OpenBrace | Token::LessThan => {
+                    depth += 1;
+                }
+                Token::CloseParen
+                | Token::CloseBracket
+                | Token::CloseBrace
+                | Token::GreaterThan
+                    if depth > 0 =>
+                {
+                    depth -= 1;
+                }
+                Token::EndOfFile => lexer.expected(Token::Equals),
+                _ => {}
+            }
+            lexer.next();
+        }
+        lexer.next();
+        skip_type_until_statement_end(lexer);
+        return Some(Stmt::new(
+            loc,
+            StmtData::TypeScript(TypeScriptStmt::default()),
+        ));
+    }
+    None
+}
+
+fn skip_balanced_group(lexer: &mut Lexer, open: Token, close: Token) {
+    lexer.expect(open);
+    let mut depth = 1_usize;
+    while depth > 0 {
+        if lexer.token == open {
+            depth += 1;
+        } else if lexer.token == close {
+            depth -= 1;
+        } else if lexer.token == Token::EndOfFile {
+            lexer.expected(close);
+        }
+        lexer.next();
+    }
+}
+
+fn skip_type_until_statement_end(lexer: &mut Lexer) {
+    let mut delimiters = Vec::new();
+    let mut has_type_token = false;
+    loop {
+        if has_type_token
+            && delimiters.is_empty()
+            && lexer.has_newline_before
+            && is_statement_start(lexer)
+        {
+            return;
+        }
+        match lexer.token {
+            Token::Semicolon if delimiters.is_empty() => {
+                lexer.next();
+                return;
+            }
+            Token::EndOfFile if delimiters.is_empty() => return,
+            Token::OpenParen => delimiters.push(Token::CloseParen),
+            Token::OpenBracket => delimiters.push(Token::CloseBracket),
+            Token::OpenBrace => delimiters.push(Token::CloseBrace),
+            Token::LessThan => delimiters.push(Token::GreaterThan),
+            token if delimiters.last() == Some(&token) => {
+                delimiters.pop();
+            }
+            Token::EndOfFile => {
+                lexer.expected(*delimiters.last().expect("delimiter stack is not empty"));
+            }
+            _ => {}
+        }
+        has_type_token = true;
+        lexer.next();
+    }
+}
+
+fn is_statement_start(lexer: &Lexer) -> bool {
+    matches!(
+        lexer.token,
+        Token::Var
+            | Token::Const
+            | Token::Function
+            | Token::Class
+            | Token::Import
+            | Token::Export
+            | Token::If
+            | Token::For
+            | Token::While
+            | Token::Do
+            | Token::Switch
+            | Token::Try
+            | Token::Throw
+            | Token::Return
+    ) || lexer.is_contextual_keyword(b"let")
+        || lexer.is_contextual_keyword(b"interface")
+        || lexer.is_contextual_keyword(b"type")
+        || lexer.is_contextual_keyword(b"async")
+}

@@ -118,6 +118,12 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
             "An export declaration can only be used at the top level of a module",
         );
     }
+    if let Some(statement) =
+        super::syntax_typescript::parse_type_script_statement(core, lexer, true)
+    {
+        core.has_type_script_export = true;
+        return statement;
+    }
     match lexer.token {
         Token::Var | Token::Const | Token::Function | Token::Class => {
             let mut statement = super::syntax_statement::parse_statement(core, lexer);

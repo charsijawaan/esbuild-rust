@@ -58,6 +58,11 @@ pub(crate) fn parse_block_with_scope(
 #[allow(clippy::too_many_lines)]
 pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
+    if let Some(statement) =
+        super::syntax_typescript::parse_type_script_statement(core, lexer, false)
+    {
+        return statement;
+    }
     if lexer.is_contextual_keyword(b"await")
         && core.fn_or_arrow_data_parse.await_policy
             == super::parser_types::AwaitOrYield::AllowExpression

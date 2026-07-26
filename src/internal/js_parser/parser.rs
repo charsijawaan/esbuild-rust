@@ -84,6 +84,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         let has_esm_exports = core.esm_import_meta.len > 0
             || core.top_level_await_keyword.len > 0
             || (core.options.jsx.automatic_runtime && core.has_jsx_element)
+            || core.has_type_script_export
             || statements.iter().any(|statement| {
                 matches!(
                     statement.data.as_deref(),
@@ -2529,6 +2530,64 @@ mod tests {
         let messages = log.done();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].kind, MsgKind::Warning);
+    }
+
+    #[test]
+    fn parses_type_script_type_only_declarations() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "interface Point extends Base {\
+               x: number;\
+               nested: { value: string };\
+             }\
+             type Identifier<T> = T | { id: string };\
+             const runtime = 1;",
+            options.clone(),
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].statements.len(), 3);
+        assert!(matches!(
+            ast.parts[1].statements[0].data.as_deref(),
+            Some(StmtData::TypeScript(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[1].data.as_deref(),
+            Some(StmtData::TypeScript(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[2].data.as_deref(),
+            Some(StmtData::Local(_))
+        ));
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::None);
+
+        let (ast, ok, log) = parse_source_with_options(
+            "export interface PublicShape { value: string }\
+             export type PublicId = string;",
+            options.clone(),
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].statements.len(), 2);
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+
+        let (ast, ok, log) = parse_source_with_options(
+            "type Local = string\n\
+             const runtime = 1;\
+             export type {PublicShape} from './types';\
+             export type * from './more-types';",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].statements.len(), 4);
+        assert!(matches!(
+            ast.parts[1].statements[1].data.as_deref(),
+            Some(StmtData::Local(_))
+        ));
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+        assert!(ast.import_records.is_empty());
     }
 
     #[test]
