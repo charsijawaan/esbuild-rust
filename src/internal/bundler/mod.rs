@@ -176,6 +176,31 @@ pub fn compile_javascript_bundle(
     }
 }
 
+/// Scan filesystem entry points and compile them as a JavaScript bundle.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn bundle_javascript(
+    log: &Log,
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    entry_points: &[EntryPoint],
+    options: &mut Options,
+    unique_key_prefix: &str,
+) -> CompiledBundle {
+    let scanned = scan_bundle(
+        log,
+        file_system,
+        caches,
+        entry_points,
+        options,
+        unique_key_prefix,
+    );
+    if log.has_errors() {
+        return CompiledBundle::default();
+    }
+    compile_javascript_bundle(file_system, &scanned, options, unique_key_prefix)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DataForSourceMap {
     pub line_offset_tables: Vec<LineOffsetTable>,
@@ -1601,8 +1626,8 @@ pub fn sanitize_file_path_for_virtual_module_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_option_defaults, default_extension_to_loader_map, find_reachable_files,
-        guess_mime_type, hash_for_file_name, is_ascii_only, parse_file,
+        apply_option_defaults, bundle_javascript, default_extension_to_loader_map,
+        find_reachable_files, guess_mime_type, hash_for_file_name, is_ascii_only, parse_file,
         parse_file_with_unique_key_prefix, path_relative_to_outbase, resolve_import_records,
         sanitize_file_path_for_virtual_module_path, scan_bundle,
     };
@@ -1610,7 +1635,7 @@ mod tests {
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32},
         cache::{CacheSet, SourceIndexCache},
         compat::JsFeature,
-        config::{Loader, Mode, Options, PathPlaceholder, Platform},
+        config::{Format, Loader, Mode, Options, PathPlaceholder, Platform},
         fs::{MockKind, mock_fs},
         graph::{EntryPoint, InputFile, InputFileRepr, JsRepr, SideEffectsKind},
         js_ast::ExportsKind,
@@ -2154,6 +2179,43 @@ mod tests {
         let messages = log.done();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].data.text, "Could not resolve \"./missing\"");
+    }
+
+    #[test]
+    fn bundles_filesystem_entry_points_to_output_files() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([("/project/entry.js".into(), "console.log('bundled')".into())]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert!(compiled.scan_result.import_issues.is_empty());
+        assert_eq!(compiled.output_files.len(), 1);
+        assert_eq!(compiled.output_files[0].abs_path, "/out/entry.js");
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains("console.log(\"bundled\");"));
+        assert!(output.starts_with("(() => {\n"));
+        assert!(output.ends_with("})();\n"));
     }
 
     #[test]
