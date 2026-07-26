@@ -959,6 +959,7 @@ fn class_field_assignment_target(property: &Property) -> Option<Expr> {
     match property.key.data.as_deref()? {
         ExprData::String(key)
             if !property.flags.contains(PropertyFlags::IS_COMPUTED)
+                && !property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY)
                 && is_identifier_es5_and_es_next(&String::from_utf16_lossy(&key.value)) =>
         {
             Expr::new(

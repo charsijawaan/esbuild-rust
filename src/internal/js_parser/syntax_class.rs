@@ -316,7 +316,12 @@ fn parse_class_property(
                 lexer.next();
                 key
             }
-            Token::StringLiteral => parse_string_literal(core, lexer),
+            Token::StringLiteral => {
+                if !core.options.minify_syntax {
+                    flags |= PropertyFlags::PREFER_QUOTED_KEY;
+                }
+                parse_string_literal(core, lexer)
+            }
             _ => {
                 if !lexer.is_identifier_or_keyword() {
                     lexer.expected(Token::Identifier);

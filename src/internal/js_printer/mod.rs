@@ -1440,6 +1440,11 @@ impl Printer<'_> {
             self.output.push(b'[');
             self.print_expr_at(&property.key, Precedence::Lowest);
             self.output.push(b']');
+        } else if property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY)
+            && let Some(ExprData::String(key)) = property.key.data.as_deref()
+        {
+            self.output
+                .extend(quote_utf16(&key.value, self.options, true));
         } else {
             self.print_property_key(&property.key);
         }
