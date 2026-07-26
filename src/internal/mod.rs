@@ -8,6 +8,7 @@ pub mod compat;
 pub mod config;
 pub mod css_ast;
 pub mod css_lexer;
+pub mod css_parser;
 pub mod css_printer;
 pub mod fs;
 pub mod helpers;

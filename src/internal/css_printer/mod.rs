@@ -167,19 +167,27 @@ impl Printer<'_> {
                 self.print_rule_block(&rule.rules);
             }
             RuleData::Qualified(rule) => {
-                self.print_tokens(&rule.prelude);
-                self.print_space();
+                let has_whitespace_after = self.print_tokens(&rule.prelude);
+                if !has_whitespace_after {
+                    self.print_space();
+                }
                 self.print_rule_block(&rule.rules);
             }
             RuleData::Declaration(rule) => {
                 self.print_ident(&rule.key_text);
                 self.css.push(b':');
-                if !self.options.minify_whitespace && !rule.value.is_empty() {
+                if !self.options.minify_whitespace
+                    && !rule.value.is_empty()
+                    && !rule.value[0].whitespace.contains(WhitespaceFlags::BEFORE)
+                {
                     self.css.push(b' ');
                 }
-                self.print_tokens(&rule.value);
+                let has_whitespace_after = self.print_tokens(&rule.value);
                 if rule.important {
-                    if !self.options.minify_whitespace && !rule.value.is_empty() {
+                    if !self.options.minify_whitespace
+                        && !rule.value.is_empty()
+                        && !has_whitespace_after
+                    {
                         self.css.push(b' ');
                     }
                     self.css.extend_from_slice(b"!important");
@@ -280,7 +288,7 @@ impl Printer<'_> {
         }
     }
 
-    fn print_tokens(&mut self, tokens: &[Token]) {
+    fn print_tokens(&mut self, tokens: &[Token]) -> bool {
         let mut has_whitespace = false;
         for (index, token) in tokens.iter().enumerate() {
             if token.kind == TokenKind::Whitespace {
@@ -302,6 +310,7 @@ impl Printer<'_> {
         if has_whitespace {
             self.css.push(b' ');
         }
+        has_whitespace
     }
 
     fn print_token(&mut self, token: &Token) {
@@ -396,7 +405,9 @@ impl Printer<'_> {
                     self.css.push(b')');
                 }
             }
-            MediaQueryData::ArbitraryTokens(query) => self.print_tokens(&query.tokens),
+            MediaQueryData::ArbitraryTokens(query) => {
+                self.print_tokens(&query.tokens);
+            }
             MediaQueryData::PlainOrBoolean(query) => {
                 self.css.push(b'(');
                 self.print_ident(&query.name);

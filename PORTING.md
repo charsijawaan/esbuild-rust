@@ -20,7 +20,7 @@ Status values:
 | `internal/config` | ported |
 | `internal/css_ast` | ported |
 | `internal/css_lexer` | ported |
-| `internal/css_parser` | not started |
+| `internal/css_parser` | in progress |
 | `internal/css_printer` | in progress |
 | `internal/fs` | ported |
 | `internal/graph` | not started |
