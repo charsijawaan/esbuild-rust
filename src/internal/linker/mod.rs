@@ -7868,6 +7868,36 @@ pub fn generate_javascript_chunk(
     )
 }
 
+/// Compile and assemble every JavaScript chunk in index order.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn generate_javascript_chunks(
+    graph: &LinkerGraph,
+    chunks: &mut [ChunkInfo],
+    options: &Options,
+    runtime_refs: ChunkRuntimeRefs,
+    entry_point_refs: EntryPointTailRefs,
+    renamer: &dyn crate::internal::renamer::Renamer,
+    output_paths: &OutputPathContext<'_>,
+) -> Vec<bool> {
+    let mut executable = vec![false; chunks.len()];
+    for chunk_index in 0..chunks.len() {
+        if !chunks[chunk_index].is_css {
+            executable[chunk_index] = generate_javascript_chunk(
+                graph,
+                chunks,
+                chunk_index,
+                options,
+                runtime_refs,
+                entry_point_refs,
+                renamer,
+                output_paths,
+            );
+        }
+    }
+    executable
+}
+
 /// Assign the output path template for every JavaScript and CSS chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -8665,16 +8695,16 @@ mod tests {
         find_imported_files_in_css_order, generate_code_for_lazy_exports,
         generate_common_js_export_copies, generate_cross_chunk_stmts, generate_css_chunk,
         generate_css_module_exports, generate_entry_point_tail, generate_global_name_prefix,
-        generate_isolated_hash, generate_javascript_chunk, generate_source_map_for_chunk,
-        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
-        lower_esm_lazy_export, mangle_local_css, mangle_props, mark_file_live_for_tree_shaking,
-        match_import_with_export, maybe_correct_export_typo, merge_adjacent_local_stmts,
-        path_between_chunks, populate_css_stub_lazy_export, prepare_css_asts,
-        prevent_exports_from_being_renamed, print_cross_chunk_bindings,
-        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        require_or_import_meta_for_source, resolve_export_stars, runtime_symbol_ref,
-        scan_runtime_refs_from_graph, sort_and_filter_export_aliases,
+        generate_isolated_hash, generate_javascript_chunk, generate_javascript_chunks,
+        generate_source_map_for_chunk, has_dynamic_exports_due_to_export_star,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, lower_common_js_lazy_export, lower_esm_lazy_export,
+        mangle_local_css, mangle_props, mark_file_live_for_tree_shaking, match_import_with_export,
+        maybe_correct_export_typo, merge_adjacent_local_stmts, path_between_chunks,
+        populate_css_stub_lazy_export, prepare_css_asts, prevent_exports_from_being_renamed,
+        print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, require_or_import_meta_for_source, resolve_export_stars,
+        runtime_symbol_ref, scan_runtime_refs_from_graph, sort_and_filter_export_aliases,
         sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
         tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
         wrap_rules_with_conditions,
@@ -11410,7 +11440,7 @@ mod tests {
             }],
         };
 
-        let prepared = crate::internal::bundler::prepare_linker_graph(
+        let mut prepared = crate::internal::bundler::prepare_linker_graph(
             &scanned,
             &options,
             PREFIX,
@@ -11428,6 +11458,38 @@ mod tests {
         assert_eq!(prepared.chunks[0].source_index, 1);
         assert!(!prepared.chunks[0].parts_in_chunk_in_order.is_empty());
         assert!(prepared.graph.files[1].is_live);
+
+        let runtime_refs = chunk_runtime_refs_from_graph(&prepared.graph, None);
+        let renamer = crate::internal::renamer::new_no_op_renamer(prepared.graph.symbols.clone());
+        let chunk_paths: Vec<_> = prepared
+            .chunks
+            .iter()
+            .map(|chunk| ChunkPath {
+                unique_key: chunk.unique_key.clone(),
+                final_rel_path: chunk.final_rel_path.clone(),
+            })
+            .collect();
+        let output_paths = OutputPathContext::new(PREFIX, &[], &chunk_paths);
+        assert_eq!(
+            generate_javascript_chunks(
+                &prepared.graph,
+                &mut prepared.chunks,
+                &options,
+                runtime_refs,
+                EntryPointTailRefs {
+                    to_common_js_ref: runtime_refs.to_common_js_ref,
+                    unbound_module_ref: prepared.unbound_module_ref,
+                },
+                &renamer,
+                &output_paths,
+            ),
+            [false]
+        );
+        let output = std::mem::take(&mut prepared.chunks[0].intermediate_output.joiner).done();
+        let output = String::from_utf8(output).expect("generated JavaScript is UTF-8");
+        assert!(output.contains("console.log(1);"));
+        assert!(output.starts_with("(() => {\n"));
+        assert!(output.ends_with("})();\n"));
     }
 
     #[test]
