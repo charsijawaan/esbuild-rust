@@ -721,6 +721,13 @@ fn visit_expr_with_target(
             },
         ),
         ExprData::Template(template) => {
+            if template.legacy_octal_loc.start > 0 {
+                core.add_error_range(
+                    core.source
+                        .range_of_legacy_octal_escape(template.legacy_octal_loc),
+                    "Legacy octal escape sequences cannot be used in template literals",
+                );
+            }
             visit_expr(core, &mut template.tag_or_nil, resolve_identifiers);
             for part in &mut template.parts {
                 visit_expr(core, &mut part.value, resolve_identifiers);
@@ -819,13 +826,36 @@ fn visit_expr_with_target(
         | ExprData::JsxElement(_)
         | ExprData::JsxText(_)
         | ExprData::Missing
-        | ExprData::Number(_)
         | ExprData::BigInt(_)
-        | ExprData::String(_)
         | ExprData::RegExp(_)
         | ExprData::RequireString(_)
         | ExprData::RequireResolveString(_)
         | ExprData::ImportString(_) => {}
+        ExprData::String(string) => {
+            if string.legacy_octal_loc.start > 0 {
+                let range = core
+                    .source
+                    .range_of_legacy_octal_escape(string.legacy_octal_loc);
+                if string.prefer_template {
+                    core.add_error_range(
+                        range,
+                        "Legacy octal escape sequences cannot be used in template literals",
+                    );
+                } else if core.is_strict_mode() {
+                    core.add_error_range(
+                        range,
+                        "Legacy octal escape sequences cannot be used in strict mode",
+                    );
+                }
+            }
+        }
+        ExprData::Number(_) => {
+            if core.is_strict_mode()
+                && let Some(range) = core.legacy_octal_literals.get(&expression.loc).copied()
+            {
+                core.add_error_range(range, "Legacy octal literals cannot be used in strict mode");
+            }
+        }
     }
 }
 

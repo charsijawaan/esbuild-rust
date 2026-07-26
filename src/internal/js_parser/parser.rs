@@ -57,7 +57,8 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             statements.push(parse_statement(&mut core, &mut lexer));
         }
 
-        let directives = strip_directive_prologue(&core, &mut statements);
+        let (directives, directive_legacy_octal_locs) =
+            strip_directive_prologue(&core, &mut statements);
         if directives.iter().any(|directive| directive == "use strict") {
             Scope::recursive_set_strict_mode(
                 core.current_scope
@@ -91,6 +92,18 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                     Some(StmtData::Class(class)) if class.is_export
                 )
             });
+        if has_esm_exports
+            || has_import_statement
+            || core.options.module_type_data.module_type.is_esm()
+            || directives.iter().any(|directive| directive == "use strict")
+        {
+            for loc in directive_legacy_octal_locs {
+                core.add_error_range(
+                    core.source.range_of_legacy_octal_escape(loc),
+                    "Legacy octal escape sequences cannot be used in strict mode",
+                );
+            }
+        }
         core.declared_symbols = declare_top_level_symbols(&mut core, &mut statements);
         core.hoist_symbols();
         let scopes = core.scope_refs_in_order();
@@ -562,8 +575,12 @@ fn record_top_level_symbol(declared: &mut Vec<DeclaredSymbol>, reference: Ref) {
     }
 }
 
-fn strip_directive_prologue(core: &ParserCore, statements: &mut Vec<Stmt>) -> Vec<String> {
+fn strip_directive_prologue(
+    core: &ParserCore,
+    statements: &mut Vec<Stmt>,
+) -> (Vec<String>, Vec<Loc>) {
     let mut directives = Vec::new();
+    let mut legacy_octal_locs = Vec::new();
     if core
         .options
         .ts_always_strict
@@ -587,13 +604,16 @@ fn strip_directive_prologue(core: &ParserCore, statements: &mut Vec<Stmt>) -> Ve
         }
 
         let directive = String::from_utf8_lossy(&utf16_to_string(&value.value)).into_owned();
+        if value.legacy_octal_loc.start > 0 {
+            legacy_octal_locs.push(value.legacy_octal_loc);
+        }
         if !directives.contains(&directive) {
             directives.push(directive);
         }
         count += 1;
     }
     statements.drain(..count);
-    directives
+    (directives, legacy_octal_locs)
 }
 
 #[cfg(test)]
@@ -1188,6 +1208,29 @@ mod tests {
         );
         assert!(ok);
         assert_eq!(log.done().len(), 2);
+    }
+
+    #[test]
+    fn rejects_legacy_octal_syntax_in_strict_and_template_contexts() {
+        let (_, ok, log) = parse_source(r#""use strict"; let number = 010; let string = "\1";"#);
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
+
+        let (_, ok, log) = parse_source(r#"let number = 010; let string = "\1";"#);
+        assert!(ok);
+        assert!(log.done().is_empty());
+
+        let (_, ok, log) = parse_source(r"let template = `\1`;");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+
+        let (_, ok, log) = parse_source(r#""\1"; "use strict";"#);
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+
+        let (_, ok, log) = parse_source(r#""\1"; export {};"#);
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
     }
 
     #[test]
