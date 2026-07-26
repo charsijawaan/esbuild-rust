@@ -7758,6 +7758,49 @@ pub fn assemble_javascript_chunk(
     is_executable
 }
 
+/// Compile and assemble one JavaScript chunk from its ordered linker state.
+///
+/// # Panics
+///
+/// Panics when `chunk_index` is invalid, the selected chunk is CSS, or any
+/// underlying compilation invariant is violated.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_javascript_chunk(
+    graph: &LinkerGraph,
+    chunks: &mut [ChunkInfo],
+    chunk_index: usize,
+    options: &Options,
+    runtime_refs: ChunkRuntimeRefs,
+    entry_point_refs: EntryPointTailRefs,
+    renamer: &dyn crate::internal::renamer::Renamer,
+    output_paths: &OutputPathContext<'_>,
+) -> bool {
+    assert!(!chunks[chunk_index].is_css, "chunk must be JavaScript");
+    let bindings = print_cross_chunk_bindings(chunks, chunk_index, renamer, options);
+    let compiled_parts =
+        compile_part_ranges_for_chunk(graph, options, &chunks[chunk_index], runtime_refs, renamer);
+    let entry_point_tail = if chunks[chunk_index].is_entry_point {
+        generate_entry_point_tail(
+            graph,
+            options,
+            chunks[chunk_index].source_index,
+            entry_point_refs,
+            renamer,
+        )
+    } else {
+        Vec::new()
+    };
+    assemble_javascript_chunk(
+        graph,
+        &mut chunks[chunk_index],
+        &compiled_parts,
+        &bindings,
+        &entry_point_tail,
+        options,
+        output_paths,
+    )
+}
+
 /// Assign the output path template for every JavaScript and CSS chunk, leaving the
 /// content-hash placeholder unresolved until final hashing.
 ///
@@ -8555,7 +8598,7 @@ mod tests {
         find_imported_files_in_css_order, generate_code_for_lazy_exports,
         generate_common_js_export_copies, generate_cross_chunk_stmts, generate_css_chunk,
         generate_css_module_exports, generate_entry_point_tail, generate_global_name_prefix,
-        generate_isolated_hash, generate_source_map_for_chunk,
+        generate_isolated_hash, generate_javascript_chunk, generate_source_map_for_chunk,
         has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
         is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
         lower_esm_lazy_export, mangle_local_css, mangle_props, mark_file_live_for_tree_shaking,
@@ -11076,6 +11119,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn compiles_ordered_part_ranges_with_linked_import_metadata() {
         let wrapper_ref = Ref {
             source_index: 2,
@@ -11168,6 +11212,22 @@ mod tests {
         assert_eq!(compiled[0].js, b"2;\n");
         assert_eq!(compiled[1].source_index, 1);
         assert_eq!(compiled[1].js, b"require_dep();\n");
+
+        let mut chunks = vec![chunk];
+        assert!(!generate_javascript_chunk(
+            &graph,
+            &mut chunks,
+            0,
+            &Options::default(),
+            ChunkRuntimeRefs::default(),
+            EntryPointTailRefs::default(),
+            &renamer,
+            &context(&[], &[]),
+        ));
+        assert_eq!(
+            std::mem::take(&mut chunks[0].intermediate_output.joiner).done(),
+            b"2;\nrequire_dep();\n"
+        );
     }
 
     #[test]
