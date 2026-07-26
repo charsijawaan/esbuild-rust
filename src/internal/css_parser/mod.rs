@@ -907,7 +907,8 @@ impl Parser {
                             &result,
                             &converted,
                             next_non_whitespace_kind(&self.tokens, index + 1, end),
-                        );
+                        )
+                    || inside_calc && calc_product_operator_whitespace(&result, &converted);
                 if keep_whitespace {
                     if let Some(previous) = result.last_mut() {
                         previous.whitespace |= WhitespaceFlags::AFTER;
@@ -1208,6 +1209,16 @@ fn numeric_calc_division_whitespace(
     }
 }
 
+fn calc_product_operator_whitespace(previous: &[Token], current: &Token) -> bool {
+    previous
+        .last()
+        .is_some_and(|token| matches!(token.kind, TokenKind::DelimAsterisk | TokenKind::DelimSlash))
+        || matches!(
+            current.kind,
+            TokenKind::DelimAsterisk | TokenKind::DelimSlash
+        )
+}
+
 fn next_non_whitespace_kind(
     tokens: &[css_lexer::Token],
     mut index: usize,
@@ -1262,10 +1273,65 @@ fn reduce_calc_expressions(tokens: &mut [Token]) {
                 numeric_token_from_parts(token, value.number, value.kind, &value.unit)
             });
         }
+        if replacement.is_none()
+            && let Some(children) = &mut token.children
+            && !contains_var_function(children)
+            && !has_failed_numeric_calc_product(children)
+        {
+            clear_calc_product_whitespace(children);
+        }
         if let Some(mut replacement) = replacement {
             replacement.loc = token.loc;
             replacement.whitespace = token.whitespace;
             *token = replacement;
+        }
+    }
+}
+
+fn has_failed_numeric_calc_product(tokens: &[Token]) -> bool {
+    for window in tokens.windows(3) {
+        let operator = window[1].kind;
+        if matches!(operator, TokenKind::DelimAsterisk | TokenKind::DelimSlash) {
+            let left = numeric_token(&window[0]);
+            let right = numeric_token(&window[2]);
+            if operator == TokenKind::DelimSlash
+                && right.is_some_and(|right| right.kind == TokenKind::Number && right.number == 0.0)
+                && left.is_some()
+            {
+                return true;
+            }
+            if let Some(value) = evaluate_calc_numeric(window)
+                && numeric_token_from_parts(&window[0], value.number, value.kind, &value.unit)
+                    .is_none()
+            {
+                return true;
+            }
+        }
+    }
+    tokens.iter().any(|token| {
+        token
+            .children
+            .as_deref()
+            .is_some_and(has_failed_numeric_calc_product)
+    })
+}
+
+fn clear_calc_product_whitespace(tokens: &mut [Token]) {
+    for index in 0..tokens.len() {
+        if matches!(
+            tokens[index].kind,
+            TokenKind::DelimAsterisk | TokenKind::DelimSlash
+        ) {
+            tokens[index].whitespace = WhitespaceFlags::default();
+            if index > 0 {
+                tokens[index - 1].whitespace.remove(WhitespaceFlags::AFTER);
+            }
+            if index + 1 < tokens.len() {
+                tokens[index + 1].whitespace.remove(WhitespaceFlags::BEFORE);
+            }
+        }
+        if let Some(children) = &mut tokens[index].children {
+            clear_calc_product_whitespace(children);
         }
     }
 }
@@ -1277,12 +1343,45 @@ fn contains_var_function(tokens: &[Token]) -> bool {
     })
 }
 
-fn simplify_mixed_calc(tokens: &mut Vec<Token>) {
+fn simplify_mixed_calc(tokens: &mut Vec<Token>) -> bool {
+    let original = tokens.clone();
+    for token in tokens.iter_mut() {
+        let is_group = token.kind == TokenKind::OpenParen
+            || token.kind == TokenKind::Function && token.text.eq_ignore_ascii_case("calc");
+        if is_group
+            && let Some(children) = &mut token.children
+            && !contains_var_function(children)
+        {
+            simplify_mixed_calc(children);
+        }
+    }
+    unwrap_single_calc_groups(tokens);
     flatten_calc_sums(tokens);
+    flatten_calc_products(tokens);
     reduce_numeric_calc_products(tokens);
     rewrite_shorter_calc_reciprocals(tokens);
     combine_calc_sum_terms(tokens);
     trim_token_boundary_whitespace(tokens);
+    *tokens != original
+}
+
+fn unwrap_single_calc_groups(tokens: &mut [Token]) {
+    for token in tokens.iter_mut() {
+        let is_group = token.kind == TokenKind::OpenParen
+            || token.kind == TokenKind::Function && token.text.eq_ignore_ascii_case("calc");
+        if !is_group
+            || token
+                .children
+                .as_ref()
+                .is_none_or(|children| children.len() != 1)
+        {
+            continue;
+        }
+        let outer_whitespace = token.whitespace;
+        let mut replacement = token.children.take().unwrap_or_default().remove(0);
+        replacement.whitespace |= outer_whitespace;
+        *token = replacement;
+    }
 }
 
 fn flatten_calc_sums(tokens: &mut Vec<Token>) {
@@ -1302,6 +1401,48 @@ fn flatten_calc_sums(tokens: &mut Vec<Token>) {
             && is_group
             && tokens[index].children.as_ref().is_some_and(|children| {
                 children
+                    .iter()
+                    .any(|token| matches!(token.kind, TokenKind::DelimPlus | TokenKind::DelimMinus))
+            })
+        {
+            let outer_whitespace = tokens[index].whitespace;
+            let mut children = tokens[index].children.take().unwrap_or_default();
+            if let Some(first) = children.first_mut()
+                && outer_whitespace.contains(WhitespaceFlags::BEFORE)
+            {
+                first.whitespace |= WhitespaceFlags::BEFORE;
+            }
+            if let Some(last) = children.last_mut()
+                && outer_whitespace.contains(WhitespaceFlags::AFTER)
+            {
+                last.whitespace |= WhitespaceFlags::AFTER;
+            }
+            tokens.splice(index..=index, children);
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn flatten_calc_products(tokens: &mut Vec<Token>) {
+    let mut index = 0;
+    while index < tokens.len() {
+        let can_flatten_after = index == 0 || tokens[index - 1].kind == TokenKind::DelimAsterisk;
+        let can_flatten_before = index + 1 == tokens.len()
+            || matches!(
+                tokens[index + 1].kind,
+                TokenKind::DelimAsterisk | TokenKind::DelimSlash
+            );
+        let is_group = tokens[index].kind == TokenKind::OpenParen
+            || tokens[index].kind == TokenKind::Function
+                && tokens[index].text.eq_ignore_ascii_case("calc");
+        if can_flatten_after
+            && can_flatten_before
+            && is_group
+            && tokens[index].children.as_ref().is_some_and(|children| {
+                children.iter().any(|token| {
+                    matches!(token.kind, TokenKind::DelimAsterisk | TokenKind::DelimSlash)
+                }) && !children
                     .iter()
                     .any(|token| matches!(token.kind, TokenKind::DelimPlus | TokenKind::DelimMinus))
             })
