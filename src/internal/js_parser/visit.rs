@@ -830,7 +830,17 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
     let is_derived = class.extends_or_nil.data.is_some();
     let has_constructor = class_constructor_index(class).is_some();
     let allow_any_initializer = !has_constructor || class_constructor_is_binding_free(class);
-    let constructor_binding_names = class_constructor_binding_names(core, class);
+    let (mut constructor_binding_names, constructor_binding_refs) =
+        class_constructor_bindings(core, class);
+    if class.properties.iter().any(|property| {
+        class_field_has_binding_collision(core, property, &constructor_binding_names)
+    }) {
+        rename_constructor_bindings(
+            core,
+            &constructor_binding_refs,
+            &mut constructor_binding_names,
+        );
+    }
     let lower_private_fields = class.properties.iter().any(|property| {
         !matches!(
             property.key.data.as_deref(),
@@ -982,119 +992,192 @@ fn class_constructor_is_binding_free(class: &Class) -> bool {
             .any(statement_contains_binding)
 }
 
-fn class_constructor_binding_names(core: &ParserCore, class: &Class) -> HashSet<String> {
+fn class_constructor_bindings(
+    core: &ParserCore,
+    class: &Class,
+) -> (HashSet<String>, Vec<crate::internal::ast::Ref>) {
     let mut names = HashSet::new();
+    let mut references = Vec::new();
     let Some(index) = class_constructor_index(class) else {
-        return names;
+        return (names, references);
     };
     let Some(ExprData::Function(function)) = class.properties[index].value_or_nil.data.as_deref()
     else {
-        return names;
+        return (names, references);
     };
     for argument in &function.function.args {
-        collect_binding_names(core, &argument.binding, &mut names);
+        collect_bindings(core, &argument.binding, &mut names, &mut references);
     }
     for statement in &function.function.body.block.statements {
-        collect_statement_binding_names(core, statement, &mut names);
+        collect_statement_bindings(core, statement, &mut names, &mut references);
     }
-    names
+    (names, references)
 }
 
-fn collect_binding_names(core: &ParserCore, binding: &Binding, names: &mut HashSet<String>) {
+fn collect_bindings(
+    core: &ParserCore,
+    binding: &Binding,
+    names: &mut HashSet<String>,
+    references: &mut Vec<crate::internal::ast::Ref>,
+) {
     match binding.data.as_deref() {
         Some(BindingData::Identifier(identifier)) => {
             names.insert(symbol_name(core, identifier.reference));
+            references.push(identifier.reference);
         }
         Some(BindingData::Array(array)) => {
             for item in &array.items {
-                collect_binding_names(core, &item.binding, names);
+                collect_bindings(core, &item.binding, names, references);
             }
         }
         Some(BindingData::Object(object)) => {
             for property in &object.properties {
-                collect_binding_names(core, &property.value, names);
+                collect_bindings(core, &property.value, names, references);
             }
         }
         Some(BindingData::Missing) | None => {}
     }
 }
 
-fn collect_statement_binding_names(
+fn collect_statement_bindings(
     core: &ParserCore,
     statement: &Stmt,
     names: &mut HashSet<String>,
+    references: &mut Vec<crate::internal::ast::Ref>,
 ) {
     match statement.data.as_deref() {
         Some(StmtData::Local(local)) => {
             for declaration in &local.declarations {
-                collect_binding_names(core, &declaration.binding, names);
+                collect_bindings(core, &declaration.binding, names, references);
             }
         }
         Some(StmtData::Function(function)) => {
             if let Some(name) = function.function.name {
                 names.insert(symbol_name(core, name.reference));
+                references.push(name.reference);
             }
         }
         Some(StmtData::Class(class)) => {
             if let Some(name) = class.class.name {
                 names.insert(symbol_name(core, name.reference));
+                references.push(name.reference);
             }
         }
         Some(StmtData::Block(value)) => {
             for statement in &value.statements {
-                collect_statement_binding_names(core, statement, names);
+                collect_statement_bindings(core, statement, names, references);
             }
         }
         Some(StmtData::If(value)) => {
-            collect_statement_binding_names(core, &value.yes, names);
-            collect_statement_binding_names(core, &value.no_or_nil, names);
+            collect_statement_bindings(core, &value.yes, names, references);
+            collect_statement_bindings(core, &value.no_or_nil, names, references);
         }
         Some(StmtData::For(value)) => {
-            collect_statement_binding_names(core, &value.init_or_nil, names);
-            collect_statement_binding_names(core, &value.body, names);
+            collect_statement_bindings(core, &value.init_or_nil, names, references);
+            collect_statement_bindings(core, &value.body, names, references);
         }
         Some(StmtData::ForIn(value)) => {
-            collect_statement_binding_names(core, &value.init, names);
-            collect_statement_binding_names(core, &value.body, names);
+            collect_statement_bindings(core, &value.init, names, references);
+            collect_statement_bindings(core, &value.body, names, references);
         }
         Some(StmtData::ForOf(value)) => {
-            collect_statement_binding_names(core, &value.init, names);
-            collect_statement_binding_names(core, &value.body, names);
+            collect_statement_bindings(core, &value.init, names, references);
+            collect_statement_bindings(core, &value.body, names, references);
         }
         Some(StmtData::DoWhile(value)) => {
-            collect_statement_binding_names(core, &value.body, names);
+            collect_statement_bindings(core, &value.body, names, references);
         }
         Some(StmtData::While(value)) => {
-            collect_statement_binding_names(core, &value.body, names);
+            collect_statement_bindings(core, &value.body, names, references);
         }
-        Some(StmtData::With(value)) => collect_statement_binding_names(core, &value.body, names),
+        Some(StmtData::With(value)) => {
+            collect_statement_bindings(core, &value.body, names, references);
+        }
         Some(StmtData::Label(value)) => {
-            collect_statement_binding_names(core, &value.statement, names);
+            collect_statement_bindings(core, &value.statement, names, references);
         }
         Some(StmtData::Try(value)) => {
             for statement in &value.block.statements {
-                collect_statement_binding_names(core, statement, names);
+                collect_statement_bindings(core, statement, names, references);
             }
             if let Some(catch) = &value.catch {
-                collect_binding_names(core, &catch.binding_or_nil, names);
+                collect_bindings(core, &catch.binding_or_nil, names, references);
                 for statement in &catch.block.statements {
-                    collect_statement_binding_names(core, statement, names);
+                    collect_statement_bindings(core, statement, names, references);
                 }
             }
             if let Some(finally) = &value.finally {
                 for statement in &finally.block.statements {
-                    collect_statement_binding_names(core, statement, names);
+                    collect_statement_bindings(core, statement, names, references);
                 }
             }
         }
         Some(StmtData::Switch(value)) => {
             for case in &value.cases {
                 for statement in &case.body {
-                    collect_statement_binding_names(core, statement, names);
+                    collect_statement_bindings(core, statement, names, references);
                 }
             }
         }
         _ => {}
+    }
+}
+
+fn class_field_has_binding_collision(
+    core: &ParserCore,
+    property: &Property,
+    constructor_binding_names: &HashSet<String>,
+) -> bool {
+    if property.kind != PropertyKind::Field
+        || property.flags.contains(PropertyFlags::IS_STATIC)
+        || !property.decorators.is_empty()
+        || class_field_assignment_target(property).is_none()
+    {
+        return false;
+    }
+    let initializer = if property.initializer_or_nil.data.is_some() {
+        &property.initializer_or_nil
+    } else {
+        &property.value_or_nil
+    };
+    initializer.data.is_some()
+        && class_field_initializer_has_binding_collision(
+            core,
+            initializer,
+            constructor_binding_names,
+        )
+}
+
+fn rename_constructor_bindings(
+    core: &mut ParserCore,
+    references: &[crate::internal::ast::Ref],
+    constructor_binding_names: &mut HashSet<String>,
+) {
+    let mut used_names = core
+        .symbols
+        .iter()
+        .map(|symbol| symbol.original_name.clone())
+        .collect::<HashSet<_>>();
+    let mut renamed_references = HashSet::new();
+    constructor_binding_names.clear();
+    for &reference in references {
+        if !renamed_references.insert(reference) {
+            continue;
+        }
+        let symbol_index = usize::try_from(reference.inner_index).expect("symbol index");
+        let original_name = core.symbols[symbol_index].original_name.clone();
+        let mut suffix = 2_u32;
+        let replacement = loop {
+            let candidate = format!("{original_name}{suffix}");
+            if used_names.insert(candidate.clone()) {
+                break candidate;
+            }
+            suffix += 1;
+        };
+        core.symbols[symbol_index]
+            .original_name
+            .clone_from(&replacement);
+        constructor_binding_names.insert(replacement);
     }
 }
 

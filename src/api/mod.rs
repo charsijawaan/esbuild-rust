@@ -4223,7 +4223,7 @@ mod tests {
     #[test]
     fn lowers_only_capture_safe_type_script_class_fields() {
         let capture_sensitive = code(transform(
-            "const outer = 1; class Foo { initialized = outer; constructor() { let outer = 2 } }",
+            "const outer = 1; class Foo { initialized = outer; constructor() { let outer = 2; use(outer) } }",
             TransformOptions {
                 loader: Loader::Ts,
                 tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
@@ -4231,12 +4231,37 @@ mod tests {
             },
         ));
         assert!(
-            capture_sensitive.contains("initialized = outer;"),
+            capture_sensitive.contains("this.initialized = outer;"),
             "{capture_sensitive}"
         );
         assert!(
-            !capture_sensitive.contains("this.initialized = outer;"),
+            capture_sensitive.contains("let outer2 = 2;"),
             "{capture_sensitive}"
+        );
+        assert!(
+            capture_sensitive.contains("use(outer2);"),
+            "{capture_sensitive}"
+        );
+
+        let parameter_capture = code(transform(
+            "const id = 1; class Foo { initialized = id; constructor(id: number) { use(id) } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                tsconfig_raw: r#"{"compilerOptions":{"useDefineForClassFields":false}}"#.into(),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(
+            parameter_capture.contains("this.initialized = id;"),
+            "{parameter_capture}"
+        );
+        assert!(
+            parameter_capture.contains("constructor(id2)"),
+            "{parameter_capture}"
+        );
+        assert!(
+            parameter_capture.contains("use(id2);"),
+            "{parameter_capture}"
         );
 
         let non_colliding = code(transform(
