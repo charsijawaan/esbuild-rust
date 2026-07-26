@@ -678,7 +678,7 @@ impl Printer<'_> {
                 if wrap {
                     self.output.push(b'(');
                 }
-                self.print_expr_at(&expression.value, Precedence::Lowest);
+                self.print_expr_at_with_usage(&expression.value, Precedence::Lowest, true);
                 if wrap {
                     self.output.push(b')');
                 }
@@ -1448,6 +1448,11 @@ impl Printer<'_> {
 
     #[allow(clippy::too_many_lines)]
     fn print_expr_at(&mut self, expr: &Expr, level: Precedence) {
+        self.print_expr_at_with_usage(expr, level, false);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn print_expr_at_with_usage(&mut self, expr: &Expr, level: Precedence, result_is_unused: bool) {
         let Some(data) = expr.data.as_deref() else {
             return;
         };
@@ -1721,7 +1726,11 @@ impl Printer<'_> {
             ExprData::Class(class) => self.print_class(&class.class),
             ExprData::Template(template) => self.print_template(template),
             ExprData::RequireString(require) => {
-                if !self.print_linked_require_or_import(require.import_record_index, level) {
+                if !self.print_linked_require_or_import(
+                    require.import_record_index,
+                    level,
+                    result_is_unused,
+                ) {
                     self.output.extend_from_slice(b"require(");
                     self.print_import_path(require.import_record_index, true);
                     self.output.push(b')');
@@ -1733,8 +1742,11 @@ impl Printer<'_> {
                 self.output.push(b')');
             }
             ExprData::ImportString(import) => {
-                if !self.print_linked_require_or_import(import.import_record_index, level)
-                    && !self.print_external_dynamic_import_fallback(import.import_record_index)
+                if !self.print_linked_require_or_import(
+                    import.import_record_index,
+                    level,
+                    result_is_unused,
+                ) && !self.print_external_dynamic_import_fallback(import.import_record_index)
                 {
                     let phase = self.import_records
                         [usize::try_from(import.import_record_index).expect("import record index")]
@@ -1767,6 +1779,7 @@ impl Printer<'_> {
         &mut self,
         import_record_index: u32,
         level: Precedence,
+        result_is_unused: bool,
     ) -> bool {
         let Some(linker_options) = self.linker_options else {
             return false;
@@ -1777,8 +1790,11 @@ impl Printer<'_> {
         if !record.source_index.is_valid() {
             return false;
         }
-        let meta =
+        let mut meta =
             (linker_options.require_or_import_meta_for_source)(record.source_index.get_index());
+        if result_is_unused {
+            meta.exports_ref = INVALID_REF;
+        }
 
         if record.kind == ImportKind::Dynamic && meta.is_wrapper_async {
             self.print_symbol(meta.wrapper_ref);
@@ -2269,7 +2285,8 @@ mod tests {
             contents: Arc::from(
                 b"const cjs = require('./cjs');\
                   const esm = require('./esm');\
-                  import('./async');"
+                  import('./async');\
+                  require('./esm');"
                     .as_slice(),
             ),
             identifier_name: "entry".into(),
@@ -2278,10 +2295,9 @@ mod tests {
         let (mut ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
         assert!(ok);
         assert!(log.done().is_empty());
-        assert_eq!(ast.import_records.len(), 3);
-        for (index, record) in ast.import_records.iter_mut().enumerate() {
-            record.source_index =
-                Index32::new(u32::try_from(index + 1).expect("small source index"));
+        assert_eq!(ast.import_records.len(), 4);
+        for (record, source_index) in ast.import_records.iter_mut().zip([1, 2, 3, 2]) {
+            record.source_index = Index32::new(source_index);
         }
         ast.import_records[1].flags |= ImportRecordFlags::WRAP_WITH_TO_CJS;
 
@@ -2337,7 +2353,8 @@ mod tests {
             .js,
             b"const cjs = require_cjs();\n\
               const esm = (init_esm(), __toCommonJS(esm_exports));\n\
-              init_async().then(() => async_exports);\n"
+              init_async();\n\
+              init_esm();\n"
         );
     }
 
