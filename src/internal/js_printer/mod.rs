@@ -1730,7 +1730,8 @@ impl Printer<'_> {
                     require.import_record_index,
                     level,
                     result_is_unused,
-                ) {
+                ) && !self.print_external_require(require.import_record_index)
+                {
                     self.output.extend_from_slice(b"require(");
                     self.print_import_path(require.import_record_index, true);
                     self.output.push(b')');
@@ -1853,6 +1854,50 @@ impl Printer<'_> {
         }
         if record.kind == ImportKind::Dynamic {
             self.print_then_suffix();
+        }
+        true
+    }
+
+    fn print_external_require(&mut self, import_record_index: u32) -> bool {
+        let Some(linker_options) = self.linker_options else {
+            return false;
+        };
+        let record = self.import_records
+            [usize::try_from(import_record_index).expect("import record index")]
+        .clone();
+        if record.source_index.is_valid()
+            || record.kind == ImportKind::Dynamic
+            || (!record.flags.contains(ImportRecordFlags::WRAP_WITH_TO_ESM)
+                && !record
+                    .flags
+                    .contains(ImportRecordFlags::CALL_RUNTIME_REQUIRE))
+        {
+            return false;
+        }
+
+        let wrap_with_to_esm = record.flags.contains(ImportRecordFlags::WRAP_WITH_TO_ESM);
+        if wrap_with_to_esm {
+            self.print_symbol(linker_options.to_esm_ref);
+            self.output.push(b'(');
+        }
+        if record
+            .flags
+            .contains(ImportRecordFlags::CALL_RUNTIME_REQUIRE)
+        {
+            self.print_symbol(linker_options.runtime_require_ref);
+        } else {
+            self.output.extend_from_slice(b"require");
+        }
+        self.output.push(b'(');
+        self.print_import_path(import_record_index, true);
+        self.output.push(b')');
+        if wrap_with_to_esm {
+            if self.module_type_is_esm {
+                self.output.push(b',');
+                self.print_optional_space();
+                self.output.push(b'1');
+            }
+            self.output.push(b')');
         }
         true
     }
@@ -2472,6 +2517,53 @@ mod tests {
             b"Promise.resolve().then(function() {\n\
               \x20\x20return __toESM(__require(\"./pkg\"), 1);\n\
               });\n"
+        );
+    }
+
+    #[test]
+    fn lowers_external_require_interop_flags() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(b"const pkg = require('./pkg');".as_slice()),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (mut ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        ast.module_type_data.module_type = ModuleType::EsmMjs;
+        ast.import_records[0].flags |=
+            ImportRecordFlags::WRAP_WITH_TO_ESM | ImportRecordFlags::CALL_RUNTIME_REQUIRE;
+
+        let to_esm_ref = Ref {
+            source_index: 0,
+            inner_index: u32::try_from(ast.symbols.len()).expect("symbol count"),
+        };
+        let runtime_require_ref = Ref {
+            source_index: 0,
+            inner_index: to_esm_ref.inner_index + 1,
+        };
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        symbols.symbols_for_source[0].push(Symbol::new(SymbolKind::Other, "__toESM"));
+        symbols.symbols_for_source[0].push(Symbol::new(SymbolKind::Other, "__require"));
+        let renamer = new_no_op_renamer(symbols);
+        let metadata = |_| panic!("external requires do not have linker metadata");
+
+        assert_eq!(
+            print_linked(
+                &ast,
+                &renamer,
+                Options::default(),
+                LinkerOptions {
+                    require_or_import_meta_for_source: &metadata,
+                    to_common_js_ref: INVALID_REF,
+                    to_esm_ref,
+                    runtime_require_ref,
+                },
+            )
+            .js,
+            b"const pkg = __toESM(__require(\"./pkg\"), 1);\n"
         );
     }
 
