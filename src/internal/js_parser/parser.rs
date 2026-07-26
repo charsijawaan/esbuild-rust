@@ -69,26 +69,27 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         let has_import_statement = statements
             .iter()
             .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))));
-        let has_esm_exports = statements.iter().any(|statement| {
-            matches!(
-                statement.data.as_deref(),
-                Some(
-                    StmtData::ExportClause(_)
-                        | StmtData::ExportFrom(_)
-                        | StmtData::ExportDefault(_)
-                        | StmtData::ExportStar(_)
+        let has_esm_exports = core.top_level_await_keyword.len > 0
+            || statements.iter().any(|statement| {
+                matches!(
+                    statement.data.as_deref(),
+                    Some(
+                        StmtData::ExportClause(_)
+                            | StmtData::ExportFrom(_)
+                            | StmtData::ExportDefault(_)
+                            | StmtData::ExportStar(_)
+                    )
+                ) || matches!(
+                    statement.data.as_deref(),
+                    Some(StmtData::Local(local)) if local.is_export
+                ) || matches!(
+                    statement.data.as_deref(),
+                    Some(StmtData::Function(function)) if function.is_export
+                ) || matches!(
+                    statement.data.as_deref(),
+                    Some(StmtData::Class(class)) if class.is_export
                 )
-            ) || matches!(
-                statement.data.as_deref(),
-                Some(StmtData::Local(local)) if local.is_export
-            ) || matches!(
-                statement.data.as_deref(),
-                Some(StmtData::Function(function)) if function.is_export
-            ) || matches!(
-                statement.data.as_deref(),
-                Some(StmtData::Class(class)) if class.is_export
-            )
-        });
+            });
         let declared_symbols = declare_top_level_symbols(&mut core, &mut statements);
         core.hoist_symbols();
         let scopes = core.scope_refs_in_order();
@@ -136,7 +137,9 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             || core.options.module_type_data.module_type.is_esm()
         {
             ExportsKind::Esm
-        } else if core.options.module_type_data.module_type.is_common_js() {
+        } else if core.options.module_type_data.module_type.is_common_js()
+            || core.has_top_level_return
+        {
             ExportsKind::CommonJs
         } else {
             ExportsKind::None
@@ -159,6 +162,8 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             named_exports: module_metadata.named_exports,
             export_star_import_records: module_metadata.export_star_import_records,
             source_map_comment: lexer.source_mapping_url.clone(),
+            top_level_await_keyword: core.top_level_await_keyword,
+            live_top_level_await_keyword: core.top_level_await_keyword,
             exports_ref: core.exports_ref,
             module_ref: core.module_ref,
             wrapper_ref,
@@ -626,6 +631,13 @@ mod tests {
             statement.value.data.as_deref(),
             Some(ExprData::Await(_))
         ));
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+        assert_eq!(ast.top_level_await_keyword.loc.start, 0);
+        assert_eq!(ast.top_level_await_keyword.len, 5);
+        assert_eq!(
+            ast.live_top_level_await_keyword,
+            ast.top_level_await_keyword
+        );
     }
 
     #[test]
@@ -1284,5 +1296,47 @@ mod tests {
             panic!("expected class statement");
         };
         assert_eq!(class.class.name.expect("class name").reference, outer_item);
+    }
+
+    #[test]
+    fn validates_unlabeled_break_and_continue_contexts() {
+        let (_, ok, log) = parse_source("break; continue;");
+        assert!(ok);
+        assert_eq!(log.done().len(), 2);
+
+        let (_, ok, log) = parse_source(
+            "while (condition) {\
+               break;\
+               continue;\
+               function nested() { break; }\
+               () => { continue; };\
+               class Item { static { break; return; } }\
+             }\
+             switch (value) { default: break; }",
+        );
+        assert!(ok);
+        assert_eq!(log.done().len(), 4);
+    }
+
+    #[test]
+    fn rejects_with_statements_in_strict_mode() {
+        let (_, ok, log) = parse_source("\"use strict\"; with (object) {}");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+    }
+
+    #[test]
+    fn classifies_top_level_return_as_common_js_and_rejects_it_in_esm() {
+        let (ast, ok, log) = parse_source("return;");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(
+            ast.exports_kind,
+            crate::internal::js_ast::ExportsKind::CommonJs
+        );
+
+        let (_, ok, log) = parse_source("export {}; return;");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
     }
 }

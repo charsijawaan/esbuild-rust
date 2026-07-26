@@ -62,8 +62,12 @@ pub(crate) struct ParserCore {
     pub(crate) module_ref: Ref,
     pub(crate) legacy_octal_literals: HashMap<Loc, Range>,
     pub(crate) esm_import_meta: Range,
+    pub(crate) top_level_await_keyword: Range,
     pub(crate) fn_or_arrow_data_parse: FnOrArrowDataParse,
     pub(crate) lower_all_of_these_private_names: HashMap<String, bool>,
+    pub(crate) visit_loop_depth: usize,
+    pub(crate) visit_switch_depth: usize,
+    pub(crate) has_top_level_return: bool,
 }
 
 impl ParserCore {
@@ -97,8 +101,12 @@ impl ParserCore {
             module_ref: INVALID_REF,
             legacy_octal_literals: HashMap::new(),
             esm_import_meta: Range::default(),
+            top_level_await_keyword: Range::default(),
             fn_or_arrow_data_parse: FnOrArrowDataParse::default(),
             lower_all_of_these_private_names: HashMap::new(),
+            visit_loop_depth: 0,
+            visit_switch_depth: 0,
+            has_top_level_return: false,
         }
     }
 
@@ -251,6 +259,44 @@ impl ParserCore {
 
     pub(crate) fn remaining_scope_count(&self) -> usize {
         self.scopes_in_order.len()
+    }
+
+    pub(crate) fn is_strict_mode(&self) -> bool {
+        self.current_scope.as_ref().is_some_and(|scope| {
+            scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .strict_mode
+                != StrictModeKind::Sloppy
+        })
+    }
+
+    pub(crate) fn is_inside_function_scope(&self) -> bool {
+        let mut scope = self.current_scope.clone();
+        while let Some(current) = scope {
+            let current = current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if current.kind == ScopeKind::FunctionBody {
+                return true;
+            }
+            scope = current.parent.as_ref().and_then(std::sync::Weak::upgrade);
+        }
+        false
+    }
+
+    pub(crate) fn is_inside_class_static_block(&self) -> bool {
+        let mut scope = self.current_scope.clone();
+        while let Some(current) = scope {
+            let current = current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if current.kind == ScopeKind::ClassStaticInit {
+                return true;
+            }
+            scope = current.parent.as_ref().and_then(std::sync::Weak::upgrade);
+        }
+        false
     }
 
     pub(crate) fn prepare_for_visit_pass(

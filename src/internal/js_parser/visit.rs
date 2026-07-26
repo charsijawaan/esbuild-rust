@@ -51,14 +51,24 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 visit_statement(core, &mut if_statement.no_or_nil, resolve_identifiers);
             }
             Some(StmtData::DoWhile(loop_statement)) => {
+                core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
+                core.visit_loop_depth -= 1;
                 visit_expr(core, &mut loop_statement.test, resolve_identifiers);
             }
             Some(StmtData::While(loop_statement)) => {
                 visit_expr(core, &mut loop_statement.test, resolve_identifiers);
+                core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
+                core.visit_loop_depth -= 1;
             }
             Some(StmtData::With(with_statement)) => {
+                if core.is_strict_mode() {
+                    core.add_error_range(
+                        crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
+                        "With statements cannot be used in strict mode",
+                    );
+                }
                 visit_expr(core, &mut with_statement.value, resolve_identifiers);
                 core.push_scope_for_visit_pass(ScopeKind::With, with_statement.body_loc);
                 visit_statement(core, &mut with_statement.body, resolve_identifiers);
@@ -68,6 +78,19 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 visit_expr(core, &mut throw_statement.value, resolve_identifiers);
             }
             Some(StmtData::Return(return_statement)) => {
+                if !core.is_inside_function_scope() && !core.is_inside_class_static_block() {
+                    if core.is_file_considered_esm {
+                        core.add_error_range(
+                            crate::internal::js_lexer::range_of_identifier(
+                                &core.source,
+                                statement.loc,
+                            ),
+                            "Top-level return cannot be used inside an ECMAScript module",
+                        );
+                    } else {
+                        core.has_top_level_return = true;
+                    }
+                }
                 visit_expr(
                     core,
                     &mut return_statement.value_or_nil,
@@ -78,17 +101,23 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 visit_statement(core, &mut loop_statement.init_or_nil, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.test_or_nil, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.update_or_nil, resolve_identifiers);
+                core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
+                core.visit_loop_depth -= 1;
             }
             Some(StmtData::ForIn(loop_statement)) => {
                 visit_statement(core, &mut loop_statement.init, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
+                core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
+                core.visit_loop_depth -= 1;
             }
             Some(StmtData::ForOf(loop_statement)) => {
                 visit_statement(core, &mut loop_statement.init, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
+                core.visit_loop_depth += 1;
                 visit_statement(core, &mut loop_statement.body, resolve_identifiers);
+                core.visit_loop_depth -= 1;
             }
             Some(StmtData::Label(label)) => {
                 core.push_scope_for_visit_pass(ScopeKind::Label, statement.loc);
@@ -124,10 +153,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             Some(StmtData::Switch(switch)) => {
                 visit_expr(core, &mut switch.test, resolve_identifiers);
                 core.push_scope_for_visit_pass(ScopeKind::Block, switch.body_loc);
+                core.visit_switch_depth += 1;
                 for case in &mut switch.cases {
                     visit_expr(core, &mut case.value_or_nil, resolve_identifiers);
                     visit_statements(core, &mut case.body, resolve_identifiers);
                 }
+                core.visit_switch_depth -= 1;
                 core.pop_scope();
             }
             Some(StmtData::Try(try_statement)) => {
@@ -154,9 +185,24 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 }
             }
             Some(StmtData::Break(break_statement)) => {
+                if break_statement.label.is_none()
+                    && core.visit_loop_depth == 0
+                    && core.visit_switch_depth == 0
+                {
+                    core.add_error_range(
+                        crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
+                        "Cannot use \"break\" here",
+                    );
+                }
                 bind_label_reference(core, &mut break_statement.label, false);
             }
             Some(StmtData::Continue(continue_statement)) => {
+                if continue_statement.label.is_none() && core.visit_loop_depth == 0 {
+                    core.add_error_range(
+                        crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
+                        "Cannot use \"continue\" here",
+                    );
+                }
                 bind_label_reference(core, &mut continue_statement.label, true);
             }
             _ => {}
@@ -202,6 +248,8 @@ fn visit_block(
 }
 
 fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identifiers: bool) {
+    let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
+    let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
     core.push_scope_for_visit_pass(ScopeKind::FunctionArgs, function.open_paren_loc);
     for argument in &mut function.args {
         visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
@@ -218,6 +266,8 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     );
     core.pop_scope();
     core.pop_scope();
+    core.visit_loop_depth = old_loop_depth;
+    core.visit_switch_depth = old_switch_depth;
 }
 
 fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bool) {
@@ -268,6 +318,8 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
         visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
         visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
         if let Some(static_block) = &mut property.class_static_block {
+            let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
+            let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
             core.push_scope_for_visit_pass(ScopeKind::ClassStaticInit, static_block.loc);
             visit_statements(
                 core,
@@ -275,6 +327,8 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
                 resolve_identifiers,
             );
             core.pop_scope();
+            core.visit_loop_depth = old_loop_depth;
+            core.visit_switch_depth = old_switch_depth;
         }
     }
     core.pop_scope();
@@ -461,6 +515,8 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
         }
         ExprData::Class(class) => visit_class(core, &mut class.class, resolve_identifiers),
         ExprData::Arrow(arrow) => {
+            let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
+            let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
             for argument in &mut arrow.args {
                 visit_binding_initializers(core, &mut argument.binding, false);
                 visit_expr(core, &mut argument.default_or_nil, false);
@@ -470,6 +526,8 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
             visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
             core.pop_scope();
             core.pop_scope();
+            core.visit_loop_depth = old_loop_depth;
+            core.visit_switch_depth = old_switch_depth;
         }
         ExprData::Boolean(_)
         | ExprData::Super

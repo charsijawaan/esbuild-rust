@@ -50,6 +50,9 @@ pub(crate) fn parse_await_or_yield_prefix(
             );
         }
         AwaitOrYield::AllowExpression if is_await => {
+            if !core.is_inside_function_scope() && core.top_level_await_keyword.len == 0 {
+                core.top_level_await_keyword = name_range;
+            }
             let value = parse_value(core, lexer, Precedence::Prefix);
             if lexer.token == Token::AsteriskAsterisk {
                 lexer.unexpected();
