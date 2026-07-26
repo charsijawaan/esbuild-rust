@@ -8,9 +8,10 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
-    ast::Index32,
+    ast::{ImportKind, ImportRecordFlags, Index32},
+    cache::{SourceIndexCache, SourceIndexKind},
     compat::{CssFeature, JsFeature},
-    config::{Loader, Options, PathPlaceholder, PathTemplate, Platform, PluginData},
+    config::{Loader, Mode, Options, PathPlaceholder, PathTemplate, Platform, PluginData},
     css_parser,
     fs::Fs,
     graph::{
@@ -20,7 +21,8 @@ use crate::internal::{
     helpers::{encode_string_as_shortest_data_url, mime_type_by_extension, string_to_utf16},
     js_ast::{self, ExportsKind, Expr, ExprData, StringExpr},
     js_parser::{self, HelperCall},
-    logger::{self, Log, Range, Source},
+    logger::{self, LineColumnTracker, Log, Range, Source},
+    resolver::{self, ResolveResult, ResolverContext},
     runtime,
     sourcemap::LineOffsetTable,
 };
@@ -34,6 +36,7 @@ pub struct ScannerFile {
 
 #[derive(Clone, Default)]
 pub struct ParseResult {
+    pub resolve_results: Vec<Option<ResolveResult>>,
     pub file: ScannerFile,
     pub tla_check: TlaCheck,
     pub ok: bool,
@@ -302,6 +305,81 @@ pub fn parse_file_with_unique_key_prefix(
     }
 
     result
+}
+
+pub fn resolve_import_records(
+    log: &Log,
+    file_system: &dyn Fs,
+    source_index_cache: &SourceIndexCache,
+    options: &Options,
+    result: &mut ParseResult,
+) {
+    if options.mode != Mode::Bundle || !result.ok {
+        return;
+    }
+    let source = result.file.input_file.source.clone();
+    let source_directory = file_system.dir(&source.key_path.text);
+    let Some(records) = result
+        .file
+        .input_file
+        .repr
+        .as_mut()
+        .and_then(InputFileRepr::import_records_mut)
+    else {
+        return;
+    };
+    result.resolve_results = vec![None; records.len()];
+    let mut tracker = LineColumnTracker::new(Some(&source));
+
+    for (record_index, record) in records.iter_mut().enumerate() {
+        if record.source_index.is_valid()
+            || record.flags.contains(ImportRecordFlags::IS_UNUSED)
+            || record.glob_pattern.is_some()
+        {
+            continue;
+        }
+        let is_require = matches!(
+            record.kind,
+            ImportKind::Require | ImportKind::RequireResolve
+        );
+        let Some(resolve_result) = resolver::resolve_with_metadata(
+            log,
+            file_system,
+            &source_directory,
+            &record.path.text,
+            &options.extension_order,
+            options.platform,
+            (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
+            is_require,
+            ResolverContext::default(),
+        ) else {
+            if !record
+                .flags
+                .contains(ImportRecordFlags::HANDLES_IMPORT_ERRORS)
+            {
+                log.add_error(
+                    Some(&mut tracker),
+                    record.range,
+                    format!("Could not resolve {:?}", record.path.text),
+                );
+            }
+            continue;
+        };
+
+        if record.kind == ImportKind::RequireResolve {
+            if resolve_result.path_pair.is_external {
+                result.resolve_results[record_index] = Some(resolve_result);
+            }
+            continue;
+        }
+        if !resolve_result.path_pair.is_external {
+            record.source_index = Index32::new(source_index_cache.get(
+                resolve_result.path_pair.primary.clone(),
+                SourceIndexKind::Normal,
+            ));
+        }
+        result.resolve_results[record_index] = Some(resolve_result);
+    }
 }
 
 fn lazy_export_string(
@@ -656,13 +734,14 @@ mod tests {
     use super::{
         apply_option_defaults, default_extension_to_loader_map, find_reachable_files,
         guess_mime_type, hash_for_file_name, is_ascii_only, parse_file,
-        parse_file_with_unique_key_prefix, path_relative_to_outbase,
+        parse_file_with_unique_key_prefix, path_relative_to_outbase, resolve_import_records,
         sanitize_file_path_for_virtual_module_path,
     };
     use crate::internal::{
-        ast::{ImportRecord, Index32},
+        ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32},
+        cache::SourceIndexCache,
         compat::JsFeature,
-        config::{Loader, Options, PathPlaceholder, Platform},
+        config::{Loader, Mode, Options, PathPlaceholder, Platform},
         fs::{MockKind, mock_fs},
         graph::{EntryPoint, InputFile, InputFileRepr, JsRepr, SideEffectsKind},
         js_ast::ExportsKind,
@@ -1070,5 +1149,138 @@ mod tests {
             guess_mime_type("", &[0xff, 0x00]),
             "application/octet-stream"
         );
+    }
+
+    #[test]
+    fn resolves_parsed_import_records_into_source_indexes() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                ("/project/entry.js".into(), String::new()),
+                ("/project/dep.js".into(), "export let x = 1".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let options = Options {
+            extension_order: vec![".js".into()],
+            mode: Mode::Bundle,
+            ..Options::default()
+        };
+        let mut result = parse_file(
+            &log,
+            source(
+                "/project/entry.js",
+                b"import './dep'; import {x} from './dep'; console.log(x)",
+            ),
+            Loader::Js,
+            &options,
+        );
+        let cache = SourceIndexCache::new();
+        resolve_import_records(&log, &file_system, &cache, &options, &mut result);
+
+        assert_eq!(result.resolve_results.len(), 2);
+        assert!(result.resolve_results.iter().all(Option::is_some));
+        let records = result
+            .file
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+            .expect("JavaScript import records");
+        assert!(records.iter().all(|record| record.source_index.is_valid()));
+        assert_eq!(
+            records[0].source_index.get_index(),
+            records[1].source_index.get_index()
+        );
+        assert_eq!(
+            result.resolve_results[0]
+                .as_ref()
+                .expect("resolution")
+                .path_pair
+                .primary
+                .text,
+            "/project/dep.js"
+        );
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn externalizes_node_builtins_and_suppresses_handled_failures() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let options = Options {
+            extension_order: vec![".js".into()],
+            mode: Mode::Bundle,
+            platform: Platform::Node,
+            ..Options::default()
+        };
+        let mut result = parse_file(
+            &log,
+            source(
+                "/project/entry.js",
+                b"import fs from 'node:fs'; import('./missing').catch(() => {})",
+            ),
+            Loader::Js,
+            &options,
+        );
+        {
+            let records = result
+                .file
+                .input_file
+                .repr
+                .as_mut()
+                .and_then(InputFileRepr::import_records_mut)
+                .expect("JavaScript import records");
+            assert_eq!(records[0].kind, ImportKind::Stmt);
+            records[1].flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
+        }
+        let cache = SourceIndexCache::new();
+        resolve_import_records(&log, &file_system, &cache, &options, &mut result);
+
+        let records = result
+            .file
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+            .expect("JavaScript import records");
+        assert!(!records[0].source_index.is_valid());
+        assert!(
+            result.resolve_results[0]
+                .as_ref()
+                .expect("node builtin resolution")
+                .path_pair
+                .is_external
+        );
+        assert!(result.resolve_results[1].is_none());
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn logs_unresolved_imports_during_dependency_scanning() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let options = Options {
+            extension_order: vec![".js".into()],
+            mode: Mode::Bundle,
+            ..Options::default()
+        };
+        let mut result = parse_file(
+            &log,
+            source("/project/entry.js", b"import './missing'"),
+            Loader::Js,
+            &options,
+        );
+        resolve_import_records(
+            &log,
+            &file_system,
+            &SourceIndexCache::new(),
+            &options,
+            &mut result,
+        );
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].data.text, "Could not resolve \"./missing\"");
     }
 }
