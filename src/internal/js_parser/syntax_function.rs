@@ -39,24 +39,54 @@ pub(crate) fn parse_function_prefix(core: &mut ParserCore, lexer: &mut Lexer) ->
         None
     };
 
-    let body_context = FnOrArrowDataParse {
-        yield_policy: if is_generator {
-            AwaitOrYield::AllowExpression
-        } else {
-            AwaitOrYield::AllowIdentifier
+    let function = parse_function_tail(
+        core,
+        lexer,
+        name,
+        FnOrArrowDataParse {
+            yield_policy: if is_generator {
+                AwaitOrYield::AllowExpression
+            } else {
+                AwaitOrYield::AllowIdentifier
+            },
+            ..FnOrArrowDataParse::default()
         },
-        ..FnOrArrowDataParse::default()
-    };
+    );
+
+    Some(Expr::new(
+        loc,
+        ExprData::Function(FunctionExpr {
+            function,
+            ..FunctionExpr::default()
+        }),
+    ))
+}
+
+pub(crate) fn parse_function_tail(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    name: Option<LocRef>,
+    body_context: FnOrArrowDataParse,
+) -> Function {
+    let is_async = body_context.await_policy == AwaitOrYield::AllowExpression;
+    let is_generator = body_context.yield_policy == AwaitOrYield::AllowExpression;
     let open_paren_loc = lexer.loc();
     lexer.expect(Token::OpenParen);
 
     let old_context = core.fn_or_arrow_data_parse;
     core.fn_or_arrow_data_parse = FnOrArrowDataParse {
+        await_policy: if is_async {
+            AwaitOrYield::ForbidAll
+        } else {
+            AwaitOrYield::AllowIdentifier
+        },
         yield_policy: if is_generator {
             AwaitOrYield::ForbidAll
         } else {
             AwaitOrYield::AllowIdentifier
         },
+        allow_super_call: body_context.allow_super_call,
+        allow_super_property: body_context.allow_super_property,
         ..FnOrArrowDataParse::default()
     };
 
@@ -106,25 +136,20 @@ pub(crate) fn parse_function_prefix(core: &mut ParserCore, lexer: &mut Lexer) ->
     let (body_loc, block) = parse_block(core, lexer);
     core.fn_or_arrow_data_parse = old_context;
 
-    Some(Expr::new(
-        loc,
-        ExprData::Function(FunctionExpr {
-            function: Function {
-                name,
-                args,
-                body: crate::internal::js_ast::FunctionBody {
-                    block,
-                    loc: body_loc,
-                },
-                arguments_ref: INVALID_REF,
-                open_paren_loc,
-                is_generator,
-                has_rest_arg,
-                ..Function::default()
-            },
-            ..FunctionExpr::default()
-        }),
-    ))
+    Function {
+        name,
+        args,
+        body: crate::internal::js_ast::FunctionBody {
+            block,
+            loc: body_loc,
+        },
+        arguments_ref: INVALID_REF,
+        open_paren_loc,
+        is_async,
+        is_generator,
+        has_rest_arg,
+        ..Function::default()
+    }
 }
 
 #[cfg(test)]

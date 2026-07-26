@@ -3,8 +3,8 @@
 use crate::internal::{
     helpers::string_to_utf16,
     js_ast::{
-        Expr, ExprData, IdentifierExpr, NameOfSymbolExpr, ObjectExpr, Precedence, Property,
-        PropertyFlags, PropertyKind, StringExpr,
+        Expr, ExprData, FunctionExpr, IdentifierExpr, NameOfSymbolExpr, ObjectExpr, Precedence,
+        Property, PropertyFlags, PropertyKind, StringExpr,
     },
     js_lexer::{Lexer, Token},
     logger::Loc,
@@ -12,7 +12,8 @@ use crate::internal::{
 
 use super::{
     parser_core::ParserCore,
-    parser_types::AwaitOrYield,
+    parser_types::{AwaitOrYield, FnOrArrowDataParse},
+    syntax_function::parse_function_tail,
     syntax_literals::{
         parse_big_int_or_string_if_unsupported, parse_numeric_literal, parse_string_literal,
     },
@@ -79,12 +80,18 @@ pub(crate) fn parse_object_literal_prefix(
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_property(
     core: &mut ParserCore,
     lexer: &mut Lexer,
     parse_expression: &mut impl FnMut(&mut ParserCore, &mut Lexer, Precedence) -> Expr,
 ) -> Property {
     let start_loc = lexer.loc();
+    let is_generator = lexer.token == Token::Asterisk;
+    if is_generator {
+        lexer.next();
+    }
+    let key_loc = lexer.loc();
     let mut flags = PropertyFlags::NONE;
     let mut close_bracket_loc = Loc::default();
     let mut shorthand = None;
@@ -142,7 +149,7 @@ fn parse_property(
                     );
                 }
                 shorthand = Some(Expr::new(
-                    start_loc,
+                    key_loc,
                     ExprData::Identifier(IdentifierExpr {
                         reference: core.store_name_in_ref(name.clone()),
                         ..IdentifierExpr::default()
@@ -151,9 +158,44 @@ fn parse_property(
                 flags |= PropertyFlags::WAS_SHORTHAND;
             }
 
-            property_name_expr(core, start_loc, name)
+            property_name_expr(core, key_loc, name)
         }
     };
+
+    if lexer.token == Token::OpenParen {
+        let function = parse_function_tail(
+            core,
+            lexer,
+            None,
+            FnOrArrowDataParse {
+                yield_policy: if is_generator {
+                    AwaitOrYield::AllowExpression
+                } else {
+                    AwaitOrYield::AllowIdentifier
+                },
+                allow_super_property: true,
+                ..FnOrArrowDataParse::default()
+            },
+        );
+        return Property {
+            key,
+            value_or_nil: Expr::new(
+                start_loc,
+                ExprData::Function(FunctionExpr {
+                    function,
+                    ..FunctionExpr::default()
+                }),
+            ),
+            loc: start_loc,
+            close_bracket_loc,
+            kind: PropertyKind::Method,
+            flags,
+            ..Property::default()
+        };
+    }
+    if is_generator {
+        lexer.expected(Token::OpenParen);
+    }
 
     let value_or_nil = if let Some(value) = shorthand {
         value
@@ -245,6 +287,34 @@ mod tests {
                 .contains(PropertyFlags::WAS_SHORTHAND)
         );
         assert_eq!(object.properties[3].kind, PropertyKind::Spread);
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_ordinary_and_generator_methods() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"{method(a) { return a }, *generator() { yield 1 }}"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let object =
+            parse_object_literal_prefix(&mut core, &mut lexer, parse_number).expect("object");
+        let Some(ExprData::Object(object)) = object.data.as_deref() else {
+            panic!("expected object");
+        };
+        assert_eq!(object.properties.len(), 2);
+        assert!(
+            object
+                .properties
+                .iter()
+                .all(|property| property.kind == PropertyKind::Method)
+        );
+        assert!(matches!(
+            object.properties[1].value_or_nil.data.as_deref(),
+            Some(ExprData::Function(function)) if function.function.is_generator
+        ));
         assert_eq!(lexer.token, Token::EndOfFile);
     }
 }
