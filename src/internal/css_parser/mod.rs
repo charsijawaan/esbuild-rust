@@ -11,7 +11,7 @@ use crate::internal::{
         KeyframeBlock, KnownAtRule, MediaArbitraryTokensQuery, MediaQuery, MediaQueryData,
         NameToken, NamespacedName, PseudoClassSelector, QualifiedRule, Rule, RuleData,
         SelectorRule, SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags,
-        rules_equal, tokens_are_comma_separated,
+        media_queries_equal, rules_equal, tokens_are_comma_separated,
     },
     css_lexer::{self, TokenKind},
     logger::{Loc, Log, Path, Range, Source},
@@ -208,17 +208,7 @@ impl Parser {
                 return self.parse_keyframes(loc, name, &prelude);
             }
             if name.eq_ignore_ascii_case("media") {
-                let queries = split_media_queries(prelude, loc);
-                self.index += 1;
-                let rules = self.parse_rule_list(true, preserve_legal_comments);
-                return Rule {
-                    loc,
-                    data: RuleData::AtMedia(AtMediaRule {
-                        queries,
-                        rules,
-                        ..AtMediaRule::default()
-                    }),
-                };
+                return self.parse_media_at_rule(loc, prelude, preserve_legal_comments);
             }
             if name.eq_ignore_ascii_case("layer") {
                 let names = parse_layer_names(&prelude);
@@ -268,6 +258,28 @@ impl Parser {
                 at_token: name,
                 prelude,
                 block,
+            }),
+        }
+    }
+
+    fn parse_media_at_rule(
+        &mut self,
+        loc: Loc,
+        prelude: Vec<Token>,
+        preserve_legal_comments: bool,
+    ) -> Rule {
+        let queries = split_media_queries(prelude, loc);
+        self.index += 1;
+        let mut rules = self.parse_rule_list(true, preserve_legal_comments);
+        if self.minify_syntax {
+            unwrap_duplicate_media_rules(&mut rules, &queries);
+        }
+        Rule {
+            loc,
+            data: RuleData::AtMedia(AtMediaRule {
+                queries,
+                rules,
+                ..AtMediaRule::default()
             }),
         }
     }
@@ -1159,6 +1171,25 @@ fn mangle_empty_and_nested_rules(rules: &mut Vec<Rule>) {
         };
         if remove {
             rules.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn unwrap_duplicate_media_rules(rules: &mut Vec<Rule>, parent_queries: &[MediaQuery]) {
+    let mut index = 0;
+    while index < rules.len() {
+        let replacement = match &mut rules[index].data {
+            RuleData::AtMedia(media)
+                if media_queries_equal(&media.queries, parent_queries, None) =>
+            {
+                Some(std::mem::take(&mut media.rules))
+            }
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            rules.splice(index..=index, replacement);
         } else {
             index += 1;
         }

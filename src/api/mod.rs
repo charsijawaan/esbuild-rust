@@ -718,6 +718,22 @@ mod tests {
     }
 
     #[test]
+    fn unwraps_duplicate_nested_css_media_rules() {
+        assert_eq!(
+            code(transform(
+                "@media screen { a { color: red } @media screen { b { color: blue } } @media print { c { color: black } } } @media (min-width: 1px) { @media (min-width: 1px) { d { color: white } } }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "@media screen{a{color:red}b{color:#00f}@media print{c{color:#000}}}@media(min-width:1px){d{color:#fff}}\n"
+        );
+    }
+
+    #[test]
     fn scopes_and_minifies_local_css_names() {
         let input = ".card { color: red } #root .card { color: blue }";
         assert_eq!(

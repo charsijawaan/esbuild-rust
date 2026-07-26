@@ -225,8 +225,16 @@ impl Printer<'_> {
             RuleData::AtMedia(rule) => {
                 self.css.extend_from_slice(b"@media");
                 if !rule.queries.is_empty() {
-                    self.css.push(b' ');
+                    if !self.options.minify_whitespace {
+                        self.css.push(b' ');
+                    }
+                    let query_start = self.css.len();
                     self.print_media_queries(&rule.queries);
+                    if self.options.minify_whitespace
+                        && self.css.get(query_start).is_some_and(|byte| *byte != b'(')
+                    {
+                        self.css.insert(query_start, b' ');
+                    }
                     self.print_space();
                 }
                 self.print_rule_block(&rule.rules);
