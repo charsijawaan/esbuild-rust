@@ -1020,6 +1020,18 @@ fn visit_expr_with_target(
             for child in &mut element.nullable_children {
                 visit_expr(core, child, resolve_identifiers);
             }
+            if core.options.jsx.preserve {
+                let reference = match element.tag_or_nil.data.as_deref() {
+                    Some(ExprData::Identifier(identifier)) => Some(identifier.reference),
+                    Some(ExprData::ImportIdentifier(identifier)) => Some(identifier.reference),
+                    _ => None,
+                };
+                if let Some(reference) = reference {
+                    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                        .flags |=
+                        crate::internal::ast::SymbolFlags::MUST_START_WITH_CAPITAL_LETTER_FOR_JSX;
+                }
+            }
             if !core.options.jsx.preserve {
                 let mut children = std::mem::take(&mut element.nullable_children);
                 children.retain(|child| child.data.is_some());
@@ -1095,7 +1107,7 @@ fn visit_expr_with_target(
                                 }
                                 key_or_nil = Some(property.value_or_nil);
                             }
-                            Some("__source" | "__self") if core.options.jsx.development => {
+                            Some("__source" | "__self") => {
                                 core.add_error_range(
                                     crate::internal::logger::Range {
                                         loc: property.loc,

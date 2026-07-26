@@ -2226,10 +2226,16 @@ mod tests {
         else {
             panic!("expected JSX element");
         };
-        assert!(matches!(
-            element.tag_or_nil.data.as_deref(),
-            Some(ExprData::Identifier(_))
-        ));
+        let Some(ExprData::Identifier(component)) = element.tag_or_nil.data.as_deref() else {
+            panic!("expected component identifier");
+        };
+        assert!(
+            ast.symbols[usize::try_from(component.reference.inner_index).expect("symbol index")]
+                .flags
+                .contains(
+                    crate::internal::ast::SymbolFlags::MUST_START_WITH_CAPITAL_LETTER_FOR_JSX
+                )
+        );
         assert_eq!(element.properties.len(), 3);
         assert_eq!(element.nullable_children.len(), 2);
         assert!(matches!(
@@ -2291,6 +2297,12 @@ mod tests {
         let messages = log.done();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].kind, MsgKind::Error);
+
+        let mut options = Options::default();
+        options.jsx.parse = true;
+        let (_, ok, log) = parse_source_with_options("<Foo.bad-name />;", options);
+        assert!(!ok);
+        assert_eq!(log.done().len(), 1);
     }
 
     #[test]
@@ -2386,7 +2398,8 @@ mod tests {
         };
         assert_eq!(ast.named_imports[&target.reference].alias, "jsx");
 
-        let (ast, ok, log) = parse_source_with_options("<div {...props} key={id} />;", options);
+        let (ast, ok, log) =
+            parse_source_with_options("<div {...props} key={id} />;", options.clone());
         assert!(ok);
         assert!(log.done().is_empty());
         assert_eq!(ast.import_records.len(), 1);
@@ -2401,6 +2414,10 @@ mod tests {
             panic!("expected createElement import target");
         };
         assert_eq!(ast.named_imports[&target.reference].alias, "createElement");
+
+        let (_, ok, log) = parse_source_with_options("<div __source=\"plugin\" />;", options);
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
     }
 
     #[test]

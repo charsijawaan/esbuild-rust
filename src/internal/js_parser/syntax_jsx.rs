@@ -115,6 +115,7 @@ fn parse_jsx_tag(core: &mut ParserCore, lexer: &mut Lexer) -> (Range, String, Ex
                 },
                 "Unexpected \"-\"",
             );
+            panic_any(LexerPanic);
         }
         tag_text.push('.');
         tag_text.push_str(&member);
