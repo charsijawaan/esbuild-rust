@@ -22,8 +22,11 @@ use crate::internal::{
         template_to_string,
     },
     css_ast::{
-        ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
+        AtMediaRule, ImportConditions, KnownAtRule, Rule, RuleData,
+        clone_media_queries_with_import_records, clone_tokens_with_import_records,
+        media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
     },
+    css_lexer::TokenKind,
     fs::Fs,
     graph::{
         ExportData, ImportData, InputFileRepr, LinkerGraph, OutputFile, SideEffectsKind, WrapKind,
@@ -2563,6 +2566,85 @@ fn optimize_css_import_order(
         }
     }
     merged
+}
+
+/// Wrap CSS rules in the nested conditions accumulated from `@import` edges.
+///
+/// # Panics
+///
+/// Panics if a URL token in an import condition refers to a missing condition
+/// import record.
+#[must_use]
+pub fn wrap_rules_with_conditions(
+    mut rules: Vec<Rule>,
+    mut import_records: Vec<ImportRecord>,
+    conditions: &[ImportConditions],
+    condition_import_records: &[ImportRecord],
+) -> (Vec<Rule>, Vec<ImportRecord>) {
+    for condition in conditions.iter().rev() {
+        for token in &condition.layers {
+            if rules.is_empty() {
+                if token.children.is_none() {
+                    continue;
+                }
+                rules.clear();
+            }
+            let prelude = token.children.as_deref().unwrap_or_default();
+            let prelude = clone_tokens_with_import_records(
+                prelude,
+                condition_import_records,
+                &mut import_records,
+            );
+            rules = vec![Rule {
+                data: RuleData::KnownAt(KnownAtRule {
+                    at_token: "layer".into(),
+                    prelude,
+                    rules,
+                    ..KnownAtRule::default()
+                }),
+                loc: crate::internal::logger::Loc::default(),
+            }];
+        }
+
+        if !rules.is_empty() {
+            for token in &condition.supports {
+                let mut token = token.clone();
+                token.kind = TokenKind::OpenParen;
+                token.text = "(".into();
+                let prelude = clone_tokens_with_import_records(
+                    &[token],
+                    condition_import_records,
+                    &mut import_records,
+                );
+                rules = vec![Rule {
+                    data: RuleData::KnownAt(KnownAtRule {
+                        at_token: "supports".into(),
+                        prelude,
+                        rules,
+                        ..KnownAtRule::default()
+                    }),
+                    loc: crate::internal::logger::Loc::default(),
+                }];
+            }
+        }
+
+        if !rules.is_empty() && !condition.queries.is_empty() {
+            let queries = clone_media_queries_with_import_records(
+                &condition.queries,
+                condition_import_records,
+                &mut import_records,
+            );
+            rules = vec![Rule {
+                data: RuleData::AtMedia(AtMediaRule {
+                    queries,
+                    rules,
+                    ..AtMediaRule::default()
+                }),
+                loc: crate::internal::logger::Loc::default(),
+            }];
+        }
+    }
+    (rules, import_records)
 }
 
 /// Discover symbol edges that cross JavaScript chunk boundaries and assign
@@ -5777,6 +5859,7 @@ mod tests {
         recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
         sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
         tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
+        wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -8191,6 +8274,141 @@ mod tests {
                 .collect::<Vec<_>>(),
             [2, 4, 3, 1]
         );
+    }
+
+    #[test]
+    fn wraps_css_rules_with_nested_import_conditions() {
+        let base_rule = Rule {
+            data: RuleData::Comment(crate::internal::css_ast::CommentRule {
+                text: "contents".into(),
+            }),
+            loc: Loc::default(),
+        };
+        let conditions = [ImportConditions {
+            layers: vec![Token {
+                children: Some(vec![Token {
+                    kind: TokenKind::Ident,
+                    text: "theme".into(),
+                    ..Token::default()
+                }]),
+                kind: TokenKind::Function,
+                text: "layer".into(),
+                ..Token::default()
+            }],
+            supports: vec![Token {
+                children: Some(vec![Token {
+                    kind: TokenKind::Ident,
+                    text: "grid".into(),
+                    ..Token::default()
+                }]),
+                kind: TokenKind::Function,
+                text: "supports".into(),
+                ..Token::default()
+            }],
+            queries: vec![MediaQuery {
+                loc: Loc::default(),
+                data: MediaQueryData::ArbitraryTokens(MediaArbitraryTokensQuery {
+                    tokens: vec![Token {
+                        kind: TokenKind::Ident,
+                        text: "screen".into(),
+                        ..Token::default()
+                    }],
+                }),
+            }],
+        }];
+        let (rules, import_records) =
+            wrap_rules_with_conditions(vec![base_rule], vec![], &conditions, &[]);
+        assert!(import_records.is_empty());
+        let RuleData::AtMedia(media) = &rules[0].data else {
+            panic!("expected media wrapper");
+        };
+        let RuleData::KnownAt(supports) = &media.rules[0].data else {
+            panic!("expected supports wrapper");
+        };
+        assert_eq!(supports.at_token, "supports");
+        assert_eq!(supports.prelude[0].kind, TokenKind::OpenParen);
+        let RuleData::KnownAt(layer) = &supports.rules[0].data else {
+            panic!("expected layer wrapper");
+        };
+        assert_eq!(layer.at_token, "layer");
+        assert_eq!(layer.prelude[0].text, "theme");
+        assert!(matches!(layer.rules[0].data, RuleData::Comment(_)));
+    }
+
+    #[test]
+    fn keeps_named_empty_layers_but_omits_anonymous_empty_layers() {
+        let named_layer = ImportConditions {
+            layers: vec![Token {
+                children: Some(vec![Token {
+                    kind: TokenKind::Ident,
+                    text: "base".into(),
+                    ..Token::default()
+                }]),
+                ..Token::default()
+            }],
+            ..ImportConditions::default()
+        };
+        let (rules, _) = wrap_rules_with_conditions(vec![], vec![], &[named_layer], &[]);
+        let RuleData::KnownAt(layer) = &rules[0].data else {
+            panic!("expected named layer");
+        };
+        assert_eq!(layer.at_token, "layer");
+        assert_eq!(layer.prelude[0].text, "base");
+        assert!(layer.rules.is_empty());
+
+        let anonymous_layer = ImportConditions {
+            layers: vec![Token::default()],
+            ..ImportConditions::default()
+        };
+        let (rules, _) = wrap_rules_with_conditions(vec![], vec![], &[anonymous_layer], &[]);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn remaps_url_records_inside_css_condition_wrappers() {
+        let existing_record = ImportRecord {
+            path: Path {
+                text: "existing.png".into(),
+                ..Path::default()
+            },
+            kind: ImportKind::Url,
+            ..ImportRecord::default()
+        };
+        let condition_record = ImportRecord {
+            path: Path {
+                text: "condition.png".into(),
+                ..Path::default()
+            },
+            kind: ImportKind::Url,
+            ..ImportRecord::default()
+        };
+        let condition = ImportConditions {
+            layers: vec![Token {
+                children: Some(vec![Token {
+                    kind: TokenKind::Url,
+                    payload_index: 0,
+                    ..Token::default()
+                }]),
+                ..Token::default()
+            }],
+            ..ImportConditions::default()
+        };
+        let base_rule = Rule {
+            data: RuleData::Comment(crate::internal::css_ast::CommentRule::default()),
+            loc: Loc::default(),
+        };
+        let (rules, import_records) = wrap_rules_with_conditions(
+            vec![base_rule],
+            vec![existing_record],
+            &[condition],
+            &[condition_record],
+        );
+        assert_eq!(import_records.len(), 2);
+        assert_eq!(import_records[1].path.text, "condition.png");
+        let RuleData::KnownAt(layer) = &rules[0].data else {
+            panic!("expected layer wrapper");
+        };
+        assert_eq!(layer.prelude[0].payload_index, 1);
     }
 
     fn js_repr(graph: &crate::internal::graph::LinkerGraph, source_index: usize) -> &JsRepr {
