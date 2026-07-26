@@ -4,8 +4,9 @@ use crate::internal::{
     js_ast::{
         Binding, BindingData, BlockStmt, BreakStmt, Catch, ContinueStmt, Decl, DoWhileStmt, Expr,
         ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt, ForStmt, FunctionStmt,
-        IdentifierBinding, IdentifierExpr, IfStmt, LocalKind, LocalStmt, Precedence, ReturnStmt,
-        Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt, TryStmt, WhileStmt, WithStmt,
+        IdentifierBinding, IdentifierExpr, IfStmt, LabelStmt, LocalKind, LocalStmt, Precedence,
+        ReturnStmt, Stmt, StmtData, SwitchCase, SwitchStmt, ThrowStmt, TryStmt, WhileStmt,
+        WithStmt,
     },
     js_lexer::{Lexer, Token},
     logger::{Loc, Range},
@@ -39,8 +40,12 @@ pub(crate) fn parse_block(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, Blo
 pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
     if lexer.is_contextual_keyword(b"let") {
+        let name_loc = lexer.loc();
         let reference = core.store_name_in_ref(lexer.identifier.clone());
         lexer.next();
+        if lexer.token == Token::Colon {
+            return parse_label_statement(core, lexer, loc, name_loc, reference);
+        }
         if matches!(
             lexer.token,
             Token::Identifier | Token::OpenBracket | Token::OpenBrace
@@ -74,7 +79,42 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         if matches!(expression.data.as_deref(), Some(ExprData::Function(_))) {
             return function_declaration_from_expression(core, loc, expression);
         }
+        if lexer.token == Token::Colon {
+            let Some(ExprData::Identifier(identifier)) = expression.data.as_deref() else {
+                unreachable!("non-function async prefix is an identifier");
+            };
+            return parse_label_statement(core, lexer, loc, loc, identifier.reference);
+        }
         let value = parse_expression_suffix(core, lexer, expression, Precedence::Lowest, true);
+        lexer.expect_or_insert_semicolon();
+        return Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value,
+                ..ExprStmt::default()
+            }),
+        );
+    }
+    if lexer.token == Token::Identifier && !matches!(lexer.raw(), b"await" | b"yield") {
+        let name_loc = lexer.loc();
+        let reference = core.store_name_in_ref(lexer.identifier.clone());
+        lexer.next();
+        if lexer.token == Token::Colon {
+            return parse_label_statement(core, lexer, loc, name_loc, reference);
+        }
+        let value = parse_expression_suffix(
+            core,
+            lexer,
+            Expr::new(
+                name_loc,
+                ExprData::Identifier(IdentifierExpr {
+                    reference,
+                    ..IdentifierExpr::default()
+                }),
+            ),
+            Precedence::Lowest,
+            true,
+        );
         lexer.expect_or_insert_semicolon();
         return Stmt::new(
             loc,
@@ -450,6 +490,29 @@ fn function_declaration_from_expression(core: &mut ParserCore, loc: Loc, express
         StmtData::Function(FunctionStmt {
             function: function.function,
             is_export: false,
+        }),
+    )
+}
+
+fn parse_label_statement(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    loc: Loc,
+    name_loc: Loc,
+    reference: crate::internal::ast::Ref,
+) -> Stmt {
+    lexer.expect(Token::Colon);
+    let is_single_line_stmt = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
+    let statement = parse_statement(core, lexer);
+    Stmt::new(
+        loc,
+        StmtData::Label(LabelStmt {
+            statement,
+            name: crate::internal::ast::LocRef {
+                loc: name_loc,
+                reference,
+            },
+            is_single_line_stmt,
         }),
     )
 }
@@ -917,6 +980,28 @@ mod tests {
         assert!(matches!(
             block.statements[2].data.as_deref(),
             Some(StmtData::Function(function)) if function.function.is_async
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_labeled_statements_with_labeled_branches() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"{outer: while (condition) { continue outer; break outer; }}"[..],
+            ),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (_, block) = parse_block(&mut core, &mut lexer);
+        let Some(StmtData::Label(label)) = block.statements[0].data.as_deref() else {
+            panic!("expected label");
+        };
+        assert!(matches!(
+            label.statement.data.as_deref(),
+            Some(StmtData::While(_))
         ));
         assert_eq!(lexer.token, Token::EndOfFile);
     }
