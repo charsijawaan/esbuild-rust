@@ -443,7 +443,7 @@ fn parse_namespace_statement(
         reference: core.declare_symbol(SymbolKind::TsNamespace, name_loc, &name_text),
     };
     lexer.expect(Token::Identifier);
-    let argument = core.new_symbol(SymbolKind::Hoisted, format!("_{name_text}"));
+    let argument = core.new_symbol(SymbolKind::Hoisted, name_text.clone());
 
     core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Entry, loc);
     core.current_scope
@@ -596,7 +596,7 @@ pub(crate) fn parse_enum_statement(
         reference: core.declare_symbol(SymbolKind::TsEnum, name_loc, &name_text),
     };
     lexer.expect(Token::Identifier);
-    let argument = core.new_symbol(SymbolKind::Hoisted, format!("_{name_text}"));
+    let argument = core.new_symbol(SymbolKind::Hoisted, name_text.clone());
     core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Entry, loc);
     core.current_scope
         .as_ref()

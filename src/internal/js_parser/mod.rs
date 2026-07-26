@@ -7,6 +7,7 @@ mod define;
 mod duplicate_properties;
 mod global_name;
 mod json;
+mod lower_typescript;
 mod options;
 mod parser;
 mod parser_core;

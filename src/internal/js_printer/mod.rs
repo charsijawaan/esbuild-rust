@@ -2192,4 +2192,35 @@ mod tests {
              const fragment = <><Item /></>;\n"
         );
     }
+
+    #[test]
+    fn prints_lowered_type_script_enums() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"enum Color { Red, Blue = 'blue' } const red = Color.Red;".as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let mut options = js_parser::Options::default();
+        options.ts.parse = true;
+        let (ast, ok) = js_parser::parse(log.clone(), source, options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "var Color;\n\
+             Color = ((Color) => {\n\
+             \x20\x20Color[Color[\"Red\"] = 0] = \"Red\";\n\
+             \x20\x20Color[\"Blue\"] = \"blue\";\n\
+             \x20\x20return Color;\n\
+             })(Color || {});\n\
+             const red = 0 /* Red */;\n"
+        );
+    }
 }

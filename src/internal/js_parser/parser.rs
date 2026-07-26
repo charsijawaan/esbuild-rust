@@ -15,8 +15,9 @@ use crate::internal::{
 };
 
 use super::{
-    Options, parser_core::ParserCore, parser_types::AwaitOrYield,
-    syntax_statement::parse_statement, visit::visit_top_level_statements,
+    Options, lower_typescript::lower_type_script_enums, parser_core::ParserCore,
+    parser_types::AwaitOrYield, syntax_statement::parse_statement,
+    visit::visit_top_level_statements,
 };
 
 const MODULE_SCOPE_LOC: Loc = Loc { start: -1 };
@@ -128,6 +129,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
         visit_top_level_statements(&mut core, &mut statements);
+        statements = lower_type_script_enums(&mut core, statements);
         assert_eq!(
             core.remaining_scope_count(),
             0,
@@ -761,7 +763,7 @@ mod tests {
 
     use super::parse;
     use crate::internal::{
-        js_ast::{ExprData, StmtData},
+        js_ast::{ExprData, LocalKind, StmtData},
         js_parser::Options,
         logger::{DeferLogKind, Log, MsgKind, Source},
     };
@@ -3199,7 +3201,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn parses_type_script_enum_declarations() {
         let mut options = Options::default();
         options.ts.parse = true;
@@ -3215,53 +3216,36 @@ mod tests {
         );
         assert!(ok);
         assert!(log.done().is_empty());
-        assert_eq!(ast.parts[1].statements.len(), 7);
-        let Some(StmtData::Enum(color)) = ast.parts[1].statements[0].data.as_deref() else {
-            panic!("expected enum declaration");
-        };
-        assert_eq!(color.values.len(), 5);
-        assert!(matches!(
-            color.values[0].value_or_nil.data.as_deref(),
-            Some(ExprData::Number(0.0))
-        ));
-        assert!(matches!(
-            color.values[1].value_or_nil.data.as_deref(),
-            Some(ExprData::Number(2.0))
-        ));
-        assert!(matches!(
-            color.values[2].value_or_nil.data.as_deref(),
-            Some(ExprData::Number(5.0))
-        ));
-        assert!(matches!(
-            color.values[3].value_or_nil.data.as_deref(),
-            Some(ExprData::String(_))
-        ));
-        assert!(matches!(
-            color.values[4].value_or_nil.data.as_deref(),
-            Some(ExprData::Call(_))
-        ));
+        assert_eq!(ast.parts[1].statements.len(), 9);
+        let color_ref = ast
+            .ts_enums
+            .keys()
+            .copied()
+            .find(|reference| {
+                ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                    .original_name
+                    == "Color"
+            })
+            .expect("Color enum constants");
+        assert!(ast.ts_enums[&color_ref]["Red"].number.abs() < f64::EPSILON);
+        assert!((ast.ts_enums[&color_ref]["Green"].number - 2.0).abs() < f64::EPSILON);
+        assert!((ast.ts_enums[&color_ref]["Yellow"].number - 5.0).abs() < f64::EPSILON);
         assert_eq!(
-            ast.symbols[usize::try_from(color.name.reference.inner_index).expect("symbol index")]
-                .kind,
-            crate::internal::ast::SymbolKind::TsEnum
-        );
-        assert!(ast.ts_enums[&color.name.reference]["Red"].number.abs() < f64::EPSILON);
-        assert!((ast.ts_enums[&color.name.reference]["Green"].number - 2.0).abs() < f64::EPSILON);
-        assert!((ast.ts_enums[&color.name.reference]["Yellow"].number - 5.0).abs() < f64::EPSILON);
-        assert_eq!(
-            crate::internal::helpers::utf16_to_string(
-                &ast.ts_enums[&color.name.reference]["Blue"].string
-            ),
+            crate::internal::helpers::utf16_to_string(&ast.ts_enums[&color_ref]["Blue"].string),
             b"blue"
         );
         assert!(matches!(
+            ast.parts[1].statements[0].data.as_deref(),
+            Some(StmtData::Local(local)) if local.kind == LocalKind::Var
+        ));
+        assert!(matches!(
             ast.parts[1].statements[1].data.as_deref(),
-            Some(StmtData::Local(local))
+            Some(StmtData::Expr(statement))
                 if matches!(
-                    local.declarations[0].value_or_nil.data.as_deref(),
-                    Some(ExprData::InlinedEnum(value))
-                        if matches!(value.value.data.as_deref(), Some(ExprData::Number(0.0)))
-                            && value.comment == "Red"
+                    statement.value.data.as_deref(),
+                    Some(ExprData::Binary(binary))
+                        if binary.op == crate::internal::js_ast::OpCode::BinaryAssign
+                            && matches!(binary.right.data.as_deref(), Some(ExprData::Call(_)))
                 )
         ));
         assert!(matches!(
@@ -3270,53 +3254,20 @@ mod tests {
                 if matches!(
                     local.declarations[0].value_or_nil.data.as_deref(),
                     Some(ExprData::InlinedEnum(value))
-                        if matches!(value.value.data.as_deref(), Some(ExprData::String(_)))
-                            && value.comment == "Blue"
+                        if matches!(value.value.data.as_deref(), Some(ExprData::Number(0.0)))
                 )
         ));
         assert!(matches!(
-            ast.parts[1].statements[3].data.as_deref(),
-            Some(StmtData::Local(local))
-                if matches!(
-                    local.declarations[0].value_or_nil.data.as_deref(),
-                    Some(ExprData::InlinedEnum(value))
-                        if matches!(value.value.data.as_deref(), Some(ExprData::Number(2.0)))
-                            && value.comment == "Green"
-                )
-        ));
-        assert!(matches!(
-            ast.parts[1].statements[4].data.as_deref(),
-            Some(StmtData::Expr(statement))
-                if matches!(
-                    statement.value.data.as_deref(),
-                    Some(ExprData::Binary(binary))
-                        if matches!(binary.left.data.as_deref(), Some(ExprData::Dot(_)))
-                )
-        ));
-        assert!(matches!(
-            ast.parts[1].statements[5].data.as_deref(),
-            Some(StmtData::Expr(statement))
-                if matches!(
-                    statement.value.data.as_deref(),
-                    Some(ExprData::Binary(binary))
-                        if matches!(binary.left.data.as_deref(), Some(ExprData::Index(_)))
-                )
-        ));
-        let Some(StmtData::Enum(flags)) = ast.parts[1].statements[6].data.as_deref() else {
-            panic!("expected exported const enum");
-        };
-        assert!(flags.is_export);
-        assert!(matches!(
-            flags.values[1].value_or_nil.data.as_deref(),
-            Some(ExprData::Number(2.0))
+            ast.parts[1].statements[7].data.as_deref(),
+            Some(StmtData::Local(local)) if local.is_export && local.kind == LocalKind::Var
         ));
         assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
         assert!(ast.named_exports.contains_key("Flags"));
         assert!(
-            ast.parts[1]
-                .declared_symbols
+            !ast.parts[1]
+                .statements
                 .iter()
-                .any(|symbol| symbol.reference == color.argument)
+                .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Enum(_))))
         );
     }
 
@@ -3340,19 +3291,21 @@ mod tests {
         );
         assert!(ok);
         assert!(log.done().is_empty());
-        let Some(StmtData::Enum(enumeration)) = ast.parts[1].statements[0].data.as_deref() else {
-            panic!("expected enum declaration");
-        };
+        let values = ast.ts_enums.values().next().expect("Folded enum constants");
         let expected = [3.0, -3.0, 200.0, 0.5, 23.0, 11.390_625, -2.0, 2.0, 7.0];
-        for (value, expected) in enumeration.values.iter().zip(expected) {
-            assert!(
-                matches!(
-                    value.value_or_nil.data.as_deref(),
-                    Some(ExprData::Number(actual)) if (*actual - expected).abs() < f64::EPSILON
-                ),
-                "expected {expected:?}, got {:?}",
-                value.value_or_nil.data
-            );
+        let names = [
+            "Add",
+            "Sub",
+            "Mul",
+            "Div",
+            "Mod",
+            "Pow",
+            "Complement",
+            "Shift",
+            "Previous",
+        ];
+        for (name, expected) in names.into_iter().zip(expected) {
+            assert!((values[name].number - expected).abs() < f64::EPSILON);
         }
     }
 
