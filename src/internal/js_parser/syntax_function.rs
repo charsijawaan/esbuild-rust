@@ -22,7 +22,37 @@ pub(crate) fn parse_function_prefix(core: &mut ParserCore, lexer: &mut Lexer) ->
     }
 
     let loc = lexer.loc();
+    Some(parse_function_after_keyword(core, lexer, loc, false))
+}
+
+pub(crate) fn parse_async_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Option<Expr> {
+    if lexer.token != Token::Identifier || lexer.raw() != b"async" {
+        return None;
+    }
+
+    let loc = lexer.loc();
+    let reference = core.store_name_in_ref(lexer.identifier.clone());
     lexer.next();
+    if !lexer.has_newline_before && lexer.token == Token::Function {
+        return Some(parse_function_after_keyword(core, lexer, loc, true));
+    }
+
+    Some(Expr::new(
+        loc,
+        ExprData::Identifier(crate::internal::js_ast::IdentifierExpr {
+            reference,
+            ..crate::internal::js_ast::IdentifierExpr::default()
+        }),
+    ))
+}
+
+fn parse_function_after_keyword(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    loc: crate::internal::logger::Loc,
+    is_async: bool,
+) -> Expr {
+    lexer.expect(Token::Function);
     let is_generator = lexer.token == Token::Asterisk;
     if is_generator {
         lexer.next();
@@ -44,6 +74,11 @@ pub(crate) fn parse_function_prefix(core: &mut ParserCore, lexer: &mut Lexer) ->
         lexer,
         name,
         FnOrArrowDataParse {
+            await_policy: if is_async {
+                AwaitOrYield::AllowExpression
+            } else {
+                AwaitOrYield::AllowIdentifier
+            },
             yield_policy: if is_generator {
                 AwaitOrYield::AllowExpression
             } else {
@@ -53,13 +88,13 @@ pub(crate) fn parse_function_prefix(core: &mut ParserCore, lexer: &mut Lexer) ->
         },
     );
 
-    Some(Expr::new(
+    Expr::new(
         loc,
         ExprData::Function(FunctionExpr {
             function,
             ..FunctionExpr::default()
         }),
-    ))
+    )
 }
 
 pub(crate) fn parse_function_tail(
@@ -156,7 +191,7 @@ pub(crate) fn parse_function_tail(
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use super::parse_function_prefix;
+    use super::{parse_async_prefix, parse_function_prefix};
     use crate::internal::{
         config::TsOptions,
         js_ast::{ExprData, StmtData},
@@ -186,5 +221,29 @@ mod tests {
             Some(StmtData::Expr(_))
         ));
         assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn parses_async_function_and_async_generator_prefixes() {
+        for (text, generator) in [
+            (&b"async function name() { await work }"[..], false),
+            (&b"async function* name() { yield await work }"[..], true),
+        ] {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let source = Source {
+                contents: Arc::from(text),
+                ..Source::default()
+            };
+            let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+            let mut core = super::ParserCore::new(source, Options::default());
+            let expr = parse_async_prefix(&mut core, &mut lexer).expect("async function");
+            assert!(matches!(
+                expr.data.as_deref(),
+                Some(ExprData::Function(function))
+                    if function.function.is_async
+                        && function.function.is_generator == generator
+            ));
+            assert_eq!(lexer.token, Token::EndOfFile);
+        }
     }
 }

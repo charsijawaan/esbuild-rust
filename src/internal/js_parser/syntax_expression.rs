@@ -7,7 +7,7 @@ use crate::internal::{
 
 use super::{
     parser_core::ParserCore,
-    syntax_function::parse_function_prefix,
+    syntax_function::{parse_async_prefix, parse_function_prefix},
     syntax_import::parse_import_prefix,
     syntax_literals::{
         parse_array_prefix, parse_big_int_or_string_if_unsupported, parse_numeric_literal,
@@ -111,6 +111,9 @@ fn parse_prefix(
     minimum_precedence: Precedence,
     allow_in: bool,
 ) -> Expr {
+    if let Some(expr) = parse_async_prefix(core, lexer) {
+        return expr;
+    }
     if let Some(expr) = parse_super_prefix(core, lexer, minimum_precedence) {
         return expr;
     }
@@ -430,6 +433,27 @@ mod tests {
                 if matches!(
                     return_stmt.value_or_nil.data.as_deref(),
                     Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryAdd
+                )
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
+
+    #[test]
+    fn integrates_async_function_expression_call_suffix() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"async function() { await work }()"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        assert!(matches!(
+            expression.data.as_deref(),
+            Some(ExprData::Call(call))
+                if matches!(
+                    call.target.data.as_deref(),
+                    Some(ExprData::Function(function)) if function.function.is_async
                 )
         ));
         assert_eq!(lexer.token, Token::EndOfFile);
