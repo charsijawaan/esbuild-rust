@@ -837,6 +837,23 @@ impl ParserCore {
         }
     }
 
+    pub(crate) fn is_valid_assignment_target(&self, expr: &Expr, is_strict_mode: bool) -> bool {
+        match expr.data.as_deref() {
+            Some(ExprData::Identifier(identifier)) => {
+                !is_strict_mode
+                    || !matches!(
+                        self.load_name_from_ref(identifier.reference),
+                        b"eval" | b"arguments"
+                    )
+            }
+            Some(ExprData::Dot(dot)) => dot.optional_chain == OptionalChain::None,
+            Some(ExprData::Index(index)) => index.optional_chain == OptionalChain::None,
+            Some(ExprData::Object(object)) => !object.is_parenthesized,
+            Some(ExprData::Array(array)) => !array.is_parenthesized,
+            _ => false,
+        }
+    }
+
     fn check_for_unrepresentable_identifier(&mut self, loc: Loc, name: &str) {
         if self.options.ascii_only
             && self
@@ -1385,5 +1402,35 @@ mod tests {
         parser.is_control_flow_dead = true;
         assert_eq!(parser.symbol_for_mangled_prop("_value"), first);
         assert_eq!(parser.symbols[0].use_count_estimate, 2);
+    }
+
+    #[test]
+    fn validates_assignment_targets_and_strict_mode_names() {
+        let mut parser = parser();
+        let eval_ref = parser.store_name_in_ref(MaybeSubstring::from_allocated(b"eval".to_vec()));
+        let identifier = Expr::new(
+            Loc::default(),
+            ExprData::Identifier(IdentifierExpr {
+                reference: eval_ref,
+                ..IdentifierExpr::default()
+            }),
+        );
+        assert!(parser.is_valid_assignment_target(&identifier, false));
+        assert!(!parser.is_valid_assignment_target(&identifier, true));
+
+        let optional = Expr::new(
+            Loc::default(),
+            ExprData::Dot(DotExpr {
+                optional_chain: OptionalChain::Start,
+                ..DotExpr::default()
+            }),
+        );
+        assert!(!parser.is_valid_assignment_target(&optional, false));
+        assert!(
+            !parser.is_valid_assignment_target(
+                &Expr::new(Loc::default(), ExprData::Number(1.0)),
+                false
+            )
+        );
     }
 }
