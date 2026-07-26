@@ -405,6 +405,9 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                 } else {
                     lexer.expect(Token::OpenParen);
                     let binding = parse_binding(core, lexer);
+                    if core.options.ts.parse {
+                        super::syntax_typescript::skip_type_annotation(lexer, &[Token::CloseParen]);
+                    }
                     lexer.expect(Token::CloseParen);
                     binding
                 };
@@ -583,6 +586,21 @@ fn parse_local_declarations(
             core.add_error_range(binding_range, "Cannot use \"let\" as an identifier here:");
         }
         let mut binding = parse_binding(core, lexer);
+        if core.options.ts.parse && lexer.token == Token::Exclamation {
+            lexer.next();
+        }
+        if core.options.ts.parse {
+            super::syntax_typescript::skip_type_annotation(
+                lexer,
+                &[
+                    Token::Equals,
+                    Token::Comma,
+                    Token::Semicolon,
+                    Token::In,
+                    Token::CloseParen,
+                ],
+            );
+        }
         let symbol_kind = match kind {
             LocalKind::Var => crate::internal::ast::SymbolKind::Hoisted,
             LocalKind::Const => crate::internal::ast::SymbolKind::Const,

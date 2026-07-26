@@ -5,6 +5,71 @@ use crate::internal::{
 
 use super::parser_core::ParserCore;
 
+pub(crate) fn skip_type_parameters(lexer: &mut Lexer) {
+    if lexer.token != Token::LessThan {
+        return;
+    }
+    let mut depth = 0_usize;
+    loop {
+        match lexer.token {
+            Token::LessThan => depth += 1,
+            Token::GreaterThan => {
+                depth -= 1;
+                lexer.next();
+                if depth == 0 {
+                    return;
+                }
+                continue;
+            }
+            Token::EndOfFile => lexer.expected(Token::GreaterThan),
+            _ => {}
+        }
+        lexer.next();
+    }
+}
+
+pub(crate) fn skip_type_annotation(lexer: &mut Lexer, stop_tokens: &[Token]) {
+    if lexer.token != Token::Colon {
+        return;
+    }
+    lexer.next();
+    let mut delimiters = Vec::new();
+    let mut has_type_token = false;
+    loop {
+        if delimiters.is_empty()
+            && (stop_tokens.contains(&lexer.token)
+                || (stop_tokens.contains(&Token::In) && lexer.is_contextual_keyword(b"of")))
+        {
+            return;
+        }
+        if has_type_token
+            && delimiters.is_empty()
+            && lexer.has_newline_before
+            && is_statement_start(lexer)
+        {
+            return;
+        }
+        match lexer.token {
+            Token::OpenParen => delimiters.push(Token::CloseParen),
+            Token::OpenBracket => delimiters.push(Token::CloseBracket),
+            Token::OpenBrace => delimiters.push(Token::CloseBrace),
+            Token::LessThan => delimiters.push(Token::GreaterThan),
+            token if delimiters.last() == Some(&token) => {
+                delimiters.pop();
+            }
+            Token::EndOfFile => {
+                if let Some(expected) = delimiters.last().copied() {
+                    lexer.expected(expected);
+                }
+                return;
+            }
+            _ => {}
+        }
+        has_type_token = true;
+        lexer.next();
+    }
+}
+
 pub(crate) fn parse_type_script_statement(
     core: &mut ParserCore,
     lexer: &mut Lexer,

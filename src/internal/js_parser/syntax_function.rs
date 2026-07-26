@@ -137,6 +137,9 @@ fn parse_function_after_keyword(
     } else {
         None
     };
+    if core.options.ts.parse {
+        super::syntax_typescript::skip_type_parameters(lexer);
+    }
 
     let function = parse_function_tail(
         core,
@@ -221,6 +224,15 @@ pub(crate) fn parse_function_tail(
         }
 
         let mut binding = parse_binding(core, lexer);
+        if core.options.ts.parse && lexer.token == Token::Question {
+            lexer.next();
+        }
+        if core.options.ts.parse {
+            super::syntax_typescript::skip_type_annotation(
+                lexer,
+                &[Token::Equals, Token::Comma, Token::CloseParen],
+            );
+        }
         core.declare_binding(SymbolKind::Hoisted, &mut binding);
 
         let default_or_nil = if !has_rest_arg && lexer.token == Token::Equals {
@@ -244,6 +256,9 @@ pub(crate) fn parse_function_tail(
         lexer.next();
     }
     lexer.expect(Token::CloseParen);
+    if core.options.ts.parse {
+        super::syntax_typescript::skip_type_annotation(lexer, &[Token::OpenBrace]);
+    }
 
     core.fn_or_arrow_data_parse = body_context;
     let (body_loc, block) = parse_block_with_scope(

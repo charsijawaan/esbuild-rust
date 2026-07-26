@@ -62,6 +62,9 @@ pub(crate) fn parse_expression_suffix(
     loop {
         if lexer.token == Token::Question && Precedence::Conditional > minimum_precedence {
             lexer.next();
+            if core.options.ts.parse && lexer.token == Token::Colon {
+                return left;
+            }
             let yes = parse_expression(core, lexer, Precedence::Comma, true);
             lexer.expect(Token::Colon);
             let no = parse_expression(core, lexer, Precedence::Comma, allow_in);
@@ -200,6 +203,9 @@ fn parse_prefix(
                     .unwrap_or_else(|| lexer.unexpected());
             }
             let mut expr = parse_parenthesized_item(core, lexer);
+            if core.options.ts.parse {
+                expr = parse_type_script_parameter_suffix(core, lexer, expr);
+            }
             let mut has_trailing_comma = false;
             let mut has_rest = matches!(expr.data.as_deref(), Some(ExprData::Spread(_)));
             while lexer.token == Token::Comma {
@@ -215,7 +221,10 @@ fn parse_prefix(
                 if has_rest {
                     core.add_error_range(comma_range, "Unexpected \",\" after rest pattern");
                 }
-                let right = parse_parenthesized_item(core, lexer);
+                let mut right = parse_parenthesized_item(core, lexer);
+                if core.options.ts.parse {
+                    right = parse_type_script_parameter_suffix(core, lexer, right);
+                }
                 has_rest |= matches!(right.data.as_deref(), Some(ExprData::Spread(_)));
                 expr = Expr::new(
                     expr.loc,
@@ -227,6 +236,9 @@ fn parse_prefix(
                 );
             }
             lexer.expect(Token::CloseParen);
+            if core.options.ts.parse {
+                super::syntax_typescript::skip_type_annotation(lexer, &[Token::EqualsGreaterThan]);
+            }
             if lexer.token == Token::EqualsGreaterThan {
                 parse_arrow_after_parenthesized_expression(core, lexer, paren_loc, expr)
                     .expect("arrow token was checked")
@@ -242,6 +254,38 @@ fn parse_prefix(
         })
         .unwrap_or_else(|| lexer.unexpected()),
     }
+}
+
+fn parse_type_script_parameter_suffix(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    mut expression: Expr,
+) -> Expr {
+    if lexer.token == Token::Question {
+        lexer.next();
+    }
+    super::syntax_typescript::skip_type_annotation(
+        lexer,
+        &[
+            Token::Equals,
+            Token::Comma,
+            Token::CloseParen,
+            Token::EqualsGreaterThan,
+        ],
+    );
+    if lexer.token == Token::Equals {
+        lexer.next();
+        let right = parse_expression(core, lexer, Precedence::Comma, true);
+        expression = Expr::new(
+            expression.loc,
+            ExprData::Binary(BinaryExpr {
+                left: expression,
+                right,
+                op: crate::internal::js_ast::OpCode::BinaryAssign,
+            }),
+        );
+    }
+    expression
 }
 
 fn parse_new_target(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {

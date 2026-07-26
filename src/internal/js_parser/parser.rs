@@ -2591,6 +2591,87 @@ mod tests {
     }
 
     #[test]
+    fn erases_type_script_binding_and_function_annotations() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "const count: number = 1;\
+             let value!: string;\
+             let pair: [number, string]\n\
+             function add<T extends number>(left: T, right?: number): number {\
+               return left + (right || 0);\
+             }\
+             try { throw 1 } catch (error: unknown) { use(error); }",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.parts[1].statements.len(), 5);
+        assert!(matches!(
+            ast.parts[1].statements[0].data.as_deref(),
+            Some(StmtData::Local(local))
+                if local.declarations[0].value_or_nil.data.is_some()
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[1].data.as_deref(),
+            Some(StmtData::Local(local))
+                if local.declarations[0].value_or_nil.data.is_none()
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[2].data.as_deref(),
+            Some(StmtData::Local(_))
+        ));
+        let Some(StmtData::Function(function)) = ast.parts[1].statements[3].data.as_deref() else {
+            panic!("expected annotated function declaration");
+        };
+        assert_eq!(function.function.args.len(), 2);
+        assert!(function.function.args[1].default_or_nil.data.is_none());
+        assert!(matches!(
+            ast.parts[1].statements[4].data.as_deref(),
+            Some(StmtData::Try(_))
+        ));
+
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "const convert = (value: number, radix?: number): string => value + radix;\
+             const empty = (): void => {};\
+             const defaulted = (value: string = 'x') => value;",
+            options,
+        );
+        let messages = log.done();
+        assert!(
+            ok,
+            "{:?}",
+            messages
+                .iter()
+                .map(|message| &message.data.text)
+                .collect::<Vec<_>>()
+        );
+        assert!(messages.is_empty());
+        for (index, argument_count) in [(0, 2), (1, 0), (2, 1)] {
+            let Some(StmtData::Local(local)) = ast.parts[1].statements[index].data.as_deref()
+            else {
+                panic!("expected arrow declaration");
+            };
+            let Some(ExprData::Arrow(arrow)) = local.declarations[0].value_or_nil.data.as_deref()
+            else {
+                panic!("expected arrow function");
+            };
+            assert_eq!(arrow.args.len(), argument_count);
+        }
+        let Some(StmtData::Local(defaulted)) = ast.parts[1].statements[2].data.as_deref() else {
+            panic!("expected defaulted arrow");
+        };
+        let Some(ExprData::Arrow(defaulted)) =
+            defaulted.declarations[0].value_or_nil.data.as_deref()
+        else {
+            panic!("expected defaulted arrow");
+        };
+        assert!(defaulted.args[0].default_or_nil.data.is_some());
+    }
+
+    #[test]
     fn for_loops_keep_lexical_bindings_in_a_loop_scope() {
         let (ast, ok, log) =
             parse_source("for (let item of items) { item; } item; for (let i = 0; i < 1; i++) {}");

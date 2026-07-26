@@ -64,6 +64,9 @@ pub(crate) fn parse_empty_parenthesized_arrow(
     loc: crate::internal::logger::Loc,
 ) -> Option<Expr> {
     lexer.expect(Token::CloseParen);
+    if core.options.ts.parse {
+        super::syntax_typescript::skip_type_annotation(lexer, &[Token::EqualsGreaterThan]);
+    }
     if lexer.token != Token::EqualsGreaterThan {
         return None;
     }
