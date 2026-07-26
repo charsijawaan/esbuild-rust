@@ -1,4 +1,4 @@
-# Experimental closeout evaluation
+# Experimental compatibility evaluation
 
 This is a bounded functional evaluation of an experimental, unaudited,
 AI-generated Rust port. It is not an upstream conformance suite, a security
@@ -6,15 +6,15 @@ audit, or a production-readiness claim.
 
 ## Snapshot
 
-- Rust feature checkpoint: `82f34d2`
+- Rust feature checkpoint: `c463b2d`
 - Upstream esbuild: `6ff1d8b0d8c134e867a397eef39702a223ebef9e`
   (version 0.28.1)
 - Evaluation date: 2026-07-27
 - Toolchain: Rust 1.96.0, Node.js 24.15.0
 - Build: `cargo build --release --locked`
-- Repository tests: 787 passing
-- Approximate behavioral/API parity: 96.7%
-- Approximate structural source coverage: 98.6%
+- Repository tests: 790 passing
+- Approximate behavioral/API parity: 97.0%
+- Approximate structural source coverage: 98.7%
 
 The percentages are engineering estimates based on translated subsystems,
 translated tests, differential probes, and known gaps. They are not calculated

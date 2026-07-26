@@ -1,10 +1,10 @@
-# Final experimental porting status
+# Current experimental porting status
 
-Active feature porting stopped after commit `82f34d2`. The final engineering
-estimate is 96.7% behavioral/API parity and 98.6% structural source coverage
-against the pinned upstream revision. These figures are approximate, not an
-official coverage metric. See [EVALUATION.md](EVALUATION.md) for the release
-binary evaluation and the important unverified surfaces.
+The current engineering estimate is 97.0% behavioral/API parity and 98.7%
+structural source coverage against the pinned upstream revision. These figures
+are approximate, not an official coverage metric. See
+[EVALUATION.md](EVALUATION.md) for the release binary evaluation and the
+important unverified surfaces.
 
 Status values:
 

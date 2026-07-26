@@ -15,15 +15,14 @@ type and ownership systems allow it. Behavioral compatibility with the pinned
 upstream revision is the acceptance criterion. Upstream tests are translated
 or exercised as differential tests as each subsystem lands.
 
-This repository is now a frozen experimental snapshot instead of an active
-attempt to reach complete parity. Its release binary passes all 9 scenarios in
-the bounded bundler evaluation, with the same runtime results as the pinned
-upstream executable. That is encouraging, but it is not evidence of complete
-compatibility and this project is not a drop-in or production-ready esbuild
-replacement.
+This repository is an active experimental attempt to reach complete parity.
+Its release binary passes all 9 scenarios in the bounded bundler evaluation,
+with the same runtime results as the pinned upstream executable. That is
+encouraging, but it is not evidence of complete compatibility and this project
+is not a drop-in or production-ready esbuild replacement.
 
 See [EVALUATION.md](EVALUATION.md) for the reproducible bundler evaluation,
-[PORTING.md](PORTING.md) for the final package matrix, and
+[PORTING.md](PORTING.md) for the current package matrix, and
 [UPSTREAM.md](UPSTREAM.md) for the exact upstream revision.
 
 ## Development
