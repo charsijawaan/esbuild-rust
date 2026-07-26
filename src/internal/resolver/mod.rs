@@ -298,10 +298,86 @@ pub fn is_package_path(path: &str) -> bool {
         && path != ".."
 }
 
+pub const BUILT_IN_NODE_MODULES: &[&str] = &[
+    "_http_agent",
+    "_http_client",
+    "_http_common",
+    "_http_incoming",
+    "_http_outgoing",
+    "_http_server",
+    "_stream_duplex",
+    "_stream_passthrough",
+    "_stream_readable",
+    "_stream_transform",
+    "_stream_wrap",
+    "_stream_writable",
+    "_tls_common",
+    "_tls_wrap",
+    "assert",
+    "assert/strict",
+    "async_hooks",
+    "buffer",
+    "child_process",
+    "cluster",
+    "console",
+    "constants",
+    "crypto",
+    "dgram",
+    "diagnostics_channel",
+    "dns",
+    "dns/promises",
+    "domain",
+    "events",
+    "fs",
+    "fs/promises",
+    "http",
+    "http2",
+    "https",
+    "inspector",
+    "module",
+    "net",
+    "os",
+    "path",
+    "path/posix",
+    "path/win32",
+    "perf_hooks",
+    "process",
+    "punycode",
+    "querystring",
+    "readline",
+    "repl",
+    "stream",
+    "stream/consumers",
+    "stream/promises",
+    "stream/web",
+    "string_decoder",
+    "sys",
+    "timers",
+    "timers/promises",
+    "tls",
+    "trace_events",
+    "tty",
+    "url",
+    "util",
+    "util/types",
+    "v8",
+    "vm",
+    "wasi",
+    "worker_threads",
+    "zlib",
+];
+
+#[must_use]
+pub fn is_node_builtin(path: &str) -> bool {
+    BUILT_IN_NODE_MODULES.binary_search(&path).is_ok()
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct ResolverContext<'a> {
     pub tsconfig: Option<&'a TsConfigJson>,
     pub pnp: Option<&'a PnpData>,
+    pub strip_node_prefix_for_import: bool,
+    pub strip_node_prefix_for_require: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -367,6 +443,32 @@ fn resolve_file_or_package_core(
     context: ResolverContext<'_>,
     forbid_package_imports: bool,
 ) -> Option<LoadedPathPair> {
+    if platform == Platform::Node
+        && (is_node_builtin(import_path) || import_path.starts_with("node:"))
+    {
+        let strip_prefix = import_path.starts_with("node:")
+            && if is_require {
+                context.strip_node_prefix_for_require
+            } else {
+                context.strip_node_prefix_for_import
+            };
+        let path = if strip_prefix {
+            import_path.strip_prefix("node:").unwrap_or(import_path)
+        } else {
+            import_path
+        };
+        return Some(LoadedPathPair {
+            paths: PathPair {
+                primary: Path {
+                    text: path.to_string(),
+                    ..Path::default()
+                },
+                is_external: true,
+                ..PathPair::default()
+            },
+            different_case: None,
+        });
+    }
     if let Some(tsconfig) = context.tsconfig {
         if let Some(candidates) = match_tsconfig_path_candidates(tsconfig, import_path, file_system)
         {
@@ -583,6 +685,85 @@ fn package_conditions(platform: Platform, is_require: bool) -> HashMap<String, b
             true,
         ),
     ])
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_with_metadata(
+    log: &Log,
+    file_system: &dyn Fs,
+    source_dir: &str,
+    import_path: &str,
+    extension_order: &[String],
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+    is_require: bool,
+    context: ResolverContext<'_>,
+) -> Option<ResolveResult> {
+    let loaded = resolve_file_or_package_with_context(
+        log,
+        file_system,
+        source_dir,
+        import_path,
+        extension_order,
+        platform,
+        configured_main_fields,
+        is_require,
+        context,
+    )?;
+    let mut result = ResolveResult {
+        path_pair: loaded.paths,
+        different_case: loaded.different_case,
+        ..ResolveResult::default()
+    };
+    if let Some(tsconfig) = context.tsconfig {
+        result.ts_config_jsx = tsconfig.jsx_settings.clone();
+        result.ts_config = Some(tsconfig.settings);
+        result.ts_always_strict = tsconfig.ts_always_strict_or_strict().cloned();
+    }
+    if platform == Platform::Node
+        && is_node_builtin(import_path.strip_prefix("node:").unwrap_or(import_path))
+    {
+        result.primary_side_effects_data = Some(SideEffectsData::default());
+    }
+    if result.path_pair.is_external
+        || result.path_pair.primary.is_disabled()
+        || result.path_pair.primary.namespace != "file"
+    {
+        return Some(result);
+    }
+
+    let resolved_path = result.path_pair.primary.text.replace('\\', "/");
+    let mut directory = file_system.dir(&result.path_pair.primary.text);
+    loop {
+        if let Some(package) = read_package_json(
+            log,
+            file_system,
+            &directory,
+            platform,
+            configured_main_fields,
+        ) {
+            result.module_type_data = package.module_type_data.clone();
+            if let Some(side_effects_map) = &package.side_effects_map {
+                let has_side_effects = side_effects_map.contains_key(&resolved_path)
+                    || package
+                        .side_effects_regexps
+                        .iter()
+                        .any(|regexp| regexp.is_match(&resolved_path));
+                if !has_side_effects {
+                    result
+                        .primary_side_effects_data
+                        .clone_from(&package.side_effects_data);
+                }
+            }
+            break;
+        }
+        let parent = file_system.dir(&directory);
+        if parent == directory {
+            break;
+        }
+        directory = parent;
+    }
+    Some(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3023,12 +3204,13 @@ mod tests {
         DataUrl, DebugMeta, MimeType, PackageMapKind, PackageMapStatus, PathPair, PnpStatus,
         ResolverContext, TsConfigJson, TsConfigPath, TsConfigPaths, compile_yarn_pnp_data,
         find_invalid_package_segment, globstar_to_escaped_regexp,
-        handle_package_map_post_conditions, is_package_path,
+        handle_package_map_post_conditions, is_node_builtin, is_package_path,
         is_valid_tsconfig_path_no_base_url_pattern, load_as_directory, load_as_file, load_as_index,
         match_tsconfig_path_candidates, parse_bare_identifier, parse_esm_package_name,
         parse_imports_exports_map, parse_package_json, parse_tsconfig_json,
         resolve_file_or_package, resolve_file_or_package_with_context, resolve_package_exports,
-        resolve_package_imports, reverse_resolve_package_exports, sort_package_expansion_keys,
+        resolve_package_imports, resolve_with_metadata, reverse_resolve_package_exports,
+        sort_package_expansion_keys,
     };
     use crate::internal::{
         config::{MaybeBool, Platform, TsJsx, TsTarget},
@@ -4014,7 +4196,7 @@ mod tests {
         };
         let context = ResolverContext {
             tsconfig: Some(&tsconfig),
-            pnp: None,
+            ..ResolverContext::default()
         };
 
         assert_eq!(
@@ -4052,6 +4234,135 @@ mod tests {
             .primary
             .text,
             "/project/internal.js"
+        );
+    }
+
+    #[test]
+    fn externalizes_node_builtins_and_strips_unsupported_prefixes() {
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/");
+        let extensions = vec![".js".into()];
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        assert!(is_node_builtin("fs/promises"));
+        assert!(!is_node_builtin("not-a-node-module"));
+
+        let builtin = resolve_file_or_package(
+            &log,
+            &file_system,
+            "/project",
+            "fs",
+            &extensions,
+            Platform::Node,
+            None,
+            false,
+        )
+        .expect("node builtin");
+        assert!(builtin.paths.is_external);
+        assert_eq!(builtin.paths.primary.text, "fs");
+
+        let prefixed = resolve_file_or_package_with_context(
+            &log,
+            &file_system,
+            "/project",
+            "node:custom",
+            &extensions,
+            Platform::Node,
+            None,
+            true,
+            ResolverContext {
+                strip_node_prefix_for_require: true,
+                ..ResolverContext::default()
+            },
+        )
+        .expect("node prefix");
+        assert!(prefixed.paths.is_external);
+        assert_eq!(prefixed.paths.primary.text, "custom");
+
+        assert!(
+            resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project",
+                "fs",
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn resolved_files_inherit_package_and_tsconfig_metadata() {
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/package.json".into(),
+                    r#"{"type":"module","sideEffects":["keep.js"]}"#.into(),
+                ),
+                ("/project/keep.js".into(), String::new()),
+                ("/project/drop.js".into(), String::new()),
+            ]),
+            MockKind::Unix,
+            "/",
+        );
+        let extensions = vec![".js".into()];
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let tsconfig = TsConfigJson {
+            settings: crate::internal::config::TsConfig {
+                experimental_decorators: MaybeBool::True,
+                ..crate::internal::config::TsConfig::default()
+            },
+            ts_always_strict: Some(crate::internal::config::TsAlwaysStrict {
+                value: true,
+                ..crate::internal::config::TsAlwaysStrict::default()
+            }),
+            ..TsConfigJson::default()
+        };
+        let context = ResolverContext {
+            tsconfig: Some(&tsconfig),
+            ..ResolverContext::default()
+        };
+
+        let keep = resolve_with_metadata(
+            &log,
+            &file_system,
+            "/project",
+            "./keep",
+            &extensions,
+            Platform::Browser,
+            None,
+            false,
+            context,
+        )
+        .expect("kept file");
+        assert_eq!(
+            keep.module_type_data.module_type,
+            crate::internal::js_ast::ModuleType::EsmPackageJson
+        );
+        assert!(keep.primary_side_effects_data.is_none());
+        assert_eq!(
+            keep.ts_config.expect("tsconfig").experimental_decorators,
+            MaybeBool::True
+        );
+        assert!(keep.ts_always_strict.expect("always strict").value);
+
+        let drop = resolve_with_metadata(
+            &log,
+            &file_system,
+            "/project",
+            "./drop",
+            &extensions,
+            Platform::Browser,
+            None,
+            false,
+            context,
+        )
+        .expect("tree-shakeable file");
+        assert!(
+            drop.primary_side_effects_data
+                .expect("side effects metadata")
+                .is_side_effects_array_in_json
         );
     }
 }
