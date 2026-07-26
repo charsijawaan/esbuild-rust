@@ -5754,8 +5754,75 @@ mod tests {
                 ..TransformOptions::default()
             },
         ));
-        assert_eq!(nested.matches("let E =").count(), 1, "{nested}");
-        assert!(nested.contains("\n  E = /* @__PURE__ */"), "{nested}");
+        assert_eq!(
+            nested,
+            "var N;\n((N2) => {\n  let E;\n  ((E2) => {\n    E2[E2[\"A\"] = 1] = \"A\";\n  })(E = N2.E || (N2.E = {}));\n  ((E2) => {\n    E2[E2[\"B\"] = 2] = \"B\";\n  })(E = N2.E || (N2.E = {}));\n})(N || (N = {}));\n"
+        );
+        assert_eq!(
+            code(transform(
+                "namespace N { export enum E { A = 1 } export enum E { B = 2 } }",
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "var N;(n=>{let m;(e=>e[e.A=1]=\"A\")(m=n.E||={}),(e=>e[e.B=2]=\"B\")(m=n.E||={})})(N||={});\n"
+        );
+    }
+
+    #[test]
+    fn lowers_nested_typescript_enums_like_esbuild() {
+        assert_eq!(
+            code(transform(
+                "{ enum E { A = 1 } }",
+                TransformOptions {
+                    loader: Loader::Ts,
+                    ..TransformOptions::default()
+                }
+            )),
+            "{\n  let E;\n  ((E2) => {\n    E2[E2[\"A\"] = 1] = \"A\";\n  })(E || (E = {}));\n}\n"
+        );
+        let function = "function f(){enum E{A};return E}";
+        assert_eq!(
+            code(transform(
+                function,
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function f() {\n  let E;\n  return ((E2) => E2[E2.A = 0] = \"A\")(E ||= {}), E;\n}\n"
+        );
+        assert_eq!(
+            code(transform(
+                function,
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "function f(){let n;return(u=>u[u.A=0]=\"A\")(n||={}),n}\n"
+        );
+        assert_eq!(
+            code(transform(
+                "const f=()=>{enum E{A,B};return E}",
+                TransformOptions {
+                    loader: Loader::Ts,
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "const f=()=>{let e;return(n=>(n[n.A=0]=\"A\",n[n.B=1]=\"B\"))(e||={}),e};\n"
+        );
     }
 
     #[test]

@@ -27,6 +27,16 @@ pub(crate) fn lower_type_script_statements(
     context.lower_statements(core, statements)
 }
 
+pub(crate) fn lower_nested_type_script_statements(
+    core: &mut ParserCore,
+    statements: &mut Vec<Stmt>,
+    enclosing_namespace: Option<Ref>,
+) {
+    let mut context = LowerTypeScriptContext::default();
+    *statements =
+        context.lower_nested_statements(core, std::mem::take(statements), enclosing_namespace);
+}
+
 impl LowerTypeScriptContext {
     pub(crate) fn lower_statements(
         &mut self,
@@ -44,11 +54,67 @@ impl LowerTypeScriptContext {
             };
             match *data {
                 StmtData::Enum(enumeration) => {
-                    lower_enum(core, loc, enumeration, &mut self.emitted, &mut result, None);
+                    lower_enum(
+                        core,
+                        loc,
+                        enumeration,
+                        &mut self.emitted,
+                        &mut result,
+                        true,
+                        None,
+                    );
                 }
                 StmtData::Namespace(namespace) => {
-                    lower_namespace(core, loc, namespace, &mut self.emitted, &mut result, None);
+                    lower_namespace(
+                        core,
+                        loc,
+                        namespace,
+                        &mut self.emitted,
+                        &mut result,
+                        true,
+                        None,
+                    );
                 }
+                other => result.push(Stmt::new(loc, other)),
+            }
+        }
+        result
+    }
+
+    fn lower_nested_statements(
+        &mut self,
+        core: &mut ParserCore,
+        statements: Vec<Stmt>,
+        enclosing_namespace: Option<Ref>,
+    ) -> Vec<Stmt> {
+        let mut result = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let loc = statement.loc;
+            let Some(data) = statement.data else {
+                if !core.options.minify_syntax {
+                    result.push(statement);
+                }
+                continue;
+            };
+            match *data {
+                StmtData::Enum(enumeration) => lower_enum(
+                    core,
+                    loc,
+                    enumeration,
+                    &mut self.emitted,
+                    &mut result,
+                    false,
+                    enclosing_namespace,
+                ),
+                StmtData::Namespace(namespace) => lower_namespace(
+                    core,
+                    loc,
+                    namespace,
+                    &mut self.emitted,
+                    &mut result,
+                    false,
+                    enclosing_namespace,
+                ),
                 other => result.push(Stmt::new(loc, other)),
             }
         }
@@ -62,6 +128,7 @@ fn lower_namespace(
     namespace: NamespaceStmt,
     emitted: &mut HashSet<Ref>,
     result: &mut Vec<Stmt>,
+    is_module_scope: bool,
     enclosing_namespace: Option<Ref>,
 ) {
     if !namespace_has_runtime_value(&namespace.statements) {
@@ -76,17 +143,20 @@ fn lower_namespace(
                     binding: identifier_binding(namespace.name.loc, name_ref),
                     ..Decl::default()
                 }],
-                kind: if enclosing_namespace.is_some() {
-                    LocalKind::Let
-                } else {
+                kind: if is_module_scope {
                     LocalKind::Var
+                } else {
+                    LocalKind::Let
                 },
-                is_export: namespace.is_export && enclosing_namespace.is_none(),
+                is_export: namespace.is_export && is_module_scope,
                 ..LocalStmt::default()
             }),
         ));
     }
-    let body = lower_namespace_body(core, namespace.argument, namespace.statements, emitted);
+    let mut body = lower_namespace_body(core, namespace.argument, namespace.statements, emitted);
+    if core.options.minify_syntax {
+        body = join_adjacent_expression_statements(body);
+    }
     let initial_value = namespace_initial_value(
         core,
         namespace.name.loc,
@@ -97,11 +167,39 @@ fn lower_namespace(
     result.push(Stmt::new(
         loc,
         StmtData::Expr(ExprStmt {
-            value: namespace_iife(loc, namespace.argument, body, initial_value),
+            value: namespace_iife(
+                loc,
+                namespace.argument,
+                body,
+                initial_value,
+                core.options.minify_syntax,
+            ),
             ..ExprStmt::default()
         }),
     ));
-    core.record_usage(namespace.argument);
+    let argument_index =
+        usize::try_from(namespace.argument.inner_index).expect("symbol index fits usize");
+    if core.symbols[argument_index].use_count_estimate == 0 {
+        core.record_usage(namespace.argument);
+    }
+}
+
+fn join_adjacent_expression_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
+    let mut result: Vec<Stmt> = Vec::with_capacity(statements.len());
+    for statement in statements {
+        let Some(StmtData::Expr(expression)) = statement.data.as_deref() else {
+            result.push(statement);
+            continue;
+        };
+        if let Some(StmtData::Expr(previous)) =
+            result.last_mut().and_then(|item| item.data.as_deref_mut())
+        {
+            previous.value = join_with_comma(previous.value.clone(), expression.value.clone());
+        } else {
+            result.push(statement);
+        }
+    }
+    result
 }
 
 fn lower_namespace_body(
@@ -150,10 +248,26 @@ fn lower_namespace_body(
                 }
             }
             StmtData::Namespace(namespace) => {
-                lower_namespace(core, loc, namespace, emitted, &mut result, Some(argument));
+                lower_namespace(
+                    core,
+                    loc,
+                    namespace,
+                    emitted,
+                    &mut result,
+                    false,
+                    Some(argument),
+                );
             }
             StmtData::Enum(enumeration) => {
-                lower_enum(core, loc, enumeration, emitted, &mut result, Some(argument));
+                lower_enum(
+                    core,
+                    loc,
+                    enumeration,
+                    emitted,
+                    &mut result,
+                    false,
+                    Some(argument),
+                );
             }
             other => result.push(Stmt::new(loc, other)),
         }
@@ -244,29 +358,57 @@ fn namespace_initial_value(
     is_export: bool,
     enclosing_namespace: Option<Ref>,
 ) -> Expr {
-    let target = if is_export && let Some(enclosing_namespace) = enclosing_namespace {
+    if is_export && let Some(enclosing_namespace) = enclosing_namespace {
         let property = dot(
             loc,
             identifier(loc, enclosing_namespace),
             symbol_name(core, name_ref),
         );
-        core.record_usage(enclosing_namespace);
-        core.record_usage(enclosing_namespace);
-        assign(
-            loc,
-            identifier(loc, name_ref),
-            Expr::new(
+        if core.options.minify_syntax {
+            core.record_usage(enclosing_namespace);
+            core.record_usage(name_ref);
+            assign(
                 loc,
-                ExprData::Binary(BinaryExpr {
-                    left: property.clone(),
-                    right: assign(
-                        loc,
-                        property,
-                        Expr::new(loc, ExprData::Object(ObjectExpr::default())),
-                    ),
-                    op: OpCode::BinaryLogicalOr,
-                }),
-            ),
+                identifier(loc, name_ref),
+                Expr::new(
+                    loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: property,
+                        right: Expr::new(loc, ExprData::Object(ObjectExpr::default())),
+                        op: OpCode::BinaryLogicalOrAssign,
+                    }),
+                ),
+            )
+        } else {
+            core.record_usage(enclosing_namespace);
+            core.record_usage(enclosing_namespace);
+            core.record_usage(name_ref);
+            assign(
+                loc,
+                identifier(loc, name_ref),
+                Expr::new(
+                    loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: property.clone(),
+                        right: assign(
+                            loc,
+                            property,
+                            Expr::new(loc, ExprData::Object(ObjectExpr::default())),
+                        ),
+                        op: OpCode::BinaryLogicalOr,
+                    }),
+                ),
+            )
+        }
+    } else if core.options.minify_syntax {
+        core.record_usage(name_ref);
+        Expr::new(
+            loc,
+            ExprData::Binary(BinaryExpr {
+                left: identifier(loc, name_ref),
+                right: Expr::new(loc, ExprData::Object(ObjectExpr::default())),
+                op: OpCode::BinaryLogicalOrAssign,
+            }),
         )
     } else {
         core.record_usage(name_ref);
@@ -283,12 +425,34 @@ fn namespace_initial_value(
                 op: OpCode::BinaryLogicalOr,
             }),
         )
-    };
-    core.record_usage(name_ref);
-    target
+    }
 }
 
-fn namespace_iife(loc: Loc, argument: Ref, body: Vec<Stmt>, initial_value: Expr) -> Expr {
+fn namespace_iife(
+    loc: Loc,
+    argument: Ref,
+    mut body: Vec<Stmt>,
+    initial_value: Expr,
+    minify_syntax: bool,
+) -> Expr {
+    let prefer_expr = if minify_syntax && body.len() == 1 {
+        if let Some(StmtData::Expr(expression)) =
+            body.first().and_then(|statement| statement.data.as_deref())
+        {
+            let value = expression.value.clone();
+            body[0] = Stmt::new(
+                loc,
+                StmtData::Return(ReturnStmt {
+                    value_or_nil: value,
+                }),
+            );
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     let arrow = Expr::new(
         loc,
         ExprData::Arrow(ArrowExpr {
@@ -303,6 +467,7 @@ fn namespace_iife(loc: Loc, argument: Ref, body: Vec<Stmt>, initial_value: Expr)
                 },
                 loc,
             },
+            prefer_expr,
             ..ArrowExpr::default()
         }),
     );
@@ -322,9 +487,23 @@ fn lower_enum(
     enumeration: EnumStmt,
     emitted: &mut HashSet<Ref>,
     result: &mut Vec<Stmt>,
+    is_module_scope: bool,
     enclosing_namespace: Option<Ref>,
 ) {
     let name_ref = follow_symbols(core, enumeration.name.reference);
+    let is_first_declaration = should_emit_namespace_var(core, name_ref, emitted);
+    if !is_module_scope {
+        lower_nested_enum(
+            core,
+            loc,
+            enumeration,
+            name_ref,
+            is_first_declaration,
+            result,
+            enclosing_namespace,
+        );
+        return;
+    }
     let all_values_are_pure = {
         let helpers = make_helper_context(|reference| {
             let reference = follow_symbols(core, reference);
@@ -337,8 +516,6 @@ fn lower_enum(
             .iter()
             .all(|value| helpers.expr_can_be_removed_if_unused(&value.value_or_nil))
     };
-    let is_first_declaration = should_emit_namespace_var(core, name_ref, emitted);
-
     let mut body = Vec::with_capacity(enumeration.values.len() + 1);
     for value in enumeration.values {
         body.push(lower_enum_value(
@@ -398,6 +575,86 @@ fn lower_enum(
         ));
         core.record_usage(name_ref);
     }
+    core.record_usage(enumeration.argument);
+}
+
+fn lower_nested_enum(
+    core: &mut ParserCore,
+    loc: Loc,
+    enumeration: EnumStmt,
+    name_ref: Ref,
+    is_first_declaration: bool,
+    result: &mut Vec<Stmt>,
+    enclosing_namespace: Option<Ref>,
+) {
+    if is_first_declaration {
+        result.push(Stmt::new(
+            loc,
+            StmtData::Local(LocalStmt {
+                declarations: vec![Decl {
+                    binding: identifier_binding(enumeration.name.loc, name_ref),
+                    ..Decl::default()
+                }],
+                kind: LocalKind::Let,
+                ..LocalStmt::default()
+            }),
+        ));
+    }
+
+    let mut body = Vec::with_capacity(enumeration.values.len());
+    for value in enumeration.values {
+        body.push(lower_enum_value(
+            enumeration.argument,
+            value.loc,
+            value.name,
+            value.value_or_nil,
+            core.options.minify_syntax,
+        ));
+        core.record_usage(enumeration.argument);
+    }
+    if core.options.minify_syntax && body.len() > 1 {
+        let joined = body
+            .into_iter()
+            .filter_map(|statement| match statement.data.as_deref() {
+                Some(StmtData::Expr(expression)) => Some(expression.value.clone()),
+                _ => None,
+            })
+            .fold(Expr::default(), |left, right| {
+                if left.data.is_none() {
+                    right
+                } else {
+                    join_with_comma(left, right)
+                }
+            });
+        body = vec![Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value: joined,
+                ..ExprStmt::default()
+            }),
+        )];
+    }
+
+    let initial_value = namespace_initial_value(
+        core,
+        enumeration.name.loc,
+        name_ref,
+        enumeration.is_export,
+        enclosing_namespace,
+    );
+    result.push(Stmt::new(
+        loc,
+        StmtData::Expr(ExprStmt {
+            value: namespace_iife(
+                loc,
+                enumeration.argument,
+                body,
+                initial_value,
+                core.options.minify_syntax,
+            ),
+            ..ExprStmt::default()
+        }),
+    ));
     core.record_usage(enumeration.argument);
 }
 

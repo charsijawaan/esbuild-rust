@@ -789,12 +789,9 @@ impl Printer<'_> {
                 self.print_indent();
                 self.output.extend_from_slice(b"return");
                 if return_statement.value_or_nil.data.is_some() {
-                    if !self.options.minify_whitespace
-                        || !matches!(
-                            return_statement.value_or_nil.data.as_deref(),
-                            Some(ExprData::Arrow(_))
-                        )
-                    {
+                    let can_omit_space =
+                        can_omit_space_after_return(&return_statement.value_or_nil);
+                    if !self.options.minify_whitespace || !can_omit_space {
                         self.output.push(b' ');
                     }
                     self.print_expr_at(&return_statement.value_or_nil, Precedence::Lowest);
@@ -2603,6 +2600,17 @@ impl Printer<'_> {
     }
 }
 
+fn can_omit_space_after_return(expression: &Expr) -> bool {
+    match expression.data.as_deref() {
+        Some(ExprData::Arrow(_)) => true,
+        Some(ExprData::Call(call)) => {
+            matches!(call.target.data.as_deref(), Some(ExprData::Arrow(_)))
+        }
+        Some(ExprData::Binary(binary)) => can_omit_space_after_return(&binary.left),
+        _ => false,
+    }
+}
+
 fn statement_can_omit_semicolon_before_close_brace(statement: &Stmt) -> bool {
     match statement.data.as_deref() {
         Some(
@@ -4068,10 +4076,10 @@ mod tests {
              \x20\x20\x20\x20}\n\
              \x20\x20\x20\x20Nested.Item = Item;\n\
              \x20\x20})(Nested = Tools.Nested || (Tools.Nested = {}));\n\
-             \x20\x20let Mode = /* @__PURE__ */ ((Mode) => {\n\
+             \x20\x20let Mode;\n\
+             \x20\x20((Mode) => {\n\
              \x20\x20\x20\x20Mode[Mode[\"Ready\"] = 0] = \"Ready\";\n\
-             \x20\x20\x20\x20return Mode;\n\
-             \x20\x20})(Tools.Mode || (Tools.Mode = {}));\n\
+             \x20\x20})(Mode = Tools.Mode || (Tools.Mode = {}));\n\
              })(Tools || (Tools = {}));\n"
         );
     }

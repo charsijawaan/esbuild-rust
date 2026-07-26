@@ -2,8 +2,8 @@ use crate::internal::{
     ast::{INVALID_REF, LocRef, Ref, SymbolKind},
     helpers::string_to_utf16,
     js_ast::{
-        EnumStmt, EnumValue, Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, Stmt, StmtData,
-        TsNamespaceMember, TsNamespaceMemberData, TsNamespaceScope, TypeScriptStmt,
+        EnumStmt, EnumValue, Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, ScopeMember,
+        Stmt, StmtData, TsNamespaceMember, TsNamespaceMemberData, TsNamespaceScope, TypeScriptStmt,
     },
     js_lexer::{Lexer, Token},
 };
@@ -467,6 +467,29 @@ fn parse_namespace_statement(
         statements
     };
     core.fn_or_arrow_data_parse = old_context;
+    {
+        let mut scope = core
+            .current_scope
+            .as_ref()
+            .expect("namespace scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let collision_name = format!("_{name_text}");
+        match scope.members.entry(name_text) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                core.symbols
+                    [usize::try_from(argument.inner_index).expect("symbol index fits usize")]
+                .original_name = collision_name;
+                scope.generated.push(argument);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ScopeMember {
+                    reference: argument,
+                    loc: name_loc,
+                });
+            }
+        }
+    }
     core.pop_scope();
 
     Stmt::new(
@@ -600,7 +623,6 @@ pub(crate) fn parse_enum_statement(
             .expect("enum scope")
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        scope.generated.push(argument);
         scope.ts_namespace = Some(TsNamespaceScope {
             argument_ref: argument,
             is_enum_scope: true,
@@ -668,7 +690,7 @@ pub(crate) fn parse_enum_statement(
     }
     lexer.expect(Token::CloseBrace);
     core.fn_or_arrow_data_parse = old_context;
-    rename_enum_argument_if_collides(core, argument, &name_text);
+    register_enum_argument(core, argument, name_loc, &name_text);
     core.pop_scope();
     Stmt::new(
         loc,
@@ -681,18 +703,30 @@ pub(crate) fn parse_enum_statement(
     )
 }
 
-fn rename_enum_argument_if_collides(core: &mut ParserCore, argument: Ref, name: &str) {
-    let argument_collides = core
+fn register_enum_argument(
+    core: &mut ParserCore,
+    argument: Ref,
+    loc: crate::internal::logger::Loc,
+    name: &str,
+) {
+    let mut scope = core
         .current_scope
         .as_ref()
         .expect("enum scope")
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .members
-        .contains_key(name);
-    if argument_collides {
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if scope.members.contains_key(name) {
         core.symbols[usize::try_from(argument.inner_index).expect("symbol index fits usize")]
             .original_name = format!("_{name}");
+        scope.generated.push(argument);
+    } else {
+        scope.members.insert(
+            name.into(),
+            ScopeMember {
+                reference: argument,
+                loc,
+            },
+        );
     }
 }
 

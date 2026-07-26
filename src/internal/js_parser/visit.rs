@@ -18,7 +18,10 @@ use crate::internal::{
 };
 
 use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properties};
-use super::{parser_core::ParserCore, standalone_helpers::is_simple_parameter_list};
+use super::{
+    lower_typescript::lower_nested_type_script_statements, parser_core::ParserCore,
+    standalone_helpers::is_simple_parameter_list,
+};
 
 fn symbol_name(core: &ParserCore, reference: crate::internal::ast::Ref) -> String {
     core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
@@ -267,6 +270,11 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.record_declared_symbol(namespace.argument);
                 core.push_scope_for_visit_pass(ScopeKind::Entry, statement.loc);
                 visit_statements(core, &mut namespace.statements, resolve_identifiers);
+                lower_nested_type_script_statements(
+                    core,
+                    &mut namespace.statements,
+                    Some(namespace.argument),
+                );
                 core.pop_scope();
             }
             Some(StmtData::ExportDefault(export)) => match export.value.data.as_deref_mut() {
@@ -490,6 +498,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                         }
                     }
                     visit_statements(core, &mut case.body, resolve_identifiers);
+                    lower_nested_type_script_statements(core, &mut case.body, None);
                 }
                 core.visit_switch_depth -= 1;
                 core.pop_scope();
@@ -517,6 +526,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 if let Some(finally) = &mut try_statement.finally {
                     core.push_next_scope_for_visit_pass(ScopeKind::Block);
                     visit_statements(core, &mut finally.block.statements, resolve_identifiers);
+                    lower_nested_type_script_statements(core, &mut finally.block.statements, None);
                     core.pop_scope();
                 }
             }
@@ -880,6 +890,7 @@ fn visit_block(
 ) {
     core.push_scope_for_visit_pass(ScopeKind::Block, loc);
     visit_statements(core, &mut block.statements, resolve_identifiers);
+    lower_nested_type_script_statements(core, &mut block.statements, None);
     core.pop_scope();
 }
 
@@ -937,6 +948,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         &mut function.body.block.statements,
         resolve_identifiers,
     );
+    lower_nested_type_script_statements(core, &mut function.body.block.statements, None);
     core.pop_scope();
     core.pop_scope();
     core.visit_loop_depth = old_loop_depth;
@@ -1072,6 +1084,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
                 &mut static_block.block.statements,
                 resolve_identifiers,
             );
+            lower_nested_type_script_statements(core, &mut static_block.block.statements, None);
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;
             core.visit_switch_depth = old_switch_depth;
@@ -3598,6 +3611,7 @@ fn visit_expr_with_target(
             }
             core.push_scope_for_visit_pass(ScopeKind::FunctionBody, arrow.body.loc);
             visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
+            lower_nested_type_script_statements(core, &mut arrow.body.block.statements, None);
             core.pop_scope();
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;

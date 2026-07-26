@@ -366,8 +366,7 @@ fn assign_nested_scope_slots_helper(
     symbols: &mut [Symbol],
     mut slot: SlotCounts,
 ) -> SlotCounts {
-    let (mut members, generated, children) = scope_parts(scope);
-    members.sort_by_key(|reference| reference.inner_index);
+    let (members, generated, children) = scope_parts(scope);
     for reference in members.iter().chain(&generated) {
         let symbol = &mut symbols[reference.inner_index as usize];
         let namespace = symbol.slot_namespace();
@@ -399,15 +398,22 @@ fn scope_parts(scope: &ScopeRef) -> (Vec<Ref>, Vec<Ref>, Vec<ScopeRef>) {
     let scope = scope
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    (
-        scope
-            .members
-            .values()
-            .map(|member| member.reference)
-            .collect(),
-        scope.generated.clone(),
-        scope.children.clone(),
-    )
+    let namespace_argument = scope
+        .ts_namespace
+        .as_ref()
+        .map(|namespace| namespace.argument_ref);
+    let mut members = scope
+        .members
+        .values()
+        .map(|member| member.reference)
+        .collect::<Vec<_>>();
+    members.sort_by_key(|reference| {
+        (
+            namespace_argument == Some(*reference),
+            reference.inner_index,
+        )
+    });
+    (members, scope.generated.clone(), scope.children.clone())
 }
 
 pub struct NumberRenamer {
@@ -484,8 +490,7 @@ impl NumberRenamer {
         source_index: u32,
         parent: usize,
     ) -> usize {
-        let (mut members, generated, _) = scope_parts(scope);
-        members.sort_by_key(|reference| reference.inner_index);
+        let (members, generated, _) = scope_parts(scope);
         let scope_index = self.scopes.len();
         self.scopes.push(NumberScope {
             parent: Some(parent),
