@@ -63,6 +63,7 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
     let mut preserve_symlinks = false;
     let mut allow_overwrite = false;
     let mut sourcemap = BuildSourceMap::None;
+    let mut bare_sourcemap = false;
     let mut source_root = String::new();
     let mut sources_content = BuildSourcesContent::Include;
     let mut legal_comments = BuildLegalComments::Inline;
@@ -136,9 +137,11 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
         }
         if argument == "--sourcemap" {
             sourcemap = BuildSourceMap::Linked;
+            bare_sourcemap = true;
             continue;
         }
         if let Some(value) = argument.strip_prefix("--sourcemap=") {
+            bare_sourcemap = false;
             sourcemap = match value {
                 "linked" => BuildSourceMap::Linked,
                 "external" => BuildSourceMap::External,
@@ -588,8 +591,22 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
     if !metafile_path.is_empty() {
         return Err("\"--metafile\" without \"--bundle\" is not implemented yet".into());
     }
-    if sourcemap != BuildSourceMap::None {
-        return Err("\"--sourcemap\" without \"--bundle\" is not implemented yet".into());
+    if bare_sourcemap {
+        sourcemap = BuildSourceMap::Inline;
+    }
+    if matches!(
+        sourcemap,
+        BuildSourceMap::Linked | BuildSourceMap::External | BuildSourceMap::InlineAndExternal
+    ) {
+        let mode = match sourcemap {
+            BuildSourceMap::Linked => "linked",
+            BuildSourceMap::External => "external",
+            BuildSourceMap::InlineAndExternal => "both",
+            _ => unreachable!(),
+        };
+        return Err(format!(
+            "Use \"--sourcemap\" instead of \"--sourcemap={mode}\" when transforming stdin"
+        ));
     }
     if input_paths.len() > 1 {
         return Err("Only one input file can be transformed at a time".into());
@@ -604,6 +621,9 @@ fn run_with_stdin(arguments: &[String], stdin_override: Option<&[u8]>) -> Result
     options.pure = pure;
     options.keep_names = keep_names;
     options.legal_comments = legal_comments;
+    options.sourcemap = sourcemap;
+    options.source_root = source_root;
+    options.sources_content = sources_content;
     if matches!(
         options.legal_comments,
         BuildLegalComments::Linked | BuildLegalComments::External
@@ -985,6 +1005,34 @@ mod tests {
             assert_eq!(
                 error,
                 "Cannot transform with linked or external legal comments"
+            );
+        }
+    }
+
+    #[test]
+    fn generates_inline_source_maps_for_transforms() {
+        for flag in ["--sourcemap", "--sourcemap=inline"] {
+            let Output::Code(output) =
+                run_with_stdin(&[flag.into()], Some(b"1+2")).expect("inline source map succeeds")
+            else {
+                panic!("expected transformed code");
+            };
+            let output = String::from_utf8(output).expect("transform output is UTF-8");
+            assert!(
+                output.starts_with("1 + 2;\n//# sourceMappingURL=data:application/json;base64,"),
+                "{output}"
+            );
+        }
+
+        for mode in ["linked", "external", "both"] {
+            let Err(error) = run_with_stdin(&[format!("--sourcemap={mode}")], Some(b"1+2")) else {
+                panic!("CLI transforms only emit one output file");
+            };
+            assert_eq!(
+                error,
+                format!(
+                    "Use \"--sourcemap\" instead of \"--sourcemap={mode}\" when transforming stdin"
+                )
             );
         }
     }

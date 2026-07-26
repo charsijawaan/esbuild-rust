@@ -15,13 +15,15 @@ use crate::internal::{
     fs::{Fs, RealFsOptions, real_fs},
     helpers::{
         encode_string_as_shortest_data_url, escape_closing_tag, mime_type_by_extension,
-        string_to_utf16,
+        quote_for_json, string_to_utf16,
     },
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
     logger::{DeferLogKind, Log, Msg, MsgKind, PrettyPaths, Source},
     renamer::{Renamer, new_no_op_renamer},
-    resolver, xxhash,
+    resolver,
+    sourcemap::{Chunk as SourceMapChunk, LineColumnOffset, generate_line_offset_tables},
+    xxhash,
 };
 use base64::{
     Engine as _,
@@ -183,6 +185,9 @@ pub struct TransformOptions {
     pub drop_labels: Vec<String>,
     pub ignore_annotations: bool,
     pub legal_comments: BuildLegalComments,
+    pub sourcemap: BuildSourceMap,
+    pub source_root: String,
+    pub sources_content: BuildSourcesContent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -204,6 +209,14 @@ pub struct TransformResult {
     pub code: Vec<u8>,
     pub map: Vec<u8>,
     pub legal_comments: Vec<u8>,
+}
+
+#[derive(Default)]
+struct TransformPrint {
+    code: Vec<u8>,
+    extracted_legal_comments: Vec<String>,
+    source_map_chunk: SourceMapChunk,
+    source_map_prefix_lines: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1053,6 +1066,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
 
 #[must_use]
 #[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_lines)]
 pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> TransformResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
     let mut options = options;
@@ -1060,6 +1074,15 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         return TransformResult {
             errors: vec![Message {
                 text: "Cannot transform with linked legal comments".into(),
+                kind: MessageKind::Error,
+            }],
+            ..TransformResult::default()
+        };
+    }
+    if options.sourcemap == BuildSourceMap::Linked {
+        return TransformResult {
+            errors: vec![Message {
+                text: "Cannot transform with linked source maps".into(),
                 kind: MessageKind::Error,
             }],
             ..TransformResult::default()
@@ -1082,27 +1105,43 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         };
         options.loader = loader;
     }
+    let input_contents = Arc::<[u8]>::from(input.as_ref());
     let source = Source {
         pretty_paths: PrettyPaths {
             abs: sourcefile.clone(),
             rel: sourcefile.clone(),
         },
         identifier_name: generate_non_unique_name_from_path(&sourcefile),
-        contents: Arc::from(input.as_ref()),
+        contents: input_contents.clone(),
         ..Source::default()
     };
 
-    let (mut code, extracted_legal_comments) = match options.loader {
+    let mut printed = match options.loader {
         Loader::Css | Loader::GlobalCss | Loader::LocalCss => transform_css(&log, source, &options),
         Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None => {
             transform_javascript(&log, source, &options)
         }
-        Loader::Json => (transform_json(&log, source, &options), Vec::new()),
-        Loader::Text => (transform_text(&source, &options), Vec::new()),
-        Loader::Base64 => (transform_base64(&source, &options), Vec::new()),
-        Loader::Binary => (transform_binary(&source, &options), Vec::new()),
-        Loader::DataUrl => (transform_data_url(&source, &options), Vec::new()),
-        Loader::Empty => (Vec::new(), Vec::new()),
+        Loader::Json => TransformPrint {
+            code: transform_json(&log, source, &options),
+            ..TransformPrint::default()
+        },
+        Loader::Text => TransformPrint {
+            code: transform_text(&source, &options),
+            ..TransformPrint::default()
+        },
+        Loader::Base64 => TransformPrint {
+            code: transform_base64(&source, &options),
+            ..TransformPrint::default()
+        },
+        Loader::Binary => TransformPrint {
+            code: transform_binary(&source, &options),
+            ..TransformPrint::default()
+        },
+        Loader::DataUrl => TransformPrint {
+            code: transform_data_url(&source, &options),
+            ..TransformPrint::default()
+        },
+        Loader::Empty => TransformPrint::default(),
         loader => {
             let message = format!("Transform loader {loader:?} is not implemented yet");
             return TransformResult {
@@ -1118,8 +1157,9 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
     let messages = log.done();
     let (errors, warnings) = public_messages(messages);
     let mut legal_comments = Vec::new();
+    let mut source_map = Vec::new();
     if errors.is_empty() {
-        code = add_banner_and_footer(code, &options.banner, "");
+        printed.code = add_banner_and_footer(printed.code, &options.banner, "");
         let slash_tag = if matches!(
             options.loader,
             Loader::Css | Loader::GlobalCss | Loader::LocalCss
@@ -1128,22 +1168,104 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         } else {
             "/script"
         };
-        let rendered = render_legal_comments(&extracted_legal_comments, slash_tag);
+        let rendered = render_legal_comments(&printed.extracted_legal_comments, slash_tag);
         match options.legal_comments {
-            BuildLegalComments::EndOfFile => code.extend(rendered),
+            BuildLegalComments::EndOfFile => printed.code.extend(rendered),
             BuildLegalComments::External => legal_comments = rendered,
             _ => {}
         }
-        code = add_banner_and_footer(code, "", &options.footer);
+        printed.code = add_banner_and_footer(printed.code, "", &options.footer);
+        if options.sourcemap != BuildSourceMap::None {
+            let mut banner_offset = LineColumnOffset::default();
+            if !options.banner.is_empty() {
+                banner_offset.advance_bytes(options.banner.as_bytes());
+                banner_offset.advance_bytes(b"\n");
+            }
+            let banner_lines = usize::try_from(banner_offset.lines).unwrap_or_default();
+            source_map = generate_transform_source_map(
+                &sourcefile,
+                &input_contents,
+                &printed.source_map_chunk,
+                printed.source_map_prefix_lines + banner_lines,
+                &options,
+            );
+            if matches!(
+                options.sourcemap,
+                BuildSourceMap::Inline | BuildSourceMap::InlineAndExternal
+            ) {
+                append_inline_source_map(
+                    &mut printed.code,
+                    &source_map,
+                    matches!(
+                        options.loader,
+                        Loader::Css | Loader::GlobalCss | Loader::LocalCss
+                    ),
+                );
+            }
+            if options.sourcemap == BuildSourceMap::Inline {
+                source_map.clear();
+            }
+        }
     } else {
-        code.clear();
+        printed.code.clear();
     }
     TransformResult {
         errors,
         warnings,
-        code,
+        code: printed.code,
+        map: source_map,
         legal_comments,
-        ..TransformResult::default()
+    }
+}
+
+fn generate_transform_source_map(
+    sourcefile: &str,
+    contents: &[u8],
+    chunk: &SourceMapChunk,
+    generated_prefix_lines: usize,
+    options: &TransformOptions,
+) -> Vec<u8> {
+    let mut result = b"{\n  \"version\": 3,\n  \"sources\": [".to_vec();
+    result.extend(quote_for_json(sourcefile.as_bytes(), options.ascii_only));
+    result.push(b']');
+    if !options.source_root.is_empty() {
+        result.extend_from_slice(b",\n  \"sourceRoot\": ");
+        result.extend(quote_for_json(
+            options.source_root.as_bytes(),
+            options.ascii_only,
+        ));
+    }
+    if options.sources_content == BuildSourcesContent::Include {
+        result.extend_from_slice(b",\n  \"sourcesContent\": [");
+        result.extend(quote_for_json(contents, options.ascii_only));
+        result.push(b']');
+    }
+    result.extend_from_slice(b",\n  \"mappings\": \"");
+    result.extend(std::iter::repeat_n(b';', generated_prefix_lines));
+    result.extend_from_slice(&chunk.buffer.data);
+    result.extend_from_slice(b"\",\n  \"names\": [");
+    for (index, name) in chunk.quoted_names.iter().enumerate() {
+        if index != 0 {
+            result.extend_from_slice(b", ");
+        }
+        result.extend_from_slice(name);
+    }
+    result.extend_from_slice(b"]\n}\n");
+    result
+}
+
+fn append_inline_source_map(code: &mut Vec<u8>, source_map: &[u8], is_css: bool) {
+    if !code.is_empty() && code.last() != Some(&b'\n') {
+        code.push(b'\n');
+    }
+    if is_css {
+        code.extend_from_slice(b"/*# sourceMappingURL=data:application/json;base64,");
+        code.extend_from_slice(STANDARD.encode(source_map).as_bytes());
+        code.extend_from_slice(b" */\n");
+    } else {
+        code.extend_from_slice(b"//# sourceMappingURL=data:application/json;base64,");
+        code.extend_from_slice(STANDARD.encode(source_map).as_bytes());
+        code.push(b'\n');
     }
 }
 
@@ -1288,11 +1410,9 @@ fn detect_content_type(contents: &[u8]) -> &'static str {
     }
 }
 
-fn transform_javascript(
-    log: &Log,
-    source: Source,
-    options: &TransformOptions,
-) -> (Vec<u8>, Vec<String>) {
+fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -> TransformPrint {
+    let line_offset_tables = (options.sourcemap != BuildSourceMap::None)
+        .then(|| generate_line_offset_tables(&source.contents, 1));
     let mut parser_options = js_parser::Options::default();
     parser_options.ts.parse = matches!(options.loader, Loader::Ts | Loader::Tsx);
     parser_options.jsx.parse = matches!(options.loader, Loader::Jsx | Loader::Tsx);
@@ -1327,19 +1447,44 @@ fn transform_javascript(
     parser_options.omit_runtime_for_tests = true;
     let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
     if !ok {
-        return (Vec::new(), Vec::new());
+        return TransformPrint::default();
     }
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&ast.symbols);
     let (renamer, helper_name) = transform_keep_name_renamer(&ast, symbols, options.keep_names);
-    let printed = js_printer::print(&ast, &renamer, js_printer_options(options));
+    let printed = if let Some(line_offset_tables) = line_offset_tables {
+        js_printer::print_with_source_map(
+            &ast,
+            &renamer,
+            js_printer_options(options),
+            None,
+            line_offset_tables,
+        )
+    } else {
+        js_printer::print(&ast, &renamer, js_printer_options(options))
+    };
     let mut code = printed.js;
+    let printed_len = code.len();
     prepend_keep_name_helper(&mut code, &helper_name, options.minify_whitespace);
-    (code, printed.extracted_legal_comments)
+    let mut source_map_prefix_offset = LineColumnOffset::default();
+    source_map_prefix_offset.advance_bytes(&code[..code.len() - printed_len]);
+    let source_map_prefix_lines = usize::try_from(source_map_prefix_offset.lines)
+        .expect("source-map prefix line count is non-negative");
+    TransformPrint {
+        code,
+        extracted_legal_comments: printed.extracted_legal_comments,
+        source_map_chunk: printed.source_map_chunk,
+        source_map_prefix_lines,
+    }
 }
 
-fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> (Vec<u8>, Vec<String>) {
+fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> TransformPrint {
     let identifier_name = source.identifier_name.clone();
+    let line_offset_tables = if options.sourcemap == BuildSourceMap::None {
+        Vec::new()
+    } else {
+        generate_line_offset_tables(&source.contents, 1)
+    };
     let tree = css_parser::parse(
         log.clone(),
         source,
@@ -1375,6 +1520,12 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> (Vec<
             minify_whitespace: options.minify_whitespace,
             ascii_only: options.ascii_only,
             legal_comments: internal_legal_comments(options.legal_comments),
+            line_offset_tables,
+            source_map: if options.sourcemap == BuildSourceMap::None {
+                config::SourceMap::None
+            } else {
+                config::SourceMap::ExternalWithoutComment
+            },
             ..css_printer::Options::default()
         },
     );
@@ -1382,7 +1533,12 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> (Vec<
     if !css.is_empty() && css.last() != Some(&b'\n') {
         css.push(b'\n');
     }
-    (css, printed.extracted_legal_comments)
+    TransformPrint {
+        code: css,
+        extracted_legal_comments: printed.extracted_legal_comments,
+        source_map_chunk: printed.source_map_chunk,
+        ..TransformPrint::default()
+    }
 }
 
 fn local_css_names(
@@ -4006,5 +4162,88 @@ mod tests {
             },
         );
         assert_eq!(code(escaped), "keep();\n/*! <\\/script> */\nfooter()\n");
+    }
+
+    #[test]
+    fn generates_transform_source_maps() {
+        let external = transform(
+            "1+2",
+            TransformOptions {
+                sourcemap: BuildSourceMap::External,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(external.errors.is_empty(), "{:?}", external.errors);
+        assert_eq!(
+            String::from_utf8(external.code).expect("transform output is UTF-8"),
+            "1 + 2;\n"
+        );
+        assert_eq!(
+            String::from_utf8(external.map).expect("source map is UTF-8"),
+            "{\n  \"version\": 3,\n  \"sources\": [\"<stdin>\"],\n  \"sourcesContent\": [\"1+2\"],\n  \"mappings\": \"AAAA,IAAE;\",\n  \"names\": []\n}\n"
+        );
+
+        let configured = transform(
+            "let       x",
+            TransformOptions {
+                sourcefile: "afile.js".into(),
+                sourcemap: BuildSourceMap::External,
+                source_root: "https://example.com/".into(),
+                sources_content: BuildSourcesContent::Exclude,
+                banner: "/* banner */".into(),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(configured.errors.is_empty(), "{:?}", configured.errors);
+        let configured_map = String::from_utf8(configured.map).expect("source map is UTF-8");
+        assert!(configured_map.contains("\"sources\": [\"afile.js\"]"));
+        assert!(configured_map.contains("\"sourceRoot\": \"https://example.com/\""));
+        assert!(!configured_map.contains("\"sourcesContent\""));
+        assert!(configured_map.contains("\"mappings\": \";AAAA"));
+
+        let inline = transform(
+            "1+2",
+            TransformOptions {
+                sourcemap: BuildSourceMap::Inline,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(inline.errors.is_empty(), "{:?}", inline.errors);
+        assert!(inline.map.is_empty());
+        assert!(
+            String::from_utf8(inline.code)
+                .expect("transform output is UTF-8")
+                .starts_with("1 + 2;\n//# sourceMappingURL=data:application/json;base64,")
+        );
+
+        let both = transform(
+            "a{b:c}",
+            TransformOptions {
+                loader: Loader::Css,
+                sourcemap: BuildSourceMap::InlineAndExternal,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(both.errors.is_empty(), "{:?}", both.errors);
+        assert!(!both.map.is_empty());
+        assert!(
+            String::from_utf8(both.code)
+                .expect("transform output is UTF-8")
+                .contains("/*# sourceMappingURL=data:application/json;base64,")
+        );
+
+        let linked = transform(
+            "1+2",
+            TransformOptions {
+                sourcemap: BuildSourceMap::Linked,
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(
+            linked.errors.first().map(|message| message.text.as_str()),
+            Some("Cannot transform with linked source maps")
+        );
+        assert!(linked.code.is_empty());
+        assert!(linked.map.is_empty());
     }
 }
