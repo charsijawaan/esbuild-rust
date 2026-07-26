@@ -788,7 +788,7 @@ impl Printer<'_> {
                 self.output.push(b'(');
                 self.print_expr_at(&while_statement.test, Precedence::Lowest);
                 self.output.push(b')');
-                self.print_body(&while_statement.body);
+                self.print_loop_body(&while_statement.body, while_statement.is_single_line_body);
             }
             StmtData::With(with_statement) => {
                 self.print_indent();
@@ -797,7 +797,7 @@ impl Printer<'_> {
                 self.output.push(b'(');
                 self.print_expr_at(&with_statement.value, Precedence::Lowest);
                 self.output.push(b')');
-                self.print_body(&with_statement.body);
+                self.print_loop_body(&with_statement.body, with_statement.is_single_line_body);
             }
             StmtData::DoWhile(do_while) => {
                 self.print_indent();
@@ -839,7 +839,7 @@ impl Printer<'_> {
                     );
                 }
                 self.output.push(b')');
-                self.print_body(&for_statement.body);
+                self.print_loop_body(&for_statement.body, for_statement.is_single_line_body);
             }
             StmtData::ForIn(for_statement) => {
                 self.print_indent();
@@ -850,7 +850,7 @@ impl Printer<'_> {
                 self.output.extend_from_slice(b" in ");
                 self.print_expr_at(&for_statement.value, Precedence::Lowest);
                 self.output.push(b')');
-                self.print_body(&for_statement.body);
+                self.print_loop_body(&for_statement.body, for_statement.is_single_line_body);
             }
             StmtData::ForOf(for_statement) => {
                 self.print_indent();
@@ -866,7 +866,7 @@ impl Printer<'_> {
                 self.output.extend_from_slice(b" of ");
                 self.print_expr_at(&for_statement.value, Precedence::Spread);
                 self.output.push(b')');
-                self.print_body(&for_statement.body);
+                self.print_loop_body(&for_statement.body, for_statement.is_single_line_body);
             }
             StmtData::Label(label) => {
                 self.print_indent();
@@ -1121,6 +1121,17 @@ impl Printer<'_> {
             self.indent += 1;
             self.print_stmt(body);
             self.indent -= 1;
+        }
+    }
+
+    fn print_loop_body(&mut self, body: &Stmt, is_single_line: bool) {
+        if is_single_line && !matches!(body.data.as_deref(), Some(StmtData::Block(_))) {
+            self.print_optional_space();
+            let indent = std::mem::take(&mut self.indent);
+            self.print_stmt(body);
+            self.indent = indent;
+        } else {
+            self.print_body(body);
         }
     }
 
@@ -2493,19 +2504,34 @@ impl Printer<'_> {
 }
 
 fn statement_can_omit_semicolon_before_close_brace(statement: &Stmt) -> bool {
-    matches!(
-        statement.data.as_deref(),
+    match statement.data.as_deref() {
         Some(
             StmtData::Debugger
-                | StmtData::Directive(_)
-                | StmtData::Expr(_)
-                | StmtData::Local(_)
-                | StmtData::Return(_)
-                | StmtData::Throw(_)
-                | StmtData::Break(_)
-                | StmtData::Continue(_)
-        )
-    )
+            | StmtData::Directive(_)
+            | StmtData::Expr(_)
+            | StmtData::Local(_)
+            | StmtData::Return(_)
+            | StmtData::Throw(_)
+            | StmtData::Break(_)
+            | StmtData::Continue(_),
+        ) => true,
+        Some(StmtData::For(statement)) => {
+            statement_can_omit_semicolon_before_close_brace(&statement.body)
+        }
+        Some(StmtData::ForIn(statement)) => {
+            statement_can_omit_semicolon_before_close_brace(&statement.body)
+        }
+        Some(StmtData::ForOf(statement)) => {
+            statement_can_omit_semicolon_before_close_brace(&statement.body)
+        }
+        Some(StmtData::While(statement)) => {
+            statement_can_omit_semicolon_before_close_brace(&statement.body)
+        }
+        Some(StmtData::With(statement)) => {
+            statement_can_omit_semicolon_before_close_brace(&statement.body)
+        }
+        _ => false,
+    }
 }
 
 fn expr_precedence(data: &ExprData) -> Precedence {
@@ -3268,7 +3294,8 @@ mod tests {
                 b"function add(a, b = 1) { return a + b; }\
                   const twice = (value) => value * 2;\
                   async function load(){await work();return()=>1}\
-                  function* values(){yield 1;yield* other}"
+                  function* values(){yield 1;yield* other}\
+                  async function consume(){for await(const item of items)use(item)}"
                     .as_slice(),
             ),
             identifier_name: "entry".into(),
@@ -3294,6 +3321,9 @@ mod tests {
              function* values() {\n\
              \x20\x20yield 1;\n\
              \x20\x20yield* other;\n\
+             }\n\
+             async function consume() {\n\
+             \x20\x20for await (const item of items) use(item);\n\
              }\n"
         );
         assert_eq!(
@@ -3309,7 +3339,7 @@ mod tests {
                 .js,
             )
             .expect("printer output is UTF-8"),
-            "function add(a,b=1){return a+b}const twice=value=>value*2;async function load(){await work();return()=>1}function*values(){yield 1;yield*other}"
+            "function add(a,b=1){return a+b}const twice=value=>value*2;async function load(){await work();return()=>1}function*values(){yield 1;yield*other}async function consume(){for await(const item of items)use(item)}"
         );
     }
 
@@ -3386,10 +3416,8 @@ mod tests {
             "for (let i = 0; i < 2; i++) {\n\
              \x20\x20sum += i;\n\
              }\n\
-             for (const key in object)\n\
-             \x20\x20use(key);\n\
-             for (const value of list)\n\
-             \x20\x20use(value);\n"
+             for (const key in object) use(key);\n\
+             for (const value of list) use(value);\n"
         );
     }
 
