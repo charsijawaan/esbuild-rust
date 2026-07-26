@@ -402,6 +402,267 @@ pub struct BuildResult {
     pub output_files: Vec<BuildOutputFile>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AnalyzeMetafileOptions {
+    pub color: bool,
+    pub verbose: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MetafileEntry {
+    name: String,
+    entry_point: String,
+    entries: Vec<MetafileEntry>,
+    size: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MetafileTableEntry {
+    first: String,
+    second: String,
+    third: String,
+    first_len: usize,
+    second_len: usize,
+    third_len: usize,
+    is_top_level: bool,
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn pretty_print_byte_count(size: usize) -> String {
+    if size < 1024 {
+        format!("{size}b ")
+    } else if size < 1024 * 1024 {
+        format!("{:.1}kb", size as f64 / 1024.0)
+    } else if size < 1024 * 1024 * 1024 {
+        format!("{:.1}mb", size as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1}gb", size as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+#[must_use]
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
+pub fn analyze_metafile(metafile: &str, options: AnalyzeMetafileOptions) -> String {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(metafile) else {
+        return String::new();
+    };
+    let Some(outputs) = root.get("outputs").and_then(serde_json::Value::as_object) else {
+        return String::new();
+    };
+    let mut entries = Vec::new();
+    let mut entry_points = Vec::new();
+    for (name, output) in outputs {
+        if name.ends_with(".map") {
+            continue;
+        }
+        let Some(size) = output.get("bytes").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let Some(inputs) = output.get("inputs").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        let entry_point = output
+            .get("entryPoint")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if !entry_point.is_empty() {
+            entry_points.push(entry_point.clone());
+        }
+        let mut children = inputs
+            .iter()
+            .filter_map(|(name, input)| {
+                let size = input
+                    .get("bytesInOutput")
+                    .and_then(serde_json::Value::as_u64)?;
+                (size > 0).then(|| MetafileEntry {
+                    name: name.clone(),
+                    size: usize::try_from(size).unwrap_or(usize::MAX),
+                    ..MetafileEntry::default()
+                })
+            })
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| {
+            right
+                .size
+                .cmp(&left.size)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        entries.push(MetafileEntry {
+            name: name.clone(),
+            entry_point,
+            entries: children,
+            size: usize::try_from(size).unwrap_or(usize::MAX),
+        });
+    }
+    entries.sort_by(|left, right| {
+        right
+            .size
+            .cmp(&left.size)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    let imports = root
+        .get("inputs")
+        .and_then(serde_json::Value::as_object)
+        .map(|inputs| {
+            inputs
+                .iter()
+                .map(|(name, input)| {
+                    let paths = input
+                        .get("imports")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|item| item.get("path").and_then(serde_json::Value::as_str))
+                        .map(str::to_string)
+                        .collect::<Vec<_>>();
+                    (name.clone(), paths)
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let graph_for = |roots: &[String]| {
+        let mut graph = roots
+            .iter()
+            .cloned()
+            .map(|path| (path, (String::new(), 0_u32)))
+            .collect::<HashMap<_, _>>();
+        let mut worklist = roots.to_vec();
+        while let Some(path) = worklist.pop() {
+            let depth = graph.get(&path).map_or(1, |entry| entry.1 + 1);
+            for imported in imports.get(&path).into_iter().flatten() {
+                let old_depth = graph.get(imported).map_or(u32::MAX, |entry| entry.1);
+                if old_depth > depth {
+                    graph.insert(imported.clone(), (path.clone(), depth));
+                    worklist.push(imported.clone());
+                }
+            }
+        }
+        graph
+    };
+    let all_graph = options.verbose.then(|| graph_for(&entry_points));
+    let mut table = Vec::new();
+    for entry in entries {
+        let second = pretty_print_byte_count(entry.size);
+        table.push(MetafileTableEntry {
+            first_len: entry.name.chars().count(),
+            second_len: second.len(),
+            third_len: 6,
+            first: entry.name,
+            second,
+            third: "100.0%".into(),
+            is_top_level: true,
+        });
+        let entry_graph = (!entry.entry_point.is_empty())
+            .then(|| graph_for(std::slice::from_ref(&entry.entry_point)));
+        let graph = entry_graph.as_ref().or(all_graph.as_ref());
+        let child_count = entry.entries.len();
+        for (index, child) in entry.entries.into_iter().enumerate() {
+            let last = index + 1 == child_count;
+            let first = format!(" {} {}", if last { '└' } else { '├' }, child.name);
+            let second = pretty_print_byte_count(child.size);
+            let third = format!(
+                "{:.1}%",
+                100.0 * child.size as f64 / entry.size.max(1) as f64
+            );
+            table.push(MetafileTableEntry {
+                first_len: first.chars().count(),
+                second_len: second.len(),
+                third_len: third.len(),
+                first,
+                second,
+                third,
+                ..MetafileTableEntry::default()
+            });
+            if options.verbose {
+                let indent = if last { "   " } else { " │ " };
+                let mut current = graph
+                    .and_then(|graph| graph.get(&child.name))
+                    .cloned()
+                    .unwrap_or_default();
+                let mut depth = 0;
+                while current.1 != 0 {
+                    let first = format!("{indent}{} └ {}", " ".repeat(depth), current.0);
+                    table.push(MetafileTableEntry {
+                        first,
+                        ..MetafileTableEntry::default()
+                    });
+                    current = graph
+                        .and_then(|graph| graph.get(&current.0))
+                        .cloned()
+                        .unwrap_or_default();
+                    depth += 3;
+                }
+            }
+        }
+    }
+    render_metafile_table(&table, options)
+}
+
+fn render_metafile_table(table: &[MetafileTableEntry], options: AnalyzeMetafileOptions) -> String {
+    let max_first = table.iter().map(|entry| entry.first_len).max().unwrap_or(0);
+    let max_second = table
+        .iter()
+        .map(|entry| entry.second_len)
+        .max()
+        .unwrap_or(0);
+    let max_third = table.iter().map(|entry| entry.third_len).max().unwrap_or(0);
+    let colors = if options.color {
+        crate::internal::logger::TERMINAL_COLORS
+    } else {
+        crate::internal::logger::Colors::default()
+    };
+    let mut result = String::new();
+    for entry in table {
+        if entry.is_top_level {
+            result.push('\n');
+        }
+        if entry.second.is_empty() && entry.third.is_empty() {
+            result.push_str("  ");
+            result.push_str(&entry.first);
+            result.push('\n');
+            continue;
+        }
+        let trimmed = entry.second.trim_end();
+        let line = if options.verbose { '─' } else { ' ' };
+        let extra = usize::from(options.verbose);
+        let color = if entry.is_top_level { colors.bold } else { "" };
+        result.push_str("  ");
+        result.push_str(color);
+        result.push_str(&entry.first);
+        result.push_str(colors.reset);
+        result.push(' ');
+        result.push_str(colors.dim);
+        result.extend(std::iter::repeat_n(
+            line,
+            extra + max_first - entry.first_len + max_second - entry.second_len,
+        ));
+        result.push_str(colors.reset);
+        result.push(' ');
+        result.push_str(color);
+        result.push_str(trimmed);
+        result.push_str(colors.reset);
+        result.push(' ');
+        result.push_str(colors.dim);
+        result.extend(std::iter::repeat_n(
+            line,
+            extra + max_third - entry.third_len + entry.second.len() - trimmed.len(),
+        ));
+        result.push_str(colors.reset);
+        result.push(' ');
+        result.push_str(color);
+        result.push_str(&entry.third);
+        result.push_str(colors.reset);
+        result.push('\n');
+    }
+    result
+}
+
 fn output_file_hash(contents: &[u8]) -> String {
     STANDARD_NO_PAD.encode(xxhash::sum64(contents).to_le_bytes())
 }
@@ -1989,6 +2250,44 @@ mod tests {
     fn code(result: super::TransformResult) -> String {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         String::from_utf8(result.code).expect("transform output is UTF-8")
+    }
+
+    #[test]
+    fn analyzes_metafiles() {
+        let metafile = r#"{
+          "inputs": {
+            "entry.js": {"bytes": 50, "imports": [{"path": "lib.js"}]},
+            "lib.js": {"bytes": 200, "imports": []}
+          },
+          "outputs": {
+            "out.js": {
+              "entryPoint": "entry.js",
+              "inputs": {
+                "entry.js": {"bytesInOutput": 25},
+                "lib.js": {"bytesInOutput": 50}
+              },
+              "bytes": 100
+            }
+          }
+        }"#;
+        assert_eq!(
+            super::analyze_metafile(metafile, super::AnalyzeMetafileOptions::default()),
+            "\n  out.js       100b   100.0%\n   ├ lib.js     50b    50.0%\n   └ entry.js   25b    25.0%\n"
+        );
+        assert_eq!(
+            super::analyze_metafile(
+                metafile,
+                super::AnalyzeMetafileOptions {
+                    verbose: true,
+                    ..super::AnalyzeMetafileOptions::default()
+                }
+            ),
+            "\n  out.js ────── 100b ── 100.0%\n   ├ lib.js ──── 50b ─── 50.0%\n   │  └ entry.js\n   └ entry.js ── 25b ─── 25.0%\n"
+        );
+        assert!(
+            super::analyze_metafile("not json", super::AnalyzeMetafileOptions::default())
+                .is_empty()
+        );
     }
 
     #[test]
