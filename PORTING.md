@@ -21,7 +21,7 @@ Status values:
 | `internal/css_ast` | ported |
 | `internal/css_lexer` | ported |
 | `internal/css_parser` | not started |
-| `internal/css_printer` | not started |
+| `internal/css_printer` | in progress |
 | `internal/fs` | ported |
 | `internal/graph` | not started |
 | `internal/helpers` | ported |
