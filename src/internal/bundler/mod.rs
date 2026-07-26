@@ -578,11 +578,32 @@ pub fn resolve_import_records(
     tsconfig: Option<&resolver::TsConfigJson>,
     result: &mut ParseResult,
 ) {
+    resolve_import_records_from_directory(
+        log,
+        file_system,
+        source_index_cache,
+        options,
+        tsconfig,
+        None,
+        result,
+    );
+}
+
+fn resolve_import_records_from_directory(
+    log: &Log,
+    file_system: &dyn Fs,
+    source_index_cache: &SourceIndexCache,
+    options: &Options,
+    tsconfig: Option<&resolver::TsConfigJson>,
+    source_directory: Option<&str>,
+    result: &mut ParseResult,
+) {
     if options.mode != Mode::Bundle || !result.ok {
         return;
     }
     let source = result.file.input_file.source.clone();
-    let source_directory = file_system.dir(&source.key_path.text);
+    let source_directory =
+        source_directory.map_or_else(|| file_system.dir(&source.key_path.text), str::to_string);
     let Some(records) = result
         .file
         .input_file
@@ -807,6 +828,115 @@ pub fn scan_bundle(
     let mut pending = Vec::new();
     let mut queued = HashSet::from([runtime::SOURCE_INDEX]);
     let mut resolution_slots: HashMap<u32, Vec<Option<ResolveResult>>> = HashMap::new();
+    if let Some(stdin) = options.stdin.clone() {
+        let key_path = if stdin.source_file.is_empty() {
+            Path {
+                text: "<stdin>".into(),
+                ..Path::default()
+            }
+        } else if stdin.abs_resolve_dir.is_empty() {
+            Path {
+                text: stdin.source_file.clone(),
+                ..Path::default()
+            }
+        } else {
+            Path {
+                text: if file_system.is_abs(&stdin.source_file) {
+                    stdin.source_file.clone()
+                } else {
+                    file_system.join(&[&stdin.abs_resolve_dir, &stdin.source_file])
+                },
+                namespace: "file".into(),
+                ..Path::default()
+            }
+        };
+        let source_index = caches
+            .source_index_cache
+            .get(key_path.clone(), SourceIndexKind::Normal);
+        let pretty_path = if stdin.source_file.is_empty() {
+            "<stdin>".to_string()
+        } else {
+            stdin.source_file.clone()
+        };
+        let source = Source {
+            index: source_index,
+            key_path,
+            pretty_paths: logger::PrettyPaths {
+                abs: pretty_path.clone(),
+                rel: pretty_path,
+            },
+            contents: Arc::from(stdin.contents.into_bytes()),
+            ..Source::default()
+        };
+        let mut file_options = options.clone();
+        let tsconfig = find_nearest_tsconfig(
+            log,
+            file_system,
+            if stdin.abs_resolve_dir.is_empty() {
+                file_system.cwd()
+            } else {
+                &stdin.abs_resolve_dir
+            },
+            (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
+        );
+        if let Some(tsconfig) = &tsconfig {
+            tsconfig.jsx_settings.apply_to(&mut file_options.jsx);
+            file_options.ts.config = tsconfig.settings;
+            file_options.ts_always_strict =
+                tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
+        }
+        let loader = if stdin.loader == Loader::None {
+            Loader::Js
+        } else {
+            stdin.loader
+        };
+        let mut result = parse_file_with_unique_key_prefix(
+            log,
+            source,
+            loader,
+            &file_options,
+            unique_key_prefix,
+        );
+        resolve_import_records_from_directory(
+            log,
+            file_system,
+            &caches.source_index_cache,
+            &file_options,
+            tsconfig.as_ref(),
+            (!stdin.abs_resolve_dir.is_empty()).then_some(stdin.abs_resolve_dir.as_str()),
+            &mut result,
+        );
+        for resolve_result in result.resolve_results.iter().flatten() {
+            if resolve_result.path_pair.is_external {
+                continue;
+            }
+            let dependency_path = &resolve_result.path_pair.primary;
+            let dependency_index = caches
+                .source_index_cache
+                .get(dependency_path.clone(), SourceIndexKind::Normal);
+            if queued.insert(dependency_index) {
+                pending.push((
+                    dependency_path.clone(),
+                    dependency_index,
+                    resolve_result.clone(),
+                ));
+            }
+        }
+        let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
+        bundle
+            .files
+            .resize_with(needed_length, ScannerFile::default);
+        if result.ok {
+            resolution_slots.insert(source_index, std::mem::take(&mut result.resolve_results));
+            bundle.files[usize::try_from(source_index).expect("source index fits usize")] =
+                result.file;
+            bundle.entry_points.push(GraphEntryPoint {
+                output_path: "stdin".into(),
+                source_index,
+                output_path_was_auto_generated: true,
+            });
+        }
+    }
     for entry_point in entry_points {
         let input_path = if file_system.is_abs(&entry_point.input_path)
             || entry_point.input_path.starts_with("./")

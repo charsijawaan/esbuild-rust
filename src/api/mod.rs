@@ -161,6 +161,7 @@ pub enum BuildJsx {
 pub struct BuildOptions {
     pub entry_points: Vec<String>,
     pub entry_points_advanced: Vec<BuildEntryPoint>,
+    pub stdin: Option<BuildStdin>,
     pub outdir: String,
     pub outfile: String,
     pub outbase: String,
@@ -214,6 +215,14 @@ pub struct BuildOptions {
 pub struct BuildEntryPoint {
     pub input_path: String,
     pub output_path: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BuildStdin {
+    pub contents: String,
+    pub resolve_dir: String,
+    pub sourcefile: String,
+    pub loader: Loader,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -741,6 +750,18 @@ pub fn build(options: BuildOptions) -> BuildResult {
     } else {
         file_system.join(&[file_system.cwd(), &options.tsconfig])
     };
+    let stdin = options.stdin.map(|stdin| config::StdinInfo {
+        contents: stdin.contents,
+        source_file: stdin.sourcefile,
+        abs_resolve_dir: if stdin.resolve_dir.is_empty() {
+            String::new()
+        } else if file_system.is_abs(&stdin.resolve_dir) {
+            stdin.resolve_dir
+        } else {
+            file_system.join(&[file_system.cwd(), &stdin.resolve_dir])
+        },
+        loader: build_loader(stdin.loader),
+    });
     let abs_node_paths = options
         .node_paths
         .iter()
@@ -823,6 +844,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         abs_output_file: output_file,
         abs_output_base,
         tsconfig_path,
+        stdin,
         needs_metafile: options.metafile,
         ..config::Options::default()
     };
@@ -1283,8 +1305,8 @@ mod tests {
 
     use super::{
         BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
-        BuildSourceMap, BuildSourcesContent, BuildTreeShaking, Loader, Packages, TransformOptions,
-        build, transform,
+        BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, Loader, Packages,
+        TransformOptions, build, transform,
     };
 
     fn code(result: super::TransformResult) -> String {
@@ -1317,6 +1339,45 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("console.log(\"api build\");"));
         assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn builds_stdin_as_a_synthetic_entry_point() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-build-stdin-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("dependency.ts"),
+            "export const value: number = 42",
+        )
+        .expect("write dependency");
+
+        let result = build(BuildOptions {
+            stdin: Some(BuildStdin {
+                contents:
+                    "import {value} from './dependency.ts'; const result: number = value; console.log(result)"
+                        .into(),
+                resolve_dir: ".".into(),
+                sourcefile: "virtual-entry.ts".into(),
+                loader: Loader::Ts,
+            }),
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.output_files.len(), 1);
+        assert!(result.output_files[0].path.ends_with("/out/stdin.js"));
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("const value = 42;"));
+        assert!(output.contains("const result = value;"));
+        assert!(output.contains("console.log(result);"));
+        assert!(!output.contains("import "));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
