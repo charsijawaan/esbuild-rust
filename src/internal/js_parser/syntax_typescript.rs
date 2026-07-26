@@ -283,6 +283,16 @@ pub(crate) fn parse_type_script_statement(
         return None;
     }
     let loc = lexer.loc();
+    if is_export && lexer.is_contextual_keyword(b"as") {
+        lexer.next();
+        lexer.expect_contextual_keyword(b"namespace");
+        lexer.expect(Token::Identifier);
+        lexer.expect_or_insert_semicolon();
+        return Some(Stmt::new(
+            loc,
+            StmtData::TypeScript(TypeScriptStmt::default()),
+        ));
+    }
     if lexer.is_contextual_keyword(b"interface") {
         lexer.next();
         lexer.expect(Token::Identifier);

@@ -332,6 +332,16 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
 fn parse_export_default(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Stmt {
     let default_loc = lexer.loc();
     lexer.expect(Token::Default);
+    if let Some(statement) =
+        super::syntax_typescript::parse_type_script_statement(core, lexer, true)
+    {
+        core.has_type_script_export = true;
+        return statement;
+    }
+    let is_abstract_class = core.options.ts.parse && lexer.is_contextual_keyword(b"abstract");
+    if is_abstract_class {
+        lexer.next();
+    }
     let value = if lexer.token == Token::Function {
         let expression = parse_function_declaration_prefix(core, lexer)
             .expect("function token was already checked");

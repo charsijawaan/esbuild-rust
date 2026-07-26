@@ -2238,6 +2238,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_type_script_export_only_syntax() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "export as namespace Toolkit;\
+             export default interface Config { value: string }\
+             export default abstract class Runtime {\
+               abstract value: string;\
+               method() {}\
+             }",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert!(matches!(
+            ast.parts[1].statements[0].data.as_deref(),
+            Some(StmtData::TypeScript(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[1].data.as_deref(),
+            Some(StmtData::TypeScript(_))
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[2].data.as_deref(),
+            Some(StmtData::ExportDefault(export))
+                if matches!(
+                    export.value.data.as_deref(),
+                    Some(StmtData::Class(class)) if class.class.properties.len() == 1
+                )
+        ));
+        assert!(ast.named_exports.contains_key("default"));
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+    }
+
+    #[test]
     fn validates_class_constructor_and_prototype_names() {
         let (_, ok, log) = parse_source(
             "class Getter { get constructor() {} }\
