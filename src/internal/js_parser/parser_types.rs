@@ -15,6 +15,7 @@ pub(crate) struct FnOrArrowDataParse {
     pub(crate) yield_policy: AwaitOrYield,
     pub(crate) allow_super_call: bool,
     pub(crate) allow_super_property: bool,
+    pub(crate) is_this_disallowed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

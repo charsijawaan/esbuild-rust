@@ -20,7 +20,12 @@ pub(crate) fn parse_simple_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> O
         Token::False => ExprData::Boolean(false),
         Token::True => ExprData::Boolean(true),
         Token::Null => ExprData::Null,
-        Token::This => ExprData::This,
+        Token::This => {
+            if core.fn_or_arrow_data_parse.is_this_disallowed {
+                core.add_error_range(lexer.range(), "Cannot use \"this\" here:");
+            }
+            ExprData::This
+        }
         Token::Identifier => {
             let reference = core.store_name_in_ref(lexer.identifier.clone());
             lexer.next();
@@ -428,6 +433,22 @@ mod tests {
                 if value.value == "value".encode_utf16().collect::<Vec<_>>()
         ));
         assert_eq!(lexer.token, Token::Plus);
+    }
+
+    #[test]
+    fn reports_this_when_disallowed_by_the_function_context() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"this"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log.clone(), source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new_with_log(source, Options::default(), log.clone());
+        core.fn_or_arrow_data_parse.is_this_disallowed = true;
+        let expr = parse_simple_prefix(&mut core, &mut lexer).expect("expected this");
+        assert!(matches!(expr.data.as_deref(), Some(ExprData::This)));
+        assert_eq!(log.peek().len(), 1);
+        assert_eq!(lexer.token, Token::EndOfFile);
     }
 
     #[test]
