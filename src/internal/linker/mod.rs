@@ -2126,6 +2126,255 @@ pub fn create_entry_point_part(graph: &mut LinkerGraph, source_index: u32, to_co
     }
 }
 
+/// Encode wrapper and runtime-helper constraints for all imports in one file.
+///
+/// # Panics
+///
+/// Panics when import records or resolved targets violate linker graph
+/// invariants.
+#[allow(clippy::too_many_lines)]
+pub fn encode_import_constraints_for_file(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    options: &Options,
+) {
+    let (part_count, is_entry_point) = {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            panic!("import source must be JavaScript");
+        };
+        (
+            repr.ast.parts.len(),
+            graph.files[source_index as usize].is_entry_point(),
+        )
+    };
+
+    for part_index in 0..part_count {
+        let part_index_u32 = u32::try_from(part_index).expect("part index fits in u32");
+        let import_record_indices = {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_ref()
+            else {
+                unreachable!();
+            };
+            repr.ast.parts[part_index].import_record_indices.clone()
+        };
+        let mut to_esm_uses = 0;
+        let mut to_common_js_uses = 0;
+        let mut runtime_require_uses = 0;
+
+        for record_index in import_record_indices {
+            let record = {
+                let Some(InputFileRepr::Js(repr)) =
+                    graph.files[source_index as usize].input_file.repr.as_ref()
+                else {
+                    unreachable!();
+                };
+                repr.ast.import_records[record_index as usize].clone()
+            };
+            if !record.source_index.is_valid()
+                || is_external_dynamic_import(graph, options, &record, source_index)
+            {
+                let becomes_require = record.kind == ImportKind::Require
+                    || !options.output_format.keep_esm_import_export_syntax()
+                    || (record.kind == ImportKind::Dynamic
+                        && options
+                            .unsupported_js_features
+                            .contains(crate::internal::compat::JsFeature::DYNAMIC_IMPORT));
+                if becomes_require {
+                    let Some(InputFileRepr::Js(repr)) =
+                        graph.files[source_index as usize].input_file.repr.as_mut()
+                    else {
+                        unreachable!();
+                    };
+                    let record = &mut repr.ast.import_records[record_index as usize];
+                    if crate::internal::config::should_call_runtime_require(
+                        options.mode,
+                        options.output_format,
+                    ) {
+                        record.flags |= ImportRecordFlags::CALL_RUNTIME_REQUIRE;
+                        runtime_require_uses += 1;
+                    }
+                    if record.kind != ImportKind::Require
+                        && (record.kind != ImportKind::Stmt
+                            || record
+                                .flags
+                                .contains(ImportRecordFlags::CONTAINS_IMPORT_STAR)
+                            || record
+                                .flags
+                                .contains(ImportRecordFlags::CONTAINS_DEFAULT_ALIAS)
+                            || record
+                                .flags
+                                .contains(ImportRecordFlags::CONTAINS_ES_MODULE_ALIAS))
+                    {
+                        record.flags |= ImportRecordFlags::WRAP_WITH_TO_ESM;
+                        to_esm_uses += 1;
+                    }
+                }
+                continue;
+            }
+
+            let other_source_index = record.source_index.get_index();
+            let (other_wrap, other_kind, other_wrapper_ref, other_exports_ref) = {
+                let Some(InputFileRepr::Js(other)) = graph.files[other_source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                else {
+                    panic!("resolved import target must be JavaScript");
+                };
+                (
+                    other.meta.wrap,
+                    other.ast.exports_kind,
+                    other.ast.wrapper_ref,
+                    other.ast.exports_ref,
+                )
+            };
+            if other_wrap != WrapKind::None {
+                graph.generate_symbol_import_and_use(
+                    source_index,
+                    part_index_u32,
+                    other_wrapper_ref,
+                    1,
+                    other_source_index,
+                );
+                if record.kind != ImportKind::Require && other_kind == ExportsKind::CommonJs {
+                    let Some(InputFileRepr::Js(repr)) =
+                        graph.files[source_index as usize].input_file.repr.as_mut()
+                    else {
+                        unreachable!();
+                    };
+                    repr.ast.import_records[record_index as usize].flags |=
+                        ImportRecordFlags::WRAP_WITH_TO_ESM;
+                    to_esm_uses += 1;
+                }
+                if other_wrap == WrapKind::Esm && record.kind != ImportKind::Stmt {
+                    graph.generate_symbol_import_and_use(
+                        source_index,
+                        part_index_u32,
+                        other_exports_ref,
+                        1,
+                        other_source_index,
+                    );
+                    if record.kind == ImportKind::Require {
+                        let Some(InputFileRepr::Js(repr)) =
+                            graph.files[source_index as usize].input_file.repr.as_mut()
+                        else {
+                            unreachable!();
+                        };
+                        repr.ast.import_records[record_index as usize].flags |=
+                            ImportRecordFlags::WRAP_WITH_TO_CJS;
+                        to_common_js_uses += 1;
+                    }
+                }
+            } else if record.kind == ImportKind::Stmt
+                && other_kind == ExportsKind::EsmWithDynamicFallback
+            {
+                graph.generate_symbol_import_and_use(
+                    source_index,
+                    part_index_u32,
+                    other_exports_ref,
+                    1,
+                    other_source_index,
+                );
+            }
+        }
+        graph.generate_runtime_symbol_import_and_use(
+            source_index,
+            part_index_u32,
+            "__toESM",
+            to_esm_uses,
+        );
+        graph.generate_runtime_symbol_import_and_use(
+            source_index,
+            part_index_u32,
+            "__toCommonJS",
+            to_common_js_uses,
+        );
+        graph.generate_runtime_symbol_import_and_use(
+            source_index,
+            part_index_u32,
+            "__require",
+            runtime_require_uses,
+        );
+
+        let (export_stars, own_exports_ref) = {
+            let Some(InputFileRepr::Js(repr)) =
+                graph.files[source_index as usize].input_file.repr.as_ref()
+            else {
+                unreachable!();
+            };
+            (
+                repr.ast.export_star_import_records.clone(),
+                repr.ast.exports_ref,
+            )
+        };
+        let mut re_export_uses = 0;
+        for record_index in export_stars {
+            let record = {
+                let Some(InputFileRepr::Js(repr)) =
+                    graph.files[source_index as usize].input_file.repr.as_ref()
+                else {
+                    unreachable!();
+                };
+                repr.ast.import_records[record_index as usize].clone()
+            };
+            let mut happens_at_run_time = !record.source_index.is_valid()
+                && (!is_entry_point || !options.output_format.keep_esm_import_export_syntax());
+            if record.source_index.is_valid() {
+                let other_source_index = record.source_index.get_index();
+                let (other_kind, other_exports_ref) = {
+                    let Some(InputFileRepr::Js(other)) = graph.files[other_source_index as usize]
+                        .input_file
+                        .repr
+                        .as_ref()
+                    else {
+                        panic!("resolved export-star target must be JavaScript");
+                    };
+                    (other.ast.exports_kind, other.ast.exports_ref)
+                };
+                if other_source_index != source_index && other_kind.is_dynamic() {
+                    happens_at_run_time = true;
+                }
+                if other_kind == ExportsKind::EsmWithDynamicFallback {
+                    graph.generate_symbol_import_and_use(
+                        source_index,
+                        part_index_u32,
+                        other_exports_ref,
+                        1,
+                        other_source_index,
+                    );
+                }
+            }
+            if happens_at_run_time {
+                graph.generate_symbol_import_and_use(
+                    source_index,
+                    part_index_u32,
+                    own_exports_ref,
+                    1,
+                    source_index,
+                );
+                let Some(InputFileRepr::Js(repr)) =
+                    graph.files[source_index as usize].input_file.repr.as_mut()
+                else {
+                    unreachable!();
+                };
+                repr.ast.import_records[record_index as usize].flags |=
+                    ImportRecordFlags::CALLS_RUN_TIME_RE_EXPORT_FN;
+                repr.ast.uses_exports_ref = true;
+                re_export_uses += 1;
+            }
+        }
+        graph.generate_runtime_symbol_import_and_use(
+            source_index,
+            part_index_u32,
+            "__reExport",
+            re_export_uses,
+        );
+    }
+}
+
 /// Create the synthetic wrapper part used by wrapped `CommonJS` and ESM files.
 ///
 /// # Panics
@@ -7608,21 +7857,21 @@ mod tests {
         compile_prepared_css_asts, compute_chunks, compute_cross_chunk_dependencies,
         compute_js_chunks, convert_import_for_chunk, convert_stmts_for_chunk,
         create_entry_point_part, create_exports_for_file, create_wrapper_for_file,
-        enforce_no_cyclic_chunk_imports, finalize_chunk_paths, finalize_javascript_chunk_outputs,
-        finalize_part_dependencies_for_file, find_imported_css_files_in_js_order,
-        find_imported_files_in_css_order, generate_code_for_lazy_exports,
-        generate_cross_chunk_stmts, generate_css_chunk, generate_css_module_exports,
-        generate_entry_point_tail, generate_global_name_prefix, generate_isolated_hash,
-        generate_source_map_for_chunk, has_dynamic_exports_due_to_export_star,
-        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
-        join_with_public_path, lower_common_js_lazy_export, lower_esm_lazy_export,
-        mangle_local_css, mark_file_live_for_tree_shaking, match_import_with_export,
-        merge_adjacent_local_stmts, path_between_chunks, populate_css_stub_lazy_export,
-        prepare_css_asts, print_cross_chunk_bindings, propagate_wrappers_and_dynamic_exports,
-        recursively_wrap_dependencies, resolve_export_stars, sort_and_filter_export_aliases,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports, strip_exports_from_stmts,
-        tree_shaking_and_code_splitting, wrap_common_js_stmts, wrap_esm_stmts,
-        wrap_rules_with_conditions,
+        encode_import_constraints_for_file, enforce_no_cyclic_chunk_imports, finalize_chunk_paths,
+        finalize_javascript_chunk_outputs, finalize_part_dependencies_for_file,
+        find_imported_css_files_in_js_order, find_imported_files_in_css_order,
+        generate_code_for_lazy_exports, generate_cross_chunk_stmts, generate_css_chunk,
+        generate_css_module_exports, generate_entry_point_tail, generate_global_name_prefix,
+        generate_isolated_hash, generate_source_map_for_chunk,
+        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
+        is_conditional_import_redundant, join_with_public_path, lower_common_js_lazy_export,
+        lower_esm_lazy_export, mangle_local_css, mark_file_live_for_tree_shaking,
+        match_import_with_export, merge_adjacent_local_stmts, path_between_chunks,
+        populate_css_stub_lazy_export, prepare_css_asts, print_cross_chunk_bindings,
+        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
+        resolve_export_stars, sort_and_filter_export_aliases, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports, strip_exports_from_stmts, tree_shaking_and_code_splitting,
+        wrap_common_js_stmts, wrap_esm_stmts, wrap_rules_with_conditions,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind},
@@ -13305,6 +13554,128 @@ mod tests {
             ]
         );
         assert_eq!(part.symbol_uses[&to_common_js_ref].count_estimate, 1);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn import_constraints_pull_in_wrappers_and_runtime_helpers() {
+        let to_esm_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let require_ref = Ref {
+            source_index: 0,
+            inner_index: 1,
+        };
+        let source_exports_ref = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let wrapper_ref = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let input_files = [
+            js_file(js_ast::Ast {
+                symbols: vec![
+                    Symbol::new(SymbolKind::Other, "__toESM"),
+                    Symbol::new(SymbolKind::Other, "__require"),
+                ],
+                named_exports: HashMap::from([
+                    (
+                        "__toESM".into(),
+                        NamedExport {
+                            reference: to_esm_ref,
+                            ..NamedExport::default()
+                        },
+                    ),
+                    (
+                        "__require".into(),
+                        NamedExport {
+                            reference: require_ref,
+                            ..NamedExport::default()
+                        },
+                    ),
+                ]),
+                parts: vec![js_ast::Part::default(), js_ast::Part::default()],
+                top_level_symbol_to_parts_from_parser: HashMap::from([
+                    (to_esm_ref, vec![0]),
+                    (require_ref, vec![1]),
+                ]),
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "exports")],
+                exports_ref: source_exports_ref,
+                import_records: vec![
+                    ImportRecord {
+                        source_index: Index32::new(2),
+                        kind: ImportKind::Stmt,
+                        ..ImportRecord::default()
+                    },
+                    ImportRecord {
+                        kind: ImportKind::Require,
+                        ..ImportRecord::default()
+                    },
+                ],
+                parts: vec![js_ast::Part {
+                    import_record_indices: vec![0, 1],
+                    ..js_ast::Part::default()
+                }],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "require_dep")],
+                wrapper_ref,
+                exports_kind: ExportsKind::CommonJs,
+                parts: vec![js_ast::Part::default()],
+                top_level_symbol_to_parts_from_parser: HashMap::from([(wrapper_ref, vec![0])]),
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1, 2], &[], false);
+        let Some(InputFileRepr::Js(target)) = graph.files[2].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        target.meta.wrap = WrapKind::Cjs;
+
+        encode_import_constraints_for_file(
+            &mut graph,
+            1,
+            &Options {
+                mode: Mode::Bundle,
+                output_format: Format::Preserve,
+                ..Options::default()
+            },
+        );
+
+        let repr = js_repr(&graph, 1);
+        assert!(
+            repr.ast.import_records[0]
+                .flags
+                .contains(ImportRecordFlags::WRAP_WITH_TO_ESM)
+        );
+        assert!(
+            repr.ast.import_records[1]
+                .flags
+                .contains(ImportRecordFlags::CALL_RUNTIME_REQUIRE)
+        );
+        let part = &repr.ast.parts[0];
+        assert_eq!(part.symbol_uses[&wrapper_ref].count_estimate, 1);
+        assert_eq!(part.symbol_uses[&to_esm_ref].count_estimate, 1);
+        assert_eq!(part.symbol_uses[&require_ref].count_estimate, 1);
+        assert!(part.dependencies.contains(&js_ast::Dependency {
+            source_index: 2,
+            part_index: 0,
+        }));
+        assert!(part.dependencies.contains(&js_ast::Dependency {
+            source_index: 0,
+            part_index: 0,
+        }));
+        assert!(part.dependencies.contains(&js_ast::Dependency {
+            source_index: 0,
+            part_index: 1,
+        }));
     }
 
     #[test]
