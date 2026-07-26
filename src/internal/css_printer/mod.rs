@@ -172,7 +172,15 @@ impl Printer<'_> {
             RuleData::Declaration(rule) => {
                 self.print_ident(&rule.key_text);
                 self.css.push(b':');
+                let multiline = !self.options.minify_whitespace
+                    && rule
+                        .value
+                        .iter()
+                        .filter(|token| token.kind == TokenKind::Comma)
+                        .count()
+                        >= 2;
                 if !self.options.minify_whitespace
+                    && !multiline
                     && !rule.value.is_empty()
                     && !rule.value[0].whitespace.contains(WhitespaceFlags::BEFORE)
                 {
@@ -332,9 +340,7 @@ impl Printer<'_> {
             return self.print_tokens(tokens);
         }
 
-        let mut has_whitespace = tokens
-            .first()
-            .is_some_and(|token| token.whitespace.contains(WhitespaceFlags::BEFORE));
+        let mut has_whitespace = true;
         let mut previous_was_comma = false;
         let mut printed_any = false;
         for token in tokens {
@@ -342,7 +348,7 @@ impl Printer<'_> {
                 has_whitespace = true;
                 continue;
             }
-            if has_whitespace {
+            if has_whitespace || token.whitespace.contains(WhitespaceFlags::BEFORE) {
                 if !printed_any || previous_was_comma {
                     self.css.push(b'\n');
                     for _ in 0..=self.indent {

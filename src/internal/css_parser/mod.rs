@@ -14,7 +14,7 @@ use crate::internal::{
         SubclassSelector, Token, UnknownAtRule, WhitespaceFlags, media_queries_equal, rules_equal,
         tokens_are_comma_separated,
     },
-    css_lexer::{self, TokenKind},
+    css_lexer::{self, TokenKind, is_name_continue, would_start_identifier_without_escapes},
     logger::{Loc, Log, Path, Range, Source},
 };
 
@@ -665,49 +665,7 @@ impl Parser {
             _ => {}
         }
         if self.minify_syntax {
-            minify_numeric_tokens(&mut value);
-            let key_lower = key_text.to_ascii_lowercase();
-            if is_single_color_property(&key_lower) {
-                minify_single_color(&mut value);
-            } else if key_lower == "background" {
-                for token in &mut value {
-                    minify_single_color(std::slice::from_mut(token));
-                }
-            }
-            if matches!(key_lower.as_str(), "margin" | "inset") && is_box_quad(&value, true)
-                || key_lower == "padding" && is_box_quad(&value, false)
-            {
-                minify_four_side_shorthand(&mut value);
-            }
-            if key_lower == "border-radius" {
-                minify_border_radius(&mut value, self.minify_whitespace);
-            } else if matches!(
-                key_lower.as_str(),
-                "border-top-left-radius"
-                    | "border-top-right-radius"
-                    | "border-bottom-right-radius"
-                    | "border-bottom-left-radius"
-            ) {
-                minify_border_radius_corner(&mut value);
-            }
-            if key_lower == "font-weight"
-                && let [token] = value.as_mut_slice()
-                && token.kind == TokenKind::Ident
-            {
-                if token.text.eq_ignore_ascii_case("normal") {
-                    token.kind = TokenKind::Number;
-                    token.text = "400".into();
-                } else if token.text.eq_ignore_ascii_case("bold") {
-                    token.kind = TokenKind::Number;
-                    token.text = "700".into();
-                }
-            }
-            if key_lower == "transform" {
-                minify_transforms(&mut value);
-            }
-            if key_lower == "box-shadow" {
-                minify_box_shadows(&mut value, self.minify_whitespace);
-            }
+            minify_declaration(&key_text, &mut value, self.minify_whitespace);
         }
         let important = take_important(&mut value);
         if !important && let Some(last) = value.last_mut() {
@@ -1017,6 +975,7 @@ impl Parser {
             }
             result.push(converted);
         }
+        normalize_converted_token_whitespace(&mut result, self.minify_whitespace);
         result
     }
 
@@ -1111,6 +1070,35 @@ fn update_stack(stack: &mut Vec<TokenKind>, kind: TokenKind) {
         stack.push(close);
     } else if stack.last() == Some(&kind) {
         stack.pop();
+    }
+}
+
+fn normalize_converted_token_whitespace(tokens: &mut [Token], minify_whitespace: bool) {
+    if let Some(first) = tokens.first_mut() {
+        first.whitespace.remove(WhitespaceFlags::BEFORE);
+    }
+    if let Some(last) = tokens.last_mut() {
+        last.whitespace.remove(WhitespaceFlags::AFTER);
+    }
+    for index in 0..tokens.len() {
+        if tokens[index].kind != TokenKind::Comma {
+            continue;
+        }
+        tokens[index].whitespace.remove(WhitespaceFlags::BEFORE);
+        if index > 0 {
+            tokens[index - 1].whitespace.remove(WhitespaceFlags::AFTER);
+        }
+        if minify_whitespace {
+            tokens[index].whitespace.remove(WhitespaceFlags::AFTER);
+            if index + 1 < tokens.len() {
+                tokens[index + 1].whitespace.remove(WhitespaceFlags::BEFORE);
+            }
+        } else {
+            tokens[index].whitespace |= WhitespaceFlags::AFTER;
+            if index + 1 < tokens.len() {
+                tokens[index + 1].whitespace |= WhitespaceFlags::BEFORE;
+            }
+        }
     }
 }
 
@@ -1907,6 +1895,53 @@ fn named_color_hex_h_z(name: &str) -> Option<&'static str> {
     })
 }
 
+fn minify_declaration(key: &str, value: &mut Vec<Token>, minify_whitespace: bool) {
+    minify_numeric_tokens(value);
+    let key = key.to_ascii_lowercase();
+    if is_single_color_property(&key) {
+        minify_single_color(value);
+    } else if key == "background" {
+        for token in value.iter_mut() {
+            minify_single_color(std::slice::from_mut(token));
+        }
+    }
+    if matches!(key.as_str(), "margin" | "inset") && is_box_quad(value, true)
+        || key == "padding" && is_box_quad(value, false)
+    {
+        minify_four_side_shorthand(value);
+    }
+    if key == "border-radius" {
+        minify_border_radius(value, minify_whitespace);
+    } else if matches!(
+        key.as_str(),
+        "border-top-left-radius"
+            | "border-top-right-radius"
+            | "border-bottom-right-radius"
+            | "border-bottom-left-radius"
+    ) {
+        minify_border_radius_corner(value);
+    }
+    if key == "font-weight"
+        && let [token] = value.as_mut_slice()
+    {
+        minify_font_weight_token(token);
+    }
+    if key == "font-family"
+        && let Some(family) = minify_font_family(value, minify_whitespace)
+    {
+        *value = family;
+    }
+    if key == "font" {
+        minify_font(value, minify_whitespace);
+    }
+    if key == "transform" {
+        minify_transforms(value);
+    }
+    if key == "box-shadow" {
+        minify_box_shadows(value, minify_whitespace);
+    }
+}
+
 fn minify_numeric_tokens(tokens: &mut [Token]) {
     for token in tokens {
         if let Some(children) = &mut token.children {
@@ -2683,6 +2718,213 @@ fn mangle_box_declarations(rules: &mut Vec<Rule>) {
         index += 1;
         keep
     });
+}
+
+const CSS_WIDE_AND_RESERVED_KEYWORDS: &[&str] = &[
+    "initial",
+    "inherit",
+    "unset",
+    "default",
+    "revert",
+    "revert-layer",
+];
+
+const GENERIC_FONT_FAMILY_NAMES: &[&str] = &[
+    "serif",
+    "sans-serif",
+    "cursive",
+    "fantasy",
+    "monospace",
+    "system-ui",
+    "emoji",
+    "math",
+    "fangsong",
+    "ui-serif",
+    "ui-sans-serif",
+    "ui-monospace",
+    "ui-rounded",
+];
+
+fn minify_font_family(tokens: &[Token], minify_whitespace: bool) -> Option<Vec<Token>> {
+    let mut result = Vec::new();
+    let mut position = minify_font_family_name(&mut result, tokens, 0, minify_whitespace)?;
+    while position < tokens.len() && tokens[position].kind == TokenKind::Comma {
+        result.push(tokens[position].clone());
+        position = minify_font_family_name(&mut result, tokens, position + 1, minify_whitespace)?;
+    }
+    (position == tokens.len()).then_some(result)
+}
+
+fn minify_font_family_name(
+    result: &mut Vec<Token>,
+    tokens: &[Token],
+    position: usize,
+    minify_whitespace: bool,
+) -> Option<usize> {
+    let token = tokens.get(position)?;
+    if token.kind == TokenKind::Ident && GENERIC_FONT_FAMILY_NAMES.contains(&token.text.as_str()) {
+        result.push(token.clone());
+        return Some(position + 1);
+    }
+    if token.kind == TokenKind::String {
+        let names = token.text.split(' ').collect::<Vec<_>>();
+        if names
+            .iter()
+            .all(|name| is_valid_custom_ident(name, GENERIC_FONT_FAMILY_NAMES))
+        {
+            for (index, name) in names.into_iter().enumerate() {
+                let mut ident = Token {
+                    kind: TokenKind::Ident,
+                    text: name.into(),
+                    loc: token.loc,
+                    ..Token::default()
+                };
+                if index != 0 || !minify_whitespace {
+                    ident.whitespace = WhitespaceFlags::BEFORE;
+                }
+                result.push(ident);
+            }
+        } else {
+            result.push(token.clone());
+        }
+        return Some(position + 1);
+    }
+    if token.kind != TokenKind::Ident {
+        return None;
+    }
+
+    let mut position = position;
+    while let Some(token) = tokens.get(position) {
+        if token.kind != TokenKind::Ident {
+            break;
+        }
+        if !is_valid_custom_ident(&token.text, GENERIC_FONT_FAMILY_NAMES) {
+            return None;
+        }
+        result.push(token.clone());
+        position += 1;
+    }
+    Some(position)
+}
+
+fn is_valid_custom_ident(text: &str, predefined_keywords: &[&str]) -> bool {
+    let lower = text.to_ascii_lowercase();
+    !text.is_empty()
+        && !predefined_keywords.contains(&lower.as_str())
+        && !CSS_WIDE_AND_RESERVED_KEYWORDS.contains(&lower.as_str())
+        && would_start_identifier_without_escapes(text.as_bytes())
+        && text
+            .chars()
+            .all(|character| is_name_continue(character as i32))
+}
+
+fn minify_font(tokens: &mut Vec<Token>, minify_whitespace: bool) {
+    let original = tokens.clone();
+    let mut result = Vec::new();
+    let mut position = 0;
+    while position < original.len() && !is_font_size(&original[position]) {
+        let mut token = original[position].clone();
+        match token.kind {
+            TokenKind::Ident => match token.text.to_ascii_lowercase().as_str() {
+                "normal" => {
+                    position += 1;
+                    continue;
+                }
+                "italic" | "small-caps" | "ultra-condensed" | "extra-condensed" | "condensed"
+                | "semi-condensed" | "semi-expanded" | "expanded" | "extra-expanded"
+                | "ultra-expanded" => {}
+                "oblique" => {
+                    if original.get(position + 1).is_some_and(Token::is_angle) {
+                        result.push(token);
+                        result.push(original[position + 1].clone());
+                        position += 2;
+                        continue;
+                    }
+                }
+                "bold" | "bolder" | "lighter" => {
+                    minify_font_weight_token(&mut token);
+                }
+                _ => return,
+            },
+            TokenKind::Number => {
+                let Ok(value) = token.text.parse::<f64>() else {
+                    return;
+                };
+                if !(1.0..=1000.0).contains(&value) {
+                    return;
+                }
+            }
+            _ => return,
+        }
+        result.push(token);
+        position += 1;
+    }
+    let Some(size) = original.get(position) else {
+        return;
+    };
+    result.push(size.clone());
+    position += 1;
+
+    if original
+        .get(position)
+        .is_some_and(|token| token.kind == TokenKind::DelimSlash)
+    {
+        let Some(line_height) = original.get(position + 1) else {
+            return;
+        };
+        let mut slash = original[position].clone();
+        let mut line_height = line_height.clone();
+        if minify_whitespace {
+            if let Some(size) = result.last_mut() {
+                size.whitespace.remove(WhitespaceFlags::AFTER);
+            }
+            slash.whitespace = WhitespaceFlags::default();
+            line_height.whitespace.remove(WhitespaceFlags::BEFORE);
+        }
+        result.push(slash);
+        result.push(line_height);
+        position += 2;
+    }
+
+    let Some(mut family) = minify_font_family(&original[position..], minify_whitespace) else {
+        return;
+    };
+    if !result.is_empty() && !family.is_empty() && family[0].kind != TokenKind::String {
+        family[0].whitespace |= WhitespaceFlags::BEFORE;
+    }
+    result.extend(family);
+    *tokens = result;
+}
+
+fn minify_font_weight_token(token: &mut Token) {
+    if token.kind != TokenKind::Ident {
+        return;
+    }
+    if token.text.eq_ignore_ascii_case("normal") {
+        token.kind = TokenKind::Number;
+        token.text = "400".into();
+    } else if token.text.eq_ignore_ascii_case("bold") {
+        token.kind = TokenKind::Number;
+        token.text = "700".into();
+    }
+}
+
+fn is_font_size(token: &Token) -> bool {
+    matches!(token.kind, TokenKind::Dimension | TokenKind::Percentage)
+        || token.kind == TokenKind::Ident
+            && matches!(
+                token.text.to_ascii_lowercase().as_str(),
+                "xx-small"
+                    | "x-small"
+                    | "small"
+                    | "medium"
+                    | "large"
+                    | "x-large"
+                    | "xx-large"
+                    | "xxx-large"
+                    | "larger"
+                    | "smaller"
+            )
 }
 
 fn minify_box_shadows(tokens: &mut Vec<Token>, minify_whitespace: bool) {

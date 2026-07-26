@@ -670,6 +670,33 @@ mod tests {
     }
 
     #[test]
+    fn minifies_css_font_declarations() {
+        assert_eq!(
+            code(transform(
+                "a { font-family: 'serif' } b { font-family: 'aaa bbb', serif } c { font-family: 'aaa  bbb', serif } d { font-family: 'initial', serif } e { font-family: 'revert-layer', 'Segoe UI', serif } f { font: 1rem 'aaa bbb' } g { font: 1rem / 1.2 'aaa bbb' } h { font: normal 1rem 'aaa bbb' } i { font: italic small-caps bold ultra-condensed 1rem / 1.2 'aaa bbb' } j { font: oblique 45deg 1px 'aaa bbb' } k { font: var(--var) 'aaa bbb' } l { font: 10px '123' }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a{font-family:\"serif\"}b{font-family:aaa bbb,serif}c{font-family:\"aaa  bbb\",serif}d{font-family:\"initial\",serif}e{font-family:\"revert-layer\",Segoe UI,serif}f{font:1rem aaa bbb}g{font:1rem/1.2 aaa bbb}h{font: 1rem aaa bbb}i{font:italic small-caps 700 ultra-condensed 1rem/1.2 aaa bbb}j{font:oblique 45deg 1px aaa bbb}k{font:var(--var) \"aaa bbb\"}l{font:10px \"123\"}\n"
+        );
+        assert_eq!(
+            code(transform(
+                "a { font-family: 'revert-layer','Segoe UI',serif }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            "a {\n  font-family:\n    \"revert-layer\",\n    Segoe UI,\n    serif;\n}\n"
+        );
+    }
+
+    #[test]
     fn minifies_css_transforms() {
         assert_eq!(
             code(transform(
