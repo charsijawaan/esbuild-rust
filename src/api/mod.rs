@@ -131,6 +131,14 @@ pub enum BuildTreeShaking {
     Disabled,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BuildJsx {
+    #[default]
+    Transform,
+    Preserve,
+    Automatic,
+}
+
 #[derive(Clone, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildOptions {
@@ -149,6 +157,11 @@ pub struct BuildOptions {
     pub sourcemap: BuildSourceMap,
     pub legal_comments: BuildLegalComments,
     pub tree_shaking: BuildTreeShaking,
+    pub jsx: BuildJsx,
+    pub jsx_factory: String,
+    pub jsx_fragment: String,
+    pub jsx_import_source: String,
+    pub jsx_development: bool,
     pub splitting: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
@@ -362,6 +375,28 @@ fn validate_path_template(template: &str) -> Vec<config::PathTemplate> {
     parts
 }
 
+fn validate_jsx_define(
+    log: &Log,
+    text: &str,
+    option_name: &str,
+    allow_constant: bool,
+) -> config::DefineExpr {
+    if text.is_empty() {
+        return config::DefineExpr::default();
+    }
+    let (define, injected) = js_parser::parse_define_expr(text);
+    if !define.parts.is_empty() || (allow_constant && define.constant.data.is_some()) {
+        return define;
+    }
+    let _ = injected;
+    log.add_error(
+        None,
+        crate::internal::logger::Range::default(),
+        format!("Invalid value for {option_name}: {text:?}"),
+    );
+    config::DefineExpr::default()
+}
+
 fn validate_defines(
     log: &Log,
     defines: &HashMap<String, String>,
@@ -548,6 +583,8 @@ pub fn build(options: BuildOptions) -> BuildResult {
         options.platform,
         options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
     );
+    let jsx_factory = validate_jsx_define(&log, &options.jsx_factory, "jsx factory", false);
+    let jsx_fragment = validate_jsx_define(&log, &options.jsx_fragment, "jsx fragment", true);
     if log.has_errors() {
         let (errors, warnings) = public_messages(log.done());
         return BuildResult {
@@ -598,6 +635,15 @@ pub fn build(options: BuildOptions) -> BuildResult {
         },
         code_splitting: options.splitting,
         tree_shaking: options.tree_shaking != BuildTreeShaking::Disabled,
+        jsx: config::JsxOptions {
+            factory: jsx_factory,
+            fragment: jsx_fragment,
+            preserve: options.jsx == BuildJsx::Preserve,
+            automatic_runtime: options.jsx == BuildJsx::Automatic,
+            import_source: options.jsx_import_source,
+            development: options.jsx_development,
+            ..config::JsxOptions::default()
+        },
         minify_whitespace: options.minify_whitespace,
         minify_identifiers: options.minify_identifiers,
         minify_syntax: options.minify_syntax,
@@ -1042,7 +1088,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        BuildFormat, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
+        BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
         BuildTreeShaking, Loader, Packages, TransformOptions, build, transform,
     };
 
@@ -1549,6 +1595,69 @@ mod tests {
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("\"hello loader\""));
         assert!(output.contains("console.log("));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn exposes_build_jsx_modes_and_configuration() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-jsx-options-{unique}"));
+        std::fs::create_dir_all(directory.join("node_modules/preact"))
+            .expect("create package directory");
+        let entry = directory.join("entry.jsx");
+        std::fs::write(&entry, "console.log(<><div /></>)").expect("write entry file");
+
+        let common = || BuildOptions {
+            entry_points: vec!["entry.jsx".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::Iife,
+            ..BuildOptions::default()
+        };
+
+        let preserved = build(BuildOptions {
+            jsx: BuildJsx::Preserve,
+            ..common()
+        });
+        assert!(preserved.errors.is_empty(), "{:?}", preserved.errors);
+        let output = String::from_utf8_lossy(&preserved.output_files[0].contents);
+        assert!(output.contains("<>"));
+        assert!(output.contains("<div />"));
+
+        let transformed = build(BuildOptions {
+            jsx_factory: "h".into(),
+            jsx_fragment: "Frag".into(),
+            ..common()
+        });
+        assert!(transformed.errors.is_empty(), "{:?}", transformed.errors);
+        let output = String::from_utf8_lossy(&transformed.output_files[0].contents);
+        assert!(output.contains("h(Frag, null"), "{output}");
+        assert!(output.contains("h(\"div\", null)"), "{output}");
+
+        std::fs::write(
+            directory.join("node_modules/preact/package.json"),
+            r#"{"sideEffects":false}"#,
+        )
+        .expect("write package metadata");
+        std::fs::write(
+            directory.join("node_modules/preact/jsx-runtime.js"),
+            "export function jsx(type, props) { return {type, props} }",
+        )
+        .expect("write automatic runtime");
+        std::fs::write(&entry, "console.log(<div />)").expect("write automatic entry");
+        let automatic = build(BuildOptions {
+            jsx: BuildJsx::Automatic,
+            jsx_import_source: "preact".into(),
+            ..common()
+        });
+        assert!(automatic.errors.is_empty(), "{:?}", automatic.errors);
+        let output = String::from_utf8_lossy(&automatic.output_files[0].contents);
+        assert!(output.contains("function jsx(type, props)"), "{output}");
+        assert!(output.contains("jsx(\"div\", {})"), "{output}");
+
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

@@ -6,7 +6,7 @@ use std::{
 
 use esbuild_rs::{
     api::{
-        BuildFormat, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
+        BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
         BuildTreeShaking, Loader, Packages, TransformOptions, build, transform,
     },
     internal::cli_helpers,
@@ -55,6 +55,11 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut sourcemap = BuildSourceMap::None;
     let mut legal_comments = BuildLegalComments::Inline;
     let mut tree_shaking = BuildTreeShaking::Default;
+    let mut jsx = BuildJsx::Transform;
+    let mut jsx_factory = String::new();
+    let mut jsx_fragment = String::new();
+    let mut jsx_import_source = String::new();
+    let mut jsx_development = false;
     let mut external = Vec::new();
     let mut packages = Packages::Bundle;
     let mut build_loaders = HashMap::new();
@@ -114,6 +119,31 @@ fn run(arguments: &[String]) -> Result<Output, String> {
                 "false" => BuildTreeShaking::Disabled,
                 _ => return Err(format!("Invalid tree shaking setting {value:?}")),
             };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--jsx=") {
+            jsx = match value {
+                "transform" => BuildJsx::Transform,
+                "preserve" => BuildJsx::Preserve,
+                "automatic" => BuildJsx::Automatic,
+                _ => return Err(format!("Invalid JSX setting {value:?}")),
+            };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--jsx-factory=") {
+            jsx_factory = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--jsx-fragment=") {
+            jsx_fragment = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--jsx-import-source=") {
+            jsx_import_source = value.into();
+            continue;
+        }
+        if argument == "--jsx-dev" {
+            jsx_development = true;
             continue;
         }
         if let Some(value) = argument.strip_prefix("--outdir=") {
@@ -296,6 +326,11 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             sourcemap,
             legal_comments,
             tree_shaking,
+            jsx,
+            jsx_factory,
+            jsx_fragment,
+            jsx_import_source,
+            jsx_development,
             splitting,
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
@@ -423,6 +458,11 @@ fn help_text() -> String {
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
          \x20\x20--legal-comments=none|inline|eof|linked|external\n\
          \x20\x20--tree-shaking=true|false\n\
+         \x20\x20--jsx=transform|preserve|automatic\n\
+         \x20\x20--jsx-factory=EXPRESSION\n\
+         \x20\x20--jsx-fragment=EXPRESSION\n\
+         \x20\x20--jsx-import-source=PATH\n\
+         \x20\x20--jsx-dev\n\
          \x20\x20--external:PATH\n\
          \x20\x20--packages=bundle|external\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
@@ -480,6 +520,7 @@ mod tests {
         assert!(run(&["--packages=wat".into()]).is_err());
         assert!(run(&["--sourcemap=wat".into()]).is_err());
         assert!(run(&["--tree-shaking=wat".into()]).is_err());
+        assert!(run(&["--jsx=wat".into()]).is_err());
     }
 
     #[test]
