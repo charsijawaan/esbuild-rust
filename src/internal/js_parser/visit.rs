@@ -75,6 +75,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                                 name,
                                 crate::internal::js_ast::TsEnumValue {
                                     string: string.value.clone(),
+                                    is_string: true,
                                     ..crate::internal::js_ast::TsEnumValue::default()
                                 },
                             );
@@ -941,7 +942,41 @@ fn visit_expr_with_target(
                 };
             }
         }
-        ExprData::Dot(dot) => visit_expr(core, &mut dot.target, resolve_identifiers),
+        ExprData::Dot(dot) => {
+            visit_expr(core, &mut dot.target, resolve_identifiers);
+            let replacement = if assign_target == AssignTarget::None {
+                let reference = match dot.target.data.as_deref() {
+                    Some(ExprData::Identifier(identifier)) => Some(identifier.reference),
+                    _ => None,
+                };
+                reference
+                    .and_then(|reference| core.ts_enums.get(&reference))
+                    .and_then(|values| values.get(&dot.name))
+                    .cloned()
+                    .map(|value| {
+                        let value = if value.is_string {
+                            Expr::new(
+                                expression.loc,
+                                ExprData::String(crate::internal::js_ast::StringExpr {
+                                    value: value.string,
+                                    ..crate::internal::js_ast::StringExpr::default()
+                                }),
+                            )
+                        } else {
+                            Expr::new(expression.loc, ExprData::Number(value.number))
+                        };
+                        ExprData::InlinedEnum(crate::internal::js_ast::InlinedEnumExpr {
+                            value,
+                            comment: dot.name.clone(),
+                        })
+                    })
+            } else {
+                None
+            };
+            if let Some(replacement) = replacement {
+                *data = replacement;
+            }
+        }
         ExprData::Index(index) => {
             visit_expr(core, &mut index.target, resolve_identifiers);
             visit_expr(core, &mut index.index, resolve_identifiers);

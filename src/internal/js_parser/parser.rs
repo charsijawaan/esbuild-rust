@@ -3204,12 +3204,15 @@ mod tests {
         options.ts.parse = true;
         let (ast, ok, log) = parse_source_with_options(
             "enum Color { Red, Green = 2, Blue = 'blue', Computed = make() }\
+             const red = Color.Red;\
+             const blue = Color.Blue;\
+             Color.Red = 3;\
              export const enum Flags { A = 1, B }",
             options,
         );
         assert!(ok);
         assert!(log.done().is_empty());
-        assert_eq!(ast.parts[1].statements.len(), 2);
+        assert_eq!(ast.parts[1].statements.len(), 5);
         let Some(StmtData::Enum(color)) = ast.parts[1].statements[0].data.as_deref() else {
             panic!("expected enum declaration");
         };
@@ -3243,7 +3246,36 @@ mod tests {
             ),
             b"blue"
         );
-        let Some(StmtData::Enum(flags)) = ast.parts[1].statements[1].data.as_deref() else {
+        assert!(matches!(
+            ast.parts[1].statements[1].data.as_deref(),
+            Some(StmtData::Local(local))
+                if matches!(
+                    local.declarations[0].value_or_nil.data.as_deref(),
+                    Some(ExprData::InlinedEnum(value))
+                        if matches!(value.value.data.as_deref(), Some(ExprData::Number(0.0)))
+                            && value.comment == "Red"
+                )
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[2].data.as_deref(),
+            Some(StmtData::Local(local))
+                if matches!(
+                    local.declarations[0].value_or_nil.data.as_deref(),
+                    Some(ExprData::InlinedEnum(value))
+                        if matches!(value.value.data.as_deref(), Some(ExprData::String(_)))
+                            && value.comment == "Blue"
+                )
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[3].data.as_deref(),
+            Some(StmtData::Expr(statement))
+                if matches!(
+                    statement.value.data.as_deref(),
+                    Some(ExprData::Binary(binary))
+                        if matches!(binary.left.data.as_deref(), Some(ExprData::Dot(_)))
+                )
+        ));
+        let Some(StmtData::Enum(flags)) = ast.parts[1].statements[4].data.as_deref() else {
             panic!("expected exported const enum");
         };
         assert!(flags.is_export);

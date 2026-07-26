@@ -1310,6 +1310,7 @@ pub struct Ast {
 pub struct TsEnumValue {
     pub string: Vec<u16>,
     pub number: f64,
+    pub is_string: bool,
 }
 
 #[derive(Clone, Debug, Default)]
