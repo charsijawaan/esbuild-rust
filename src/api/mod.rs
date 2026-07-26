@@ -65,9 +65,10 @@ fn transform_keep_name_renamer(
     symbols: SymbolMap,
     keep_names: bool,
     minify_identifiers: bool,
-) -> (TransformRenamer, String) {
+) -> (TransformRenamer, String, String) {
     let mut overrides = HashMap::new();
     let mut helper_name = String::new();
+    let mut def_prop_name = String::new();
     if keep_names {
         let helper_refs = ast
             .named_imports
@@ -111,6 +112,12 @@ fn transform_keep_name_renamer(
                 helper_name = format!("__name{suffix}");
                 suffix += 1;
             }
+            def_prop_name = "__defProp".into();
+            suffix = 2;
+            while used_names.contains(def_prop_name.as_str()) || def_prop_name == helper_name {
+                def_prop_name = format!("__defProp{suffix}");
+                suffix += 1;
+            }
             overrides.extend(
                 helper_refs
                     .into_iter()
@@ -126,6 +133,7 @@ fn transform_keep_name_renamer(
             overrides,
         },
         helper_name,
+        def_prop_name,
     )
 }
 
@@ -177,17 +185,22 @@ fn transform_base_renamer(
     }
 }
 
-fn prepend_keep_name_helper(code: &mut Vec<u8>, helper_name: &str, minify_whitespace: bool) {
+fn prepend_keep_name_helper(
+    code: &mut Vec<u8>,
+    helper_name: &str,
+    def_prop_name: &str,
+    minify_whitespace: bool,
+) {
     if helper_name.is_empty() {
         return;
     }
     let helper = if minify_whitespace {
         format!(
-            "var {helper_name}=(target,value)=>Object.defineProperty(target,\"name\",{{value,configurable:true}});"
+            "var {def_prop_name}=Object.defineProperty;var {helper_name}=(target,value)=>{def_prop_name}(target,\"name\",{{value,configurable:true}});"
         )
     } else {
         format!(
-            "var {helper_name} = (target, value) => Object.defineProperty(target, \"name\", {{ value, configurable: true }});\n"
+            "var {def_prop_name} = Object.defineProperty;\nvar {helper_name} = (target, value) => {def_prop_name}(target, \"name\", {{ value, configurable: true }});\n"
         )
     };
     let insertion = if code.starts_with(b"#!") {
@@ -2235,7 +2248,7 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     }
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&ast.symbols);
-    let (renamer, helper_name) = transform_keep_name_renamer(
+    let (renamer, helper_name, def_prop_name) = transform_keep_name_renamer(
         &ast,
         symbols,
         options.keep_names,
@@ -2254,7 +2267,12 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
     };
     let mut code = printed.js;
     let printed_len = code.len();
-    prepend_keep_name_helper(&mut code, &helper_name, options.minify_whitespace);
+    prepend_keep_name_helper(
+        &mut code,
+        &helper_name,
+        &def_prop_name,
+        options.minify_whitespace,
+    );
     let source_map_prefix_len = code.len() - printed_len;
     if options.minify_whitespace && !code.is_empty() && code.last() != Some(&b'\n') {
         code.push(b'\n');
@@ -5081,7 +5099,10 @@ mod tests {
                 ..TransformOptions::default()
             },
         ));
-        assert!(transformed.starts_with("var __name2 = (target, value) =>"));
+        assert!(transformed.starts_with(
+            "var __defProp = Object.defineProperty;\n\
+             var __name2 = (target, value) => __defProp(target, \"name\", { value, configurable: true });"
+        ));
         assert!(transformed.contains("__name2(LongFunction, \"LongFunction\")"));
         assert!(transformed.contains("__name2(this, \"LongClass\")"));
         assert!(transformed.contains("__name2(() =>"));
@@ -5098,6 +5119,20 @@ mod tests {
                     .find("static observed")
                     .expect("user static initializer")
         );
+
+        let colliding_helpers = code(transform(
+            "var __defProp = 1; var __name = 2; const Foo = function() {};",
+            TransformOptions {
+                keep_names: true,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(colliding_helpers.starts_with(
+            "var __defProp2 = Object.defineProperty;\n\
+             var __name2 = (target, value) => __defProp2(target, \"name\", { value, configurable: true });"
+        ));
+        assert!(colliding_helpers.contains("__name2(function()"));
+        assert!(colliding_helpers.contains("\"Foo\")"));
 
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
