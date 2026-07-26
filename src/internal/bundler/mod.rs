@@ -9,7 +9,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
     ast::{ImportKind, ImportRecordFlags, Index32},
-    cache::{SourceIndexCache, SourceIndexKind},
+    cache::{CacheSet, SourceIndexCache, SourceIndexKind},
     compat::{CssFeature, JsFeature},
     config::{Loader, Mode, Options, PathPlaceholder, PathTemplate, Platform, PluginData},
     css_parser,
@@ -47,6 +47,12 @@ pub struct TlaCheck {
     pub parent: Index32,
     pub depth: u32,
     pub import_record_index: u32,
+}
+
+#[derive(Clone, Default)]
+pub struct ScannedBundle {
+    pub files: Vec<ScannerFile>,
+    pub entry_points: Vec<GraphEntryPoint>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -380,6 +386,166 @@ pub fn resolve_import_records(
         }
         result.resolve_results[record_index] = Some(resolve_result);
     }
+}
+
+/// Scan entry points and their recursively resolved dependencies into a graph.
+///
+/// # Panics
+///
+/// Panics if a source index cannot fit into the host's address space.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn scan_bundle(
+    log: &Log,
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    entry_points: &[EntryPoint],
+    options: &mut Options,
+    unique_key_prefix: &str,
+) -> ScannedBundle {
+    apply_option_defaults(options);
+    let mut bundle = ScannedBundle::default();
+
+    let runtime_source = runtime::source(options.unsupported_js_features);
+    let runtime_result = parse_file(log, runtime_source, Loader::Js, options);
+    if runtime_result.ok {
+        let mut runtime_file = runtime_result.file;
+        runtime_file.input_file.omit_from_source_maps_and_metafile = true;
+        bundle.files.push(runtime_file);
+    } else {
+        bundle.files.push(ScannerFile::default());
+    }
+
+    let mut pending = Vec::new();
+    let mut queued = HashSet::from([runtime::SOURCE_INDEX]);
+    for entry_point in entry_points {
+        let input_path = if file_system.is_abs(&entry_point.input_path)
+            || entry_point.input_path.starts_with("./")
+            || entry_point.input_path.starts_with("../")
+        {
+            entry_point.input_path.clone()
+        } else {
+            file_system.join(&[file_system.cwd(), &entry_point.input_path])
+        };
+        let Some(resolved) = resolver::resolve_with_metadata(
+            log,
+            file_system,
+            file_system.cwd(),
+            &input_path,
+            &options.extension_order,
+            options.platform,
+            (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
+            false,
+            ResolverContext::default(),
+        ) else {
+            log.add_error(
+                None,
+                Range::default(),
+                format!("Could not resolve {:?}", entry_point.input_path),
+            );
+            continue;
+        };
+        if resolved.path_pair.is_external {
+            log.add_error(
+                None,
+                Range::default(),
+                format!(
+                    "The entry point {:?} cannot be external",
+                    entry_point.input_path
+                ),
+            );
+            continue;
+        }
+        let path = resolved.path_pair.primary;
+        let source_index = caches
+            .source_index_cache
+            .get(path.clone(), SourceIndexKind::Normal);
+        bundle.entry_points.push(GraphEntryPoint {
+            output_path: entry_point.output_path.clone(),
+            source_index,
+            output_path_was_auto_generated: entry_point.output_path.is_empty(),
+        });
+        if queued.insert(source_index) {
+            pending.push((path, source_index));
+        }
+    }
+
+    let mut cursor = 0;
+    while cursor < pending.len() {
+        let (path, source_index) = pending[cursor].clone();
+        cursor += 1;
+        let loader = if path.is_disabled() {
+            Loader::Empty
+        } else {
+            Loader::Default
+        };
+        let (contents, error, _) = caches.fs_cache.read_file(file_system, &path.text);
+        if let Some(error) = error {
+            log.add_error(
+                None,
+                Range::default(),
+                format!(
+                    "Could not read from file {:?}: {}",
+                    path.text, error.message
+                ),
+            );
+            continue;
+        }
+        let relative_path = file_system
+            .rel(file_system.cwd(), &path.text)
+            .unwrap_or_else(|| path.text.clone());
+        let absolute_path = path.text.clone();
+        let source = Source {
+            index: source_index,
+            key_path: path,
+            pretty_paths: logger::PrettyPaths {
+                abs: absolute_path,
+                rel: relative_path,
+            },
+            contents: Arc::from(contents.into_bytes()),
+            ..Source::default()
+        };
+        let mut result =
+            parse_file_with_unique_key_prefix(log, source, loader, options, unique_key_prefix);
+        resolve_import_records(
+            log,
+            file_system,
+            &caches.source_index_cache,
+            options,
+            &mut result,
+        );
+
+        for resolve_result in result.resolve_results.iter().flatten() {
+            if resolve_result.path_pair.is_external {
+                continue;
+            }
+            for dependency_path in [
+                &resolve_result.path_pair.primary,
+                &resolve_result.path_pair.secondary,
+            ] {
+                if dependency_path.text.is_empty() {
+                    continue;
+                }
+                let dependency_index = caches
+                    .source_index_cache
+                    .get(dependency_path.clone(), SourceIndexKind::Normal);
+                if queued.insert(dependency_index) {
+                    pending.push((dependency_path.clone(), dependency_index));
+                }
+            }
+        }
+
+        let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
+        if bundle.files.len() < needed_length {
+            bundle
+                .files
+                .resize_with(needed_length, ScannerFile::default);
+        }
+        if result.ok {
+            bundle.files[usize::try_from(source_index).expect("source index fits usize")] =
+                result.file;
+        }
+    }
+    bundle
 }
 
 fn lazy_export_string(
@@ -735,11 +901,11 @@ mod tests {
         apply_option_defaults, default_extension_to_loader_map, find_reachable_files,
         guess_mime_type, hash_for_file_name, is_ascii_only, parse_file,
         parse_file_with_unique_key_prefix, path_relative_to_outbase, resolve_import_records,
-        sanitize_file_path_for_virtual_module_path,
+        sanitize_file_path_for_virtual_module_path, scan_bundle,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32},
-        cache::SourceIndexCache,
+        cache::{CacheSet, SourceIndexCache},
         compat::JsFeature,
         config::{Loader, Mode, Options, PathPlaceholder, Platform},
         fs::{MockKind, mock_fs},
@@ -748,7 +914,10 @@ mod tests {
         logger::{DeferLogKind, Log, Path, Source},
         runtime,
     };
-    use std::{collections::HashMap, sync::Arc};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     #[test]
     fn applies_upstream_option_defaults() {
@@ -1282,5 +1451,123 @@ mod tests {
         let messages = log.done();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].data.text, "Could not resolve \"./missing\"");
+    }
+
+    #[test]
+    fn scans_entry_points_into_a_recursive_module_graph() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import './dep'; import './style.css'".into(),
+                ),
+                (
+                    "/project/dep.js".into(),
+                    "import './entry.js'; export const value = 1".into(),
+                ),
+                (
+                    "/project/style.css".into(),
+                    "@import './nested.css'; .entry { color: red }".into(),
+                ),
+                (
+                    "/project/nested.css".into(),
+                    ".nested { color: blue }".into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let caches = CacheSet::default();
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into(), ".css".into()],
+            ..Options::default()
+        };
+        let bundle = scan_bundle(
+            &log,
+            &file_system,
+            &caches,
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                output_path: "app".into(),
+                input_path_in_file_namespace: true,
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert_eq!(bundle.entry_points.len(), 1);
+        assert_eq!(bundle.entry_points[0].output_path, "app");
+        assert_eq!(bundle.files.len(), 5);
+        assert_eq!(
+            bundle.files[runtime::SOURCE_INDEX as usize]
+                .input_file
+                .source
+                .key_path
+                .text,
+            "<runtime>"
+        );
+        assert!(
+            bundle.files[runtime::SOURCE_INDEX as usize]
+                .input_file
+                .omit_from_source_maps_and_metafile
+        );
+
+        let loaded_paths = bundle
+            .files
+            .iter()
+            .skip(1)
+            .map(|file| file.input_file.source.key_path.text.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            loaded_paths,
+            HashSet::from([
+                "/project/entry.js",
+                "/project/dep.js",
+                "/project/style.css",
+                "/project/nested.css",
+            ])
+        );
+        for file in bundle.files.iter().skip(1) {
+            for record in file
+                .input_file
+                .repr
+                .as_ref()
+                .and_then(InputFileRepr::import_records)
+                .unwrap_or_default()
+            {
+                assert!(record.source_index.is_valid());
+            }
+        }
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn reports_missing_entry_points_during_bundle_scanning() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into()],
+            ..Options::default()
+        };
+        let bundle = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "/project/missing.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        assert!(bundle.entry_points.is_empty());
+        assert_eq!(bundle.files.len(), 1);
+        assert_eq!(
+            log.done()[0].data.text,
+            "Could not resolve \"/project/missing.js\""
+        );
     }
 }
