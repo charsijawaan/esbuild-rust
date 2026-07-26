@@ -1196,7 +1196,7 @@ pub struct ScopeMember {
 
 pub type ScopeRef = Arc<Mutex<Scope>>;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Scope {
     pub ts_namespace: Option<TsNamespaceScope>,

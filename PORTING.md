@@ -23,7 +23,7 @@ Status values:
 | `internal/css_parser` | in progress |
 | `internal/css_printer` | in progress |
 | `internal/fs` | ported |
-| `internal/graph` | not started |
+| `internal/graph` | in progress |
 | `internal/helpers` | ported |
 | `internal/js_ast` | ported |
 | `internal/js_lexer` | ported |
@@ -32,7 +32,7 @@ Status values:
 | `internal/linker` | not started |
 | `internal/logger` | ported |
 | `internal/renamer` | ported |
-| `internal/resolver` | not started |
+| `internal/resolver` | in progress |
 | `internal/runtime` | ported |
 | `internal/sourcemap` | ported |
 | `internal/xxhash` | ported |
