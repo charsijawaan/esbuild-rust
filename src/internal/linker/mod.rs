@@ -14,7 +14,7 @@ use crate::internal::{
         ImportConditions, media_queries_equal_ignoring_whitespace, tokens_equal_ignoring_whitespace,
     },
     fs::Fs,
-    graph::{InputFileRepr, LinkerGraph, WrapKind},
+    graph::{ExportData, ImportData, InputFileRepr, LinkerGraph, WrapKind},
     helpers::Joiner,
     js_ast::ExportsKind,
     logger::{Log, Range},
@@ -707,6 +707,191 @@ pub fn propagate_wrappers_and_dynamic_exports(graph: &mut LinkerGraph, options: 
     }
 }
 
+/// Recursively accumulate statically discoverable exports from `export *`
+/// statements into one root module's resolved export map.
+///
+/// # Panics
+///
+/// Panics if the export-star graph contains a non-JavaScript representation,
+/// or an import record index is invalid, matching linker graph invariants.
+#[allow(clippy::too_many_lines)]
+pub fn add_exports_for_export_star<Hasher: BuildHasher>(
+    graph: &mut LinkerGraph,
+    resolved_exports: &mut HashMap<String, ExportData, Hasher>,
+    source_index: u32,
+    source_index_stack: &mut Vec<u32>,
+) {
+    if source_index_stack.contains(&source_index) {
+        return;
+    }
+    source_index_stack.push(source_index);
+
+    let targets = {
+        let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+            .expect("export-star source must have a representation")
+        else {
+            panic!("export-star source must be JavaScript");
+        };
+        repr.ast
+            .export_star_import_records
+            .iter()
+            .map(|&record_index| repr.ast.import_records[record_index as usize].source_index)
+            .filter(|target| target.is_valid())
+            .map(Index32::get_index)
+            .collect::<Vec<_>>()
+    };
+
+    for other_source_index in targets {
+        let (exports_kind, named_exports) = {
+            let InputFileRepr::Js(other) = graph.files[other_source_index as usize]
+                .input_file
+                .repr
+                .as_ref()
+                .expect("export-star target must have a representation")
+            else {
+                panic!("export-star target must be JavaScript");
+            };
+            (other.ast.exports_kind, other.ast.named_exports.clone())
+        };
+        if exports_kind == ExportsKind::CommonJs {
+            continue;
+        }
+
+        for (alias, named_export) in named_exports {
+            if alias == "default" {
+                continue;
+            }
+            let is_shadowed = source_index_stack.iter().any(|&previous_source_index| {
+                let InputFileRepr::Js(previous) = graph.files[previous_source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                    .expect("export-star ancestor must have a representation")
+                else {
+                    panic!("export-star ancestor must be JavaScript");
+                };
+                previous.ast.named_exports.contains_key(&alias)
+            });
+            if is_shadowed {
+                continue;
+            }
+
+            if let Some(existing) = resolved_exports.get_mut(&alias) {
+                if existing.source_index != other_source_index {
+                    existing
+                        .potentially_ambiguous_export_star_refs
+                        .push(ImportData {
+                            source_index: other_source_index,
+                            reference: named_export.reference,
+                            name_loc: named_export.alias_loc,
+                            ..ImportData::default()
+                        });
+                }
+            } else {
+                resolved_exports.insert(
+                    alias,
+                    ExportData {
+                        reference: named_export.reference,
+                        source_index: other_source_index,
+                        name_loc: named_export.alias_loc,
+                        ..ExportData::default()
+                    },
+                );
+                let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+                    .input_file
+                    .repr
+                    .as_mut()
+                    .expect("export-star source must have a representation")
+                else {
+                    panic!("export-star source must be JavaScript");
+                };
+                repr.meta.imports_to_bind.insert(
+                    named_export.reference,
+                    ImportData {
+                        reference: named_export.reference,
+                        source_index: other_source_index,
+                        ..ImportData::default()
+                    },
+                );
+            }
+        }
+
+        add_exports_for_export_star(
+            graph,
+            resolved_exports,
+            other_source_index,
+            source_index_stack,
+        );
+    }
+
+    source_index_stack.pop();
+}
+
+/// Resolve export-star chains and create the special namespace export used by
+/// import-star bindings. This is the static export-resolution portion of
+/// upstream linker scan phase 3.
+///
+/// # Panics
+///
+/// Panics if an export-star graph violates JavaScript linker graph invariants.
+pub fn resolve_export_stars(graph: &mut LinkerGraph) {
+    for source_index in graph.reachable_files.clone() {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            continue;
+        };
+        let has_export_stars = !repr.ast.export_star_import_records.is_empty();
+        let exports_ref = repr.ast.exports_ref;
+
+        if has_export_stars {
+            let mut resolved_exports = {
+                let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+                    .input_file
+                    .repr
+                    .as_mut()
+                    .expect("JavaScript representation")
+                else {
+                    unreachable!();
+                };
+                std::mem::take(&mut repr.meta.resolved_exports)
+            };
+            add_exports_for_export_star(
+                graph,
+                &mut resolved_exports,
+                source_index,
+                &mut Vec::new(),
+            );
+            let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+                .input_file
+                .repr
+                .as_mut()
+                .expect("JavaScript representation")
+            else {
+                unreachable!();
+            };
+            repr.meta.resolved_exports = resolved_exports;
+        }
+
+        let InputFileRepr::Js(repr) = graph.files[source_index as usize]
+            .input_file
+            .repr
+            .as_mut()
+            .expect("JavaScript representation")
+        else {
+            unreachable!();
+        };
+        repr.meta.resolved_export_star = Some(ExportData {
+            reference: exports_ref,
+            source_index,
+            ..ExportData::default()
+        });
+    }
+}
+
 #[must_use]
 pub fn import_conditions_are_equal(left: &[ImportConditions], right: &[ImportConditions]) -> bool {
     left.len() == right.len()
@@ -873,11 +1058,12 @@ mod tests {
     use super::{
         AssetPath, ChunkImport, ChunkInfo, ChunkPath, CrossChunkImport, CrossChunkImportItem,
         OutputPathContext, OutputPiece, OutputPieceIndexKind, PartRange, StableRef,
-        append_or_extend_part_range, classify_module_wrappers, enforce_no_cyclic_chunk_imports,
-        has_dynamic_exports_due_to_export_star, import_conditions_are_equal, inline_linked_assets,
-        is_conditional_import_redundant, join_with_public_path, path_between_chunks,
-        propagate_wrappers_and_dynamic_exports, recursively_wrap_dependencies,
-        sorted_cross_chunk_export_items, sorted_cross_chunk_imports,
+        add_exports_for_export_star, append_or_extend_part_range, classify_module_wrappers,
+        enforce_no_cyclic_chunk_imports, has_dynamic_exports_due_to_export_star,
+        import_conditions_are_equal, inline_linked_assets, is_conditional_import_redundant,
+        join_with_public_path, path_between_chunks, propagate_wrappers_and_dynamic_exports,
+        recursively_wrap_dependencies, resolve_export_stars, sorted_cross_chunk_export_items,
+        sorted_cross_chunk_imports,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32, Ref},
@@ -893,7 +1079,7 @@ mod tests {
             clone_linker_graph,
         },
         helpers::Joiner,
-        js_ast::{self, ExportsKind},
+        js_ast::{self, ExportsKind, NamedExport},
         logger::{DeferLogKind, Loc, Log},
         sourcemap::{LineColumnOffset, SourceMapShift},
     };
@@ -1859,5 +2045,229 @@ mod tests {
             Format::EsModule
         ));
         assert_eq!(js_repr(&graph, 0).ast.exports_kind, ExportsKind::Esm);
+    }
+
+    fn named_export(reference: Ref) -> NamedExport {
+        NamedExport {
+            reference,
+            ..NamedExport::default()
+        }
+    }
+
+    #[test]
+    fn scan_step_three_resolves_export_star_chains() {
+        let root_x = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let child_z = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let child_default = Ref {
+            source_index: 2,
+            inner_index: 1,
+        };
+        let leaf_y = Ref {
+            source_index: 3,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(2),
+                    kind: ImportKind::Stmt,
+                    ..ImportRecord::default()
+                }],
+                named_exports: HashMap::from([("x".into(), named_export(root_x))]),
+                export_star_import_records: vec![0],
+                exports_ref: Ref {
+                    source_index: 1,
+                    inner_index: 9,
+                },
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(3),
+                    kind: ImportKind::Stmt,
+                    ..ImportRecord::default()
+                }],
+                named_exports: HashMap::from([
+                    ("z".into(), named_export(child_z)),
+                    ("default".into(), named_export(child_default)),
+                ]),
+                export_star_import_records: vec![0],
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                named_exports: HashMap::from([("y".into(), named_export(leaf_y))]),
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(
+            &input_files,
+            &[0, 1, 2, 3],
+            &[EntryPoint {
+                source_index: 1,
+                ..EntryPoint::default()
+            }],
+            false,
+        );
+        resolve_export_stars(&mut graph);
+
+        let root = js_repr(&graph, 1);
+        assert_eq!(
+            root.meta
+                .resolved_exports
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
+            HashSet::from(["x".into(), "y".into(), "z".into()])
+        );
+        assert_eq!(root.meta.resolved_exports["x"].source_index, 1);
+        assert_eq!(root.meta.resolved_exports["z"].source_index, 2);
+        assert_eq!(root.meta.resolved_exports["y"].source_index, 3);
+        assert!(!root.meta.resolved_exports.contains_key("default"));
+        assert_eq!(root.meta.imports_to_bind[&child_z].source_index, 2);
+        assert_eq!(
+            root.meta
+                .resolved_export_star
+                .as_ref()
+                .expect("namespace export")
+                .reference,
+            Ref {
+                source_index: 1,
+                inner_index: 9,
+            }
+        );
+        assert_eq!(
+            js_repr(&graph, 2).meta.imports_to_bind[&leaf_y].source_index,
+            3
+        );
+    }
+
+    #[test]
+    fn local_exports_shadow_export_stars() {
+        let local = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let imported = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(2),
+                    ..ImportRecord::default()
+                }],
+                named_exports: HashMap::from([("same".into(), named_export(local))]),
+                export_star_import_records: vec![0],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                named_exports: HashMap::from([("same".into(), named_export(imported))]),
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph =
+            clone_linker_graph(&input_files, &[0, 1, 2], &[EntryPoint::default()], false);
+        resolve_export_stars(&mut graph);
+        let root = js_repr(&graph, 1);
+        assert_eq!(root.meta.resolved_exports["same"].reference, local);
+        assert!(!root.meta.imports_to_bind.contains_key(&imported));
+    }
+
+    #[test]
+    fn colliding_export_stars_are_recorded_as_ambiguous() {
+        let first = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let second = Ref {
+            source_index: 3,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast {
+                import_records: vec![
+                    ImportRecord {
+                        source_index: Index32::new(2),
+                        ..ImportRecord::default()
+                    },
+                    ImportRecord {
+                        source_index: Index32::new(3),
+                        ..ImportRecord::default()
+                    },
+                ],
+                export_star_import_records: vec![0, 1],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                named_exports: HashMap::from([("same".into(), named_export(first))]),
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                named_exports: HashMap::from([("same".into(), named_export(second))]),
+                exports_kind: ExportsKind::Esm,
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph =
+            clone_linker_graph(&input_files, &[0, 1, 2, 3], &[EntryPoint::default()], false);
+        resolve_export_stars(&mut graph);
+        let export = &js_repr(&graph, 1).meta.resolved_exports["same"];
+        assert_eq!(export.reference, first);
+        assert_eq!(export.potentially_ambiguous_export_star_refs.len(), 1);
+        assert_eq!(
+            export.potentially_ambiguous_export_star_refs[0].source_index,
+            3
+        );
+        assert_eq!(
+            export.potentially_ambiguous_export_star_refs[0].reference,
+            second
+        );
+    }
+
+    #[test]
+    fn common_js_export_stars_are_left_for_runtime() {
+        let common_js_export = Ref {
+            source_index: 2,
+            inner_index: 0,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast::default()),
+            js_file(js_ast::Ast {
+                import_records: vec![ImportRecord {
+                    source_index: Index32::new(2),
+                    ..ImportRecord::default()
+                }],
+                export_star_import_records: vec![0],
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                named_exports: HashMap::from([(
+                    "runtimeOnly".into(),
+                    named_export(common_js_export),
+                )]),
+                exports_kind: ExportsKind::CommonJs,
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph =
+            clone_linker_graph(&input_files, &[0, 1, 2], &[EntryPoint::default()], false);
+        let mut resolved = HashMap::new();
+        add_exports_for_export_star(&mut graph, &mut resolved, 1, &mut Vec::new());
+        assert!(resolved.is_empty());
     }
 }
