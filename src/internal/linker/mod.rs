@@ -1541,6 +1541,230 @@ pub fn sort_and_filter_export_aliases(
     ambiguous
 }
 
+/// Populate the synthetic namespace-export part for one JavaScript file.
+///
+/// This generates the export getter object, tracks the declaring parts for
+/// each exported symbol, and initializes the namespace object when needed.
+///
+/// # Panics
+///
+/// Panics when source or runtime symbol references violate linker graph
+/// invariants.
+#[allow(clippy::too_many_lines)]
+pub fn create_exports_for_file(
+    graph: &mut LinkerGraph,
+    source_index: u32,
+    export_runtime_ref: Ref,
+    options: &Options,
+) {
+    let (aliases, resolved_exports, exports_ref, needs_exports_variable) = {
+        let Some(InputFileRepr::Js(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        else {
+            panic!("export source must be JavaScript");
+        };
+        (
+            repr.meta.sorted_and_filtered_export_aliases.clone(),
+            repr.meta.resolved_exports.clone(),
+            repr.ast.exports_ref,
+            repr.meta.needs_exports_variable,
+        )
+    };
+    let mut properties = Vec::with_capacity(aliases.len());
+    let mut dependencies = Vec::new();
+    let mut symbol_uses = HashMap::new();
+
+    for alias in aliases {
+        let mut export = resolved_exports[&alias].clone();
+        let import_data = {
+            let Some(InputFileRepr::Js(repr)) = graph.files[export.source_index as usize]
+                .input_file
+                .repr
+                .as_ref()
+            else {
+                panic!("export target must be JavaScript");
+            };
+            repr.meta.imports_to_bind.get(&export.reference).cloned()
+        };
+        if let Some(import_data) = import_data {
+            export.reference = import_data.reference;
+            export.source_index = import_data.source_index;
+            dependencies.extend(import_data.re_exports);
+        }
+
+        let value = if graph
+            .symbols
+            .get(export.reference)
+            .namespace_alias
+            .is_some()
+        {
+            js_ast::Expr::new(
+                crate::internal::logger::Loc::default(),
+                js_ast::ExprData::ImportIdentifier(js_ast::ImportIdentifierExpr {
+                    reference: export.reference,
+                    ..js_ast::ImportIdentifierExpr::default()
+                }),
+            )
+        } else {
+            identifier_expr(export.reference, crate::internal::logger::Loc::default())
+        };
+        let body = js_ast::FunctionBody {
+            block: js_ast::BlockStmt {
+                statements: vec![js_ast::Stmt::new(
+                    value.loc,
+                    js_ast::StmtData::Return(js_ast::ReturnStmt {
+                        value_or_nil: value,
+                    }),
+                )],
+                ..js_ast::BlockStmt::default()
+            },
+            ..js_ast::FunctionBody::default()
+        };
+        let getter = if options
+            .unsupported_js_features
+            .contains(crate::internal::compat::JsFeature::ARROW)
+        {
+            js_ast::Expr::new(
+                crate::internal::logger::Loc::default(),
+                js_ast::ExprData::Function(js_ast::FunctionExpr {
+                    function: js_ast::Function {
+                        body,
+                        ..js_ast::Function::default()
+                    },
+                    ..js_ast::FunctionExpr::default()
+                }),
+            )
+        } else {
+            js_ast::Expr::new(
+                crate::internal::logger::Loc::default(),
+                js_ast::ExprData::Arrow(js_ast::ArrowExpr {
+                    body,
+                    prefer_expr: true,
+                    ..js_ast::ArrowExpr::default()
+                }),
+            )
+        };
+        let flags = if alias == "__proto__"
+            && !options
+                .unsupported_js_features
+                .contains(crate::internal::compat::JsFeature::OBJECT_EXTENSIONS)
+        {
+            js_ast::PropertyFlags::IS_COMPUTED
+        } else {
+            js_ast::PropertyFlags::NONE
+        };
+        properties.push(js_ast::Property {
+            flags,
+            key: js_ast::Expr::new(
+                crate::internal::logger::Loc::default(),
+                js_ast::ExprData::String(js_ast::StringExpr {
+                    value: string_to_utf16(alias.as_bytes()),
+                    ..js_ast::StringExpr::default()
+                }),
+            ),
+            value_or_nil: getter,
+            ..js_ast::Property::default()
+        });
+        symbol_uses.insert(export.reference, js_ast::SymbolUse { count_estimate: 1 });
+
+        let Some(InputFileRepr::Js(repr)) = graph.files[export.source_index as usize]
+            .input_file
+            .repr
+            .as_ref()
+        else {
+            panic!("export target must be JavaScript");
+        };
+        dependencies.extend(
+            repr.top_level_symbol_to_parts(export.reference)
+                .unwrap_or_default()
+                .iter()
+                .map(|&part_index| js_ast::Dependency {
+                    source_index: export.source_index,
+                    part_index,
+                }),
+        );
+    }
+
+    let mut declared_symbols = Vec::new();
+    let mut statements = Vec::new();
+    if needs_exports_variable {
+        statements.push(js_ast::Stmt::new(
+            crate::internal::logger::Loc::default(),
+            js_ast::StmtData::Local(js_ast::LocalStmt {
+                declarations: vec![js_ast::Decl {
+                    binding: identifier_binding(exports_ref),
+                    value_or_nil: js_ast::Expr::new(
+                        crate::internal::logger::Loc::default(),
+                        js_ast::ExprData::Object(js_ast::ObjectExpr::default()),
+                    ),
+                }],
+                ..js_ast::LocalStmt::default()
+            }),
+        ));
+        declared_symbols.push(js_ast::DeclaredSymbol {
+            reference: exports_ref,
+            is_top_level: true,
+        });
+    }
+
+    let used_export_runtime = !properties.is_empty();
+    if used_export_runtime {
+        statements.push(expr_statement(call_with_args(
+            export_runtime_ref,
+            vec![
+                identifier_expr(exports_ref, crate::internal::logger::Loc::default()),
+                js_ast::Expr::new(
+                    crate::internal::logger::Loc::default(),
+                    js_ast::ExprData::Object(js_ast::ObjectExpr {
+                        properties,
+                        ..js_ast::ObjectExpr::default()
+                    }),
+                ),
+            ],
+            crate::internal::logger::Loc::default(),
+        )));
+        let Some(InputFileRepr::Js(runtime)) = graph.files
+            [crate::internal::runtime::SOURCE_INDEX as usize]
+            .input_file
+            .repr
+            .as_ref()
+        else {
+            panic!("runtime must be JavaScript");
+        };
+        dependencies.extend(
+            runtime
+                .top_level_symbol_to_parts(export_runtime_ref)
+                .unwrap_or_default()
+                .iter()
+                .map(|&part_index| js_ast::Dependency {
+                    source_index: crate::internal::runtime::SOURCE_INDEX,
+                    part_index,
+                }),
+        );
+    }
+
+    if statements.is_empty() {
+        return;
+    }
+    let Some(InputFileRepr::Js(repr)) = graph.files[source_index as usize].input_file.repr.as_mut()
+    else {
+        panic!("export source must be JavaScript");
+    };
+    repr.ast.parts[js_ast::NS_EXPORT_PART_INDEX as usize] = js_ast::Part {
+        statements,
+        symbol_uses,
+        dependencies,
+        declared_symbols,
+        can_be_removed_if_unused: true,
+        force_tree_shaking: true,
+        ..js_ast::Part::default()
+    };
+    if used_export_runtime {
+        repr.ast.uses_exports_ref = true;
+        repr.meta.needs_export_symbol_from_runtime = true;
+    }
+}
+
 /// Create the synthetic wrapper part used by wrapped `CommonJS` and ESM files.
 ///
 /// # Panics
@@ -7021,8 +7245,8 @@ mod tests {
         assign_chunk_path_templates, bind_imports_to_exports_for_file, classify_module_wrappers,
         compile_part_range_for_chunk, compile_prepared_css_asts, compute_chunks,
         compute_cross_chunk_dependencies, compute_js_chunks, convert_import_for_chunk,
-        convert_stmts_for_chunk, create_wrapper_for_file, enforce_no_cyclic_chunk_imports,
-        finalize_chunk_paths, finalize_javascript_chunk_outputs,
+        convert_stmts_for_chunk, create_exports_for_file, create_wrapper_for_file,
+        enforce_no_cyclic_chunk_imports, finalize_chunk_paths, finalize_javascript_chunk_outputs,
         find_imported_css_files_in_js_order, find_imported_files_in_css_order,
         generate_code_for_lazy_exports, generate_cross_chunk_stmts, generate_css_chunk,
         generate_css_module_exports, generate_entry_point_tail, generate_global_name_prefix,
@@ -12155,6 +12379,146 @@ mod tests {
             js_repr(&graph, 1).meta.sorted_and_filtered_export_aliases,
             ["good", "same"]
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn namespace_export_part_contains_getters_and_dependencies() {
+        let export_runtime_ref = Ref {
+            source_index: 0,
+            inner_index: 0,
+        };
+        let exports_ref = Ref {
+            source_index: 1,
+            inner_index: 0,
+        };
+        let foo_ref = Ref {
+            source_index: 1,
+            inner_index: 1,
+        };
+        let proto_ref = Ref {
+            source_index: 1,
+            inner_index: 2,
+        };
+        let input_files = vec![
+            js_file(js_ast::Ast {
+                symbols: vec![Symbol::new(SymbolKind::Other, "__export")],
+                parts: vec![js_ast::Part::default()],
+                top_level_symbol_to_parts_from_parser: HashMap::from([(
+                    export_runtime_ref,
+                    vec![0],
+                )]),
+                ..js_ast::Ast::default()
+            }),
+            js_file(js_ast::Ast {
+                symbols: vec![
+                    Symbol::new(SymbolKind::Other, "exports"),
+                    Symbol::new(SymbolKind::Other, "foo"),
+                    Symbol::new(SymbolKind::Other, "proto"),
+                ],
+                exports_ref,
+                named_exports: HashMap::from([
+                    (
+                        "foo".into(),
+                        NamedExport {
+                            reference: foo_ref,
+                            ..NamedExport::default()
+                        },
+                    ),
+                    (
+                        "__proto__".into(),
+                        NamedExport {
+                            reference: proto_ref,
+                            ..NamedExport::default()
+                        },
+                    ),
+                ]),
+                parts: vec![
+                    js_ast::Part::default(),
+                    js_ast::Part {
+                        declared_symbols: vec![js_ast::DeclaredSymbol {
+                            reference: foo_ref,
+                            is_top_level: true,
+                        }],
+                        ..js_ast::Part::default()
+                    },
+                    js_ast::Part {
+                        declared_symbols: vec![js_ast::DeclaredSymbol {
+                            reference: proto_ref,
+                            is_top_level: true,
+                        }],
+                        ..js_ast::Part::default()
+                    },
+                ],
+                top_level_symbol_to_parts_from_parser: HashMap::from([
+                    (foo_ref, vec![1]),
+                    (proto_ref, vec![2]),
+                ]),
+                ..js_ast::Ast::default()
+            }),
+        ];
+        let mut graph = clone_linker_graph(&input_files, &[0, 1], &[], false);
+        let Some(InputFileRepr::Js(repr)) = graph.files[1].input_file.repr.as_mut() else {
+            panic!("JavaScript");
+        };
+        repr.meta.sorted_and_filtered_export_aliases = vec!["__proto__".into(), "foo".into()];
+        repr.meta.needs_exports_variable = true;
+
+        create_exports_for_file(&mut graph, 1, export_runtime_ref, &Options::default());
+
+        let repr = js_repr(&graph, 1);
+        let part = &repr.ast.parts[js_ast::NS_EXPORT_PART_INDEX as usize];
+        assert!(part.can_be_removed_if_unused);
+        assert!(part.force_tree_shaking);
+        assert_eq!(part.statements.len(), 2);
+        assert_eq!(part.declared_symbols[0].reference, exports_ref);
+        assert_eq!(part.symbol_uses[&foo_ref].count_estimate, 1);
+        assert_eq!(part.symbol_uses[&proto_ref].count_estimate, 1);
+        assert_eq!(
+            part.dependencies,
+            [
+                js_ast::Dependency {
+                    source_index: 1,
+                    part_index: 2,
+                },
+                js_ast::Dependency {
+                    source_index: 1,
+                    part_index: 1,
+                },
+                js_ast::Dependency {
+                    source_index: 0,
+                    part_index: 0,
+                },
+            ]
+        );
+        let Some(js_ast::StmtData::Local(local)) = part.statements[0].data.as_deref() else {
+            panic!("exports declaration");
+        };
+        assert!(matches!(
+            local.declarations[0].value_or_nil.data.as_deref(),
+            Some(js_ast::ExprData::Object(_))
+        ));
+        let Some(js_ast::StmtData::Expr(statement)) = part.statements[1].data.as_deref() else {
+            panic!("export call");
+        };
+        let Some(js_ast::ExprData::Call(call)) = statement.value.data.as_deref() else {
+            panic!("export call expression");
+        };
+        let Some(js_ast::ExprData::Object(getters)) = call.args[1].data.as_deref() else {
+            panic!("export getters");
+        };
+        assert_eq!(getters.properties.len(), 2);
+        assert!(
+            getters.properties[0]
+                .flags
+                .contains(js_ast::PropertyFlags::IS_COMPUTED)
+        );
+        assert!(matches!(
+            getters.properties[0].value_or_nil.data.as_deref(),
+            Some(js_ast::ExprData::Arrow(arrow)) if arrow.prefer_expr
+        ));
+        assert!(repr.ast.uses_exports_ref);
+        assert!(repr.meta.needs_export_symbol_from_runtime);
     }
 
     #[test]
