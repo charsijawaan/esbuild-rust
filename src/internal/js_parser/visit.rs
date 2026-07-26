@@ -1147,6 +1147,25 @@ fn insert_parameter_fields_after_super_expression(
             insert_parameter_fields_after_super_expression(&mut value.target, assignments)
                 | insert_parameter_fields_after_super_expression(&mut value.index, assignments)
         }
+        Some(ExprData::Arrow(value)) => {
+            let mut inserted = false;
+            for argument in &mut value.args {
+                inserted |=
+                    insert_parameter_fields_after_super_binding(&mut argument.binding, assignments);
+                inserted |= insert_parameter_fields_after_super_expression(
+                    &mut argument.default_or_nil,
+                    assignments,
+                );
+                for decorator in &mut argument.decorators {
+                    inserted |= insert_parameter_fields_after_super_expression(
+                        &mut decorator.value,
+                        assignments,
+                    );
+                }
+            }
+            inserted
+                | insert_parameter_fields_after_super(&mut value.body.block.statements, assignments)
+        }
         Some(ExprData::Object(value)) => {
             let mut inserted = false;
             for property in &mut value.properties {
@@ -1216,7 +1235,6 @@ fn insert_parameter_fields_after_super_expression(
             | ExprData::This
             | ExprData::NewTarget(_)
             | ExprData::ImportMeta(_)
-            | ExprData::Arrow(_)
             | ExprData::Function(_)
             | ExprData::Class(_)
             | ExprData::Identifier(_)

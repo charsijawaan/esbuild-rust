@@ -4242,7 +4242,10 @@ mod tests {
         ));
         assert!(!assigned.contains("\n  id;"), "{assigned}");
         assert!(assigned.contains("this.id = id;"), "{assigned}");
+    }
 
+    #[test]
+    fn initializes_type_script_parameter_properties_after_super() {
         let derived = code(transform(
             "class Box extends Base { constructor(public id: string) { before(); super(); after() } }",
             TransformOptions {
@@ -4324,6 +4327,20 @@ mod tests {
         assert!(
             locals.contains("value = (super(2), this.id = id, this)"),
             "{locals}"
+        );
+
+        let arrow = code(transform(
+            "class Box extends Base { constructor(public id: string) { const init = () => super(1); return init() } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(arrow.contains("\n  id;"), "{arrow}");
+        assert_eq!(arrow.matches("this.id = id").count(), 1, "{arrow}");
+        assert!(
+            arrow.contains("() => (super(1), this.id = id, this)"),
+            "{arrow}"
         );
     }
 
