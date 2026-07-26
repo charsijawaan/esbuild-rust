@@ -620,13 +620,31 @@ impl Parser {
             }
             _ => {}
         }
-        if self.minify_syntax
-            && matches!(
-                key_text.to_ascii_lowercase().as_str(),
-                "color" | "background" | "background-color"
-            )
-        {
-            minify_single_color(&mut value);
+        if self.minify_syntax {
+            minify_numeric_tokens(&mut value);
+            let key_lower = key_text.to_ascii_lowercase();
+            if is_single_color_property(&key_lower) {
+                minify_single_color(&mut value);
+            } else if key_lower == "background" {
+                for token in &mut value {
+                    minify_single_color(std::slice::from_mut(token));
+                }
+            }
+            if matches!(key_lower.as_str(), "margin" | "padding" | "inset") {
+                minify_four_side_shorthand(&mut value);
+            }
+            if key_lower == "font-weight"
+                && let [token] = value.as_mut_slice()
+                && token.kind == TokenKind::Ident
+            {
+                if token.text.eq_ignore_ascii_case("normal") {
+                    token.kind = TokenKind::Number;
+                    token.text = "400".into();
+                } else if token.text.eq_ignore_ascii_case("bold") {
+                    token.kind = TokenKind::Number;
+                    token.text = "700".into();
+                }
+            }
         }
         let important = take_important(&mut value);
         if !important && let Some(last) = value.last_mut() {
@@ -1233,9 +1251,10 @@ fn next_non_whitespace_kind(
 }
 
 fn minify_single_color(tokens: &mut [Token]) {
-    if let [token] = tokens
-        && token.kind == TokenKind::Ident
-    {
+    let [token] = tokens else {
+        return;
+    };
+    if token.kind == TokenKind::Ident {
         let hex = match token.text.to_ascii_lowercase().as_str() {
             "black" => "000",
             "white" => "fff",
@@ -1247,6 +1266,254 @@ fn minify_single_color(tokens: &mut [Token]) {
         };
         token.kind = TokenKind::Hash;
         hex.clone_into(&mut token.text);
+        return;
+    }
+    if token.kind == TokenKind::Hash {
+        if let Some((red, green, blue, alpha)) = parse_hex_color(&token.text) {
+            set_color_token(token, red, green, blue, alpha);
+        }
+        return;
+    }
+    if token.kind == TokenKind::Function
+        && (token.text.eq_ignore_ascii_case("rgb") || token.text.eq_ignore_ascii_case("rgba"))
+        && let Some((red, green, blue, alpha)) = parse_rgb(token)
+    {
+        set_color_token(token, red, green, blue, alpha);
+    }
+}
+
+fn is_single_color_property(key: &str) -> bool {
+    matches!(
+        key,
+        "background-color"
+            | "border-block-end-color"
+            | "border-block-start-color"
+            | "border-bottom-color"
+            | "border-color"
+            | "border-inline-end-color"
+            | "border-inline-start-color"
+            | "border-left-color"
+            | "border-right-color"
+            | "border-top-color"
+            | "caret-color"
+            | "color"
+            | "column-rule-color"
+            | "fill"
+            | "flood-color"
+            | "lighting-color"
+            | "outline-color"
+            | "stop-color"
+            | "stroke"
+            | "text-decoration-color"
+            | "text-emphasis-color"
+    )
+}
+
+fn parse_hex_color(text: &str) -> Option<(u8, u8, u8, u8)> {
+    if !matches!(text.len(), 3 | 4 | 6 | 8) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let expand = |digit: u8| (digit << 4) | digit;
+    let digit = |index: usize| {
+        text.as_bytes()
+            .get(index)
+            .copied()
+            .and_then(|byte| (byte as char).to_digit(16))
+            .and_then(|value| u8::try_from(value).ok())
+    };
+    if text.len() <= 4 {
+        Some((
+            expand(digit(0)?),
+            expand(digit(1)?),
+            expand(digit(2)?),
+            if text.len() == 4 {
+                expand(digit(3)?)
+            } else {
+                255
+            },
+        ))
+    } else {
+        let byte = |index| Some((digit(index)? << 4) | digit(index + 1)?);
+        Some((
+            byte(0)?,
+            byte(2)?,
+            byte(4)?,
+            if text.len() == 8 { byte(6)? } else { 255 },
+        ))
+    }
+}
+
+fn parse_rgb(token: &Token) -> Option<(u8, u8, u8, u8)> {
+    let children = token.children.as_deref()?;
+    let (red, green, blue, alpha) = if token.text.eq_ignore_ascii_case("rgb") {
+        let [red, comma_one, green, comma_two, blue] = children else {
+            return None;
+        };
+        if comma_one.kind != TokenKind::Comma || comma_two.kind != TokenKind::Comma {
+            return None;
+        }
+        (red, green, blue, None)
+    } else {
+        let [red, comma_one, green, comma_two, blue, comma_three, alpha] = children else {
+            return None;
+        };
+        if comma_one.kind != TokenKind::Comma
+            || comma_two.kind != TokenKind::Comma
+            || comma_three.kind != TokenKind::Comma
+        {
+            return None;
+        }
+        (red, green, blue, Some(alpha))
+    };
+    let parse_byte = |token: &Token, number_scale: f64| {
+        let value = match token.kind {
+            TokenKind::Number => token.text.parse::<f64>().ok()? * number_scale,
+            TokenKind::Percentage => {
+                token.percentage_value().parse::<f64>().ok()? * (255.0 / 100.0)
+            }
+            _ => return None,
+        };
+        value
+            .round()
+            .clamp(0.0, 255.0)
+            .to_string()
+            .parse::<u8>()
+            .ok()
+    };
+    Some((
+        parse_byte(red, 1.0)?,
+        parse_byte(green, 1.0)?,
+        parse_byte(blue, 1.0)?,
+        alpha.map_or(Some(255), |alpha| parse_byte(alpha, 255.0))?,
+    ))
+}
+
+fn set_color_token(token: &mut Token, red: u8, green: u8, blue: u8, alpha: u8) {
+    token.children = None;
+    if alpha == 255 {
+        let hex = format!("{red:02x}{green:02x}{blue:02x}");
+        if let Some(name) = short_color_name(&hex) {
+            token.kind = TokenKind::Ident;
+            token.text = name.into();
+            return;
+        }
+        token.kind = TokenKind::Hash;
+        token.text = compact_hex(&hex);
+    } else {
+        token.kind = TokenKind::Hash;
+        token.text = compact_hex(&format!("{red:02x}{green:02x}{blue:02x}{alpha:02x}"));
+    }
+}
+
+fn compact_hex(hex: &str) -> String {
+    let bytes = hex.as_bytes();
+    if bytes.chunks_exact(2).all(|pair| pair[0] == pair[1]) {
+        bytes.chunks_exact(2).map(|pair| pair[0] as char).collect()
+    } else {
+        hex.into()
+    }
+}
+
+fn short_color_name(hex: &str) -> Option<&'static str> {
+    Some(match hex {
+        "000080" => "navy",
+        "008000" => "green",
+        "008080" => "teal",
+        "4b0082" => "indigo",
+        "800000" => "maroon",
+        "800080" => "purple",
+        "808000" => "olive",
+        "808080" => "gray",
+        "a0522d" => "sienna",
+        "a52a2a" => "brown",
+        "c0c0c0" => "silver",
+        "cd853f" => "peru",
+        "d2b48c" => "tan",
+        "da70d6" => "orchid",
+        "dda0dd" => "plum",
+        "ee82ee" => "violet",
+        "f0e68c" => "khaki",
+        "f0ffff" => "azure",
+        "f5deb3" => "wheat",
+        "f5f5dc" => "beige",
+        "fa8072" => "salmon",
+        "faf0e6" => "linen",
+        "ff0000" => "red",
+        "ff6347" => "tomato",
+        "ff7f50" => "coral",
+        "ffa500" => "orange",
+        "ffc0cb" => "pink",
+        "ffd700" => "gold",
+        "ffe4c4" => "bisque",
+        "fffafa" => "snow",
+        "fffff0" => "ivory",
+        _ => return None,
+    })
+}
+
+fn minify_numeric_tokens(tokens: &mut [Token]) {
+    for token in tokens {
+        if let Some(children) = &mut token.children {
+            minify_numeric_tokens(children);
+        }
+        match token.kind {
+            TokenKind::Number => {
+                if let Some(text) = minify_decimal(&token.text) {
+                    token.text = text;
+                }
+            }
+            TokenKind::Percentage => {
+                if let Some(text) = minify_decimal(token.percentage_value()) {
+                    token.text = format!("{text}%");
+                }
+            }
+            TokenKind::Dimension => {
+                let unit = token.dimension_unit().to_owned();
+                if let Some(text) = minify_decimal(token.dimension_value()) {
+                    let Ok(unit_offset) = u16::try_from(text.len()) else {
+                        continue;
+                    };
+                    token.unit_offset = unit_offset;
+                    token.text = format!("{text}{unit}");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn minify_decimal(text: &str) -> Option<String> {
+    if text.contains(['e', 'E']) || !text.contains('.') {
+        return None;
+    }
+    let mut result = text.trim_end_matches('0').trim_end_matches('.').to_owned();
+    if let Some(fraction) = result.strip_prefix("0.") {
+        result = format!(".{fraction}");
+    } else if let Some(fraction) = result.strip_prefix("-0.") {
+        result = format!("-.{fraction}");
+    }
+    if result.is_empty() || result == "-" {
+        result.push('0');
+    }
+    (result.len() < text.len()).then_some(result)
+}
+
+fn minify_four_side_shorthand(tokens: &mut Vec<Token>) {
+    if tokens.len() == 4 && tokens[1].equal_ignoring_whitespace(&tokens[3]) {
+        tokens.pop();
+    }
+    if tokens.len() == 3 && tokens[0].equal_ignoring_whitespace(&tokens[2]) {
+        tokens.pop();
+    }
+    if tokens.len() == 2 && tokens[0].equal_ignoring_whitespace(&tokens[1]) {
+        tokens.pop();
+    }
+    for (index, token) in tokens.iter_mut().enumerate() {
+        token.whitespace = if index == 0 {
+            WhitespaceFlags::default()
+        } else {
+            WhitespaceFlags::BEFORE
+        };
     }
 }
 
