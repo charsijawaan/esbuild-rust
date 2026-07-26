@@ -123,6 +123,14 @@ pub enum Packages {
     External,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BuildTreeShaking {
+    #[default]
+    Default,
+    Enabled,
+    Disabled,
+}
+
 #[derive(Clone, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildOptions {
@@ -140,6 +148,7 @@ pub struct BuildOptions {
     pub asset_names: String,
     pub sourcemap: BuildSourceMap,
     pub legal_comments: BuildLegalComments,
+    pub tree_shaking: BuildTreeShaking,
     pub splitting: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
@@ -561,7 +570,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
             BuildLegalComments::External => config::LegalComments::ExternalWithoutComment,
         },
         code_splitting: options.splitting,
-        tree_shaking: true,
+        tree_shaking: options.tree_shaking != BuildTreeShaking::Disabled,
         minify_whitespace: options.minify_whitespace,
         minify_identifiers: options.minify_identifiers,
         minify_syntax: options.minify_syntax,
@@ -1006,8 +1015,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        BuildFormat, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap, Loader,
-        Packages, TransformOptions, build, transform,
+        BuildFormat, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
+        BuildTreeShaking, Loader, Packages, TransformOptions, build, transform,
     };
 
     fn code(result: super::TransformResult) -> String {
@@ -1699,6 +1708,40 @@ mod tests {
         });
         assert_eq!(result.errors.len(), 1);
         assert!(result.errors[0].text.contains("more than one"));
+    }
+
+    #[test]
+    fn exposes_build_tree_shaking_control() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-api-tree-shaking-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "const dead = 1; console.log('live')").expect("write entry file");
+
+        for (tree_shaking, should_keep_dead) in [
+            (BuildTreeShaking::Enabled, false),
+            (BuildTreeShaking::Disabled, true),
+        ] {
+            let result = build(BuildOptions {
+                entry_points: vec![entry.to_string_lossy().into_owned()],
+                outdir: directory.join("out").to_string_lossy().into_owned(),
+                tree_shaking,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            let output = String::from_utf8_lossy(&result.output_files[0].contents);
+            assert_eq!(
+                output.contains("dead"),
+                should_keep_dead,
+                "{tree_shaking:?}"
+            );
+            assert!(output.contains("console.log(\"live\")"));
+        }
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]

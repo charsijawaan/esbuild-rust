@@ -6,8 +6,8 @@ use std::{
 
 use esbuild_rs::{
     api::{
-        BuildFormat, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap, Loader,
-        Packages, TransformOptions, build, transform,
+        BuildFormat, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap,
+        BuildTreeShaking, Loader, Packages, TransformOptions, build, transform,
     },
     internal::cli_helpers,
 };
@@ -54,6 +54,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut splitting = false;
     let mut sourcemap = BuildSourceMap::None;
     let mut legal_comments = BuildLegalComments::Inline;
+    let mut tree_shaking = BuildTreeShaking::Default;
     let mut external = Vec::new();
     let mut packages = Packages::Bundle;
     let mut build_loaders = HashMap::new();
@@ -104,6 +105,14 @@ fn run(arguments: &[String]) -> Result<Output, String> {
                 "linked" => BuildLegalComments::Linked,
                 "external" => BuildLegalComments::External,
                 _ => return Err(format!("Invalid legal comments setting {value:?}")),
+            };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--tree-shaking=") {
+            tree_shaking = match value {
+                "true" => BuildTreeShaking::Enabled,
+                "false" => BuildTreeShaking::Disabled,
+                _ => return Err(format!("Invalid tree shaking setting {value:?}")),
             };
             continue;
         }
@@ -286,6 +295,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             asset_names,
             sourcemap,
             legal_comments,
+            tree_shaking,
             splitting,
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
@@ -412,6 +422,7 @@ fn help_text() -> String {
          \x20\x20--splitting\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
          \x20\x20--legal-comments=none|inline|eof|linked|external\n\
+         \x20\x20--tree-shaking=true|false\n\
          \x20\x20--external:PATH\n\
          \x20\x20--packages=bundle|external\n\
          \x20\x20--loader=base64|binary|css|dataurl|default|empty|global-css|js|json|jsx|local-css|text|ts|tsx\n\
@@ -468,6 +479,7 @@ mod tests {
         assert!(run(&["--platform=wat".into()]).is_err());
         assert!(run(&["--packages=wat".into()]).is_err());
         assert!(run(&["--sourcemap=wat".into()]).is_err());
+        assert!(run(&["--tree-shaking=wat".into()]).is_err());
     }
 
     #[test]
@@ -489,6 +501,34 @@ mod tests {
         let output = String::from_utf8(output).expect("bundle output is UTF-8");
         assert!(output.contains("console.log(\"cli bundle\");"));
         assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn controls_tree_shaking_for_bundles() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-tree-shaking-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "const dead = 1; console.log('live')").expect("write entry file");
+
+        for (setting, should_keep_dead) in [("true", false), ("false", true)] {
+            let Output::Code(output) = run(&[
+                "--bundle".into(),
+                format!("--tree-shaking={setting}"),
+                entry.to_string_lossy().into_owned(),
+            ])
+            .expect("bundle succeeds") else {
+                panic!("expected bundled code");
+            };
+            let output = String::from_utf8(output).expect("bundle output is UTF-8");
+            assert_eq!(output.contains("dead"), should_keep_dead);
+            assert!(output.contains("console.log(\"live\")"));
+        }
+
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
