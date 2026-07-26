@@ -4261,6 +4261,20 @@ mod tests {
             .expect("second assignment");
         assert!(first_super < first_assignment);
         assert!(second_super < second_assignment);
+
+        let returned = code(transform(
+            "class Box extends Base { constructor(public id: string) { return flag ? super(1) : (before(), super(2)) } }",
+            TransformOptions {
+                loader: Loader::Ts,
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(returned.matches("this.id = id").count(), 2, "{returned}");
+        assert_eq!(
+            returned.matches("this.id = id, this").count(),
+            2,
+            "{returned}"
+        );
     }
 
     #[test]

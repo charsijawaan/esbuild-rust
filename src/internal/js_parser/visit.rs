@@ -934,6 +934,7 @@ fn insert_parameter_fields_after_super(statements: &mut Vec<Stmt>, assignments: 
     inserted
 }
 
+#[allow(clippy::too_many_lines)]
 fn insert_parameter_fields_in_statement(statement: &mut Stmt, assignments: &[Stmt]) -> bool {
     if is_direct_super_call_statement(statement) {
         let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() else {
@@ -962,26 +963,43 @@ fn insert_parameter_fields_in_statement(statement: &mut Stmt, assignments: &[Stm
             insert_parameter_fields_after_super(&mut block.statements, assignments)
         }
         Some(StmtData::If(value)) => {
-            insert_parameter_fields_in_statement(&mut value.yes, assignments)
+            insert_parameter_fields_after_super_expression(&mut value.test, assignments)
+                | insert_parameter_fields_in_statement(&mut value.yes, assignments)
                 | insert_parameter_fields_in_statement(&mut value.no_or_nil, assignments)
         }
         Some(StmtData::For(value)) => {
-            insert_parameter_fields_in_statement(&mut value.body, assignments)
+            insert_parameter_fields_in_statement(&mut value.init_or_nil, assignments)
+                | insert_parameter_fields_after_super_expression(
+                    &mut value.test_or_nil,
+                    assignments,
+                )
+                | insert_parameter_fields_after_super_expression(
+                    &mut value.update_or_nil,
+                    assignments,
+                )
+                | insert_parameter_fields_in_statement(&mut value.body, assignments)
         }
         Some(StmtData::ForIn(value)) => {
-            insert_parameter_fields_in_statement(&mut value.body, assignments)
+            insert_parameter_fields_in_statement(&mut value.init, assignments)
+                | insert_parameter_fields_after_super_expression(&mut value.value, assignments)
+                | insert_parameter_fields_in_statement(&mut value.body, assignments)
         }
         Some(StmtData::ForOf(value)) => {
-            insert_parameter_fields_in_statement(&mut value.body, assignments)
+            insert_parameter_fields_in_statement(&mut value.init, assignments)
+                | insert_parameter_fields_after_super_expression(&mut value.value, assignments)
+                | insert_parameter_fields_in_statement(&mut value.body, assignments)
         }
         Some(StmtData::DoWhile(value)) => {
             insert_parameter_fields_in_statement(&mut value.body, assignments)
+                | insert_parameter_fields_after_super_expression(&mut value.test, assignments)
         }
         Some(StmtData::While(value)) => {
-            insert_parameter_fields_in_statement(&mut value.body, assignments)
+            insert_parameter_fields_after_super_expression(&mut value.test, assignments)
+                | insert_parameter_fields_in_statement(&mut value.body, assignments)
         }
         Some(StmtData::With(value)) => {
-            insert_parameter_fields_in_statement(&mut value.body, assignments)
+            insert_parameter_fields_after_super_expression(&mut value.value, assignments)
+                | insert_parameter_fields_in_statement(&mut value.body, assignments)
         }
         Some(StmtData::Label(value)) => {
             insert_parameter_fields_in_statement(&mut value.statement, assignments)
@@ -999,9 +1017,27 @@ fn insert_parameter_fields_in_statement(statement: &mut Stmt, assignments: &[Stm
             }
             inserted
         }
-        Some(StmtData::Switch(value)) => value.cases.iter_mut().fold(false, |inserted, case| {
-            insert_parameter_fields_after_super(&mut case.body, assignments) | inserted
-        }),
+        Some(StmtData::Switch(value)) => {
+            let mut inserted =
+                insert_parameter_fields_after_super_expression(&mut value.test, assignments);
+            for case in &mut value.cases {
+                inserted |= insert_parameter_fields_after_super_expression(
+                    &mut case.value_or_nil,
+                    assignments,
+                );
+                inserted |= insert_parameter_fields_after_super(&mut case.body, assignments);
+            }
+            inserted
+        }
+        Some(StmtData::Expr(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.value, assignments)
+        }
+        Some(StmtData::Return(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.value_or_nil, assignments)
+        }
+        Some(StmtData::Throw(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.value, assignments)
+        }
         Some(
             StmtData::Comment(_)
             | StmtData::Debugger
@@ -1014,14 +1050,11 @@ fn insert_parameter_fields_in_statement(statement: &mut Stmt, assignments: &[Stm
             | StmtData::ExportStar(_)
             | StmtData::ExportEquals(_)
             | StmtData::LazyExport(_)
-            | StmtData::Expr(_)
             | StmtData::Enum(_)
             | StmtData::Namespace(_)
             | StmtData::Function(_)
             | StmtData::Class(_)
             | StmtData::Import(_)
-            | StmtData::Return(_)
-            | StmtData::Throw(_)
             | StmtData::Local(_)
             | StmtData::Break(_)
             | StmtData::Continue(_),
@@ -1040,6 +1073,101 @@ fn is_direct_super_call_statement(statement: &Stmt) -> bool {
                     if matches!(call.target.data.as_deref(), Some(ExprData::Super))
             )
     )
+}
+
+fn insert_parameter_fields_after_super_expression(
+    expression: &mut Expr,
+    assignments: &[Stmt],
+) -> bool {
+    let is_super_call = matches!(
+        expression.data.as_deref(),
+        Some(ExprData::Call(call))
+            if matches!(call.target.data.as_deref(), Some(ExprData::Super))
+    );
+    if is_super_call {
+        let loc = expression.loc;
+        let mut value = std::mem::take(expression);
+        for assignment in assignments {
+            let Some(StmtData::Expr(assignment)) = assignment.data.as_deref() else {
+                continue;
+            };
+            value = Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: value,
+                    right: assignment.value.clone(),
+                    op: OpCode::BinaryComma,
+                }),
+            );
+        }
+        *expression = Expr::new(
+            loc,
+            ExprData::Binary(BinaryExpr {
+                left: value,
+                right: Expr::new(loc, ExprData::This),
+                op: OpCode::BinaryComma,
+            }),
+        );
+        return true;
+    }
+    match expression.data.as_deref_mut() {
+        Some(ExprData::Binary(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.left, assignments)
+                | insert_parameter_fields_after_super_expression(&mut value.right, assignments)
+        }
+        Some(ExprData::If(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.test, assignments)
+                | insert_parameter_fields_after_super_expression(&mut value.yes, assignments)
+                | insert_parameter_fields_after_super_expression(&mut value.no, assignments)
+        }
+        Some(ExprData::Unary(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.value, assignments)
+        }
+        Some(ExprData::Await(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.value, assignments)
+        }
+        Some(ExprData::Yield(value)) => {
+            insert_parameter_fields_after_super_expression(&mut value.value_or_nil, assignments)
+        }
+        Some(
+            ExprData::Array(_)
+            | ExprData::Boolean(_)
+            | ExprData::Super
+            | ExprData::Null
+            | ExprData::Undefined
+            | ExprData::This
+            | ExprData::New(_)
+            | ExprData::NewTarget(_)
+            | ExprData::ImportMeta(_)
+            | ExprData::Call(_)
+            | ExprData::Dot(_)
+            | ExprData::Index(_)
+            | ExprData::Arrow(_)
+            | ExprData::Function(_)
+            | ExprData::Class(_)
+            | ExprData::Identifier(_)
+            | ExprData::ImportIdentifier(_)
+            | ExprData::PrivateIdentifier(_)
+            | ExprData::NameOfSymbol(_)
+            | ExprData::JsxElement(_)
+            | ExprData::JsxText(_)
+            | ExprData::Missing
+            | ExprData::Number(_)
+            | ExprData::BigInt(_)
+            | ExprData::Object(_)
+            | ExprData::Spread(_)
+            | ExprData::String(_)
+            | ExprData::Template(_)
+            | ExprData::RegExp(_)
+            | ExprData::InlinedEnum(_)
+            | ExprData::Annotation(_)
+            | ExprData::RequireString(_)
+            | ExprData::RequireResolveString(_)
+            | ExprData::ImportString(_)
+            | ExprData::ImportCall(_),
+        )
+        | None => false,
+    }
 }
 
 fn visit_binding_initializers(
