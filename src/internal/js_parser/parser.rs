@@ -90,6 +90,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             )
         });
         let declared_symbols = declare_top_level_symbols(&mut core, &mut statements);
+        let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
         visit_top_level_statements(&mut core, &mut statements);
         let module_scope = core
@@ -115,7 +116,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 .collect();
             parts.push(Part {
                 statements,
-                scopes: vec![module_scope.clone()],
+                scopes,
                 import_record_indices,
                 declared_symbols,
                 symbol_uses: std::mem::take(&mut core.symbol_uses),
@@ -520,5 +521,47 @@ mod tests {
             ast.symbols[usize::try_from(external_ref.inner_index).expect("symbol index")].kind,
             crate::internal::ast::SymbolKind::Unbound
         );
+    }
+
+    #[test]
+    fn records_nested_function_scope_order_and_parentage() {
+        let (ast, ok, log) =
+            parse_source("function outer(a) { return function inner(b) { return a + b } }");
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let kinds = ast.parts[1]
+            .scopes
+            .iter()
+            .map(|scope| scope.lock().expect("scope lock").kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                crate::internal::js_ast::ScopeKind::Entry,
+                crate::internal::js_ast::ScopeKind::FunctionArgs,
+                crate::internal::js_ast::ScopeKind::FunctionBody,
+                crate::internal::js_ast::ScopeKind::FunctionArgs,
+                crate::internal::js_ast::ScopeKind::FunctionBody,
+            ]
+        );
+        for index in 1..ast.parts[1].scopes.len() {
+            let parent = ast.parts[1].scopes[index]
+                .lock()
+                .expect("scope lock")
+                .parent
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .expect("nested scope parent");
+            let expected_parent = match index {
+                1 => 0,
+                2 | 3 => 1 + usize::from(index == 3),
+                4 => 3,
+                _ => unreachable!(),
+            };
+            assert!(std::sync::Arc::ptr_eq(
+                &parent,
+                &ast.parts[1].scopes[expected_parent]
+            ));
+        }
     }
 }

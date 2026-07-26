@@ -15,7 +15,7 @@ use super::{
     syntax_arrow::parse_arrow_body,
     syntax_binding::parse_binding,
     syntax_expression::parse_expression,
-    syntax_statement::parse_block,
+    syntax_statement::parse_block_with_scope,
 };
 
 pub(crate) fn parse_function_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Option<Expr> {
@@ -132,6 +132,10 @@ pub(crate) fn parse_function_tail(
     let is_async = body_context.await_policy == AwaitOrYield::AllowExpression;
     let is_generator = body_context.yield_policy == AwaitOrYield::AllowExpression;
     let open_paren_loc = lexer.loc();
+    core.push_scope_for_parse_pass(
+        crate::internal::js_ast::ScopeKind::FunctionArgs,
+        open_paren_loc,
+    );
     lexer.expect(Token::OpenParen);
 
     let old_context = core.fn_or_arrow_data_parse;
@@ -184,7 +188,12 @@ pub(crate) fn parse_function_tail(
     lexer.expect(Token::CloseParen);
 
     core.fn_or_arrow_data_parse = body_context;
-    let (body_loc, block) = parse_block(core, lexer);
+    let (body_loc, block) = parse_block_with_scope(
+        core,
+        lexer,
+        crate::internal::js_ast::ScopeKind::FunctionBody,
+    );
+    core.pop_scope();
     core.fn_or_arrow_data_parse = old_context;
 
     Function {

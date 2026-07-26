@@ -177,6 +177,13 @@ impl ParserCore {
         scope_index
     }
 
+    pub(crate) fn scope_refs_in_order(&self) -> Vec<ScopeRef> {
+        self.scopes_in_order
+            .iter()
+            .map(|order| order.scope.clone())
+            .collect()
+    }
+
     pub(crate) fn pop_scope(&mut self) {
         let current = self
             .current_scope

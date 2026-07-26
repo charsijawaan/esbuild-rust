@@ -39,6 +39,18 @@ pub(crate) fn parse_block(core: &mut ParserCore, lexer: &mut Lexer) -> (Loc, Blo
     )
 }
 
+pub(crate) fn parse_block_with_scope(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    kind: crate::internal::js_ast::ScopeKind,
+) -> (Loc, BlockStmt) {
+    let loc = lexer.loc();
+    core.push_scope_for_parse_pass(kind, loc);
+    let block = parse_block(core, lexer);
+    core.pop_scope();
+    block
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
