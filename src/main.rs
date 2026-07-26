@@ -46,6 +46,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
     let mut outbase = String::new();
     let mut format = BuildFormat::Iife;
     let mut platform = BuildPlatform::Browser;
+    let mut global_name = String::new();
     let mut splitting = false;
     let mut sourcemap = BuildSourceMap::None;
     let mut external = Vec::new();
@@ -114,6 +115,10 @@ fn run(arguments: &[String]) -> Result<Output, String> {
                 "neutral" => BuildPlatform::Neutral,
                 _ => return Err(format!("Invalid platform {value:?}")),
             };
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--global-name=") {
+            global_name = value.into();
             continue;
         }
         if let Some(value) = argument.strip_prefix("--external:") {
@@ -207,6 +212,7 @@ fn run(arguments: &[String]) -> Result<Output, String> {
             outbase,
             format,
             platform,
+            global_name,
             sourcemap,
             splitting,
             minify_whitespace: options.minify_whitespace,
@@ -319,6 +325,7 @@ fn help_text() -> String {
          \x20\x20--outbase=DIR\n\
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--platform=browser|node|neutral\n\
+         \x20\x20--global-name=NAME\n\
          \x20\x20--splitting\n\
          \x20\x20--sourcemap[=linked|external|inline|both]\n\
          \x20\x20--external:PATH\n\

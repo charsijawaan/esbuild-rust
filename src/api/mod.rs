@@ -123,6 +123,7 @@ pub struct BuildOptions {
     pub abs_working_dir: String,
     pub format: BuildFormat,
     pub platform: BuildPlatform,
+    pub global_name: String,
     pub sourcemap: BuildSourceMap,
     pub splitting: bool,
     pub minify_whitespace: bool,
@@ -318,6 +319,37 @@ pub fn build(options: BuildOptions) -> BuildResult {
             };
         }
     };
+    let global_name = if options.global_name.is_empty() {
+        Vec::new()
+    } else {
+        let (parts, ok) = js_parser::parse_global_name(
+            log.clone(),
+            Source {
+                key_path: crate::internal::logger::Path {
+                    text: "<global-name>".into(),
+                    ..crate::internal::logger::Path::default()
+                },
+                pretty_paths: PrettyPaths {
+                    abs: "<global-name>".into(),
+                    rel: "<global-name>".into(),
+                },
+                contents: Arc::from(options.global_name.as_bytes()),
+                ..Source::default()
+            },
+        );
+        if !ok {
+            let (errors, warnings) = public_messages(log.done());
+            return BuildResult {
+                errors,
+                warnings,
+                ..BuildResult::default()
+            };
+        }
+        parts
+            .into_iter()
+            .map(|part| String::from_utf8_lossy(&part).into_owned())
+            .collect()
+    };
     let output_dir = if options.outdir.is_empty() {
         file_system.cwd().to_string()
     } else if file_system.is_abs(&options.outdir) {
@@ -362,6 +394,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
         external_settings,
         external_packages: options.packages == Packages::External,
         extension_to_loader,
+        global_name,
         abs_output_dir: output_dir,
         abs_output_file: output_file,
         abs_output_base,
@@ -1051,6 +1084,43 @@ mod tests {
         assert!(output.contains("require(\"node:fs\")"));
         assert!(output.contains("readFileSync"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn assigns_iife_exports_to_a_global_name() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-global-name-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(directory.join("entry.js"), "export const value = 123")
+            .expect("write entry file");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            format: BuildFormat::Iife,
+            global_name: "My.Library".into(),
+            ..BuildOptions::default()
+        });
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("var My"));
+        assert!(output.contains("(My ||= {}).Library ="), "{output}");
+        assert!(output.contains("value: () => value"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn rejects_invalid_global_names() {
+        let result = build(BuildOptions {
+            global_name: "not/a/global".into(),
+            ..BuildOptions::default()
+        });
+        assert!(!result.errors.is_empty());
     }
 
     #[test]
