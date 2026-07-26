@@ -15,7 +15,7 @@ use crate::internal::{
 };
 
 use super::{
-    Options, lower_typescript::lower_type_script_enums, parser_core::ParserCore,
+    Options, lower_typescript::lower_type_script_statements, parser_core::ParserCore,
     parser_types::AwaitOrYield, syntax_statement::parse_statement,
     visit::visit_top_level_statements,
 };
@@ -129,7 +129,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
         visit_top_level_statements(&mut core, &mut statements);
-        statements = lower_type_script_enums(&mut core, statements);
+        statements = lower_type_script_statements(&mut core, statements);
         assert_eq!(
             core.remaining_scope_count(),
             0,
@@ -2156,36 +2156,34 @@ mod tests {
         );
         assert!(ok);
         assert!(log.done().is_empty());
-        let Some(StmtData::Namespace(tools)) = ast.parts[1].statements[0].data.as_deref() else {
-            panic!("expected namespace");
-        };
-        assert_eq!(tools.statements.len(), 3);
-        assert!(!tools.is_export);
-        assert_eq!(
-            ast.symbols[usize::try_from(tools.name.reference.inner_index).expect("symbol index")]
-                .kind,
-            crate::internal::ast::SymbolKind::TsNamespace
-        );
-        let Some(StmtData::Namespace(public)) = ast.parts[1].statements[1].data.as_deref() else {
-            panic!("expected exported namespace");
-        };
-        assert!(public.is_export);
+        assert_eq!(ast.parts[1].statements.len(), 8);
+        assert!(matches!(
+            ast.parts[1].statements[0].data.as_deref(),
+            Some(StmtData::Local(local)) if local.kind == LocalKind::Var && !local.is_export
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[2].data.as_deref(),
+            Some(StmtData::Local(local)) if local.kind == LocalKind::Var && local.is_export
+        ));
         assert!(ast.named_exports.contains_key("Public"));
-        let Some(StmtData::Namespace(outer)) = ast.parts[1].statements[2].data.as_deref() else {
-            panic!("expected dotted namespace");
-        };
-        assert!(matches!(
-            outer.statements[0].data.as_deref(),
-            Some(StmtData::Namespace(inner)) if inner.is_export
-        ));
-        assert!(matches!(
-            ast.parts[1].statements[3].data.as_deref(),
-            Some(StmtData::Expr(_))
-        ));
         assert!(matches!(
             ast.parts[1].statements[4].data.as_deref(),
+            Some(StmtData::Local(local)) if local.kind == LocalKind::Var
+        ));
+        assert!(matches!(
+            ast.parts[1].statements[6].data.as_deref(),
             Some(StmtData::Expr(_))
         ));
+        assert!(matches!(
+            ast.parts[1].statements[7].data.as_deref(),
+            Some(StmtData::Expr(_))
+        ));
+        assert!(
+            !ast.parts[1]
+                .statements
+                .iter()
+                .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Namespace(_))))
+        );
     }
 
     #[test]

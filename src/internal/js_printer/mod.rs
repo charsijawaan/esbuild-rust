@@ -1238,10 +1238,10 @@ impl Printer<'_> {
             ExprData::NewTarget(_) => self.output.extend_from_slice(b"new.target"),
             ExprData::ImportMeta(_) => self.output.extend_from_slice(b"import.meta"),
             ExprData::Identifier(identifier) => {
-                self.print_identifier(&self.renamer.name_for_symbol(identifier.reference));
+                self.print_symbol_expr(identifier.reference);
             }
             ExprData::ImportIdentifier(identifier) => {
-                self.print_identifier(&self.renamer.name_for_symbol(identifier.reference));
+                self.print_symbol_expr(identifier.reference);
             }
             ExprData::PrivateIdentifier(identifier) => {
                 self.print_identifier(&self.renamer.name_for_symbol(identifier.reference));
@@ -1671,6 +1671,26 @@ impl Printer<'_> {
             );
         } else {
             self.output.extend_from_slice(name.as_bytes());
+        }
+    }
+
+    fn print_symbol_expr(&mut self, reference: crate::internal::ast::Ref) {
+        if let Some(alias) = self.renamer.namespace_alias_for_symbol(reference) {
+            self.print_symbol_expr(alias.namespace_ref);
+            if is_identifier_es5_and_es_next(&alias.alias) {
+                self.output.push(b'.');
+                self.print_identifier(&alias.alias);
+            } else {
+                self.output.push(b'[');
+                self.output.extend(quote_utf16(
+                    &alias.alias.encode_utf16().collect::<Vec<_>>(),
+                    self.options,
+                    true,
+                ));
+                self.output.push(b']');
+            }
+        } else {
+            self.print_identifier(&self.renamer.name_for_symbol(reference));
         }
     }
 
@@ -2221,6 +2241,56 @@ mod tests {
              \x20\x20return Color;\n\
              })(Color || {});\n\
              const red = 0 /* Red */;\n"
+        );
+    }
+
+    #[test]
+    fn prints_lowered_type_script_namespaces() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"namespace Tools {\
+                    export const version = 1;\
+                    export function run() { return version; }\
+                    export namespace Nested { export class Item {} }\
+                    export enum Mode { Ready }\
+                    namespace Types { interface Hidden {} }\
+                }"
+                .as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let mut options = js_parser::Options::default();
+        options.ts.parse = true;
+        let (ast, ok) = js_parser::parse(log.clone(), source, options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        assert_eq!(
+            String::from_utf8(print(&ast, &renamer, Options::default()).js)
+                .expect("printer output is UTF-8"),
+            "var Tools;\n\
+             ((Tools) => {\n\
+             \x20\x20Tools.version = 1;\n\
+             \x20\x20function run() {\n\
+             \x20\x20\x20\x20return Tools.version;\n\
+             \x20\x20}\n\
+             \x20\x20Tools.run = run;\n\
+             \x20\x20let Nested;\n\
+             \x20\x20((Nested) => {\n\
+             \x20\x20\x20\x20class Item {\n\
+             \x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20Nested.Item = Item;\n\
+             \x20\x20})(Nested = Tools.Nested || (Tools.Nested = {}));\n\
+             \x20\x20let Mode;\n\
+             \x20\x20Mode = ((Mode) => {\n\
+             \x20\x20\x20\x20Mode[Mode[\"Ready\"] = 0] = \"Ready\";\n\
+             \x20\x20\x20\x20return Mode;\n\
+             \x20\x20})(Tools.Mode || (Tools.Mode = {}));\n\
+             })(Tools || (Tools = {}));\n"
         );
     }
 }

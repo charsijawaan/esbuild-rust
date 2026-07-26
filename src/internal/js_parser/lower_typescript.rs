@@ -1,19 +1,22 @@
 use std::collections::HashSet;
 
 use crate::internal::{
-    ast::{INVALID_REF, Ref},
+    ast::{INVALID_REF, NamespaceAlias, Ref},
     js_ast::{
-        Arg, ArrowExpr, BinaryExpr, Binding, BindingData, BlockStmt, Decl, EnumStmt, Expr,
+        Arg, ArrowExpr, BinaryExpr, Binding, BindingData, BlockStmt, Decl, DotExpr, EnumStmt, Expr,
         ExprData, ExprStmt, FunctionBody, IdentifierBinding, IdentifierExpr, IndexExpr, LocalKind,
-        LocalStmt, ObjectExpr, OpCode, PrimitiveType, ReturnStmt, Stmt, StmtData, StringExpr,
-        known_primitive_type,
+        LocalStmt, NamespaceStmt, ObjectExpr, OpCode, PrimitiveType, ReturnStmt, Stmt, StmtData,
+        StringExpr, known_primitive_type,
     },
     logger::Loc,
 };
 
 use super::parser_core::ParserCore;
 
-pub(crate) fn lower_type_script_enums(core: &mut ParserCore, statements: Vec<Stmt>) -> Vec<Stmt> {
+pub(crate) fn lower_type_script_statements(
+    core: &mut ParserCore,
+    statements: Vec<Stmt>,
+) -> Vec<Stmt> {
     let mut emitted = HashSet::new();
     let mut result = Vec::with_capacity(statements.len());
     for statement in statements {
@@ -24,12 +27,284 @@ pub(crate) fn lower_type_script_enums(core: &mut ParserCore, statements: Vec<Stm
         };
         match *data {
             StmtData::Enum(enumeration) => {
-                lower_enum(core, loc, enumeration, &mut emitted, &mut result);
+                lower_enum(core, loc, enumeration, &mut emitted, &mut result, None);
+            }
+            StmtData::Namespace(namespace) => {
+                lower_namespace(core, loc, namespace, &mut emitted, &mut result, None);
             }
             other => result.push(Stmt::new(loc, other)),
         }
     }
     result
+}
+
+fn lower_namespace(
+    core: &mut ParserCore,
+    loc: Loc,
+    namespace: NamespaceStmt,
+    emitted: &mut HashSet<Ref>,
+    result: &mut Vec<Stmt>,
+    enclosing_namespace: Option<Ref>,
+) {
+    if !namespace_has_runtime_value(&namespace.statements) {
+        return;
+    }
+    let name_ref = follow_symbols(core, namespace.name.reference);
+    if emitted.insert(name_ref) {
+        result.push(Stmt::new(
+            loc,
+            StmtData::Local(LocalStmt {
+                declarations: vec![Decl {
+                    binding: identifier_binding(namespace.name.loc, name_ref),
+                    ..Decl::default()
+                }],
+                kind: if enclosing_namespace.is_some() {
+                    LocalKind::Let
+                } else {
+                    LocalKind::Var
+                },
+                is_export: namespace.is_export && enclosing_namespace.is_none(),
+                ..LocalStmt::default()
+            }),
+        ));
+    }
+    let body = lower_namespace_body(core, namespace.argument, namespace.statements, emitted);
+    let initial_value = namespace_initial_value(
+        core,
+        namespace.name.loc,
+        name_ref,
+        namespace.is_export,
+        enclosing_namespace,
+    );
+    result.push(Stmt::new(
+        loc,
+        StmtData::Expr(ExprStmt {
+            value: namespace_iife(loc, namespace.argument, body, initial_value),
+            ..ExprStmt::default()
+        }),
+    ));
+    core.record_usage(namespace.argument);
+}
+
+fn lower_namespace_body(
+    core: &mut ParserCore,
+    argument: Ref,
+    statements: Vec<Stmt>,
+    emitted: &mut HashSet<Ref>,
+) -> Vec<Stmt> {
+    let mut result = Vec::with_capacity(statements.len());
+    for statement in statements {
+        let loc = statement.loc;
+        let Some(data) = statement.data else {
+            result.push(statement);
+            continue;
+        };
+        match *data {
+            StmtData::Local(local) if local.is_export => {
+                lower_namespace_locals(core, argument, loc, local, &mut result);
+            }
+            StmtData::Function(mut function) if function.is_export => {
+                function.is_export = false;
+                let name = function.function.name;
+                result.push(Stmt::new(loc, StmtData::Function(function)));
+                if let Some(name) = name {
+                    result.push(namespace_export_assignment(
+                        core,
+                        argument,
+                        name.loc,
+                        name.reference,
+                    ));
+                }
+            }
+            StmtData::Class(mut class) if class.is_export => {
+                class.is_export = false;
+                let name = class.class.name;
+                result.push(Stmt::new(loc, StmtData::Class(class)));
+                if let Some(name) = name {
+                    result.push(namespace_export_assignment(
+                        core,
+                        argument,
+                        name.loc,
+                        name.reference,
+                    ));
+                }
+            }
+            StmtData::Namespace(namespace) => {
+                lower_namespace(core, loc, namespace, emitted, &mut result, Some(argument));
+            }
+            StmtData::Enum(enumeration) => {
+                lower_enum(core, loc, enumeration, emitted, &mut result, Some(argument));
+            }
+            other => result.push(Stmt::new(loc, other)),
+        }
+    }
+    result
+}
+
+fn namespace_has_runtime_value(statements: &[Stmt]) -> bool {
+    statements
+        .iter()
+        .any(|statement| match statement.data.as_deref() {
+            None | Some(StmtData::Empty | StmtData::TypeScript(_) | StmtData::Comment(_)) => false,
+            Some(StmtData::Namespace(namespace)) => {
+                namespace_has_runtime_value(&namespace.statements)
+            }
+            Some(_) => true,
+        })
+}
+
+fn lower_namespace_locals(
+    core: &mut ParserCore,
+    argument: Ref,
+    loc: Loc,
+    mut local: LocalStmt,
+    result: &mut Vec<Stmt>,
+) {
+    let all_identifiers = local.declarations.iter().all(|declaration| {
+        matches!(
+            declaration.binding.data.as_deref(),
+            Some(BindingData::Identifier(_))
+        )
+    });
+    if !all_identifiers {
+        local.is_export = false;
+        result.push(Stmt::new(loc, StmtData::Local(local)));
+        return;
+    }
+    for declaration in local.declarations {
+        let Some(BindingData::Identifier(binding)) = declaration.binding.data.as_deref() else {
+            unreachable!("namespace export bindings were checked above");
+        };
+        set_namespace_alias(core, binding.reference, argument);
+        if declaration.value_or_nil.data.is_some() {
+            result.push(Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value: assign(
+                        loc,
+                        identifier(declaration.binding.loc, binding.reference),
+                        declaration.value_or_nil,
+                    ),
+                    ..ExprStmt::default()
+                }),
+            ));
+            core.record_usage(binding.reference);
+            core.record_usage(argument);
+        }
+    }
+}
+
+fn namespace_export_assignment(
+    core: &mut ParserCore,
+    argument: Ref,
+    loc: Loc,
+    reference: Ref,
+) -> Stmt {
+    let name = symbol_name(core, reference);
+    core.record_usage(argument);
+    core.record_usage(reference);
+    Stmt::new(
+        loc,
+        StmtData::Expr(ExprStmt {
+            value: assign(
+                loc,
+                dot(loc, identifier(loc, argument), name),
+                identifier(loc, reference),
+            ),
+            ..ExprStmt::default()
+        }),
+    )
+}
+
+fn set_namespace_alias(core: &mut ParserCore, reference: Ref, argument: Ref) {
+    let reference = follow_symbols(core, reference);
+    let name = core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+        .original_name
+        .clone();
+    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].namespace_alias =
+        Some(NamespaceAlias {
+            namespace_ref: argument,
+            alias: name,
+        });
+}
+
+fn namespace_initial_value(
+    core: &mut ParserCore,
+    loc: Loc,
+    name_ref: Ref,
+    is_export: bool,
+    enclosing_namespace: Option<Ref>,
+) -> Expr {
+    let target = if is_export && let Some(enclosing_namespace) = enclosing_namespace {
+        let property = dot(
+            loc,
+            identifier(loc, enclosing_namespace),
+            symbol_name(core, name_ref),
+        );
+        core.record_usage(enclosing_namespace);
+        core.record_usage(enclosing_namespace);
+        assign(
+            loc,
+            identifier(loc, name_ref),
+            Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: property.clone(),
+                    right: assign(
+                        loc,
+                        property,
+                        Expr::new(loc, ExprData::Object(ObjectExpr::default())),
+                    ),
+                    op: OpCode::BinaryLogicalOr,
+                }),
+            ),
+        )
+    } else {
+        core.record_usage(name_ref);
+        core.record_usage(name_ref);
+        Expr::new(
+            loc,
+            ExprData::Binary(BinaryExpr {
+                left: identifier(loc, name_ref),
+                right: assign(
+                    loc,
+                    identifier(loc, name_ref),
+                    Expr::new(loc, ExprData::Object(ObjectExpr::default())),
+                ),
+                op: OpCode::BinaryLogicalOr,
+            }),
+        )
+    };
+    core.record_usage(name_ref);
+    target
+}
+
+fn namespace_iife(loc: Loc, argument: Ref, body: Vec<Stmt>, initial_value: Expr) -> Expr {
+    let arrow = Expr::new(
+        loc,
+        ExprData::Arrow(ArrowExpr {
+            args: vec![Arg {
+                binding: identifier_binding(loc, argument),
+                ..Arg::default()
+            }],
+            body: FunctionBody {
+                block: BlockStmt {
+                    statements: body,
+                    ..BlockStmt::default()
+                },
+                loc,
+            },
+            ..ArrowExpr::default()
+        }),
+    );
+    Expr::new(
+        loc,
+        ExprData::Call(crate::internal::js_ast::CallExpr {
+            target: arrow,
+            args: vec![initial_value],
+            ..crate::internal::js_ast::CallExpr::default()
+        }),
+    )
 }
 
 fn lower_enum(
@@ -38,6 +313,7 @@ fn lower_enum(
     enumeration: EnumStmt,
     emitted: &mut HashSet<Ref>,
     result: &mut Vec<Stmt>,
+    enclosing_namespace: Option<Ref>,
 ) {
     let name_ref = follow_symbols(core, enumeration.name.reference);
     if emitted.insert(name_ref) {
@@ -48,8 +324,12 @@ fn lower_enum(
                     binding: identifier_binding(enumeration.name.loc, name_ref),
                     ..Decl::default()
                 }],
-                kind: LocalKind::Var,
-                is_export: enumeration.is_export,
+                kind: if enclosing_namespace.is_some() {
+                    LocalKind::Let
+                } else {
+                    LocalKind::Var
+                },
+                is_export: enumeration.is_export && enclosing_namespace.is_none(),
                 ..LocalStmt::default()
             }),
         ));
@@ -78,12 +358,22 @@ fn lower_enum(
             value: assign(
                 loc,
                 identifier(enumeration.name.loc, name_ref),
-                enum_iife(loc, name_ref, enumeration.argument, body),
+                enum_iife(
+                    loc,
+                    enumeration.argument,
+                    body,
+                    enum_initial_value(
+                        core,
+                        enumeration.name.loc,
+                        name_ref,
+                        enumeration.is_export,
+                        enclosing_namespace,
+                    ),
+                ),
             ),
             ..ExprStmt::default()
         }),
     ));
-    core.record_usage(name_ref);
     core.record_usage(name_ref);
     core.record_usage(enumeration.argument);
 }
@@ -131,7 +421,47 @@ fn lower_enum_value(argument: Ref, loc: Loc, name: Vec<u16>, value: Expr) -> Stm
     )
 }
 
-fn enum_iife(loc: Loc, name_ref: Ref, argument: Ref, body: Vec<Stmt>) -> Expr {
+fn enum_initial_value(
+    core: &mut ParserCore,
+    loc: Loc,
+    name_ref: Ref,
+    is_export: bool,
+    enclosing_namespace: Option<Ref>,
+) -> Expr {
+    if is_export && let Some(enclosing_namespace) = enclosing_namespace {
+        let property = dot(
+            loc,
+            identifier(loc, enclosing_namespace),
+            symbol_name(core, name_ref),
+        );
+        core.record_usage(enclosing_namespace);
+        core.record_usage(enclosing_namespace);
+        Expr::new(
+            loc,
+            ExprData::Binary(BinaryExpr {
+                left: property.clone(),
+                right: assign(
+                    loc,
+                    property,
+                    Expr::new(loc, ExprData::Object(ObjectExpr::default())),
+                ),
+                op: OpCode::BinaryLogicalOr,
+            }),
+        )
+    } else {
+        core.record_usage(name_ref);
+        Expr::new(
+            loc,
+            ExprData::Binary(BinaryExpr {
+                left: identifier(loc, name_ref),
+                right: Expr::new(loc, ExprData::Object(ObjectExpr::default())),
+                op: OpCode::BinaryLogicalOr,
+            }),
+        )
+    }
+}
+
+fn enum_iife(loc: Loc, argument: Ref, body: Vec<Stmt>, initial_value: Expr) -> Expr {
     let arrow = Expr::new(
         loc,
         ExprData::Arrow(ArrowExpr {
@@ -147,14 +477,6 @@ fn enum_iife(loc: Loc, name_ref: Ref, argument: Ref, body: Vec<Stmt>) -> Expr {
                 loc,
             },
             ..ArrowExpr::default()
-        }),
-    );
-    let initial_value = Expr::new(
-        loc,
-        ExprData::Binary(BinaryExpr {
-            left: identifier(loc, name_ref),
-            right: Expr::new(loc, ExprData::Object(ObjectExpr::default())),
-            op: OpCode::BinaryLogicalOr,
         }),
     );
     Expr::new(
@@ -195,6 +517,25 @@ fn identifier_binding(loc: Loc, reference: Ref) -> Binding {
             reference,
         }))),
     }
+}
+
+fn dot(loc: Loc, target: Expr, name: String) -> Expr {
+    Expr::new(
+        loc,
+        ExprData::Dot(DotExpr {
+            target,
+            name,
+            name_loc: loc,
+            ..DotExpr::default()
+        }),
+    )
+}
+
+fn symbol_name(core: &ParserCore, reference: Ref) -> String {
+    let reference = follow_symbols(core, reference);
+    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+        .original_name
+        .clone()
 }
 
 fn assign(loc: Loc, left: Expr, right: Expr) -> Expr {

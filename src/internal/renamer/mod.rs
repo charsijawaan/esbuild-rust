@@ -1,8 +1,8 @@
 //! Port of `internal/renamer`.
 
 use crate::internal::ast::{
-    DEFAULT_NAME_MINIFIER_JS, INVALID_REF, Index32, NameMinifier, Ref, SlotCounts, SlotNamespace,
-    Symbol, SymbolFlags, SymbolKind, SymbolMap,
+    DEFAULT_NAME_MINIFIER_JS, INVALID_REF, Index32, NameMinifier, NamespaceAlias, Ref, SlotCounts,
+    SlotNamespace, Symbol, SymbolFlags, SymbolKind, SymbolMap,
 };
 use crate::internal::js_ast::{ScopeRef, SymbolUse};
 use crate::internal::js_lexer::{KEYWORDS, STRICT_MODE_RESERVED_WORDS, is_keyword};
@@ -65,6 +65,10 @@ fn compute_reserved_names_for_scope(
 
 pub trait Renamer {
     fn name_for_symbol(&self, reference: Ref) -> String;
+
+    fn namespace_alias_for_symbol(&self, _reference: Ref) -> Option<NamespaceAlias> {
+        None
+    }
 }
 
 pub struct NoOpRenamer {
@@ -80,6 +84,11 @@ impl Renamer for NoOpRenamer {
     fn name_for_symbol(&self, reference: Ref) -> String {
         let reference = self.symbols.follow_symbols_const(reference);
         self.symbols.get(reference).original_name.clone()
+    }
+
+    fn namespace_alias_for_symbol(&self, reference: Ref) -> Option<NamespaceAlias> {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).namespace_alias.clone()
     }
 }
 
@@ -267,6 +276,11 @@ impl Renamer for MinifyRenamer {
             return symbol.original_name.clone();
         };
         self.slots[namespace as usize][index as usize].name.clone()
+    }
+
+    fn namespace_alias_for_symbol(&self, reference: Ref) -> Option<NamespaceAlias> {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).namespace_alias.clone()
     }
 }
 
@@ -545,6 +559,11 @@ impl Renamer for NumberRenamer {
         } else {
             name.clone()
         }
+    }
+
+    fn namespace_alias_for_symbol(&self, reference: Ref) -> Option<NamespaceAlias> {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).namespace_alias.clone()
     }
 }
 
