@@ -17,7 +17,7 @@ use super::{
     syntax_binding::parse_binding,
     syntax_class::parse_class_prefix,
     syntax_expression::{parse_expression, parse_expression_suffix},
-    syntax_function::{parse_async_prefix, parse_function_prefix},
+    syntax_function::{parse_async_statement_prefix, parse_function_declaration_prefix},
     syntax_module::{parse_export_statement, parse_import_statement},
 };
 
@@ -94,7 +94,8 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         );
     }
     if lexer.is_contextual_keyword(b"async") {
-        let expression = parse_async_prefix(core, lexer).expect("async token was checked");
+        let expression =
+            parse_async_statement_prefix(core, lexer).expect("async token was checked");
         if matches!(expression.data.as_deref(), Some(ExprData::Function(_))) {
             return function_declaration_from_expression(core, loc, expression);
         }
@@ -155,7 +156,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         }
         Token::Function => {
             let expression =
-                parse_function_prefix(core, lexer).expect("function token was checked");
+                parse_function_declaration_prefix(core, lexer).expect("function token was checked");
             function_declaration_from_expression(core, loc, expression)
         }
         Token::Class => {

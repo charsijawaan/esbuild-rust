@@ -16,7 +16,7 @@ use super::{
     parser_core::ParserCore,
     syntax_class::parse_class_prefix,
     syntax_expression::{parse_expression, parse_expression_suffix},
-    syntax_function::parse_function_prefix,
+    syntax_function::parse_function_declaration_prefix,
     syntax_import::parse_import_after_keyword,
 };
 
@@ -167,8 +167,8 @@ fn parse_export_default(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> S
     let default_loc = lexer.loc();
     lexer.expect(Token::Default);
     let value = if lexer.token == Token::Function {
-        let expression =
-            parse_function_prefix(core, lexer).expect("function token was already checked");
+        let expression = parse_function_declaration_prefix(core, lexer)
+            .expect("function token was already checked");
         let crate::internal::js_ast::ExprData::Function(function) =
             *expression.data.expect("function expression has data")
         else {

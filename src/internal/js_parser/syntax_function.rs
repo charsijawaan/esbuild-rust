@@ -19,15 +19,51 @@ use super::{
 };
 
 pub(crate) fn parse_function_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Option<Expr> {
+    parse_function_prefix_with_kind(core, lexer, false)
+}
+
+pub(crate) fn parse_function_declaration_prefix(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+) -> Option<Expr> {
+    parse_function_prefix_with_kind(core, lexer, true)
+}
+
+fn parse_function_prefix_with_kind(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    is_declaration: bool,
+) -> Option<Expr> {
     if lexer.token != Token::Function {
         return None;
     }
 
     let loc = lexer.loc();
-    Some(parse_function_after_keyword(core, lexer, loc, false))
+    Some(parse_function_after_keyword(
+        core,
+        lexer,
+        loc,
+        false,
+        is_declaration,
+    ))
 }
 
 pub(crate) fn parse_async_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Option<Expr> {
+    parse_async_prefix_with_kind(core, lexer, false)
+}
+
+pub(crate) fn parse_async_statement_prefix(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+) -> Option<Expr> {
+    parse_async_prefix_with_kind(core, lexer, true)
+}
+
+fn parse_async_prefix_with_kind(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    is_declaration: bool,
+) -> Option<Expr> {
     if lexer.token != Token::Identifier || lexer.raw() != b"async" {
         return None;
     }
@@ -36,7 +72,13 @@ pub(crate) fn parse_async_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
     let reference = core.store_name_in_ref(lexer.identifier.clone());
     lexer.next();
     if !lexer.has_newline_before && lexer.token == Token::Function {
-        return Some(parse_function_after_keyword(core, lexer, loc, true));
+        return Some(parse_function_after_keyword(
+            core,
+            lexer,
+            loc,
+            true,
+            is_declaration,
+        ));
     }
     if !lexer.has_newline_before && lexer.token == Token::Identifier {
         let arg_loc = lexer.loc();
@@ -77,6 +119,7 @@ fn parse_function_after_keyword(
     lexer: &mut Lexer,
     loc: crate::internal::logger::Loc,
     is_async: bool,
+    is_declaration: bool,
 ) -> Expr {
     lexer.expect(Token::Function);
     let is_generator = lexer.token == Token::Asterisk;
@@ -99,6 +142,7 @@ fn parse_function_after_keyword(
         core,
         lexer,
         name,
+        !is_declaration,
         FnOrArrowDataParse {
             await_policy: if is_async {
                 AwaitOrYield::AllowExpression
@@ -126,7 +170,8 @@ fn parse_function_after_keyword(
 pub(crate) fn parse_function_tail(
     core: &mut ParserCore,
     lexer: &mut Lexer,
-    name: Option<LocRef>,
+    mut name: Option<LocRef>,
+    name_is_function_expression: bool,
     body_context: FnOrArrowDataParse,
 ) -> Function {
     let is_async = body_context.await_policy == AwaitOrYield::AllowExpression;
@@ -136,6 +181,17 @@ pub(crate) fn parse_function_tail(
         crate::internal::js_ast::ScopeKind::FunctionArgs,
         open_paren_loc,
     );
+    if name_is_function_expression
+        && let Some(name) = &mut name
+        && ParserCore::is_stored_name_ref(name.reference)
+    {
+        let text = String::from_utf8_lossy(core.load_name_from_ref(name.reference)).into_owned();
+        name.reference = if text == "arguments" {
+            core.new_symbol(SymbolKind::HoistedFunction, text)
+        } else {
+            core.declare_symbol(SymbolKind::HoistedFunction, name.loc, &text)
+        };
+    }
     let arguments_ref = core.declare_symbol(SymbolKind::Arguments, open_paren_loc, "arguments");
     lexer.expect(Token::OpenParen);
 

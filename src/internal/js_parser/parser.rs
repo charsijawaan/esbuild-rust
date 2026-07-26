@@ -916,6 +916,37 @@ mod tests {
     }
 
     #[test]
+    fn named_function_expressions_have_a_private_self_binding() {
+        let (ast, ok, log) =
+            parse_source("const fn = function self(value = self) { return self(value); }; self;");
+        assert!(ok);
+        assert!(log.done().is_empty());
+
+        let args = ast.parts[1].scopes[1]
+            .lock()
+            .expect("function arguments scope");
+        let self_ref = args.members["self"].reference;
+        drop(args);
+        let Some(StmtData::Local(local)) = ast.parts[1].statements[0].data.as_deref() else {
+            panic!("expected local declaration");
+        };
+        let Some(ExprData::Function(function)) = local.declarations[0].value_or_nil.data.as_deref()
+        else {
+            panic!("expected function expression");
+        };
+        assert_eq!(
+            function.function.name.expect("function name").reference,
+            self_ref
+        );
+        assert_eq!(ast.parts[1].symbol_uses[&self_ref].count_estimate, 2);
+
+        let outer_self =
+            ast.parts[1].scopes[0].lock().expect("entry scope").members["self"].reference;
+        assert_ne!(outer_self, self_ref);
+        assert_eq!(ast.parts[1].symbol_uses[&outer_self].count_estimate, 1);
+    }
+
+    #[test]
     fn arrow_parameters_bind_without_creating_an_arguments_symbol() {
         let (ast, ok, log) =
             parse_source("let outer = 1; const fn = (outer, {x}) => outer + x + arguments;");

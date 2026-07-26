@@ -192,6 +192,7 @@ fn parse_property(
             core,
             lexer,
             None,
+            false,
             FnOrArrowDataParse {
                 await_policy: if is_async {
                     AwaitOrYield::AllowExpression
