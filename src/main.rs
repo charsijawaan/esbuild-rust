@@ -10,8 +10,8 @@ use esbuild_rs::{
     api::{
         AnalyzeMetafileOptions, BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments,
         BuildOptions, BuildPlatform, BuildSourceMap, BuildSourcesContent, BuildStdin,
-        BuildTreeShaking, FormatMessagesOptions, Loader, Message, MessageKind, Packages,
-        TransformOptions, analyze_metafile, build, format_messages, transform,
+        BuildTreeShaking, Engine, EngineName, FormatMessagesOptions, Loader, Message, MessageKind,
+        Packages, Target, TransformOptions, analyze_metafile, build, format_messages, transform,
     },
     internal::cli_helpers,
 };
@@ -341,6 +341,12 @@ fn run_with_stdin_and_node_paths(
             };
             continue;
         }
+        if let Some(value) = argument.strip_prefix("--target=") {
+            let (target, engines) = parse_targets(value, argument)?;
+            options.target = target;
+            options.engines = engines;
+            continue;
+        }
         if let Some(value) = argument.strip_prefix("--global-name=") {
             global_name = value.into();
             continue;
@@ -442,6 +448,21 @@ fn run_with_stdin_and_node_paths(
                 return Err(format!("Missing \"=\" in {argument:?}"));
             };
             defines.insert(key.into(), value.into());
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--supported:") {
+            let Some((feature, value)) = value.split_once('=') else {
+                return Err(format!("Missing \"=\" in {argument:?}"));
+            };
+            if feature.is_empty() {
+                return Err(format!("Invalid empty feature name in {argument:?}"));
+            }
+            let is_supported = match value {
+                "true" => true,
+                "false" => false,
+                _ => return Err(format!("Invalid supported setting {value:?}")),
+            };
+            options.supported.insert(feature.into(), is_supported);
             continue;
         }
         if let Some(value) = argument.strip_prefix("--pure:") {
@@ -583,6 +604,9 @@ fn run_with_stdin_and_node_paths(
             metafile: !metafile_path.is_empty() || analyze != AnalyzeMode::Disabled,
             format,
             platform,
+            target: options.target,
+            engines: options.engines,
+            supported: options.supported,
             global_name,
             public_path,
             entry_names,
@@ -785,6 +809,65 @@ fn run_with_stdin_and_node_paths(
     Ok(Output::Code(result.code))
 }
 
+fn parse_targets(value: &str, argument: &str) -> Result<(Target, Vec<Engine>), String> {
+    const ENGINES: &[(&str, EngineName)] = &[
+        ("chrome", EngineName::Chrome),
+        ("deno", EngineName::Deno),
+        ("edge", EngineName::Edge),
+        ("firefox", EngineName::Firefox),
+        ("hermes", EngineName::Hermes),
+        ("ie", EngineName::Ie),
+        ("ios", EngineName::Ios),
+        ("node", EngineName::Node),
+        ("opera", EngineName::Opera),
+        ("rhino", EngineName::Rhino),
+        ("safari", EngineName::Safari),
+    ];
+    let mut target = Target::Default;
+    let mut engines = Vec::new();
+    for value in value.split(',') {
+        if value.is_empty() {
+            return Err(format!("Invalid empty target in {argument:?}"));
+        }
+        let normalized = value.to_ascii_lowercase();
+        let es_target = match normalized.as_str() {
+            "esnext" => Some(Target::EsNext),
+            "es5" => Some(Target::Es5),
+            "es6" | "es2015" => Some(Target::Es2015),
+            "es2016" => Some(Target::Es2016),
+            "es2017" => Some(Target::Es2017),
+            "es2018" => Some(Target::Es2018),
+            "es2019" => Some(Target::Es2019),
+            "es2020" => Some(Target::Es2020),
+            "es2021" => Some(Target::Es2021),
+            "es2022" => Some(Target::Es2022),
+            "es2023" => Some(Target::Es2023),
+            "es2024" => Some(Target::Es2024),
+            "es2025" => Some(Target::Es2025),
+            _ => None,
+        };
+        if let Some(es_target) = es_target {
+            target = es_target;
+            continue;
+        }
+        if let Some((name, engine)) = ENGINES.iter().find(|(name, _)| value.starts_with(*name)) {
+            let version = &value[name.len()..];
+            if version.is_empty() {
+                return Err(format!(
+                    "Target {value:?} is missing a version number in {argument:?}"
+                ));
+            }
+            engines.push(Engine {
+                name: *engine,
+                version: version.into(),
+            });
+            continue;
+        }
+        return Err(format!("Invalid target {value:?} in {argument:?}"));
+    }
+    Ok((target, engines))
+}
+
 fn parse_loader(loader: &str) -> Result<Loader, String> {
     let loader = cli_helpers::parse_loader(loader)
         .map_err(|error| format!("{}\n\n{}", error.text, error.note))?;
@@ -822,6 +905,7 @@ fn help_text() -> String {
          \x20\x20--metafile=FILE\n\
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--platform=browser|node|neutral\n\
+         \x20\x20--target=TARGETS\n\
          \x20\x20--global-name=NAME\n\
          \x20\x20--public-path=PATH\n\
          \x20\x20--entry-names=TEMPLATE\n\
@@ -848,6 +932,7 @@ fn help_text() -> String {
          \x20\x20--loader:.EXT=LOADER\n\
          \x20\x20--out-extension:.js=.mjs\n\
          \x20\x20--define:KEY=VALUE\n\
+         \x20\x20--supported:FEATURE=true|false\n\
          \x20\x20--pure:CALL\n\
          \x20\x20--keep-names\n\
          \x20\x20--main-fields=FIELDS\n\
@@ -877,7 +962,10 @@ fn help_text() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Loader, Output, parse_loader, run, run_with_stdin, run_with_stdin_and_node_paths};
+    use super::{
+        EngineName, Loader, Output, Target, parse_loader, parse_targets, run, run_with_stdin,
+        run_with_stdin_and_node_paths,
+    };
 
     #[test]
     fn parses_loader_flags_and_file_extensions() {
@@ -887,6 +975,52 @@ mod tests {
         assert!(parse_loader("wat").is_err());
         assert!(parse_loader("file").is_err());
         assert!(parse_loader("copy").is_err());
+    }
+
+    #[test]
+    fn parses_targets_and_supported_feature_overrides() {
+        let (target, engines) =
+            parse_targets("es2018,node8,chrome90", "--target=es2018,node8,chrome90")
+                .expect("valid targets");
+        assert_eq!(target, Target::Es2018);
+        assert_eq!(engines.len(), 2);
+        assert_eq!(engines[0].name, EngineName::Node);
+        assert_eq!(engines[0].version, "8");
+        assert_eq!(engines[1].name, EngineName::Chrome);
+        assert_eq!(
+            parse_targets("ES2019", "--target=ES2019").unwrap().0,
+            Target::Es2019
+        );
+        assert_eq!(
+            parse_targets("es6", "--target=es6").unwrap().0,
+            Target::Es2015
+        );
+        for value in ["", "node", "wat1", "es2018,,node8"] {
+            assert!(parse_targets(value, &format!("--target={value}")).is_err());
+        }
+
+        let source = Some(b"try { x() } catch { y() }".as_slice());
+        let Output::Code(es2018) =
+            run_with_stdin(&["--target=es2018".into()], source).expect("ES2018 transform")
+        else {
+            panic!("expected transformed code");
+        };
+        assert!(String::from_utf8_lossy(&es2018).contains("catch (e)"));
+        let Output::Code(overridden) = run_with_stdin(
+            &[
+                "--target=es2018".into(),
+                "--supported:optional-catch-binding=true".into(),
+            ],
+            source,
+        )
+        .expect("supported override") else {
+            panic!("expected transformed code");
+        };
+        assert!(!String::from_utf8_lossy(&overridden).contains("catch (e)"));
+        assert!(
+            run_with_stdin(&["--supported:optional-catch-binding=maybe".into()], source).is_err()
+        );
+        assert!(run_with_stdin(&["--supported:optional-catch-binding".into()], source).is_err());
     }
 
     #[test]

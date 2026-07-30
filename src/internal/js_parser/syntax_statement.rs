@@ -480,6 +480,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                     catch_loc,
                 );
                 lexer.next();
+                let mut should_declare_binding = false;
                 let mut binding_or_nil = if lexer.token == Token::OpenBrace {
                     if core
                         .options
@@ -505,6 +506,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                         Binding::default()
                     }
                 } else {
+                    should_declare_binding = true;
                     lexer.expect(Token::OpenParen);
                     let binding = parse_binding(core, lexer);
                     if core.options.ts.parse {
@@ -513,7 +515,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                     lexer.expect(Token::CloseParen);
                     binding
                 };
-                if let Some(binding) = binding_or_nil.data.as_deref() {
+                if should_declare_binding && let Some(binding) = binding_or_nil.data.as_deref() {
                     let kind = if matches!(binding, BindingData::Identifier(_)) {
                         crate::internal::ast::SymbolKind::CatchIdentifier
                     } else {

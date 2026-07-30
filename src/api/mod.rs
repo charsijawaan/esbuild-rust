@@ -302,11 +302,55 @@ pub enum Loader {
     Tsx,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Target {
+    #[default]
+    Default,
+    EsNext,
+    Es5,
+    Es2015,
+    Es2016,
+    Es2017,
+    Es2018,
+    Es2019,
+    Es2020,
+    Es2021,
+    Es2022,
+    Es2023,
+    Es2024,
+    Es2025,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum EngineName {
+    #[default]
+    Chrome,
+    Deno,
+    Edge,
+    Firefox,
+    Hermes,
+    Ie,
+    Ios,
+    Node,
+    Opera,
+    Rhino,
+    Safari,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Engine {
+    pub name: EngineName,
+    pub version: String,
+}
+
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TransformOptions {
     pub sourcefile: String,
     pub loader: Loader,
+    pub target: Target,
+    pub engines: Vec<Engine>,
+    pub supported: HashMap<String, bool>,
     pub platform: BuildPlatform,
     pub jsx: BuildJsx,
     pub jsx_factory: String,
@@ -340,6 +384,9 @@ impl Default for TransformOptions {
         Self {
             sourcefile: String::new(),
             loader: Loader::default(),
+            target: Target::default(),
+            engines: Vec::new(),
+            supported: HashMap::new(),
             platform: BuildPlatform::default(),
             jsx: BuildJsx::default(),
             jsx_factory: String::new(),
@@ -609,6 +656,9 @@ pub struct BuildOptions {
     pub metafile: bool,
     pub format: BuildFormat,
     pub platform: BuildPlatform,
+    pub target: Target,
+    pub engines: Vec<Engine>,
+    pub supported: HashMap<String, bool>,
     pub global_name: String,
     pub public_path: String,
     pub entry_names: String,
@@ -672,6 +722,9 @@ impl Default for BuildOptions {
             metafile: false,
             format: BuildFormat::default(),
             platform: BuildPlatform::default(),
+            target: Target::default(),
+            engines: Vec::new(),
+            supported: HashMap::new(),
             global_name: String::new(),
             public_path: String::new(),
             entry_names: String::new(),
@@ -1506,10 +1559,208 @@ fn validate_defines(
     Arc::new(processed)
 }
 
+#[derive(Clone, Debug, Default)]
+struct ValidatedTargetFeatures {
+    unsupported_js_features: crate::internal::compat::JsFeature,
+    unsupported_css_features: crate::internal::compat::CssFeature,
+    css_prefix_data:
+        HashMap<crate::internal::css_ast::Declaration, crate::internal::compat::CssPrefix>,
+    unsupported_js_feature_overrides: crate::internal::compat::JsFeature,
+    unsupported_js_feature_overrides_mask: crate::internal::compat::JsFeature,
+    unsupported_css_feature_overrides: crate::internal::compat::CssFeature,
+    unsupported_css_feature_overrides_mask: crate::internal::compat::CssFeature,
+    original_target_environment: String,
+}
+
+const fn engine_name_to_compat(name: EngineName) -> crate::internal::compat::Engine {
+    match name {
+        EngineName::Chrome => crate::internal::compat::Engine::Chrome,
+        EngineName::Deno => crate::internal::compat::Engine::Deno,
+        EngineName::Edge => crate::internal::compat::Engine::Edge,
+        EngineName::Firefox => crate::internal::compat::Engine::Firefox,
+        EngineName::Hermes => crate::internal::compat::Engine::Hermes,
+        EngineName::Ie => crate::internal::compat::Engine::Ie,
+        EngineName::Ios => crate::internal::compat::Engine::Ios,
+        EngineName::Node => crate::internal::compat::Engine::Node,
+        EngineName::Opera => crate::internal::compat::Engine::Opera,
+        EngineName::Rhino => crate::internal::compat::Engine::Rhino,
+        EngineName::Safari => crate::internal::compat::Engine::Safari,
+    }
+}
+
+fn parse_engine_version(version: &str) -> Option<crate::internal::compat::Semver> {
+    let (numbers, pre_release) = version
+        .split_once('-')
+        .map_or((version, ""), |(numbers, suffix)| (numbers, suffix));
+    if numbers.is_empty()
+        || numbers.matches('.').count() > 2
+        || (!pre_release.is_empty()
+            && pre_release.split('.').any(|part| {
+                part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            }))
+        || (version.contains('-') && pre_release.is_empty())
+    {
+        return None;
+    }
+    let parts = numbers
+        .split('.')
+        .map(|part| {
+            (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| part.parse::<i32>().ok())
+                .flatten()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (parts.len() <= 3).then_some(crate::internal::compat::Semver {
+        parts,
+        pre_release: if pre_release.is_empty() {
+            String::new()
+        } else {
+            format!("-{pre_release}")
+        },
+    })
+}
+
+fn validate_supported_features(
+    log: &Log,
+    supported: &HashMap<String, bool>,
+) -> (
+    crate::internal::compat::JsFeature,
+    crate::internal::compat::JsFeature,
+    crate::internal::compat::CssFeature,
+    crate::internal::compat::CssFeature,
+) {
+    let mut js_overrides = crate::internal::compat::JsFeature::NONE;
+    let mut js_mask = crate::internal::compat::JsFeature::NONE;
+    let mut css_overrides = crate::internal::compat::CssFeature::NONE;
+    let mut css_mask = crate::internal::compat::CssFeature::NONE;
+    for (name, is_supported) in supported {
+        if let Some(feature) = crate::internal::compat::STRING_TO_JS_FEATURE.get(name.as_str()) {
+            js_mask |= *feature;
+            if !is_supported {
+                js_overrides |= *feature;
+            }
+        } else if let Some(feature) =
+            crate::internal::compat::STRING_TO_CSS_FEATURE.get(name.as_str())
+        {
+            css_mask |= *feature;
+            if !is_supported {
+                css_overrides |= *feature;
+            }
+        } else {
+            log.add_error(
+                None,
+                crate::internal::logger::Range::default(),
+                format!("{name:?} is not a valid feature name for the \"supported\" setting"),
+            );
+        }
+    }
+    (js_overrides, js_mask, css_overrides, css_mask)
+}
+
+fn validate_target_features(
+    log: &Log,
+    target: Target,
+    engines: &[Engine],
+    supported: &HashMap<String, bool>,
+    platform: BuildPlatform,
+) -> ValidatedTargetFeatures {
+    let mut constraints = HashMap::new();
+    let mut targets = Vec::with_capacity(engines.len() + 1);
+    let es_version = match target {
+        Target::Es5 => Some(5),
+        Target::Es2015 => Some(2015),
+        Target::Es2016 => Some(2016),
+        Target::Es2017 => Some(2017),
+        Target::Es2018 => Some(2018),
+        Target::Es2019 => Some(2019),
+        Target::Es2020 => Some(2020),
+        Target::Es2021 => Some(2021),
+        Target::Es2022 => Some(2022),
+        Target::Es2023 => Some(2023),
+        Target::Es2024 => Some(2024),
+        Target::Es2025 => Some(2025),
+        Target::Default | Target::EsNext => None,
+    };
+    if let Some(version) = es_version {
+        constraints.insert(
+            crate::internal::compat::Engine::Es,
+            crate::internal::compat::Semver {
+                parts: vec![version],
+                pre_release: String::new(),
+            },
+        );
+    }
+    for engine in engines {
+        if let Some(version) = parse_engine_version(&engine.version) {
+            constraints.insert(engine_name_to_compat(engine.name), version);
+        } else {
+            log.add_error_with_notes(
+                None,
+                crate::internal::logger::Range::default(),
+                format!("Invalid version: {:?}", engine.version),
+                vec![MsgData {
+                    text: "All version numbers passed to esbuild must be in the format \"X\", \
+                           \"X.Y\", or \"X.Y.Z\" where X, Y, and Z are non-negative integers."
+                        .into(),
+                    ..MsgData::default()
+                }],
+            );
+        }
+    }
+    for (engine, version) in &constraints {
+        targets.push(format!("{engine}{version}"));
+    }
+    if target == Target::EsNext {
+        targets.push("esnext".into());
+    }
+    targets.sort();
+
+    let (js_overrides, js_mask, css_overrides, css_mask) =
+        validate_supported_features(log, supported);
+
+    let mut internal_options = config::Options {
+        platform: match platform {
+            BuildPlatform::Default | BuildPlatform::Browser => config::Platform::Browser,
+            BuildPlatform::Node => config::Platform::Node,
+            BuildPlatform::Neutral => config::Platform::Neutral,
+        },
+        unsupported_js_features: crate::internal::compat::unsupported_js_features(&constraints)
+            .apply_overrides(js_overrides, js_mask),
+        unsupported_css_features: crate::internal::compat::unsupported_css_features(&constraints)
+            .apply_overrides(css_overrides, css_mask),
+        unsupported_js_feature_overrides: js_overrides,
+        unsupported_js_feature_overrides_mask: js_mask,
+        unsupported_css_feature_overrides: css_overrides,
+        unsupported_css_feature_overrides_mask: css_mask,
+        ..config::Options::default()
+    };
+    bundler::apply_unsupported_feature_constraints(&mut internal_options);
+    ValidatedTargetFeatures {
+        unsupported_js_features: internal_options.unsupported_js_features,
+        unsupported_css_features: internal_options.unsupported_css_features,
+        css_prefix_data: crate::internal::compat::css_prefix_data(&constraints),
+        unsupported_js_feature_overrides: internal_options.unsupported_js_feature_overrides,
+        unsupported_js_feature_overrides_mask: internal_options
+            .unsupported_js_feature_overrides_mask,
+        unsupported_css_feature_overrides: internal_options.unsupported_css_feature_overrides,
+        unsupported_css_feature_overrides_mask: internal_options
+            .unsupported_css_feature_overrides_mask,
+        original_target_environment:
+            crate::internal::helpers::string_array_to_quoted_comma_separated_string(&targets),
+    }
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn build(options: BuildOptions) -> BuildResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let target_features = validate_target_features(
+        &log,
+        options.target,
+        &options.engines,
+        &options.supported,
+        options.platform,
+    );
     let bundle = options.bundle;
     let write = options.write;
     let write_to_stdout = write && options.outdir.is_empty() && options.outfile.is_empty();
@@ -1862,6 +2113,16 @@ pub fn build(options: BuildOptions) -> BuildResult {
             BuildPlatform::Node => config::Platform::Node,
             BuildPlatform::Neutral => config::Platform::Neutral,
         },
+        original_target_environment: target_features.original_target_environment,
+        unsupported_js_features: target_features.unsupported_js_features,
+        unsupported_css_features: target_features.unsupported_css_features,
+        css_prefix_data: target_features.css_prefix_data,
+        unsupported_js_feature_overrides: target_features.unsupported_js_feature_overrides,
+        unsupported_js_feature_overrides_mask: target_features
+            .unsupported_js_feature_overrides_mask,
+        unsupported_css_feature_overrides: target_features.unsupported_css_feature_overrides,
+        unsupported_css_feature_overrides_mask: target_features
+            .unsupported_css_feature_overrides_mask,
         source_map: match options.sourcemap {
             BuildSourceMap::None => config::SourceMap::None,
             BuildSourceMap::Linked => config::SourceMap::LinkedWithComment,
@@ -2001,6 +2262,13 @@ pub fn build(options: BuildOptions) -> BuildResult {
 pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> TransformResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
     let mut options = options;
+    let target_features = validate_target_features(
+        &log,
+        options.target,
+        &options.engines,
+        &options.supported,
+        options.platform,
+    );
     if options.legal_comments == BuildLegalComments::Linked {
         return TransformResult {
             errors: vec![Message {
@@ -2064,26 +2332,26 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
     let mut printed = match options.loader {
         Loader::Css | Loader::GlobalCss | Loader::LocalCss => transform_css(&log, source, &options),
         Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None => {
-            transform_javascript(&log, source, &options)
+            transform_javascript(&log, source, &options, &target_features)
         }
         Loader::Json => TransformPrint {
-            code: transform_json(&log, source, &options),
+            code: transform_json(&log, source, &options, &target_features),
             ..TransformPrint::default()
         },
         Loader::Text => TransformPrint {
-            code: transform_text(&source, &options),
+            code: transform_text(&source, &options, &target_features),
             ..TransformPrint::default()
         },
         Loader::Base64 => TransformPrint {
-            code: transform_base64(&source, &options),
+            code: transform_base64(&source, &options, &target_features),
             ..TransformPrint::default()
         },
         Loader::Binary => TransformPrint {
-            code: transform_binary(&source, &options),
+            code: transform_binary(&source, &options, &target_features),
             ..TransformPrint::default()
         },
         Loader::DataUrl => TransformPrint {
-            code: transform_data_url(&source, &options),
+            code: transform_data_url(&source, &options, &target_features),
             ..TransformPrint::default()
         },
         Loader::Empty => TransformPrint::default(),
@@ -2252,50 +2520,92 @@ fn default_loader_for_sourcefile(sourcefile: &str) -> Option<Loader> {
     }
 }
 
-fn transform_json(log: &Log, source: Source, options: &TransformOptions) -> Vec<u8> {
-    let (expression, ok) =
-        js_parser::parse_json(log.clone(), source, js_parser::JsonOptions::default());
+fn transform_json(
+    log: &Log,
+    source: Source,
+    options: &TransformOptions,
+    target_features: &ValidatedTargetFeatures,
+) -> Vec<u8> {
+    let (expression, ok) = js_parser::parse_json(
+        log.clone(),
+        source,
+        js_parser::JsonOptions {
+            unsupported_js_features: target_features.unsupported_js_features,
+            ..js_parser::JsonOptions::default()
+        },
+    );
     if !ok {
         return Vec::new();
     }
     let renamer = new_no_op_renamer(SymbolMap::new(1));
-    let value = js_printer::print_expr(&expression, &renamer, js_printer_options(options));
+    let value = js_printer::print_expr(
+        &expression,
+        &renamer,
+        js_printer_options(options, target_features),
+    );
     export_default(value, options.minify_whitespace)
 }
 
-fn transform_text(source: &Source, options: &TransformOptions) -> Vec<u8> {
+fn transform_text(
+    source: &Source,
+    options: &TransformOptions,
+    target_features: &ValidatedTargetFeatures,
+) -> Vec<u8> {
     let contents = source
         .contents
         .strip_prefix(&[0xef, 0xbb, 0xbf])
         .unwrap_or(&source.contents);
-    export_string(contents, options)
+    export_string(contents, options, target_features)
 }
 
-fn transform_base64(source: &Source, options: &TransformOptions) -> Vec<u8> {
-    export_string(STANDARD.encode(&source.contents).as_bytes(), options)
+fn transform_base64(
+    source: &Source,
+    options: &TransformOptions,
+    target_features: &ValidatedTargetFeatures,
+) -> Vec<u8> {
+    export_string(
+        STANDARD.encode(&source.contents).as_bytes(),
+        options,
+        target_features,
+    )
 }
 
-fn transform_binary(source: &Source, options: &TransformOptions) -> Vec<u8> {
+fn transform_binary(
+    source: &Source,
+    options: &TransformOptions,
+    target_features: &ValidatedTargetFeatures,
+) -> Vec<u8> {
     let encoded = STANDARD.encode(&source.contents);
     let mut value = b"Uint8Array.fromBase64(".to_vec();
     value.extend(js_printer::quote_utf16(
         &string_to_utf16(encoded.as_bytes()),
-        js_printer_options(options),
+        js_printer_options(options, target_features),
         true,
     ));
     value.push(b')');
     export_default(value, options.minify_whitespace)
 }
 
-fn transform_data_url(source: &Source, options: &TransformOptions) -> Vec<u8> {
+fn transform_data_url(
+    source: &Source,
+    options: &TransformOptions,
+    target_features: &ValidatedTargetFeatures,
+) -> Vec<u8> {
     let mime_type = guess_mime_type(&source.pretty_paths.abs, &source.contents);
     let url = encode_string_as_shortest_data_url(&mime_type, &source.contents);
-    export_string(url.as_bytes(), options)
+    export_string(url.as_bytes(), options, target_features)
 }
 
-fn export_string(value: &[u8], options: &TransformOptions) -> Vec<u8> {
-    let quoted =
-        js_printer::quote_utf16(&string_to_utf16(value), js_printer_options(options), true);
+fn export_string(
+    value: &[u8],
+    options: &TransformOptions,
+    target_features: &ValidatedTargetFeatures,
+) -> Vec<u8> {
+    let quoted = js_printer::quote_utf16(
+        &string_to_utf16(value),
+        js_printer_options(options, target_features),
+        true,
+    );
     export_default(quoted, options.minify_whitespace)
 }
 
@@ -2310,8 +2620,12 @@ fn export_default(mut value: Vec<u8>, minify_whitespace: bool) -> Vec<u8> {
     code
 }
 
-fn js_printer_options(options: &TransformOptions) -> js_printer::Options {
+fn js_printer_options(
+    options: &TransformOptions,
+    target_features: &ValidatedTargetFeatures,
+) -> js_printer::Options {
     js_printer::Options {
+        unsupported_features: target_features.unsupported_js_features,
         line_limit: options.line_limit,
         minify_syntax: options.minify_syntax,
         minify_whitespace: options.minify_whitespace,
@@ -2359,7 +2673,12 @@ fn detect_content_type(contents: &[u8]) -> &'static str {
     }
 }
 
-fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -> TransformPrint {
+fn transform_javascript(
+    log: &Log,
+    source: Source,
+    options: &TransformOptions,
+    target_features: &ValidatedTargetFeatures,
+) -> TransformPrint {
     let line_offset_tables = (options.sourcemap != BuildSourceMap::None)
         .then(|| generate_line_offset_tables(&source.contents, 1));
     let mut parser_options = js_parser::Options::default();
@@ -2398,6 +2717,14 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
         BuildPlatform::Node => config::Platform::Node,
         BuildPlatform::Neutral => config::Platform::Neutral,
     };
+    parser_options
+        .original_target_env
+        .clone_from(&target_features.original_target_environment);
+    parser_options.unsupported_js_features = target_features.unsupported_js_features;
+    parser_options.unsupported_js_feature_overrides =
+        target_features.unsupported_js_feature_overrides;
+    parser_options.unsupported_js_feature_overrides_mask =
+        target_features.unsupported_js_feature_overrides_mask;
     parser_options.minify_syntax = options.minify_syntax;
     parser_options.minify_identifiers = options.minify_identifiers;
     parser_options.minify_whitespace = options.minify_whitespace;
@@ -2424,12 +2751,12 @@ fn transform_javascript(log: &Log, source: Source, options: &TransformOptions) -
         js_printer::print_with_source_map(
             &ast,
             &renamer,
-            js_printer_options(options),
+            js_printer_options(options, target_features),
             None,
             line_offset_tables,
         )
     } else {
-        js_printer::print(&ast, &renamer, js_printer_options(options))
+        js_printer::print(&ast, &renamer, js_printer_options(options, target_features))
     };
     let mut code = printed.js;
     let printed_len = code.len();
@@ -2646,8 +2973,8 @@ mod tests {
 
     use super::{
         BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
-        BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, Loader, Packages,
-        TransformOptions, build as build_api, transform,
+        BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, Engine, EngineName,
+        Loader, Packages, Target, TransformOptions, build as build_api, transform,
     };
 
     fn build(mut options: BuildOptions) -> super::BuildResult {
@@ -3944,6 +4271,132 @@ mod tests {
                 }
             )),
             "const f = (a) => ({ a });\n"
+        );
+    }
+
+    #[test]
+    fn validates_target_constraints_and_feature_names() {
+        let feature_log = crate::internal::logger::Log::new_defer(
+            crate::internal::logger::DeferLogKind::All,
+            HashMap::new(),
+        );
+        let validated = super::validate_target_features(
+            &feature_log,
+            Target::Es2018,
+            &[
+                Engine {
+                    name: EngineName::Node,
+                    version: "8.1".into(),
+                },
+                Engine {
+                    name: EngineName::Chrome,
+                    version: "90".into(),
+                },
+            ],
+            &HashMap::new(),
+            BuildPlatform::Browser,
+        );
+        assert_eq!(
+            validated.original_target_environment,
+            "\"chrome90\", \"es2018\", \"node8.1\""
+        );
+        assert!(feature_log.done().is_empty());
+
+        let invalid_version = transform(
+            "",
+            TransformOptions {
+                engines: vec![Engine {
+                    name: EngineName::Node,
+                    version: "1.2.3.4".into(),
+                }],
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(
+            invalid_version
+                .errors
+                .first()
+                .map(|message| message.text.as_str()),
+            Some("Invalid version: \"1.2.3.4\"")
+        );
+        let invalid_feature = transform(
+            "",
+            TransformOptions {
+                supported: HashMap::from([("Optional-Catch-Binding".into(), true)]),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(
+            invalid_feature.errors[0]
+                .text
+                .contains("not a valid feature name")
+        );
+    }
+
+    #[test]
+    fn applies_target_engines_and_supported_feature_overrides() {
+        let source = "try { x() } catch { y() }";
+        let transform_for = |target, engines, supported| {
+            transform(
+                source,
+                TransformOptions {
+                    target,
+                    engines,
+                    supported,
+                    ..TransformOptions::default()
+                },
+            )
+        };
+        assert_eq!(
+            code(transform_for(Target::Es2018, Vec::new(), HashMap::new())),
+            "try {\n  x();\n} catch (e) {\n  y();\n}\n"
+        );
+        assert_eq!(
+            code(transform_for(Target::Es2019, Vec::new(), HashMap::new())),
+            "try {\n  x();\n} catch {\n  y();\n}\n"
+        );
+        assert_eq!(
+            code(transform_for(
+                Target::Default,
+                vec![Engine {
+                    name: EngineName::Node,
+                    version: "8".into(),
+                }],
+                HashMap::new(),
+            )),
+            "try {\n  x();\n} catch (e) {\n  y();\n}\n"
+        );
+        assert_eq!(
+            code(transform_for(
+                Target::Es2018,
+                Vec::new(),
+                HashMap::from([("optional-catch-binding".into(), true)]),
+            )),
+            "try {\n  x();\n} catch {\n  y();\n}\n"
+        );
+        assert_eq!(
+            code(transform_for(
+                Target::EsNext,
+                Vec::new(),
+                HashMap::from([("optional-catch-binding".into(), false)]),
+            )),
+            "try {\n  x();\n} catch (e) {\n  y();\n}\n"
+        );
+
+        let built = build_api(BuildOptions {
+            bundle: true,
+            stdin: Some(BuildStdin {
+                contents: source.into(),
+                ..BuildStdin::default()
+            }),
+            target: Target::Es2018,
+            ..BuildOptions::default()
+        });
+        assert!(built.errors.is_empty(), "{:?}", built.errors);
+        assert!(
+            String::from_utf8_lossy(&built.output_files[0].contents).contains("catch (e)"),
+            "{}",
+            String::from_utf8_lossy(&built.output_files[0].contents)
         );
     }
 

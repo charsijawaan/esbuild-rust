@@ -1904,6 +1904,10 @@ pub fn apply_option_defaults(options: &mut Options) {
     }
     options.profiler_names = !options.minify_identifiers;
 
+    apply_unsupported_feature_constraints(options);
+}
+
+pub(crate) fn apply_unsupported_feature_constraints(options: &mut Options) {
     fix_invalid_unsupported_js_feature_overrides(
         options,
         JsFeature::ASYNC_AWAIT,
