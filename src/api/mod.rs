@@ -899,18 +899,16 @@ impl BuildContext {
                     &self.inner.cache,
                     Some(&old_hashes),
                 );
-                if result.errors.is_empty() {
-                    let latest_hashes = result
-                        .output_files
-                        .iter()
-                        .map(|output| (output.path.clone(), output.hash.clone()))
-                        .collect();
-                    self.inner
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .latest_hashes = latest_hashes;
-                }
+                let latest_hashes = result
+                    .output_files
+                    .iter()
+                    .map(|output| (output.path.clone(), output.hash.clone()))
+                    .collect();
+                self.inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .latest_hashes = latest_hashes;
                 result
             },
             || {},
@@ -2654,7 +2652,7 @@ fn build_with_output_state(
     } else {
         Vec::new()
     };
-    if write && errors.is_empty() {
+    if write && (errors.is_empty() || (previous_hashes.is_some() && !write_to_stdout)) {
         errors.extend(write_build_output_files(
             &output_files,
             write_to_stdout,
@@ -3727,6 +3725,23 @@ mod tests {
                 );
             }
         }
+
+        std::fs::write(directory.join("entry.js"), "if (").expect("introduce syntax error");
+        let failed = build_context.rebuild();
+        assert!(!failed.errors.is_empty());
+        assert!(
+            !entry_path.exists(),
+            "failed rebuild left stale output on disk"
+        );
+
+        std::fs::write(directory.join("entry.js"), "console.log('repaired')")
+            .expect("repair syntax error");
+        let recovered = build_context.rebuild();
+        assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+        assert!(
+            entry_path.exists(),
+            "recovered rebuild did not restore output"
+        );
         std::fs::remove_dir_all(directory).expect("remove context test directory");
     }
 
