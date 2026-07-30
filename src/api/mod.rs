@@ -4003,7 +4003,9 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
     };
 
     let mut printed = match options.loader {
-        Loader::Css | Loader::GlobalCss | Loader::LocalCss => transform_css(&log, source, &options),
+        Loader::Css | Loader::GlobalCss | Loader::LocalCss => {
+            transform_css(&log, source, &options, &target_features)
+        }
         Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None => {
             transform_javascript(&log, source, &options, &target_features)
         }
@@ -4550,7 +4552,12 @@ fn transform_javascript(
     }
 }
 
-fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> TransformPrint {
+fn transform_css(
+    log: &Log,
+    source: Source,
+    options: &TransformOptions,
+    target_features: &ValidatedTargetFeatures,
+) -> TransformPrint {
     let identifier_name = source.identifier_name.clone();
     let line_offset_tables = if options.sourcemap == BuildSourceMap::None {
         Vec::new()
@@ -4564,6 +4571,7 @@ fn transform_css(log: &Log, source: Source, options: &TransformOptions) -> Trans
             minify_syntax: options.minify_syntax,
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
+            unsupported_css_features: target_features.unsupported_css_features,
             symbol_mode: match options.loader {
                 Loader::LocalCss => css_parser::SymbolMode::Local,
                 Loader::GlobalCss => css_parser::SymbolMode::Global,
@@ -8803,6 +8811,36 @@ mod tests {
     }
 
     #[test]
+    fn lowers_unsupported_gradient_positions_in_css_builds() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("esbuild-rs-css-gradient-lowering-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        std::fs::write(
+            directory.join("entry.css"),
+            ".entry { background: linear-gradient(red 10% 20%, blue) }",
+        )
+        .expect("write CSS entry");
+
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.css".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            supported: HashMap::from([("gradient-double-position".into(), false)]),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        assert!(output.contains("red 10%,\n      red 20%"), "{output}");
+        assert!(!output.contains("red 10% 20%"), "{output}");
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
     fn applies_explicit_build_tsconfig() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -11117,6 +11155,37 @@ mod tests {
             )),
             "a {\n  background:\n    linear-gradient(\n      to right,\n      red,\n      green,\n      #00f);\n}\n"
         );
+    }
+
+    #[test]
+    fn lowers_unsupported_css_gradient_double_positions() {
+        let input =
+            "a { background: linear-gradient(red calc(10%) calc(20%), yellow 70% 80%, blue) }";
+        let lowered = code(transform(
+            input,
+            TransformOptions {
+                loader: Loader::Css,
+                supported: HashMap::from([("gradient-double-position".into(), false)]),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(lowered.contains("red calc(10%),"), "{lowered}");
+        assert!(lowered.contains("red calc(20%),"), "{lowered}");
+        assert!(
+            lowered.contains("yellow 70%,\n      yellow 80%"),
+            "{lowered}"
+        );
+
+        let supported = code(transform(
+            input,
+            TransformOptions {
+                loader: Loader::Css,
+                supported: HashMap::from([("gradient-double-position".into(), true)]),
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(supported.contains("red calc(10%) calc(20%)"), "{supported}");
+        assert!(supported.contains("yellow 70% 80%"), "{supported}");
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::internal::{
     ast::{CharFreq, ImportKind, ImportRecord, LocRef, Ref, Symbol, SymbolKind, SymbolMap},
+    compat::CssFeature,
     css_ast::{
         Ast, AtCharsetRule, AtImportRule, AtKeyframesRule, AtLayerRule, AtMediaRule,
         BadDeclarationRule, ClassSelector, Combinator, CommentRule, ComplexSelector, Composes,
@@ -24,6 +25,7 @@ pub struct Options {
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
     pub symbol_mode: SymbolMode,
+    pub unsupported_css_features: CssFeature,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -159,6 +161,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
         legal_comment_index: 0,
         minify_syntax: options.minify_syntax,
         minify_whitespace: options.minify_whitespace,
+        unsupported_css_features: options.unsupported_css_features,
         index: 0,
         import_records: Vec::new(),
         symbols: Vec::new(),
@@ -213,6 +216,7 @@ struct Parser {
     legal_comment_index: usize,
     minify_syntax: bool,
     minify_whitespace: bool,
+    unsupported_css_features: CssFeature,
     index: usize,
     import_records: Vec<ImportRecord>,
     symbols: Vec<Symbol>,
@@ -813,9 +817,13 @@ impl Parser {
             "container-name" => self.process_container_names(&mut value),
             _ => {}
         }
-        if self.minify_syntax {
-            minify_declaration(&key_text, &mut value, self.minify_whitespace);
-        }
+        process_declaration(
+            &key_text,
+            &mut value,
+            self.minify_syntax,
+            self.minify_whitespace,
+            self.unsupported_css_features,
+        );
         let important = take_important(&mut value);
         if !important
             && !key_text.starts_with("--")
@@ -2152,15 +2160,28 @@ struct GradientStop {
     midpoint: Option<Token>,
 }
 
-fn minify_gradient(token: &mut Token, minify_whitespace: bool) {
+fn lower_and_minify_gradient(
+    token: &mut Token,
+    minify_syntax: bool,
+    minify_whitespace: bool,
+    unsupported_css_features: CssFeature,
+) {
     let Some((kind, mut leading, mut stops)) = parse_gradient(token) else {
         return;
     };
-    for stop in &mut stops {
-        minify_single_color(std::slice::from_mut(&mut stop.color));
+    if minify_syntax {
+        for stop in &mut stops {
+            minify_single_color(std::slice::from_mut(&mut stop.color));
+        }
     }
-    merge_duplicate_gradient_stops(&mut stops);
-    remove_implied_gradient_positions(kind, &mut stops);
+    if unsupported_css_features.contains(CssFeature::GRADIENT_DOUBLE_POSITION) {
+        split_double_gradient_stops(&mut stops);
+    } else if minify_syntax {
+        merge_duplicate_gradient_stops(&mut stops);
+    }
+    if minify_syntax {
+        remove_implied_gradient_positions(kind, &mut stops);
+    }
 
     let mut children = Vec::new();
     children.append(&mut leading);
@@ -2300,6 +2321,24 @@ fn merge_duplicate_gradient_stops(stops: &mut Vec<GradientStop>) {
             result.push(stop.clone());
             position += 1;
         }
+    }
+    *stops = result;
+}
+
+fn split_double_gradient_stops(stops: &mut Vec<GradientStop>) {
+    let mut result = Vec::with_capacity(stops.len());
+    for mut stop in std::mem::take(stops) {
+        for position in &mut stop.positions {
+            position.whitespace = WhitespaceFlags::BEFORE;
+        }
+        while stop.positions.len() > 1 {
+            result.push(GradientStop {
+                color: stop.color.clone(),
+                positions: vec![stop.positions.remove(0)],
+                midpoint: None,
+            });
+        }
+        result.push(stop);
     }
     *stops = result;
 }
@@ -2610,23 +2649,41 @@ fn named_color_hex_h_z(name: &str) -> Option<&'static str> {
     })
 }
 
-fn minify_declaration(key: &str, value: &mut Vec<Token>, minify_whitespace: bool) {
-    minify_numeric_tokens(value);
+fn process_declaration(
+    key: &str,
+    value: &mut Vec<Token>,
+    minify_syntax: bool,
+    minify_whitespace: bool,
+    unsupported_css_features: CssFeature,
+) {
     let key = key.to_ascii_lowercase();
-    if is_single_color_property(&key) {
-        minify_single_color(value);
-    } else if key == "background" {
-        for token in value.iter_mut() {
-            minify_single_color(std::slice::from_mut(token));
+    if minify_syntax {
+        minify_numeric_tokens(value);
+        if is_single_color_property(&key) {
+            minify_single_color(value);
+        } else if key == "background" {
+            for token in value.iter_mut() {
+                minify_single_color(std::slice::from_mut(token));
+            }
         }
     }
-    if matches!(
-        key.as_str(),
-        "background" | "background-image" | "border-image" | "mask-image"
-    ) {
+    if (minify_syntax || unsupported_css_features.contains(CssFeature::GRADIENT_DOUBLE_POSITION))
+        && matches!(
+            key.as_str(),
+            "background" | "background-image" | "border-image" | "mask-image"
+        )
+    {
         for token in value.iter_mut() {
-            minify_gradient(token, minify_whitespace);
+            lower_and_minify_gradient(
+                token,
+                minify_syntax,
+                minify_whitespace,
+                unsupported_css_features,
+            );
         }
+    }
+    if !minify_syntax {
+        return;
     }
     if matches!(key.as_str(), "margin" | "inset") && is_box_quad(value, true)
         || key == "padding" && is_box_quad(value, false)
@@ -4609,6 +4666,7 @@ mod tests {
     use super::{Options, SymbolMode, make_dead_rule_mangler, parse};
     use crate::internal::{
         ast::{ImportKind, SymbolKind, SymbolMap},
+        compat::CssFeature,
         css_printer,
         logger::{DeferLogKind, Log, PrettyPaths, Source},
     };
@@ -4633,16 +4691,19 @@ mod tests {
         minify_syntax: bool,
         minify_whitespace: bool,
     ) -> String {
-        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
-        let tree = parse(
-            log.clone(),
-            source(contents),
+        parse_and_print_with_parser_options(
+            contents,
             Options {
                 minify_syntax,
                 minify_whitespace,
                 ..Options::default()
             },
-        );
+        )
+    }
+
+    fn parse_and_print_with_parser_options(contents: &str, options: Options) -> String {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let tree = parse(log.clone(), source(contents), options);
         assert!(log.done().is_empty());
         let mut symbols = SymbolMap::new(1);
         symbols.symbols_for_source[0] = tree.symbols.clone();
@@ -4651,13 +4712,82 @@ mod tests {
                 &tree,
                 &symbols,
                 css_printer::Options {
-                    minify_whitespace,
+                    minify_whitespace: options.minify_whitespace,
                     ..css_printer::Options::default()
                 },
             )
             .css,
         )
         .expect("CSS output is UTF-8")
+    }
+
+    #[test]
+    fn lowers_unsupported_double_position_gradient_stops() {
+        for gradient in [
+            "linear-gradient",
+            "repeating-linear-gradient",
+            "radial-gradient",
+            "repeating-radial-gradient",
+            "conic-gradient",
+            "repeating-conic-gradient",
+        ] {
+            let input = format!(
+                "a {{ background: {gradient}(green, red 10%, red 20%, yellow 70% 80%, black) }}"
+            );
+            let output = parse_and_print_with_parser_options(
+                &input,
+                Options {
+                    unsupported_css_features: CssFeature::GRADIENT_DOUBLE_POSITION,
+                    ..Options::default()
+                },
+            );
+            assert!(
+                output.contains("yellow 70%,\n      yellow 80%"),
+                "{gradient}: {output}"
+            );
+            assert!(!output.contains("yellow 70% 80%"), "{gradient}: {output}");
+        }
+    }
+
+    #[test]
+    fn lowers_gradient_positions_without_unsafe_minification() {
+        let options = Options {
+            unsupported_css_features: CssFeature::GRADIENT_DOUBLE_POSITION,
+            ..Options::default()
+        };
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { background: linear-gradient(red calc(10%) calc(20%), blue) }\
+                 b { background: linear-gradient(var(--stops)) }",
+                options,
+            ),
+            "a {\n\
+             \x20\x20background:\n\
+             \x20\x20\x20\x20linear-gradient(\n\
+             \x20\x20\x20\x20\x20\x20red calc(10%),\n\
+             \x20\x20\x20\x20\x20\x20red calc(20%),\n\
+             \x20\x20\x20\x20\x20\x20blue);\n\
+             }\n\
+             b {\n\
+             \x20\x20background: linear-gradient(var(--stops));\n\
+             }\n"
+        );
+    }
+
+    #[test]
+    fn minification_does_not_restore_unsupported_double_positions() {
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { background: linear-gradient(green, red 10%, red 20%, yellow 70% 80%, black) }",
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    unsupported_css_features: CssFeature::GRADIENT_DOUBLE_POSITION,
+                    ..Options::default()
+                },
+            ),
+            "a{background:linear-gradient(green,red 10%,red 20%,#ff0 70%,#ff0 80%,#000)}"
+        );
     }
 
     #[test]

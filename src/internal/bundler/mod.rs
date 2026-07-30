@@ -457,6 +457,7 @@ fn parse_file_with_cache(
                 minify_syntax: options.minify_syntax,
                 minify_whitespace: options.minify_whitespace,
                 minify_identifiers: options.minify_identifiers,
+                unsupported_css_features: options.unsupported_css_features,
                 symbol_mode: match loader {
                     Loader::LocalCss => css_parser::SymbolMode::Local,
                     Loader::GlobalCss => css_parser::SymbolMode::Global,

@@ -161,6 +161,33 @@ const cases = [
     },
   },
   {
+    name: "CSS gradient compatibility",
+    files: {
+      "entry.js": "import './style.css'; console.log('gradient-ok');\n",
+      "style.css":
+        ".card { background: linear-gradient(red 10% 20%, blue) }\n",
+    },
+    args: (output) => [
+      "entry.js",
+      "--bundle",
+      "--platform=node",
+      "--format=cjs",
+      "--supported:gradient-double-position=false",
+      `--outdir=${output}`,
+    ],
+    run: (output) => join(output, "entry.js"),
+    expected: "gradient-ok",
+    verify: (output) => {
+      const css = readFileSync(join(output, "entry.css"), "utf8");
+      if (!css.includes("red 10%,") || !css.includes("red 20%")) {
+        throw new Error("double-position gradient stop was not expanded");
+      }
+      if (css.includes("red 10% 20%")) {
+        throw new Error("unsupported double-position gradient syntax survived");
+      }
+    },
+  },
+  {
     name: "Source map + metafile",
     files: {
       "entry.js": "const answer = 40 + 2; console.log(answer);\n",
