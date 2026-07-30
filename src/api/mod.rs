@@ -6094,6 +6094,78 @@ mod tests {
     }
 
     #[test]
+    fn folds_and_shortens_equality_comparisons() {
+        for input in [
+            "return typeof x !== 'undefined'",
+            "return typeof x != 'undefined'",
+            "return 'undefined' !== typeof x",
+            "return 'undefined' != typeof x",
+        ] {
+            assert_eq!(
+                code(transform(
+                    input,
+                    TransformOptions {
+                        minify_syntax: true,
+                        ..TransformOptions::default()
+                    }
+                )),
+                "return typeof x < \"u\";\n",
+                "{input}"
+            );
+        }
+        for input in [
+            "return typeof x === 'undefined'",
+            "return typeof x == 'undefined'",
+            "return 'undefined' === typeof x",
+            "return 'undefined' == typeof x",
+        ] {
+            assert_eq!(
+                code(transform(
+                    input,
+                    TransformOptions {
+                        minify_syntax: true,
+                        ..TransformOptions::default()
+                    }
+                )),
+                "return typeof x > \"u\";\n",
+                "{input}"
+            );
+        }
+        for (input, expected) in [
+            ("x = 3 == 6", "x = false;\n"),
+            ("x = 3 != 6", "x = true;\n"),
+            ("x = 3 === 6", "x = false;\n"),
+            ("x = 3 !== 6", "x = true;\n"),
+        ] {
+            assert_eq!(
+                code(transform(input, TransformOptions::default())),
+                expected,
+                "{input}"
+            );
+        }
+        for (input, expected) in [
+            ("return +a === 0", "return +a == 0;\n"),
+            ("return -a === 0", "return -a === 0;\n"),
+            ("return !a === false", "return !!a;\n"),
+            ("return x == void 0", "return x == null;\n"),
+            ("return void 0 !== x", "return x !== void 0;\n"),
+            ("return (a, -1n) !== -1", "return a, -1n !== -1;\n"),
+        ] {
+            assert_eq!(
+                code(transform(
+                    input,
+                    TransformOptions {
+                        minify_syntax: true,
+                        ..TransformOptions::default()
+                    }
+                )),
+                expected,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
     fn inlines_single_use_locals_with_ordering_guards() {
         assert_eq!(
             code(transform(

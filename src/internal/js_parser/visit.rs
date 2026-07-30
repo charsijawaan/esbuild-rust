@@ -4776,6 +4776,19 @@ fn visit_expr_with_target_and_context(
             visit_expr(core, &mut binary.right, resolve_identifiers);
             core.is_control_flow_dead = old_control_flow_dead;
             keep_inferred_name(core, &mut binary.right, inferred_name);
+            if core.options.minify_syntax
+                && matches!(
+                    binary.op,
+                    OpCode::BinaryLooseEqual
+                        | OpCode::BinaryLooseNotEqual
+                        | OpCode::BinaryStrictEqual
+                        | OpCode::BinaryStrictNotEqual
+                )
+                && is_primitive_literal(binary.left.data.as_deref())
+                && !is_primitive_literal(binary.right.data.as_deref())
+            {
+                std::mem::swap(&mut binary.left, &mut binary.right);
+            }
             if (core.should_fold_type_script_constant_expressions
                 || (core.options.minify_syntax
                     && crate::internal::js_ast::should_fold_binary_operator_when_minifying(binary))
@@ -4804,6 +4817,69 @@ fn visit_expr_with_target_and_context(
                 {
                     *data = right;
                     return;
+                }
+            }
+            let equality = match binary.op {
+                OpCode::BinaryLooseEqual => {
+                    Some((crate::internal::js_ast::EqualityKind::Loose, false))
+                }
+                OpCode::BinaryLooseNotEqual => {
+                    Some((crate::internal::js_ast::EqualityKind::Loose, true))
+                }
+                OpCode::BinaryStrictEqual => {
+                    Some((crate::internal::js_ast::EqualityKind::Strict, false))
+                }
+                OpCode::BinaryStrictNotEqual => {
+                    Some((crate::internal::js_ast::EqualityKind::Strict, true))
+                }
+                _ => None,
+            };
+            if let Some((kind, negate)) = equality {
+                if let Some(equal) = crate::internal::js_ast::check_equality_if_no_side_effects(
+                    binary.left.data.as_deref(),
+                    binary.right.data.as_deref(),
+                    kind,
+                ) {
+                    *data = ExprData::Boolean(if negate { !equal } else { equal });
+                    return;
+                }
+                if core.options.minify_syntax {
+                    match binary.op {
+                        OpCode::BinaryLooseEqual | OpCode::BinaryLooseNotEqual => {
+                            if matches!(binary.left.data.as_deref(), Some(ExprData::Undefined)) {
+                                binary.left = Expr::new(binary.left.loc, ExprData::Null);
+                            } else if matches!(
+                                binary.right.data.as_deref(),
+                                Some(ExprData::Undefined)
+                            ) {
+                                binary.right = Expr::new(binary.right.loc, ExprData::Null);
+                            }
+                        }
+                        OpCode::BinaryStrictEqual | OpCode::BinaryStrictNotEqual
+                            if crate::internal::js_ast::can_change_strict_to_loose(
+                                &binary.left,
+                                &binary.right,
+                            ) =>
+                        {
+                            binary.op = if binary.op == OpCode::BinaryStrictEqual {
+                                OpCode::BinaryLooseEqual
+                            } else {
+                                OpCode::BinaryLooseNotEqual
+                            };
+                        }
+                        _ => {}
+                    }
+                    if let Some(replacement) =
+                        crate::internal::js_ast::maybe_simplify_equality_comparison(
+                            expression.loc,
+                            binary,
+                            core.options.unsupported_js_features,
+                        )
+                        && let Some(replacement) = replacement.data
+                    {
+                        *data = *replacement;
+                        return;
+                    }
                 }
             }
             if core.options.minify_syntax
