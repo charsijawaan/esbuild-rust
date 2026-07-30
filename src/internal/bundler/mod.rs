@@ -908,6 +908,50 @@ fn resolve_with_plugins(
     (result, false)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_for_plugin_api(
+    log: &Log,
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    options: &Options,
+    importer: &Path,
+    path: &str,
+    import_attributes: &logger::ImportAttributes,
+    kind: ImportKind,
+    abs_resolve_dir: &str,
+    plugin_data: Option<PluginData>,
+    raw_tsconfig: Option<&resolver::TsConfigJson>,
+) -> (Option<ResolveResult>, bool) {
+    let discovered_tsconfig =
+        if raw_tsconfig.is_none() && options.tsconfig_raw.is_empty() && !abs_resolve_dir.is_empty()
+        {
+            find_nearest_tsconfig(
+                log,
+                file_system,
+                abs_resolve_dir,
+                (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
+            )
+        } else {
+            None
+        };
+    resolve_with_plugins(
+        log,
+        file_system,
+        caches,
+        options,
+        importer,
+        path,
+        import_attributes,
+        kind,
+        abs_resolve_dir,
+        plugin_data,
+        None,
+        Range::default(),
+        raw_tsconfig.or(discovered_tsconfig.as_ref()),
+        matches!(kind, ImportKind::Require | ImportKind::RequireResolve),
+    )
+}
+
 struct LoadedFile {
     loader: Loader,
     abs_resolve_dir: String,

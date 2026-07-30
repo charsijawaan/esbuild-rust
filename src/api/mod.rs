@@ -8,7 +8,7 @@ use std::{
     fmt, fs as std_fs,
     io::{self, Write as _},
     path::{Path as FsPath, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex, RwLock, Weak},
 };
 
 use crate::internal::{
@@ -555,6 +555,20 @@ const fn public_resolve_kind(kind: ImportKind) -> ResolveKind {
     }
 }
 
+const fn internal_resolve_kind(kind: ResolveKind) -> Option<ImportKind> {
+    match kind {
+        ResolveKind::None => None,
+        ResolveKind::EntryPoint => Some(ImportKind::EntryPoint),
+        ResolveKind::ImportStatement => Some(ImportKind::Stmt),
+        ResolveKind::RequireCall => Some(ImportKind::Require),
+        ResolveKind::DynamicImport => Some(ImportKind::Dynamic),
+        ResolveKind::RequireResolve => Some(ImportKind::RequireResolve),
+        ResolveKind::CssImportRule => Some(ImportKind::At),
+        ResolveKind::CssComposesFrom => Some(ImportKind::ComposesFrom),
+        ResolveKind::CssUrlToken => Some(ImportKind::Url),
+    }
+}
+
 fn internal_plugin_message(message: Message, kind: MsgKind) -> Msg {
     Msg {
         notes: message
@@ -638,17 +652,109 @@ fn validate_plugin_paths(
         .collect()
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct PreparedPlugins {
     plugins: Vec<config::Plugin>,
     on_end: Vec<PreparedOnEnd>,
     on_dispose: Vec<OnDisposeCallback>,
+    resolve_state: Arc<Mutex<PluginResolvePhase>>,
+}
+
+impl Default for PreparedPlugins {
+    fn default() -> Self {
+        Self {
+            plugins: Vec::new(),
+            on_end: Vec::new(),
+            on_dispose: Vec::new(),
+            resolve_state: Arc::new(Mutex::new(PluginResolvePhase::Setup)),
+        }
+    }
 }
 
 #[derive(Clone)]
 struct PreparedOnEnd {
     plugin_name: String,
     callback: OnEndCallback,
+}
+
+enum PluginResolvePhase {
+    Setup,
+    Active(Arc<PluginResolveRuntime>),
+    Inactive,
+}
+
+struct PluginResolveRuntime {
+    file_system: RwLock<Arc<dyn Fs>>,
+    cache: Arc<CacheSet>,
+    options: config::Options,
+}
+
+struct PluginResolveFsGuard {
+    runtime: Arc<PluginResolveRuntime>,
+    previous: Arc<dyn Fs>,
+}
+
+impl Drop for PluginResolveFsGuard {
+    fn drop(&mut self) {
+        *self
+            .runtime
+            .file_system
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.previous.clone();
+    }
+}
+
+fn enter_plugin_resolve_fs(
+    prepared_plugins: &PreparedPlugins,
+    file_system: Arc<dyn Fs>,
+) -> Option<PluginResolveFsGuard> {
+    let runtime = {
+        let phase = prepared_plugins
+            .resolve_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*phase {
+            PluginResolvePhase::Active(runtime) => runtime.clone(),
+            PluginResolvePhase::Setup | PluginResolvePhase::Inactive => return None,
+        }
+    };
+    let previous = std::mem::replace(
+        &mut *runtime
+            .file_system
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        file_system,
+    );
+    Some(PluginResolveFsGuard { runtime, previous })
+}
+
+fn plugin_resolve_callback(
+    state: &Arc<Mutex<PluginResolvePhase>>,
+    default_plugin_name: String,
+) -> ResolveCallback {
+    let state: Weak<Mutex<PluginResolvePhase>> = Arc::downgrade(state);
+    Arc::new(move |path, options| {
+        let Some(state) = state.upgrade() else {
+            return plugin_resolve_error("Cannot call \"resolve\" on an inactive build");
+        };
+        let runtime = {
+            let phase = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &*phase {
+                PluginResolvePhase::Setup => {
+                    return plugin_resolve_error(
+                        "Cannot call \"resolve\" before plugin setup has completed",
+                    );
+                }
+                PluginResolvePhase::Active(runtime) => runtime.clone(),
+                PluginResolvePhase::Inactive => {
+                    return plugin_resolve_error("Cannot call \"resolve\" on an inactive build");
+                }
+            }
+        };
+        run_plugin_resolve(&runtime, &default_plugin_name, path, options)
+    })
 }
 
 fn prepare_plugins(
@@ -672,9 +778,11 @@ fn prepare_plugins(
             name: plugin.name.clone(),
             ..config::Plugin::default()
         };
+        let resolve = plugin_resolve_callback(&prepared_plugins.resolve_state, plugin.name.clone());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut build = PluginBuild {
                 initial_options: options,
+                resolve,
                 plugin_name: &plugin.name,
                 file_system: file_system.clone(),
                 plugin: &mut prepared,
@@ -934,6 +1042,31 @@ pub enum ResolveKind {
     CssUrlToken,
 }
 
+pub type ResolveCallback = Arc<dyn Fn(&str, ResolveOptions) -> ResolveResult + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct ResolveOptions {
+    pub plugin_name: String,
+    pub importer: String,
+    pub namespace: String,
+    pub resolve_dir: String,
+    pub kind: ResolveKind,
+    pub plugin_data: Option<PluginData>,
+    pub with: HashMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+pub struct ResolveResult {
+    pub errors: Vec<Message>,
+    pub warnings: Vec<Message>,
+    pub path: String,
+    pub external: bool,
+    pub side_effects: bool,
+    pub namespace: String,
+    pub suffix: String,
+    pub plugin_data: Option<PluginData>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SideEffects {
     #[default]
@@ -1015,6 +1148,7 @@ pub struct OnEndResult {
 
 pub struct PluginBuild<'a> {
     pub initial_options: &'a mut BuildOptions,
+    pub resolve: ResolveCallback,
     plugin_name: &'a str,
     file_system: Arc<dyn Fs>,
     plugin: &'a mut config::Plugin,
@@ -1460,7 +1594,7 @@ pub struct BuildContext {
 struct BuildContextInner {
     options: BuildOptions,
     prepared_plugins: PreparedPlugins,
-    cache: CacheSet,
+    cache: Arc<CacheSet>,
     state: Mutex<BuildContextState>,
 }
 
@@ -1690,6 +1824,7 @@ impl BuildContext {
             waiting_for_build();
             let _ = active.wait();
         }
+        deactivate_plugin_resolve(&self.inner.prepared_plugins);
         run_on_dispose_callbacks(&self.inner.prepared_plugins);
     }
 }
@@ -2829,6 +2964,229 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
     logged_errors
 }
 
+fn plugin_resolve_error(text: impl Into<String>) -> ResolveResult {
+    ResolveResult {
+        errors: vec![Message {
+            text: text.into(),
+            kind: MessageKind::Error,
+            ..Message::default()
+        }],
+        ..ResolveResult::default()
+    }
+}
+
+fn activate_plugin_resolve(
+    prepared_plugins: &PreparedPlugins,
+    options: &BuildOptions,
+    file_system: Arc<dyn Fs>,
+    cache: Arc<CacheSet>,
+) -> Result<(), Vec<Message>> {
+    let external_settings = validate_externals(file_system.as_ref(), &options.external)?;
+    let abs_node_paths = options
+        .node_paths
+        .iter()
+        .map(|path| {
+            if file_system.is_abs(path) {
+                path.clone()
+            } else {
+                file_system.join(&[file_system.cwd(), path])
+            }
+        })
+        .collect();
+    let tsconfig_path = if options.tsconfig.is_empty() {
+        String::new()
+    } else if file_system.is_abs(&options.tsconfig) {
+        options.tsconfig.clone()
+    } else {
+        file_system.join(&[file_system.cwd(), &options.tsconfig])
+    };
+    let mut resolve_options = config::Options {
+        platform: match options.platform {
+            BuildPlatform::Default | BuildPlatform::Browser => config::Platform::Browser,
+            BuildPlatform::Node => config::Platform::Node,
+            BuildPlatform::Neutral => config::Platform::Neutral,
+        },
+        extension_order: options.resolve_extensions.clone(),
+        main_fields: options.main_fields.clone(),
+        conditions: options.conditions.clone(),
+        abs_node_paths,
+        external_settings,
+        external_packages: options.packages == Packages::External,
+        package_aliases: options.alias.clone(),
+        preserve_symlinks: options.preserve_symlinks,
+        tsconfig_path,
+        tsconfig_raw: options.tsconfig_raw.clone(),
+        plugins: prepared_plugins.plugins.clone(),
+        ..config::Options::default()
+    };
+    bundler::apply_option_defaults(&mut resolve_options);
+    *prepared_plugins
+        .resolve_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        PluginResolvePhase::Active(Arc::new(PluginResolveRuntime {
+            file_system: RwLock::new(file_system),
+            cache,
+            options: resolve_options,
+        }));
+    Ok(())
+}
+
+fn deactivate_plugin_resolve(prepared_plugins: &PreparedPlugins) {
+    *prepared_plugins
+        .resolve_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = PluginResolvePhase::Inactive;
+}
+
+fn plugin_resolve_failure(
+    runtime: &PluginResolveRuntime,
+    file_system: &dyn Fs,
+    default_plugin_name: &str,
+    plugin_name: &str,
+    path: &str,
+    kind: ImportKind,
+    abs_resolve_dir: &str,
+) -> Message {
+    let plugin_name = if plugin_name.is_empty() {
+        default_plugin_name
+    } else {
+        plugin_name
+    };
+    let mut hint = String::new();
+    if resolver::is_package_path(path) && !file_system.is_abs(path) {
+        hint = format!(
+            "You can mark the path {path:?} as external to exclude it from the bundle, \
+             which will remove this error and leave the unresolved path in the bundle."
+        );
+        if kind == ImportKind::Require {
+            hint.push_str(
+                " You can also surround this \"require\" call with a try/catch block to handle \
+                 this failure at run-time instead of bundle-time.",
+            );
+        } else if kind == ImportKind::Dynamic {
+            hint.push_str(
+                " You can also add \".catch()\" here to handle this failure at run-time instead \
+                 of bundle-time.",
+            );
+        }
+    }
+    if runtime.options.platform != config::Platform::Node {
+        let package = path.strip_prefix("node:").unwrap_or(path);
+        if resolver::is_node_builtin(package) {
+            hint = format!(
+                "The package {path:?} wasn't found on the file system but is built into node. \
+                 Are you trying to bundle for node? You can use \
+                 \"platform: BuildPlatform::Node\" to do that, which will remove this error."
+            );
+        }
+    }
+    if abs_resolve_dir.is_empty() && !plugin_name.is_empty() {
+        hint = format!(
+            "The plugin {plugin_name:?} didn't set a resolve directory, so esbuild did not search \
+             for {path:?} on the file system."
+        );
+    }
+    Message {
+        text: format!("Could not resolve {path:?}"),
+        notes: (!hint.is_empty())
+            .then(|| Note {
+                text: hint,
+                ..Note::default()
+            })
+            .into_iter()
+            .collect(),
+        kind: MessageKind::Error,
+        ..Message::default()
+    }
+}
+
+fn run_plugin_resolve(
+    runtime: &PluginResolveRuntime,
+    default_plugin_name: &str,
+    path: &str,
+    options: ResolveOptions,
+) -> ResolveResult {
+    let Some(kind) = internal_resolve_kind(options.kind) else {
+        return plugin_resolve_error("Must specify \"kind\" when calling \"resolve\"");
+    };
+    let file_system = runtime
+        .file_system
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let abs_resolve_dir = if options.resolve_dir.is_empty() {
+        String::new()
+    } else {
+        let Some(path) = file_system.abs(&options.resolve_dir) else {
+            return plugin_resolve_error(format!(
+                "Invalid resolve directory: {}",
+                options.resolve_dir
+            ));
+        };
+        path
+    };
+    let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let raw_tsconfig = if runtime.options.tsconfig_raw.is_empty() {
+        None
+    } else {
+        parse_tsconfig_raw(
+            &log,
+            file_system.as_ref(),
+            file_system.cwd(),
+            &runtime.options.tsconfig_raw,
+        )
+    };
+    let importer = Path {
+        text: options.importer,
+        namespace: options.namespace,
+        ..Path::default()
+    };
+    let attributes = crate::internal::logger::ImportAttributes::encode(&options.with);
+    let (resolved, _) = bundler::resolve_for_plugin_api(
+        &log,
+        file_system.as_ref(),
+        runtime.cache.as_ref(),
+        &runtime.options,
+        &importer,
+        path,
+        &attributes,
+        kind,
+        &abs_resolve_dir,
+        options.plugin_data,
+        raw_tsconfig.as_ref(),
+    );
+    let (mut errors, warnings) = public_messages(log.done());
+    let Some(resolved) = resolved else {
+        if errors.is_empty() {
+            errors.push(plugin_resolve_failure(
+                runtime,
+                file_system.as_ref(),
+                default_plugin_name,
+                &options.plugin_name,
+                path,
+                kind,
+                &abs_resolve_dir,
+            ));
+        }
+        return ResolveResult {
+            errors,
+            warnings,
+            ..ResolveResult::default()
+        };
+    };
+    ResolveResult {
+        errors,
+        warnings,
+        path: resolved.path_pair.primary.text,
+        external: resolved.path_pair.is_external,
+        side_effects: resolved.primary_side_effects_data.is_none(),
+        namespace: resolved.path_pair.primary.namespace,
+        suffix: resolved.path_pair.primary.ignored_suffix,
+        plugin_data: resolved.plugin_data,
+    }
+}
+
 /// Creates a reusable build context without resolving or parsing entry points.
 ///
 /// # Errors
@@ -2858,11 +3216,17 @@ pub fn context(mut options: BuildOptions) -> Result<BuildContext, ContextError> 
         return Err(ContextError { errors });
     }
     options.abs_working_dir = file_system.cwd().to_string();
+    let cache = Arc::new(CacheSet::default());
+    if let Err(errors) =
+        activate_plugin_resolve(&prepared_plugins, &options, file_system, cache.clone())
+    {
+        return Err(ContextError { errors });
+    }
     Ok(BuildContext {
         inner: Arc::new(BuildContextInner {
             options,
             prepared_plugins,
-            cache: CacheSet::default(),
+            cache,
             state: Mutex::new(BuildContextState::default()),
         }),
     })
@@ -2870,10 +3234,10 @@ pub fn context(mut options: BuildOptions) -> Result<BuildContext, ContextError> 
 
 #[must_use]
 pub fn build(options: BuildOptions) -> BuildResult {
-    build_with_cache(options, &CacheSet::default())
+    build_with_cache(options, &Arc::new(CacheSet::default()))
 }
 
-fn build_with_cache(options: BuildOptions, cache: &CacheSet) -> BuildResult {
+fn build_with_cache(options: BuildOptions, cache: &Arc<CacheSet>) -> BuildResult {
     let mut options = options;
     let abs_working_dir = options.abs_working_dir.clone();
     let file_system: Arc<dyn Fs> = match real_fs(RealFsOptions {
@@ -2904,7 +3268,17 @@ fn build_with_cache(options: BuildOptions, cache: &CacheSet) -> BuildResult {
         };
     }
     options.abs_working_dir = file_system.cwd().to_string();
-    let (result, _) = build_with_output_state(options, cache, &prepared_plugins, None, None);
+    if let Err(errors) =
+        activate_plugin_resolve(&prepared_plugins, &options, file_system, cache.clone())
+    {
+        return BuildResult {
+            errors,
+            ..BuildResult::default()
+        };
+    }
+    let (result, _) =
+        build_with_output_state(options, cache.as_ref(), &prepared_plugins, None, None);
+    deactivate_plugin_resolve(&prepared_plugins);
     run_on_dispose_callbacks(&prepared_plugins);
     result
 }
@@ -2952,12 +3326,12 @@ fn build_with_output_state_core(
     let write = options.write;
     let write_to_stdout = write && options.outdir.is_empty() && options.outfile.is_empty();
     let allow_overwrite = options.allow_overwrite;
-    let file_system = match real_fs(RealFsOptions {
+    let file_system: Arc<dyn Fs> = match real_fs(RealFsOptions {
         abs_working_dir: options.abs_working_dir.clone(),
         want_watch_data: watch_data_sink.is_some(),
         ..RealFsOptions::default()
     }) {
-        Ok(file_system) => file_system,
+        Ok(file_system) => file_system.into(),
         Err(error) => {
             return BuildResult {
                 errors: vec![Message {
@@ -2969,6 +3343,7 @@ fn build_with_output_state_core(
             };
         }
     };
+    let _plugin_resolve_fs_guard = enter_plugin_resolve_fs(prepared_plugins, file_system.clone());
     let _watch_data_recorder = watch_data_sink.map(|sink| WatchDataRecorder {
         file_system: file_system.as_ref(),
         sink,
@@ -4429,6 +4804,266 @@ mod tests {
     }
 
     #[test]
+    fn public_plugin_resolve_enforces_setup_kind_and_build_lifetimes() {
+        let retained_resolve = Arc::new(Mutex::new(None::<super::ResolveCallback>));
+        let plugin = Plugin::new("resolve-lifecycle", {
+            let retained_resolve = retained_resolve.clone();
+            move |plugin_build| {
+                let early = (plugin_build.resolve)(
+                    "early",
+                    super::ResolveOptions {
+                        kind: ResolveKind::EntryPoint,
+                        ..super::ResolveOptions::default()
+                    },
+                );
+                assert_eq!(early.errors.len(), 1);
+                assert_eq!(
+                    early.errors[0].text,
+                    "Cannot call \"resolve\" before plugin setup has completed"
+                );
+                let resolve = plugin_build.resolve.clone();
+                *retained_resolve
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolve.clone());
+                plugin_build.on_start(move || {
+                    let bad_kind = resolve("bad-kind", super::ResolveOptions::default());
+                    assert_eq!(bad_kind.errors.len(), 1);
+                    assert_eq!(
+                        bad_kind.errors[0].text,
+                        "Must specify \"kind\" when calling \"resolve\""
+                    );
+                    let missing = resolve(
+                        "missing-package",
+                        super::ResolveOptions {
+                            plugin_name: "override-name".into(),
+                            kind: ResolveKind::ImportStatement,
+                            ..super::ResolveOptions::default()
+                        },
+                    );
+                    assert_eq!(missing.errors.len(), 1);
+                    assert!(missing.errors[0].plugin_name.is_empty());
+                    assert_eq!(missing.errors[0].notes.len(), 1);
+                    assert_eq!(
+                        missing.errors[0].notes[0].text,
+                        "The plugin \"override-name\" didn't set a resolve directory, so esbuild \
+                         did not search for \"missing-package\" on the file system."
+                    );
+                    Ok(super::OnStartResult::default())
+                });
+                Ok(())
+            }
+        });
+        let result = build_api(BuildOptions {
+            plugins: vec![plugin],
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let inactive = retained_resolve
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .expect("capture resolve callback")(
+            "late",
+            super::ResolveOptions {
+                kind: ResolveKind::EntryPoint,
+                ..super::ResolveOptions::default()
+            },
+        );
+        assert_eq!(inactive.errors.len(), 1);
+        assert_eq!(
+            inactive.errors[0].text,
+            "Cannot call \"resolve\" on an inactive build"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn public_plugin_resolve_runs_builtin_and_nested_plugin_resolution() {
+        let directory = context_test_directory("plugin-resolve");
+        let source_directory = directory.join("src");
+        std::fs::create_dir_all(&source_directory).expect("create resolve source directory");
+        let input_path = source_directory.join("input.js");
+        std::fs::write(&input_path, "console.log(123)").expect("write resolve input");
+        std::fs::write(source_directory.join("dep.custom"), "export default 1")
+            .expect("write custom-extension dependency");
+        let input_plugin_data: super::PluginData = Arc::new("input-data".to_string());
+        let output_plugin_data: super::PluginData = Arc::new("output-data".to_string());
+        let saw_nested = Arc::new(AtomicBool::new(false));
+        let plugin = Plugin::new("resolve-chain", {
+            let directory = directory.clone();
+            let source_directory = source_directory.clone();
+            let input_path = input_path.clone();
+            let input_plugin_data = input_plugin_data.clone();
+            let output_plugin_data = output_plugin_data.clone();
+            let saw_nested = saw_nested.clone();
+            move |plugin_build| {
+                plugin_build.initial_options.resolve_extensions = vec![".custom".into()];
+                plugin_build
+                    .initial_options
+                    .external
+                    .push("external-pkg".into());
+                let resolve = plugin_build.resolve.clone();
+                plugin_build.on_start({
+                    let resolve = resolve.clone();
+                    let source_directory = source_directory.clone();
+                    let expected = std::fs::canonicalize(source_directory.join("dep.custom"))
+                        .expect("canonicalize custom-extension dependency");
+                    move || {
+                        let result = resolve(
+                            "./dep",
+                            super::ResolveOptions {
+                                resolve_dir: source_directory.to_string_lossy().into_owned(),
+                                kind: ResolveKind::ImportStatement,
+                                ..super::ResolveOptions::default()
+                            },
+                        );
+                        assert!(result.errors.is_empty(), "{:?}", result.errors);
+                        assert_eq!(std::path::Path::new(&result.path), expected);
+                        assert_eq!(result.namespace, "file");
+                        assert!(result.side_effects);
+                        let external = resolve(
+                            "external-pkg",
+                            super::ResolveOptions {
+                                resolve_dir: source_directory.to_string_lossy().into_owned(),
+                                kind: ResolveKind::ImportStatement,
+                                ..super::ResolveOptions::default()
+                            },
+                        );
+                        assert!(external.errors.is_empty(), "{:?}", external.errors);
+                        assert_eq!(external.path, "external-pkg");
+                        assert!(external.external);
+                        let missing = resolve(
+                            "./missing",
+                            super::ResolveOptions {
+                                resolve_dir: source_directory.to_string_lossy().into_owned(),
+                                kind: ResolveKind::ImportStatement,
+                                ..super::ResolveOptions::default()
+                            },
+                        );
+                        assert_eq!(missing.errors.len(), 1);
+                        assert_eq!(missing.errors[0].text, "Could not resolve \"./missing\"");
+                        Ok(super::OnStartResult::default())
+                    }
+                });
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^entry$".into(),
+                        ..OnResolveOptions::default()
+                    },
+                    {
+                        let resolve = resolve.clone();
+                        let directory = directory.clone();
+                        let input_path = input_path.clone();
+                        let input_plugin_data = input_plugin_data.clone();
+                        move |_| {
+                            let result = resolve(
+                                "foo",
+                                super::ResolveOptions {
+                                    importer: "foo-importer".into(),
+                                    namespace: "foo-namespace".into(),
+                                    resolve_dir: "foo-resolve-dir".into(),
+                                    kind: ResolveKind::DynamicImport,
+                                    plugin_data: Some(input_plugin_data.clone()),
+                                    with: HashMap::from([("type".into(), "custom".into())]),
+                                    ..super::ResolveOptions::default()
+                                },
+                            );
+                            assert!(result.errors.is_empty(), "{:?}", result.errors);
+                            assert_eq!(std::path::Path::new(&result.path), input_path);
+                            assert_eq!(result.namespace, "file");
+                            assert_eq!(result.suffix, "?nested");
+                            assert!(!result.external);
+                            assert!(!result.side_effects);
+                            assert_eq!(result.warnings.len(), 1);
+                            let data = result
+                                .plugin_data
+                                .as_deref()
+                                .and_then(|value| value.downcast_ref::<String>());
+                            assert_eq!(data.map(String::as_str), Some("output-data"));
+                            Ok(OnResolveResult {
+                                path: result.path,
+                                external: result.external,
+                                side_effects: if result.side_effects {
+                                    SideEffects::True
+                                } else {
+                                    SideEffects::False
+                                },
+                                namespace: result.namespace,
+                                suffix: result.suffix,
+                                plugin_data: result.plugin_data,
+                                warnings: result.warnings,
+                                watch_dirs: vec![directory.to_string_lossy().into_owned()],
+                                ..OnResolveResult::default()
+                            })
+                        }
+                    },
+                );
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^foo$".into(),
+                        ..OnResolveOptions::default()
+                    },
+                    {
+                        let directory = directory.clone();
+                        let input_path = input_path.clone();
+                        let output_plugin_data = output_plugin_data.clone();
+                        let saw_nested = saw_nested.clone();
+                        move |args| {
+                            let data = args
+                                .plugin_data
+                                .as_deref()
+                                .and_then(|value| value.downcast_ref::<String>());
+                            assert_eq!(args.importer, "foo-importer");
+                            assert_eq!(args.namespace, "foo-namespace");
+                            assert_eq!(
+                                args.resolve_dir,
+                                std::fs::canonicalize(&directory)
+                                    .expect("canonicalize resolve working directory")
+                                    .join("foo-resolve-dir")
+                                    .to_string_lossy()
+                                    .into_owned()
+                            );
+                            assert_eq!(args.kind, ResolveKind::DynamicImport);
+                            assert_eq!(args.with.get("type").map(String::as_str), Some("custom"));
+                            assert_eq!(data.map(String::as_str), Some("input-data"));
+                            saw_nested.store(true, Ordering::SeqCst);
+                            Ok(OnResolveResult {
+                                path: input_path.to_string_lossy().into_owned(),
+                                suffix: "?nested".into(),
+                                side_effects: SideEffects::False,
+                                plugin_data: Some(output_plugin_data.clone()),
+                                warnings: vec![super::Message {
+                                    text: "nested warning".into(),
+                                    ..super::Message::default()
+                                }],
+                                ..OnResolveResult::default()
+                            })
+                        }
+                    },
+                );
+                Ok(())
+            }
+        });
+
+        let result = build_api(BuildOptions {
+            bundle: true,
+            entry_points: vec!["entry".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![plugin],
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(saw_nested.load(Ordering::SeqCst));
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].text, "nested warning");
+        assert_eq!(result.output_files.len(), 1);
+        assert!(String::from_utf8_lossy(&result.output_files[0].contents).contains("123"));
+        std::fs::remove_dir_all(directory).expect("remove plugin resolve directory");
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn public_plugin_lifecycle_hooks_run_for_each_rebuild_and_dispose_once() {
         let directory = context_test_directory("plugin-lifecycle");
@@ -4962,6 +5597,75 @@ mod tests {
 
         build_context.dispose();
         std::fs::remove_dir_all(directory).expect("remove plugin watch directory");
+    }
+
+    #[test]
+    fn public_plugin_nested_resolve_watch_paths_trigger_rebuilds() {
+        let directory = context_test_directory("plugin-resolve-watch");
+        std::fs::write(directory.join("entry.js"), "console.log('entry')")
+            .expect("write resolve-watch entry");
+        let watched_path = directory.join("resolve-watch.txt");
+        std::fs::write(&watched_path, "first").expect("write nested resolve watch file");
+        let start_count = Arc::new(AtomicUsize::new(0));
+        let plugin = Plugin::new("resolve-watch", {
+            let start_count = start_count.clone();
+            move |plugin_build| {
+                let resolve = plugin_build.resolve.clone();
+                plugin_build.on_start({
+                    let start_count = start_count.clone();
+                    move || {
+                        start_count.fetch_add(1, Ordering::SeqCst);
+                        let result = resolve(
+                            "watch-dependency",
+                            super::ResolveOptions {
+                                kind: ResolveKind::ImportStatement,
+                                ..super::ResolveOptions::default()
+                            },
+                        );
+                        assert!(result.errors.is_empty(), "{:?}", result.errors);
+                        assert!(result.external);
+                        Ok(super::OnStartResult::default())
+                    }
+                });
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^watch-dependency$".into(),
+                        ..OnResolveOptions::default()
+                    },
+                    |_| {
+                        Ok(OnResolveResult {
+                            path: "watch-dependency".into(),
+                            external: true,
+                            watch_files: vec!["resolve-watch.txt".into()],
+                            ..OnResolveResult::default()
+                        })
+                    },
+                );
+                Ok(())
+            }
+        });
+        let build_context = context(BuildOptions {
+            bundle: true,
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![plugin],
+            ..BuildOptions::default()
+        })
+        .expect("create nested resolve watch context");
+        build_context
+            .watch(WatchOptions::default())
+            .expect("enable nested resolve watch");
+        wait_for_context_change("initial nested resolve watch build", || {
+            start_count.load(Ordering::SeqCst) >= 1
+        });
+        std::fs::write(&watched_path, "second").expect("edit nested resolve watch file");
+        wait_for_context_change("nested resolve watch rebuild", || {
+            start_count.load(Ordering::SeqCst) >= 2
+        });
+
+        build_context.dispose();
+        std::fs::remove_dir_all(directory).expect("remove nested resolve watch directory");
     }
 
     #[test]
