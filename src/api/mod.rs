@@ -12,7 +12,9 @@ use std::{
 };
 
 use crate::internal::{
-    ast::{DEFAULT_NAME_MINIFIER_CSS, DEFAULT_NAME_MINIFIER_JS, Ref, SymbolKind, SymbolMap},
+    ast::{
+        DEFAULT_NAME_MINIFIER_CSS, DEFAULT_NAME_MINIFIER_JS, ImportKind, Ref, SymbolKind, SymbolMap,
+    },
     bundler,
     cache::CacheSet,
     config::{self, Mode},
@@ -540,6 +542,143 @@ fn internal_location(location: Location) -> MsgLocation {
     }
 }
 
+const fn public_resolve_kind(kind: ImportKind) -> ResolveKind {
+    match kind {
+        ImportKind::EntryPoint => ResolveKind::EntryPoint,
+        ImportKind::Stmt => ResolveKind::ImportStatement,
+        ImportKind::Require => ResolveKind::RequireCall,
+        ImportKind::Dynamic => ResolveKind::DynamicImport,
+        ImportKind::RequireResolve => ResolveKind::RequireResolve,
+        ImportKind::At => ResolveKind::CssImportRule,
+        ImportKind::ComposesFrom => ResolveKind::CssComposesFrom,
+        ImportKind::Url => ResolveKind::CssUrlToken,
+    }
+}
+
+fn internal_plugin_message(message: Message, kind: MsgKind) -> Msg {
+    Msg {
+        notes: message
+            .notes
+            .into_iter()
+            .map(|note| MsgData {
+                text: note.text,
+                location: note.location.map(internal_location),
+                ..MsgData::default()
+            })
+            .collect(),
+        plugin_name: message.plugin_name,
+        data: MsgData {
+            user_detail: message.detail,
+            location: message.location.map(internal_location),
+            text: message.text,
+            ..MsgData::default()
+        },
+        kind,
+        id: string_to_maximum_msg_id(&message.id),
+    }
+}
+
+fn internal_plugin_messages(errors: Vec<Message>, warnings: Vec<Message>) -> Vec<Msg> {
+    errors
+        .into_iter()
+        .map(|message| internal_plugin_message(message, MsgKind::Error))
+        .chain(
+            warnings
+                .into_iter()
+                .map(|message| internal_plugin_message(message, MsgKind::Warning)),
+        )
+        .collect()
+}
+
+fn plugin_setup_error(plugin_name: &str, text: impl Into<String>) -> Message {
+    Message {
+        plugin_name: plugin_name.to_string(),
+        text: text.into(),
+        kind: MessageKind::Error,
+        ..Message::default()
+    }
+}
+
+fn validate_plugin_path(
+    file_system: &dyn Fs,
+    plugin_name: &str,
+    path: &str,
+    kind: &str,
+    messages: &mut Vec<Msg>,
+) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    if let Some(path) = file_system.abs(path) {
+        return path;
+    }
+    messages.push(Msg {
+        plugin_name: plugin_name.to_string(),
+        ..Msg::new(
+            MsgKind::Error,
+            format!("Invalid {kind} path for plugin {plugin_name:?}: {path}"),
+        )
+    });
+    String::new()
+}
+
+fn validate_plugin_paths(
+    file_system: &dyn Fs,
+    plugin_name: &str,
+    paths: Vec<String>,
+    kind: &str,
+    messages: &mut Vec<Msg>,
+) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let absolute = validate_plugin_path(file_system, plugin_name, &path, kind, messages);
+            (!absolute.is_empty()).then_some(absolute)
+        })
+        .collect()
+}
+
+fn prepare_plugins(
+    options: &mut BuildOptions,
+    file_system: &Arc<dyn Fs>,
+) -> (Vec<config::Plugin>, Vec<Message>) {
+    let declared_plugins = options.plugins.clone();
+    let mut prepared_plugins = Vec::with_capacity(declared_plugins.len());
+    let mut errors = Vec::new();
+    for (index, plugin) in declared_plugins.into_iter().enumerate() {
+        if plugin.name.is_empty() {
+            errors.push(build_option_error(format!(
+                "Plugin at index {index} is missing a name"
+            )));
+            continue;
+        }
+        let mut prepared = config::Plugin {
+            name: plugin.name.clone(),
+            ..config::Plugin::default()
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut build = PluginBuild {
+                initial_options: options,
+                plugin_name: &plugin.name,
+                file_system: file_system.clone(),
+                plugin: &mut prepared,
+                errors: &mut errors,
+            };
+            (plugin.setup)(&mut build)
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => errors.push(plugin_setup_error(&plugin.name, error.message)),
+            Err(_) => errors.push(plugin_setup_error(
+                &plugin.name,
+                "Plugin setup callback panicked",
+            )),
+        }
+        prepared_plugins.push(prepared);
+    }
+    (prepared_plugins, errors)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TransformResult {
     pub errors: Vec<Message>,
@@ -643,6 +782,355 @@ pub enum BuildJsx {
     Automatic,
 }
 
+pub type PluginData = Arc<dyn Any + Send + Sync>;
+pub type PluginSetupCallback =
+    Arc<dyn for<'a> Fn(&mut PluginBuild<'a>) -> Result<(), PluginError> + Send + Sync>;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PluginError {
+    pub message: String,
+}
+
+impl PluginError {
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for PluginError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PluginError {}
+
+impl From<String> for PluginError {
+    fn from(message: String) -> Self {
+        Self { message }
+    }
+}
+
+impl From<&str> for PluginError {
+    fn from(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Plugin {
+    pub name: String,
+    pub setup: PluginSetupCallback,
+}
+
+impl Plugin {
+    #[must_use]
+    pub fn new<F>(name: impl Into<String>, setup: F) -> Self
+    where
+        F: for<'a> Fn(&mut PluginBuild<'a>) -> Result<(), PluginError> + Send + Sync + 'static,
+    {
+        Self {
+            name: name.into(),
+            setup: Arc::new(setup),
+        }
+    }
+}
+
+impl fmt::Debug for Plugin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Plugin")
+            .field("name", &self.name)
+            .field("setup", &"<callback>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResolveKind {
+    #[default]
+    None,
+    EntryPoint,
+    ImportStatement,
+    RequireCall,
+    DynamicImport,
+    RequireResolve,
+    CssImportRule,
+    CssComposesFrom,
+    CssUrlToken,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SideEffects {
+    #[default]
+    True,
+    False,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OnResolveOptions {
+    pub filter: String,
+    pub namespace: String,
+}
+
+#[derive(Clone, Default)]
+pub struct OnResolveArgs {
+    pub path: String,
+    pub importer: String,
+    pub namespace: String,
+    pub resolve_dir: String,
+    pub kind: ResolveKind,
+    pub plugin_data: Option<PluginData>,
+    pub with: HashMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+pub struct OnResolveResult {
+    pub plugin_name: String,
+    pub errors: Vec<Message>,
+    pub warnings: Vec<Message>,
+    pub path: String,
+    pub external: bool,
+    pub side_effects: SideEffects,
+    pub namespace: String,
+    pub suffix: String,
+    pub plugin_data: Option<PluginData>,
+    pub watch_files: Vec<String>,
+    pub watch_dirs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OnLoadOptions {
+    pub filter: String,
+    pub namespace: String,
+}
+
+#[derive(Clone, Default)]
+pub struct OnLoadArgs {
+    pub path: String,
+    pub namespace: String,
+    pub suffix: String,
+    pub plugin_data: Option<PluginData>,
+    pub with: HashMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+pub struct OnLoadResult {
+    pub plugin_name: String,
+    pub errors: Vec<Message>,
+    pub warnings: Vec<Message>,
+    pub contents: Option<String>,
+    pub resolve_dir: String,
+    pub loader: Loader,
+    pub plugin_data: Option<PluginData>,
+    pub watch_files: Vec<String>,
+    pub watch_dirs: Vec<String>,
+}
+
+pub struct PluginBuild<'a> {
+    pub initial_options: &'a mut BuildOptions,
+    plugin_name: &'a str,
+    file_system: Arc<dyn Fs>,
+    plugin: &'a mut config::Plugin,
+    errors: &'a mut Vec<Message>,
+}
+
+impl PluginBuild<'_> {
+    #[allow(clippy::too_many_lines)]
+    pub fn on_resolve<F>(&mut self, options: OnResolveOptions, callback: F)
+    where
+        F: Fn(OnResolveArgs) -> Result<OnResolveResult, PluginError> + Send + Sync + 'static,
+    {
+        let filter =
+            match config::compile_filter_for_plugin(self.plugin_name, "OnResolve", &options.filter)
+            {
+                Ok(filter) => filter,
+                Err(message) => {
+                    self.errors
+                        .push(plugin_setup_error(self.plugin_name, message));
+                    return;
+                }
+            };
+        let callback = Arc::new(callback);
+        let file_system = self.file_system.clone();
+        let plugin_name = self.plugin_name.to_string();
+        self.plugin.on_resolve.push(config::OnResolve {
+            filter: Some(filter),
+            callback: Some(Arc::new(move |args| {
+                let response = match callback(OnResolveArgs {
+                    path: args.path,
+                    importer: args.importer.text,
+                    namespace: args.importer.namespace,
+                    resolve_dir: args.resolve_dir,
+                    kind: public_resolve_kind(args.kind),
+                    plugin_data: args.plugin_data,
+                    with: args.with.decode_into_map(),
+                }) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        return config::OnResolveResult {
+                            thrown_error: Some(error.message),
+                            ..config::OnResolveResult::default()
+                        };
+                    }
+                };
+                let mut messages =
+                    internal_plugin_messages(response.errors, response.warnings);
+                let returned_watch_files = !response.watch_files.is_empty();
+                let returned_watch_dirs = !response.watch_dirs.is_empty();
+                let abs_watch_files = validate_plugin_paths(
+                    file_system.as_ref(),
+                    &plugin_name,
+                    response.watch_files,
+                    "watch file",
+                    &mut messages,
+                );
+                let abs_watch_dirs = validate_plugin_paths(
+                    file_system.as_ref(),
+                    &plugin_name,
+                    response.watch_dirs,
+                    "watch directory",
+                    &mut messages,
+                );
+                if !response.suffix.is_empty()
+                    && !response.suffix.starts_with(['?', '#'])
+                {
+                    return config::OnResolveResult {
+                        plugin_name: response.plugin_name,
+                        messages,
+                        thrown_error: Some(format!(
+                            "Invalid path suffix {:?} returned from plugin (must start with \"?\" or \"#\")",
+                            response.suffix
+                        )),
+                        abs_watch_files,
+                        abs_watch_dirs,
+                        ..config::OnResolveResult::default()
+                    };
+                }
+                if response.path.is_empty() && !response.external {
+                    let unused = if !response.namespace.is_empty() {
+                        "namespace"
+                    } else if !response.suffix.is_empty() {
+                        "suffix"
+                    } else if response.plugin_data.is_some() {
+                        "pluginData"
+                    } else if returned_watch_files {
+                        "watchFiles"
+                    } else if returned_watch_dirs {
+                        "watchDirs"
+                    } else {
+                        ""
+                    };
+                    if !unused.is_empty() {
+                        messages.push(Msg::new(
+                            MsgKind::Warning,
+                            format!(
+                                "Returning {unused:?} doesn't do anything when \"path\" is empty"
+                            ),
+                        ));
+                    }
+                }
+                config::OnResolveResult {
+                    plugin_name: response.plugin_name,
+                    messages,
+                    abs_watch_files,
+                    abs_watch_dirs,
+                    plugin_data: response.plugin_data,
+                    path: Path {
+                        text: response.path,
+                        namespace: response.namespace,
+                        ignored_suffix: response.suffix,
+                        ..Path::default()
+                    },
+                    external: response.external,
+                    is_side_effect_free: response.side_effects == SideEffects::False,
+                    ..config::OnResolveResult::default()
+                }
+            })),
+            name: self.plugin_name.to_string(),
+            namespace: options.namespace,
+        });
+    }
+
+    pub fn on_load<F>(&mut self, options: OnLoadOptions, callback: F)
+    where
+        F: Fn(OnLoadArgs) -> Result<OnLoadResult, PluginError> + Send + Sync + 'static,
+    {
+        let filter =
+            match config::compile_filter_for_plugin(self.plugin_name, "OnLoad", &options.filter) {
+                Ok(filter) => filter,
+                Err(message) => {
+                    self.errors
+                        .push(plugin_setup_error(self.plugin_name, message));
+                    return;
+                }
+            };
+        let callback = Arc::new(callback);
+        let file_system = self.file_system.clone();
+        let plugin_name = self.plugin_name.to_string();
+        self.plugin.on_load.push(config::OnLoad {
+            filter: Some(filter),
+            callback: Some(Arc::new(move |args| {
+                let response = match callback(OnLoadArgs {
+                    path: args.path.text,
+                    namespace: args.path.namespace,
+                    suffix: args.path.ignored_suffix,
+                    plugin_data: args.plugin_data,
+                    with: args.path.import_attributes.decode_into_map(),
+                }) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        return config::OnLoadResult {
+                            thrown_error: Some(error.message),
+                            ..config::OnLoadResult::default()
+                        };
+                    }
+                };
+                let mut messages = internal_plugin_messages(response.errors, response.warnings);
+                let abs_watch_files = validate_plugin_paths(
+                    file_system.as_ref(),
+                    &plugin_name,
+                    response.watch_files,
+                    "watch file",
+                    &mut messages,
+                );
+                let abs_watch_dirs = validate_plugin_paths(
+                    file_system.as_ref(),
+                    &plugin_name,
+                    response.watch_dirs,
+                    "watch directory",
+                    &mut messages,
+                );
+                let abs_resolve_dir = validate_plugin_path(
+                    file_system.as_ref(),
+                    &plugin_name,
+                    &response.resolve_dir,
+                    "resolve directory",
+                    &mut messages,
+                );
+                config::OnLoadResult {
+                    plugin_name: response.plugin_name,
+                    contents: response.contents,
+                    abs_resolve_dir,
+                    plugin_data: response.plugin_data,
+                    messages,
+                    abs_watch_files,
+                    abs_watch_dirs,
+                    loader: build_loader(response.loader),
+                    ..config::OnLoadResult::default()
+                }
+            })),
+            name: self.plugin_name.to_string(),
+            namespace: options.namespace,
+        });
+    }
+}
+
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildOptions {
@@ -707,6 +1195,7 @@ pub struct BuildOptions {
     pub resolve_extensions: Vec<String>,
     pub conditions: Vec<String>,
     pub node_paths: Vec<String>,
+    pub plugins: Vec<Plugin>,
 }
 
 impl Default for BuildOptions {
@@ -773,6 +1262,7 @@ impl Default for BuildOptions {
             resolve_extensions: Vec::new(),
             conditions: Vec::new(),
             node_paths: Vec::new(),
+            plugins: Vec::new(),
         }
     }
 }
@@ -849,6 +1339,7 @@ pub struct BuildContext {
 
 struct BuildContextInner {
     options: BuildOptions,
+    prepared_plugins: Vec<config::Plugin>,
     cache: CacheSet,
     state: Mutex<BuildContextState>,
 }
@@ -921,6 +1412,7 @@ impl BuildContext {
                 let result = build_with_output_state(
                     self.inner.options.clone(),
                     &self.inner.cache,
+                    &self.inner.prepared_plugins,
                     Some(&old_hashes),
                     watcher.as_ref().map(|_| &watch_data),
                 );
@@ -2225,22 +2717,32 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
 /// Returns build-option validation errors. File resolution and syntax errors are
 /// returned by [`BuildContext::rebuild`] so a later rebuild can recover from them.
 pub fn context(mut options: BuildOptions) -> Result<BuildContext, ContextError> {
-    let file_system = real_fs(RealFsOptions {
-        abs_working_dir: options.abs_working_dir.clone(),
+    let abs_working_dir = options.abs_working_dir.clone();
+    let file_system: Arc<dyn Fs> = real_fs(RealFsOptions {
+        abs_working_dir: abs_working_dir.clone(),
         do_not_cache: true,
         ..RealFsOptions::default()
     })
     .map_err(|error| ContextError {
         errors: vec![build_option_error(error.message)],
-    })?;
-    options.abs_working_dir = file_system.cwd().to_string();
-    let errors = validate_context_options(&options, file_system.as_ref());
+    })?
+    .into();
+    let (prepared_plugins, mut errors) = prepare_plugins(&mut options, &file_system);
+    if options.abs_working_dir != abs_working_dir {
+        errors.push(build_option_error(
+            "Mutating \"abs_working_dir\" during plugin setup is not allowed",
+        ));
+        options.abs_working_dir = abs_working_dir;
+    }
+    errors.extend(validate_context_options(&options, file_system.as_ref()));
     if !errors.is_empty() {
         return Err(ContextError { errors });
     }
+    options.abs_working_dir = file_system.cwd().to_string();
     Ok(BuildContext {
         inner: Arc::new(BuildContextInner {
             options,
+            prepared_plugins,
             cache: CacheSet::default(),
             state: Mutex::new(BuildContextState::default()),
         }),
@@ -2253,13 +2755,44 @@ pub fn build(options: BuildOptions) -> BuildResult {
 }
 
 fn build_with_cache(options: BuildOptions, cache: &CacheSet) -> BuildResult {
-    build_with_output_state(options, cache, None, None)
+    let mut options = options;
+    let abs_working_dir = options.abs_working_dir.clone();
+    let file_system: Arc<dyn Fs> = match real_fs(RealFsOptions {
+        abs_working_dir: abs_working_dir.clone(),
+        do_not_cache: true,
+        ..RealFsOptions::default()
+    }) {
+        Ok(file_system) => file_system.into(),
+        Err(error) => {
+            return BuildResult {
+                errors: vec![build_option_error(error.message)],
+                ..BuildResult::default()
+            };
+        }
+    };
+    let (prepared_plugins, mut errors) = prepare_plugins(&mut options, &file_system);
+    if options.abs_working_dir != abs_working_dir {
+        errors.push(build_option_error(
+            "Mutating \"abs_working_dir\" during plugin setup is not allowed",
+        ));
+        options.abs_working_dir = abs_working_dir;
+    }
+    errors.extend(validate_context_options(&options, file_system.as_ref()));
+    if !errors.is_empty() {
+        return BuildResult {
+            errors,
+            ..BuildResult::default()
+        };
+    }
+    options.abs_working_dir = file_system.cwd().to_string();
+    build_with_output_state(options, cache, &prepared_plugins, None, None)
 }
 
 #[allow(clippy::too_many_lines)]
 fn build_with_output_state(
     options: BuildOptions,
     cache: &CacheSet,
+    prepared_plugins: &[config::Plugin],
     previous_hashes: Option<&HashMap<String, String>>,
     watch_data_sink: Option<&Mutex<WatchData>>,
 ) -> BuildResult {
@@ -2697,6 +3230,7 @@ fn build_with_output_state(
         stdin,
         needs_metafile: options.metafile,
         watch_mode: watch_data_sink.is_some(),
+        plugins: prepared_plugins.to_vec(),
         ..config::Options::default()
     };
     let mut entry_points: Vec<_> = options
@@ -3485,13 +4019,20 @@ fn add_banner_and_footer(mut code: Vec<u8>, banner: &str, footer: &str) -> Vec<u
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
 
     use super::{
         BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
         BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, ContextError, Engine,
-        EngineName, Loader, Packages, Target, TransformOptions, WatchOptions, build as build_api,
-        context, transform,
+        EngineName, Loader, OnLoadOptions, OnLoadResult, OnResolveOptions, OnResolveResult,
+        Packages, Plugin, PluginError, ResolveKind, SideEffects, Target, TransformOptions,
+        WatchOptions, build as build_api, context, transform,
     };
 
     fn build(mut options: BuildOptions) -> super::BuildResult {
@@ -3533,6 +4074,393 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn public_plugins_build_virtual_modules_and_convert_callback_data() {
+        let directory = context_test_directory("plugin-build");
+        std::fs::write(directory.join("dep.js"), "export const value = 42")
+            .expect("write plugin resolve-dir dependency");
+        let setup_count = Arc::new(AtomicUsize::new(0));
+        let saw_item_resolve = Arc::new(AtomicBool::new(false));
+        let saw_item_load = Arc::new(AtomicBool::new(false));
+        let plugin_data: super::PluginData = Arc::new("from-resolve".to_string());
+        let plugin = Plugin::new("virtual", {
+            let setup_count = setup_count.clone();
+            let saw_item_resolve = saw_item_resolve.clone();
+            let saw_item_load = saw_item_load.clone();
+            let plugin_data = plugin_data.clone();
+            move |plugin_build| {
+                setup_count.fetch_add(1, Ordering::SeqCst);
+                plugin_build.initial_options.bundle = true;
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^virtual-entry$".into(),
+                        ..OnResolveOptions::default()
+                    },
+                    |args| {
+                        assert_eq!(args.kind, ResolveKind::EntryPoint);
+                        assert!(args.importer.is_empty());
+                        assert!(args.namespace.is_empty());
+                        Ok(OnResolveResult {
+                            path: "entry".into(),
+                            namespace: "virtual".into(),
+                            ..OnResolveResult::default()
+                        })
+                    },
+                );
+                plugin_build.on_load(
+                    OnLoadOptions {
+                        filter: "^entry$".into(),
+                        namespace: "virtual".into(),
+                    },
+                    |_| {
+                        Ok(OnLoadResult {
+                            contents: Some(
+                                "import value from 'virtual:item' with { type: 'custom' }; console.log(value)"
+                                    .into(),
+                            ),
+                            loader: Loader::Js,
+                            ..OnLoadResult::default()
+                        })
+                    },
+                );
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^virtual:item$".into(),
+                        namespace: "virtual".into(),
+                    },
+                    {
+                        let saw_item_resolve = saw_item_resolve.clone();
+                        let plugin_data = plugin_data.clone();
+                        move |args| {
+                            saw_item_resolve.store(
+                                args.kind == ResolveKind::ImportStatement
+                                    && args.namespace == "virtual"
+                                    && args.with.get("type").is_some_and(|value| value == "custom"),
+                                Ordering::SeqCst,
+                            );
+                            Ok(OnResolveResult {
+                                path: "item".into(),
+                                namespace: "virtual".into(),
+                                suffix: "?raw".into(),
+                                side_effects: SideEffects::False,
+                                plugin_data: Some(plugin_data.clone()),
+                                ..OnResolveResult::default()
+                            })
+                        }
+                    },
+                );
+                plugin_build.on_load(
+                    OnLoadOptions {
+                        filter: "^item$".into(),
+                        namespace: "virtual".into(),
+                    },
+                    {
+                        let saw_item_load = saw_item_load.clone();
+                        move |args| {
+                            let data = args
+                                .plugin_data
+                                .as_deref()
+                                .and_then(|data| data.downcast_ref::<String>());
+                            saw_item_load.store(
+                                args.suffix == "?raw"
+                                    && data.is_some_and(|value| value == "from-resolve")
+                                    && args.with.get("type").is_some_and(|value| value == "custom"),
+                                Ordering::SeqCst,
+                            );
+                            Ok(OnLoadResult {
+                                contents: Some(
+                                    "import {value} from './dep.js'; export default value".into(),
+                                ),
+                                resolve_dir: ".".into(),
+                                loader: Loader::Js,
+                                ..OnLoadResult::default()
+                            })
+                        }
+                    },
+                );
+                Ok(())
+            }
+        });
+
+        let result = build_api(BuildOptions {
+            entry_points: vec!["virtual-entry".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![plugin],
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(setup_count.load(Ordering::SeqCst), 1);
+        assert!(saw_item_resolve.load(Ordering::SeqCst));
+        assert!(saw_item_load.load(Ordering::SeqCst));
+        assert_eq!(result.output_files.len(), 1);
+        assert!(
+            result.output_files[0]
+                .path
+                .ends_with("/out/virtual-entry.js")
+        );
+        assert!(String::from_utf8_lossy(&result.output_files[0].contents).contains("42"));
+        std::fs::remove_dir_all(directory).expect("remove plugin build directory");
+    }
+
+    #[test]
+    fn public_plugin_setup_runs_once_across_context_rebuilds() {
+        let directory = context_test_directory("plugin-context");
+        let setup_count = Arc::new(AtomicUsize::new(0));
+        let contents = Arc::new(Mutex::new("console.log('first')".to_string()));
+        let plugin = Plugin::new("context-plugin", {
+            let setup_count = setup_count.clone();
+            let contents = contents.clone();
+            move |plugin_build| {
+                setup_count.fetch_add(1, Ordering::SeqCst);
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^virtual-context$".into(),
+                        ..OnResolveOptions::default()
+                    },
+                    |_| {
+                        Ok(OnResolveResult {
+                            path: "context".into(),
+                            namespace: "virtual".into(),
+                            ..OnResolveResult::default()
+                        })
+                    },
+                );
+                plugin_build.on_load(
+                    OnLoadOptions {
+                        filter: "^context$".into(),
+                        namespace: "virtual".into(),
+                    },
+                    {
+                        let contents = contents.clone();
+                        move |_| {
+                            Ok(OnLoadResult {
+                                contents: Some(
+                                    contents
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .clone(),
+                                ),
+                                loader: Loader::Js,
+                                ..OnLoadResult::default()
+                            })
+                        }
+                    },
+                );
+                Ok(())
+            }
+        });
+        let build_context = context(BuildOptions {
+            bundle: true,
+            entry_points: vec!["virtual-context".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![plugin],
+            ..BuildOptions::default()
+        })
+        .expect("create plugin context");
+        assert_eq!(setup_count.load(Ordering::SeqCst), 1);
+
+        let first = build_context.rebuild();
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert!(String::from_utf8_lossy(&first.output_files[0].contents).contains("first"));
+        *contents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = "console.log('second')".into();
+        let second = build_context.rebuild();
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert!(String::from_utf8_lossy(&second.output_files[0].contents).contains("second"));
+        assert_eq!(setup_count.load(Ordering::SeqCst), 1);
+
+        build_context.dispose();
+        std::fs::remove_dir_all(directory).expect("remove plugin context directory");
+    }
+
+    #[test]
+    fn public_plugin_setup_validation_is_controlled_and_attributed() {
+        let missing_setup_count = Arc::new(AtomicUsize::new(0));
+        let missing_name = build_api(BuildOptions {
+            plugins: vec![Plugin::new("", {
+                let missing_setup_count = missing_setup_count.clone();
+                move |_| {
+                    missing_setup_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            })],
+            ..BuildOptions::default()
+        });
+        assert_eq!(missing_setup_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            missing_name.errors[0].text,
+            "Plugin at index 0 is missing a name"
+        );
+
+        let invalid_filter = build_api(BuildOptions {
+            plugins: vec![Plugin::new("invalid-filter", |plugin_build| {
+                plugin_build.on_load(OnLoadOptions::default(), |_| Ok(OnLoadResult::default()));
+                Ok(())
+            })],
+            ..BuildOptions::default()
+        });
+        assert_eq!(invalid_filter.errors.len(), 1);
+        assert_eq!(invalid_filter.errors[0].plugin_name, "invalid-filter");
+        assert!(
+            invalid_filter.errors[0]
+                .text
+                .contains("is missing a filter")
+        );
+
+        let setup_error = build_api(BuildOptions {
+            plugins: vec![Plugin::new("setup-error", |_| {
+                Err(PluginError::new("setup failed"))
+            })],
+            ..BuildOptions::default()
+        });
+        assert_eq!(setup_error.errors.len(), 1);
+        assert_eq!(setup_error.errors[0].plugin_name, "setup-error");
+        assert_eq!(setup_error.errors[0].text, "setup failed");
+
+        let setup_panic = build_api(BuildOptions {
+            plugins: vec![Plugin::new("setup-panic", |_| {
+                panic!("intentional setup panic")
+            })],
+            ..BuildOptions::default()
+        });
+        assert_eq!(setup_panic.errors.len(), 1);
+        assert_eq!(setup_panic.errors[0].plugin_name, "setup-panic");
+        assert_eq!(setup_panic.errors[0].text, "Plugin setup callback panicked");
+
+        let directory = context_test_directory("plugin-working-dir");
+        let working_dir_mutation = build_api(BuildOptions {
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![Plugin::new("working-dir", |plugin_build| {
+                plugin_build.initial_options.abs_working_dir = "/other".into();
+                Ok(())
+            })],
+            ..BuildOptions::default()
+        });
+        assert!(
+            working_dir_mutation.errors.iter().any(|error| {
+                error.text == "Mutating \"abs_working_dir\" during plugin setup is not allowed"
+            }),
+            "{:?}",
+            working_dir_mutation.errors
+        );
+        std::fs::remove_dir_all(directory).expect("remove plugin working directory");
+    }
+
+    #[test]
+    fn public_plugin_callback_errors_point_to_the_triggering_import() {
+        let directory = context_test_directory("plugin-callback-error");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import value from 'virtual:error'; console.log(value)",
+        )
+        .expect("write plugin callback entry");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![Plugin::new("callback-error", |plugin_build| {
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^virtual:error$".into(),
+                        ..OnResolveOptions::default()
+                    },
+                    |_| Err(PluginError::new("resolve failed")),
+                );
+                Ok(())
+            })],
+            ..BuildOptions::default()
+        });
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].plugin_name, "callback-error");
+        assert_eq!(result.errors[0].text, "resolve failed");
+        assert_eq!(
+            result.errors[0]
+                .location
+                .as_ref()
+                .map(|location| location.file.as_str()),
+            Some("entry.js")
+        );
+        std::fs::remove_dir_all(directory).expect("remove plugin callback directory");
+    }
+
+    #[test]
+    fn public_plugin_watch_paths_rebuild_without_rerunning_setup() {
+        let directory = context_test_directory("plugin-watch");
+        let watched_path = directory.join("data.txt");
+        std::fs::write(&watched_path, "first").expect("write plugin watch input");
+        let setup_count = Arc::new(AtomicUsize::new(0));
+        let plugin = Plugin::new("watch-plugin", {
+            let directory = directory.clone();
+            let setup_count = setup_count.clone();
+            move |plugin_build| {
+                setup_count.fetch_add(1, Ordering::SeqCst);
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^virtual-watch$".into(),
+                        ..OnResolveOptions::default()
+                    },
+                    |_| {
+                        Ok(OnResolveResult {
+                            path: "watch".into(),
+                            namespace: "virtual".into(),
+                            ..OnResolveResult::default()
+                        })
+                    },
+                );
+                plugin_build.on_load(
+                    OnLoadOptions {
+                        filter: "^watch$".into(),
+                        namespace: "virtual".into(),
+                    },
+                    {
+                        let directory = directory.clone();
+                        move |_| {
+                            let value = std::fs::read_to_string(directory.join("data.txt"))
+                                .map_err(|error| PluginError::new(error.to_string()))?;
+                            Ok(OnLoadResult {
+                                contents: Some(format!("console.log({value:?})")),
+                                loader: Loader::Js,
+                                watch_files: vec!["data.txt".into()],
+                                ..OnLoadResult::default()
+                            })
+                        }
+                    },
+                );
+                Ok(())
+            }
+        });
+        let build_context = context(BuildOptions {
+            bundle: true,
+            entry_points: vec!["virtual-watch".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            write: true,
+            plugins: vec![plugin],
+            ..BuildOptions::default()
+        })
+        .expect("create plugin watch context");
+        build_context
+            .watch(WatchOptions::default())
+            .expect("enable plugin watch");
+        let output_path = directory.join("out/virtual-watch.js");
+        wait_for_context_change("initial plugin watch build", || {
+            std::fs::read_to_string(&output_path).is_ok_and(|output| output.contains("first"))
+        });
+
+        std::fs::write(&watched_path, "second").expect("edit plugin watch input");
+        wait_for_context_change("plugin watch rebuild", || {
+            std::fs::read_to_string(&output_path).is_ok_and(|output| output.contains("second"))
+        });
+        assert_eq!(setup_count.load(Ordering::SeqCst), 1);
+
+        build_context.dispose();
+        std::fs::remove_dir_all(directory).expect("remove plugin watch directory");
     }
 
     #[test]
