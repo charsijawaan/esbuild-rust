@@ -836,6 +836,7 @@ struct BuildContextInner {
 struct BuildContextState {
     disposed: bool,
     active: Option<Arc<InFlightBuild>>,
+    latest_hashes: HashMap<String, String>,
 }
 
 #[derive(Default)]
@@ -885,7 +886,33 @@ impl BuildContext {
     #[must_use]
     pub fn rebuild(&self) -> BuildResult {
         self.rebuild_with(
-            || build_with_cache(self.inner.options.clone(), &self.inner.cache),
+            || {
+                let old_hashes = self
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .latest_hashes
+                    .clone();
+                let result = build_with_output_state(
+                    self.inner.options.clone(),
+                    &self.inner.cache,
+                    Some(&old_hashes),
+                );
+                if result.errors.is_empty() {
+                    let latest_hashes = result
+                        .output_files
+                        .iter()
+                        .map(|output| (output.path.clone(), output.hash.clone()))
+                        .collect();
+                    self.inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .latest_hashes = latest_hashes;
+                }
+                result
+            },
             || {},
         )
     }
@@ -1275,6 +1302,7 @@ fn write_build_output_files(
     write_to_stdout: bool,
     input_paths: &HashSet<PathBuf>,
     allow_overwrite: bool,
+    previous_hashes: Option<&HashMap<String, String>>,
 ) -> Vec<Message> {
     if write_to_stdout {
         if output_files.len() != 1 {
@@ -1300,6 +1328,17 @@ fn write_build_output_files(
     }
 
     let mut errors = Vec::new();
+    if let Some(previous_hashes) = previous_hashes {
+        let current_paths = output_files
+            .iter()
+            .map(|output| output.path.as_str())
+            .collect::<HashSet<_>>();
+        for path in previous_hashes.keys() {
+            if !current_paths.contains(path.as_str()) {
+                let _ = std_fs::remove_file(path);
+            }
+        }
+    }
     for output in output_files {
         let path = FsPath::new(&output.path);
         if !allow_overwrite
@@ -1313,6 +1352,13 @@ fn write_build_output_files(
                 kind: MessageKind::Error,
                 ..Message::default()
             });
+            continue;
+        }
+        if previous_hashes
+            .and_then(|hashes| hashes.get(&output.path))
+            .is_some_and(|hash| hash == &output.hash)
+            && std_fs::read(path).is_ok_and(|contents| contents == output.contents)
+        {
             continue;
         }
         if let Some(parent) = path.parent()
@@ -2111,8 +2157,16 @@ pub fn build(options: BuildOptions) -> BuildResult {
     build_with_cache(options, &CacheSet::default())
 }
 
-#[allow(clippy::too_many_lines)]
 fn build_with_cache(options: BuildOptions, cache: &CacheSet) -> BuildResult {
+    build_with_output_state(options, cache, None)
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_with_output_state(
+    options: BuildOptions,
+    cache: &CacheSet,
+    previous_hashes: Option<&HashMap<String, String>>,
+) -> BuildResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
     let target_features = validate_target_features(
         &log,
@@ -2606,6 +2660,7 @@ fn build_with_cache(options: BuildOptions, cache: &CacheSet) -> BuildResult {
             write_to_stdout,
             &canonical_input_paths,
             allow_overwrite,
+            previous_hashes,
         ));
     }
     BuildResult {
@@ -3600,6 +3655,79 @@ mod tests {
         rebuild.join().expect("rebuild thread");
         dispose.join().expect("dispose thread");
         assert!(build_context.rebuild().output_files.is_empty());
+    }
+
+    #[test]
+    fn build_context_tracks_written_outputs_across_rebuilds() {
+        let directory = context_test_directory("written-outputs");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import('./lazy.js').then(console.log)",
+        )
+        .expect("write splitting entry");
+        std::fs::write(directory.join("lazy.js"), "export default 'lazy'")
+            .expect("write splitting dependency");
+        let build_context = context(BuildOptions {
+            splitting: true,
+            format: BuildFormat::EsModule,
+            write: true,
+            ..context_options(&directory)
+        })
+        .expect("create writing context");
+
+        let first = build_context.rebuild();
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert!(first.output_files.len() >= 2, "{:?}", first.output_files);
+        let entry_output = first
+            .output_files
+            .iter()
+            .find(|output| {
+                std::path::Path::new(&output.path)
+                    .file_name()
+                    .is_some_and(|name| name == "entry.js")
+            })
+            .expect("entry output");
+        let entry_path = std::path::PathBuf::from(&entry_output.path);
+        let expected_entry_contents = entry_output.contents.clone();
+        let first_modified = std::fs::metadata(&entry_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("entry output modification time");
+
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let unchanged = build_context.rebuild();
+        assert!(unchanged.errors.is_empty(), "{:?}", unchanged.errors);
+        let unchanged_modified = std::fs::metadata(&entry_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("unchanged output modification time");
+        assert_eq!(first_modified, unchanged_modified);
+
+        std::fs::write(&entry_path, "externally modified").expect("tamper with output");
+        let repaired = build_context.rebuild();
+        assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+        assert_eq!(
+            std::fs::read(&entry_path).expect("read repaired output"),
+            expected_entry_contents
+        );
+
+        std::fs::write(directory.join("entry.js"), "console.log('no chunk')")
+            .expect("remove dynamic import");
+        let reduced = build_context.rebuild();
+        assert!(reduced.errors.is_empty(), "{:?}", reduced.errors);
+        let reduced_paths = reduced
+            .output_files
+            .iter()
+            .map(|output| output.path.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for old_output in &first.output_files {
+            if !reduced_paths.contains(old_output.path.as_str()) {
+                assert!(
+                    !std::path::Path::new(&old_output.path).exists(),
+                    "stale output was not removed: {}",
+                    old_output.path
+                );
+            }
+        }
+        std::fs::remove_dir_all(directory).expect("remove context test directory");
     }
 
     #[test]
