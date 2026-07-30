@@ -711,6 +711,39 @@ fn touch_plugin_watch_paths(
     }
 }
 
+pub(crate) fn run_on_start_plugins(log: &Log, file_system: &dyn Fs, plugins: &[config::Plugin]) {
+    std::thread::scope(|scope| {
+        for plugin in plugins {
+            for on_start in &plugin.on_start {
+                let Some(callback) = on_start.callback.clone() else {
+                    continue;
+                };
+                let plugin_name = plugin.name.clone();
+                scope.spawn(move || {
+                    let mut result =
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback()))
+                        {
+                            Ok(result) => result,
+                            Err(_) => config::OnStartResult {
+                                thrown_error: Some("Plugin onStart callback panicked".into()),
+                                ..config::OnStartResult::default()
+                            },
+                        };
+                    log_plugin_messages(
+                        log,
+                        file_system,
+                        &plugin_name,
+                        std::mem::take(&mut result.messages),
+                        result.thrown_error.take(),
+                        None,
+                        Range::default(),
+                    );
+                });
+            }
+        }
+    });
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
@@ -1343,6 +1376,7 @@ pub fn scan_bundle(
     unique_key_prefix: &str,
 ) -> ScannedBundle {
     apply_option_defaults(options);
+    run_on_start_plugins(log, file_system, &options.plugins);
     let mut bundle = ScannedBundle::default();
 
     let runtime_source = runtime::source(options.unsupported_js_features);

@@ -638,12 +638,28 @@ fn validate_plugin_paths(
         .collect()
 }
 
+#[derive(Clone, Default)]
+struct PreparedPlugins {
+    plugins: Vec<config::Plugin>,
+    on_end: Vec<PreparedOnEnd>,
+    on_dispose: Vec<OnDisposeCallback>,
+}
+
+#[derive(Clone)]
+struct PreparedOnEnd {
+    plugin_name: String,
+    callback: OnEndCallback,
+}
+
 fn prepare_plugins(
     options: &mut BuildOptions,
     file_system: &Arc<dyn Fs>,
-) -> (Vec<config::Plugin>, Vec<Message>) {
+) -> (PreparedPlugins, Vec<Message>) {
     let declared_plugins = options.plugins.clone();
-    let mut prepared_plugins = Vec::with_capacity(declared_plugins.len());
+    let mut prepared_plugins = PreparedPlugins {
+        plugins: Vec::with_capacity(declared_plugins.len()),
+        ..PreparedPlugins::default()
+    };
     let mut errors = Vec::new();
     for (index, plugin) in declared_plugins.into_iter().enumerate() {
         if plugin.name.is_empty() {
@@ -662,6 +678,8 @@ fn prepare_plugins(
                 plugin_name: &plugin.name,
                 file_system: file_system.clone(),
                 plugin: &mut prepared,
+                on_end: &mut prepared_plugins.on_end,
+                on_dispose: &mut prepared_plugins.on_dispose,
                 errors: &mut errors,
             };
             (plugin.setup)(&mut build)
@@ -674,9 +692,57 @@ fn prepare_plugins(
                 "Plugin setup callback panicked",
             )),
         }
-        prepared_plugins.push(prepared);
+        prepared_plugins.plugins.push(prepared);
     }
     (prepared_plugins, errors)
+}
+
+fn run_on_end_callbacks(result: &mut BuildResult, prepared_plugins: &PreparedPlugins) {
+    for callback in &prepared_plugins.on_end {
+        let response =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (callback.callback)(result)));
+        let mut response = match response {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => OnEndResult {
+                errors: vec![plugin_setup_error(&callback.plugin_name, error.message)],
+                ..OnEndResult::default()
+            },
+            Err(_) => OnEndResult {
+                errors: vec![plugin_setup_error(
+                    &callback.plugin_name,
+                    "Plugin onEnd callback panicked",
+                )],
+                ..OnEndResult::default()
+            },
+        };
+        for message in &mut response.errors {
+            message.kind = MessageKind::Error;
+            if message.plugin_name.is_empty() {
+                message.plugin_name.clone_from(&callback.plugin_name);
+            }
+        }
+        for message in &mut response.warnings {
+            message.kind = MessageKind::Warning;
+            if message.plugin_name.is_empty() {
+                message.plugin_name.clone_from(&callback.plugin_name);
+            }
+        }
+        let did_fail = !response.errors.is_empty();
+        result.errors.append(&mut response.errors);
+        result.warnings.append(&mut response.warnings);
+        if did_fail {
+            break;
+        }
+    }
+}
+
+fn run_on_dispose_callbacks(prepared_plugins: &PreparedPlugins) {
+    for callback in &prepared_plugins.on_dispose {
+        let callback = callback.clone();
+        std::thread::spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback()));
+        });
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -785,6 +851,9 @@ pub enum BuildJsx {
 pub type PluginData = Arc<dyn Any + Send + Sync>;
 pub type PluginSetupCallback =
     Arc<dyn for<'a> Fn(&mut PluginBuild<'a>) -> Result<(), PluginError> + Send + Sync>;
+pub type OnEndCallback =
+    Arc<dyn Fn(&mut BuildResult) -> Result<OnEndResult, PluginError> + Send + Sync>;
+pub type OnDisposeCallback = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PluginError {
@@ -932,15 +1001,66 @@ pub struct OnLoadResult {
     pub watch_dirs: Vec<String>,
 }
 
+#[derive(Clone, Default)]
+pub struct OnStartResult {
+    pub errors: Vec<Message>,
+    pub warnings: Vec<Message>,
+}
+
+#[derive(Clone, Default)]
+pub struct OnEndResult {
+    pub errors: Vec<Message>,
+    pub warnings: Vec<Message>,
+}
+
 pub struct PluginBuild<'a> {
     pub initial_options: &'a mut BuildOptions,
     plugin_name: &'a str,
     file_system: Arc<dyn Fs>,
     plugin: &'a mut config::Plugin,
+    on_end: &'a mut Vec<PreparedOnEnd>,
+    on_dispose: &'a mut Vec<OnDisposeCallback>,
     errors: &'a mut Vec<Message>,
 }
 
 impl PluginBuild<'_> {
+    pub fn on_start<F>(&mut self, callback: F)
+    where
+        F: Fn() -> Result<OnStartResult, PluginError> + Send + Sync + 'static,
+    {
+        let callback = Arc::new(callback);
+        self.plugin.on_start.push(config::OnStart {
+            callback: Some(Arc::new(move || match callback() {
+                Ok(response) => config::OnStartResult {
+                    messages: internal_plugin_messages(response.errors, response.warnings),
+                    ..config::OnStartResult::default()
+                },
+                Err(error) => config::OnStartResult {
+                    thrown_error: Some(error.message),
+                    ..config::OnStartResult::default()
+                },
+            })),
+            name: self.plugin_name.to_string(),
+        });
+    }
+
+    pub fn on_end<F>(&mut self, callback: F)
+    where
+        F: Fn(&mut BuildResult) -> Result<OnEndResult, PluginError> + Send + Sync + 'static,
+    {
+        self.on_end.push(PreparedOnEnd {
+            plugin_name: self.plugin_name.to_string(),
+            callback: Arc::new(callback),
+        });
+    }
+
+    pub fn on_dispose<F>(&mut self, callback: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.on_dispose.push(Arc::new(callback));
+    }
+
     #[allow(clippy::too_many_lines)]
     pub fn on_resolve<F>(&mut self, options: OnResolveOptions, callback: F)
     where
@@ -1339,7 +1459,7 @@ pub struct BuildContext {
 
 struct BuildContextInner {
     options: BuildOptions,
-    prepared_plugins: Vec<config::Plugin>,
+    prepared_plugins: PreparedPlugins,
     cache: CacheSet,
     state: Mutex<BuildContextState>,
 }
@@ -1409,7 +1529,7 @@ impl BuildContext {
                     (state.latest_hashes.clone(), state.watcher.clone())
                 };
                 let watch_data = Mutex::new(WatchData::default());
-                let result = build_with_output_state(
+                let (result, latest_hashes) = build_with_output_state(
                     self.inner.options.clone(),
                     &self.inner.cache,
                     &self.inner.prepared_plugins,
@@ -1423,11 +1543,6 @@ impl BuildContext {
                             .unwrap_or_else(std::sync::PoisonError::into_inner),
                     );
                 }
-                let latest_hashes = result
-                    .output_files
-                    .iter()
-                    .map(|output| (output.path.clone(), output.hash.clone()))
-                    .collect();
                 self.inner
                     .state
                     .lock()
@@ -1561,6 +1676,9 @@ impl BuildContext {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.disposed {
+            return;
+        }
         state.disposed = true;
         let active = state.active.clone();
         let watcher = state.watcher.clone();
@@ -1572,6 +1690,7 @@ impl BuildContext {
             waiting_for_build();
             let _ = active.wait();
         }
+        run_on_dispose_callbacks(&self.inner.prepared_plugins);
     }
 }
 
@@ -2785,14 +2904,39 @@ fn build_with_cache(options: BuildOptions, cache: &CacheSet) -> BuildResult {
         };
     }
     options.abs_working_dir = file_system.cwd().to_string();
-    build_with_output_state(options, cache, &prepared_plugins, None, None)
+    let (result, _) = build_with_output_state(options, cache, &prepared_plugins, None, None);
+    run_on_dispose_callbacks(&prepared_plugins);
+    result
 }
 
-#[allow(clippy::too_many_lines)]
 fn build_with_output_state(
     options: BuildOptions,
     cache: &CacheSet,
-    prepared_plugins: &[config::Plugin],
+    prepared_plugins: &PreparedPlugins,
+    previous_hashes: Option<&HashMap<String, String>>,
+    watch_data_sink: Option<&Mutex<WatchData>>,
+) -> (BuildResult, HashMap<String, String>) {
+    let mut result = build_with_output_state_core(
+        options,
+        cache,
+        prepared_plugins,
+        previous_hashes,
+        watch_data_sink,
+    );
+    let latest_hashes = result
+        .output_files
+        .iter()
+        .map(|output| (output.path.clone(), output.hash.clone()))
+        .collect();
+    run_on_end_callbacks(&mut result, prepared_plugins);
+    (result, latest_hashes)
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_with_output_state_core(
+    options: BuildOptions,
+    cache: &CacheSet,
+    prepared_plugins: &PreparedPlugins,
     previous_hashes: Option<&HashMap<String, String>>,
     watch_data_sink: Option<&Mutex<WatchData>>,
 ) -> BuildResult {
@@ -2829,6 +2973,11 @@ fn build_with_output_state(
         file_system: file_system.as_ref(),
         sink,
     });
+    let mut plugins_after_start = prepared_plugins.plugins.clone();
+    bundler::run_on_start_plugins(&log, file_system.as_ref(), &plugins_after_start);
+    for plugin in &mut plugins_after_start {
+        plugin.on_start.clear();
+    }
     let entry_point_count = options.entry_points.len()
         + options.entry_points_advanced.len()
         + usize::from(options.stdin.is_some());
@@ -3230,7 +3379,7 @@ fn build_with_output_state(
         stdin,
         needs_metafile: options.metafile,
         watch_mode: watch_data_sink.is_some(),
-        plugins: prepared_plugins.to_vec(),
+        plugins: plugins_after_start,
         ..config::Options::default()
     };
     let mut entry_points: Vec<_> = options
@@ -4277,6 +4426,259 @@ mod tests {
 
         build_context.dispose();
         std::fs::remove_dir_all(directory).expect("remove plugin context directory");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn public_plugin_lifecycle_hooks_run_for_each_rebuild_and_dispose_once() {
+        let directory = context_test_directory("plugin-lifecycle");
+        let setup_count = Arc::new(AtomicUsize::new(0));
+        let start_count = Arc::new(AtomicUsize::new(0));
+        let end_count = Arc::new(AtomicUsize::new(0));
+        let dispose_count = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicBool::new(false));
+        let plugin = Plugin::new("lifecycle", {
+            let setup_count = setup_count.clone();
+            let start_count = start_count.clone();
+            let end_count = end_count.clone();
+            let dispose_count = dispose_count.clone();
+            let started = started.clone();
+            move |plugin_build| {
+                setup_count.fetch_add(1, Ordering::SeqCst);
+                plugin_build.on_start({
+                    let start_count = start_count.clone();
+                    let started = started.clone();
+                    move || {
+                        start_count.fetch_add(1, Ordering::SeqCst);
+                        started.store(true, Ordering::SeqCst);
+                        Ok(super::OnStartResult::default())
+                    }
+                });
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^virtual-lifecycle$".into(),
+                        ..OnResolveOptions::default()
+                    },
+                    |_| {
+                        Ok(OnResolveResult {
+                            path: "lifecycle".into(),
+                            namespace: "virtual".into(),
+                            ..OnResolveResult::default()
+                        })
+                    },
+                );
+                plugin_build.on_load(
+                    OnLoadOptions {
+                        filter: "^lifecycle$".into(),
+                        namespace: "virtual".into(),
+                    },
+                    {
+                        let started = started.clone();
+                        move |_| {
+                            assert!(
+                                started.swap(false, Ordering::SeqCst),
+                                "onStart must finish before onLoad"
+                            );
+                            Ok(OnLoadResult {
+                                contents: Some("console.log('lifecycle')".into()),
+                                loader: Loader::Js,
+                                ..OnLoadResult::default()
+                            })
+                        }
+                    },
+                );
+                plugin_build.on_end({
+                    let end_count = end_count.clone();
+                    move |result| {
+                        assert!(result.errors.is_empty(), "{:?}", result.errors);
+                        assert_eq!(result.output_files.len(), 1);
+                        end_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(super::OnEndResult {
+                            warnings: vec![super::Message {
+                                text: "ended".into(),
+                                ..super::Message::default()
+                            }],
+                            ..super::OnEndResult::default()
+                        })
+                    }
+                });
+                plugin_build.on_dispose({
+                    let dispose_count = dispose_count.clone();
+                    move || {
+                        dispose_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+                Ok(())
+            }
+        });
+        let build_context = context(BuildOptions {
+            bundle: true,
+            entry_points: vec!["virtual-lifecycle".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![plugin],
+            ..BuildOptions::default()
+        })
+        .expect("create lifecycle context");
+
+        for _ in 0..2 {
+            let result = build_context.rebuild();
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(result.warnings.len(), 1);
+            assert_eq!(result.warnings[0].plugin_name, "lifecycle");
+            assert_eq!(result.warnings[0].text, "ended");
+            assert_eq!(result.warnings[0].kind, super::MessageKind::Warning);
+        }
+        assert_eq!(setup_count.load(Ordering::SeqCst), 1);
+        assert_eq!(start_count.load(Ordering::SeqCst), 2);
+        assert_eq!(end_count.load(Ordering::SeqCst), 2);
+
+        build_context.dispose();
+        wait_for_context_change("plugin dispose callback", || {
+            dispose_count.load(Ordering::SeqCst) == 1
+        });
+        build_context.dispose();
+        assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(directory).expect("remove lifecycle context directory");
+    }
+
+    #[test]
+    fn public_plugin_one_shot_runs_end_and_dispose_after_start_errors() {
+        let directory = context_test_directory("plugin-lifecycle-error");
+        std::fs::write(directory.join("entry.js"), "console.log('entry')")
+            .expect("write lifecycle error entry");
+        let end_count = Arc::new(AtomicUsize::new(0));
+        let dispose_count = Arc::new(AtomicUsize::new(0));
+        let plugin = Plugin::new("lifecycle-error", {
+            let end_count = end_count.clone();
+            let dispose_count = dispose_count.clone();
+            move |plugin_build| {
+                plugin_build.on_start(|| Err(PluginError::new("start failed")));
+                plugin_build.on_end({
+                    let end_count = end_count.clone();
+                    move |result| {
+                        assert!(
+                            result
+                                .errors
+                                .iter()
+                                .any(|error| error.text == "start failed")
+                        );
+                        end_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(super::OnEndResult {
+                            warnings: vec![super::Message {
+                                text: "end still ran".into(),
+                                ..super::Message::default()
+                            }],
+                            ..super::OnEndResult::default()
+                        })
+                    }
+                });
+                plugin_build.on_dispose({
+                    let dispose_count = dispose_count.clone();
+                    move || {
+                        dispose_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+                Ok(())
+            }
+        });
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            write: true,
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![plugin],
+            ..BuildOptions::default()
+        });
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].plugin_name, "lifecycle-error");
+        assert_eq!(result.errors[0].text, "start failed");
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].plugin_name, "lifecycle-error");
+        assert_eq!(result.warnings[0].kind, super::MessageKind::Warning);
+        assert!(result.output_files.is_empty());
+        assert!(
+            !directory.join("out").join("entry.js").exists(),
+            "an onStart error must suppress generated and written output"
+        );
+        assert_eq!(end_count.load(Ordering::SeqCst), 1);
+        wait_for_context_change("one-shot plugin dispose callback", || {
+            dispose_count.load(Ordering::SeqCst) == 1
+        });
+        std::fs::remove_dir_all(directory).expect("remove lifecycle error directory");
+    }
+
+    #[test]
+    fn public_plugin_on_end_runs_for_early_errors_and_cannot_change_rebuild_hashes() {
+        let directory = context_test_directory("plugin-on-end-output-state");
+        std::fs::write(directory.join("entry.js"), "console.log('entry')")
+            .expect("write onEnd output-state entry");
+        let build_context = context(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            write: false,
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![Plugin::new("output-state", |plugin_build| {
+                plugin_build.on_end(|result| {
+                    result.output_files.clear();
+                    Ok(super::OnEndResult::default())
+                });
+                Ok(())
+            })],
+            ..BuildOptions::default()
+        })
+        .expect("create output-state context");
+        let result = build_context.rebuild();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.output_files.is_empty());
+        assert_eq!(
+            build_context
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .latest_hashes
+                .len(),
+            1,
+            "rebuild bookkeeping must snapshot output hashes before onEnd mutates the result"
+        );
+        build_context.dispose();
+        std::fs::remove_dir_all(&directory).expect("remove output-state context directory");
+
+        let directory = context_test_directory("plugin-on-end-early-error");
+        let end_count = Arc::new(AtomicUsize::new(0));
+        let prepared_plugins = super::PreparedPlugins {
+            on_end: vec![super::PreparedOnEnd {
+                plugin_name: "early-error".into(),
+                callback: {
+                    let end_count = end_count.clone();
+                    Arc::new(move |result| {
+                        assert!(!result.errors.is_empty());
+                        end_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(super::OnEndResult::default())
+                    })
+                },
+            }],
+            ..super::PreparedPlugins::default()
+        };
+        let (result, _) = super::build_with_output_state(
+            BuildOptions {
+                entry_points: vec!["first.js".into(), "second.js".into()],
+                abs_working_dir: directory.to_string_lossy().into_owned(),
+                ..BuildOptions::default()
+            },
+            &super::CacheSet::default(),
+            &prepared_plugins,
+            None,
+            None,
+        );
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(
+            result.errors[0].text,
+            "Must use \"outdir\" when there are multiple input files"
+        );
+        assert_eq!(end_count.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(&directory).expect("remove early-error working directory");
     }
 
     #[test]
