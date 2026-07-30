@@ -6,7 +6,7 @@ use std::{
     fmt, fs as std_fs,
     io::{self, Write as _},
     path::{Path as FsPath, PathBuf},
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
 };
 
 use crate::internal::{
@@ -802,6 +802,177 @@ pub struct BuildResult {
     pub warnings: Vec<Message>,
     pub metafile: String,
     pub output_files: Vec<BuildOutputFile>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ContextError {
+    pub errors: Vec<Message>,
+}
+
+impl fmt::Display for ContextError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(error) = self.errors.first() {
+            formatter.write_str(&error.text)
+        } else {
+            formatter.write_str("Context creation failed")
+        }
+    }
+}
+
+impl std::error::Error for ContextError {}
+
+#[derive(Clone)]
+pub struct BuildContext {
+    inner: Arc<BuildContextInner>,
+}
+
+struct BuildContextInner {
+    options: BuildOptions,
+    cache: CacheSet,
+    state: Mutex<BuildContextState>,
+}
+
+#[derive(Default)]
+struct BuildContextState {
+    disposed: bool,
+    active: Option<Arc<InFlightBuild>>,
+}
+
+#[derive(Default)]
+struct InFlightBuild {
+    outcome: Mutex<Option<InFlightOutcome>>,
+    changed: Condvar,
+}
+
+#[derive(Clone)]
+enum InFlightOutcome {
+    Completed(BuildResult),
+    Panicked,
+}
+
+impl InFlightBuild {
+    fn finish(&self, outcome: InFlightOutcome) {
+        *self
+            .outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+        self.changed.notify_all();
+    }
+
+    fn wait(&self) -> InFlightOutcome {
+        let mut outcome = self
+            .outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while outcome.is_none() {
+            outcome = self
+                .changed
+                .wait(outcome)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        outcome.clone().unwrap_or(InFlightOutcome::Panicked)
+    }
+
+    fn wait_for_result(&self) -> BuildResult {
+        match self.wait() {
+            InFlightOutcome::Completed(result) => result,
+            InFlightOutcome::Panicked => panic!("concurrent build context rebuild panicked"),
+        }
+    }
+}
+
+impl BuildContext {
+    #[must_use]
+    pub fn rebuild(&self) -> BuildResult {
+        self.rebuild_with(
+            || build_with_cache(self.inner.options.clone(), &self.inner.cache),
+            || {},
+        )
+    }
+
+    fn rebuild_with(
+        &self,
+        build: impl FnOnce() -> BuildResult,
+        joined_existing_build: impl FnOnce(),
+    ) -> BuildResult {
+        let (in_flight, should_build) = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.disposed {
+                return BuildResult::default();
+            }
+            if let Some(in_flight) = &state.active {
+                (in_flight.clone(), false)
+            } else {
+                let in_flight = Arc::new(InFlightBuild::default());
+                state.active = Some(in_flight.clone());
+                (in_flight, true)
+            }
+        };
+        if !should_build {
+            joined_existing_build();
+            return in_flight.wait_for_result();
+        }
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(build));
+        match outcome {
+            Ok(result) => {
+                let mut state = self
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, &in_flight))
+                {
+                    state.active = None;
+                }
+                in_flight.finish(InFlightOutcome::Completed(result.clone()));
+                result
+            }
+            Err(payload) => {
+                let mut state = self
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, &in_flight))
+                {
+                    state.active = None;
+                }
+                in_flight.finish(InFlightOutcome::Panicked);
+                drop(state);
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+
+    pub fn dispose(&self) {
+        self.dispose_with(|| {});
+    }
+
+    fn dispose_with(&self, waiting_for_build: impl FnOnce()) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.disposed = true;
+        let active = state.active.clone();
+        drop(state);
+        if let Some(active) = active {
+            waiting_for_build();
+            let _ = active.wait();
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1750,9 +1921,198 @@ fn validate_target_features(
     }
 }
 
-#[must_use]
+fn build_option_error(text: impl Into<String>) -> Message {
+    Message {
+        text: text.into(),
+        kind: MessageKind::Error,
+        ..Message::default()
+    }
+}
+
 #[allow(clippy::too_many_lines)]
+fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec<Message> {
+    let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let _ = validate_target_features(
+        &log,
+        options.target,
+        &options.engines,
+        &options.supported,
+        options.platform,
+    );
+
+    let mut errors = Vec::new();
+    let entry_point_count = options.entry_points.len()
+        + options.entry_points_advanced.len()
+        + usize::from(options.stdin.is_some());
+    if options.outdir.is_empty() && entry_point_count > 1 {
+        errors.push(build_option_error(
+            "Must use \"outdir\" when there are multiple input files",
+        ));
+    } else if options.outdir.is_empty() && options.splitting {
+        errors.push(build_option_error(
+            "Must use \"outdir\" when code splitting is enabled",
+        ));
+    } else if !options.outfile.is_empty() && !options.outdir.is_empty() {
+        errors.push(build_option_error(
+            "Cannot use both \"outfile\" and \"outdir\"",
+        ));
+    }
+
+    if options.outdir.is_empty() && options.outfile.is_empty() {
+        if !matches!(
+            options.sourcemap,
+            BuildSourceMap::None | BuildSourceMap::Inline
+        ) {
+            errors.push(build_option_error(
+                "Cannot use an external source map without an output path",
+            ));
+        }
+        if matches!(
+            options.legal_comments,
+            BuildLegalComments::Linked | BuildLegalComments::External
+        ) {
+            errors.push(build_option_error(
+                "Cannot use linked or external legal comments without an output path",
+            ));
+        }
+        if options
+            .loader
+            .values()
+            .any(|loader| *loader == Loader::File)
+        {
+            errors.push(build_option_error(
+                "Cannot use the \"file\" loader without an output path",
+            ));
+        }
+        if options
+            .loader
+            .values()
+            .any(|loader| *loader == Loader::Copy)
+        {
+            errors.push(build_option_error(
+                "Cannot use the \"copy\" loader without an output path",
+            ));
+        }
+    }
+
+    if !options.bundle {
+        if !options.external.is_empty() {
+            errors.push(build_option_error(
+                "Cannot use \"external\" without \"bundle\"",
+            ));
+        }
+        if !options.alias.is_empty() {
+            errors.push(build_option_error(
+                "Cannot use \"alias\" without \"bundle\"",
+            ));
+        }
+    }
+
+    if let Err(validation_errors) = validate_externals(file_system, &options.external) {
+        errors.extend(validation_errors);
+    }
+    if let Err(validation_errors) = validate_build_loaders(&options.loader) {
+        errors.extend(validation_errors);
+    }
+    if let Err(validation_errors) = validate_output_extensions(&options.out_extension) {
+        errors.extend(validation_errors);
+    }
+    if let Err(validation_errors) = validate_resolve_extensions(&options.resolve_extensions) {
+        errors.extend(validation_errors);
+    }
+
+    if !options.global_name.is_empty() {
+        let _ = js_parser::parse_global_name(
+            log.clone(),
+            Source {
+                key_path: crate::internal::logger::Path {
+                    text: "<global-name>".into(),
+                    ..crate::internal::logger::Path::default()
+                },
+                pretty_paths: PrettyPaths {
+                    abs: "<global-name>".into(),
+                    rel: "<global-name>".into(),
+                },
+                contents: Arc::from(options.global_name.as_bytes()),
+                ..Source::default()
+            },
+        );
+    }
+    let _ = validate_defines(
+        &log,
+        &options.define,
+        &options.pure,
+        options.platform,
+        options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
+    );
+    let _ = validate_jsx_define(&log, &options.jsx_factory, "jsx factory", false);
+    let _ = validate_jsx_define(&log, &options.jsx_fragment, "jsx fragment", true);
+    if !options.tsconfig.is_empty() && !options.tsconfig_raw.is_empty() {
+        log.add_error(
+            None,
+            crate::internal::logger::Range::default(),
+            "Cannot provide \"tsconfig\" as both a raw string and a path",
+        );
+    }
+
+    let output_format = match options.format {
+        BuildFormat::Default if options.bundle => match options.platform {
+            BuildPlatform::Default | BuildPlatform::Browser => config::Format::Iife,
+            BuildPlatform::Node => config::Format::CommonJs,
+            BuildPlatform::Neutral => config::Format::EsModule,
+        },
+        BuildFormat::Default => config::Format::Preserve,
+        BuildFormat::Iife => config::Format::Iife,
+        BuildFormat::CommonJs => config::Format::CommonJs,
+        BuildFormat::EsModule => config::Format::EsModule,
+    };
+    if options.splitting && output_format != config::Format::EsModule {
+        errors.push(build_option_error(
+            "Splitting currently only works with the \"esm\" format",
+        ));
+    }
+
+    let (mut logged_errors, _) = public_messages(log.done());
+    logged_errors.extend(errors);
+    logged_errors
+}
+
+/// Creates a reusable build context without resolving or parsing entry points.
+///
+/// # Errors
+///
+/// Returns build-option validation errors. File resolution and syntax errors are
+/// returned by [`BuildContext::rebuild`] so a later rebuild can recover from them.
+pub fn context(mut options: BuildOptions) -> Result<BuildContext, ContextError> {
+    let file_system = real_fs(RealFsOptions {
+        abs_working_dir: options.abs_working_dir.clone(),
+        do_not_cache: true,
+        ..RealFsOptions::default()
+    })
+    .map_err(|error| ContextError {
+        errors: vec![build_option_error(error.message)],
+    })?;
+    options.abs_working_dir = file_system.cwd().to_string();
+    let errors = validate_context_options(&options, file_system.as_ref());
+    if !errors.is_empty() {
+        return Err(ContextError { errors });
+    }
+    Ok(BuildContext {
+        inner: Arc::new(BuildContextInner {
+            options,
+            cache: CacheSet::default(),
+            state: Mutex::new(BuildContextState::default()),
+        }),
+    })
+}
+
+#[must_use]
 pub fn build(options: BuildOptions) -> BuildResult {
+    build_with_cache(options, &CacheSet::default())
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_with_cache(options: BuildOptions, cache: &CacheSet) -> BuildResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
     let target_features = validate_target_features(
         &log,
@@ -2202,7 +2562,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
     let compiled = bundler::bundle_javascript(
         &log,
         file_system.as_ref(),
-        &CacheSet::default(),
+        cache,
         &entry_points,
         &mut internal_options,
         "API",
@@ -2973,8 +3333,9 @@ mod tests {
 
     use super::{
         BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
-        BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, Engine, EngineName,
-        Loader, Packages, Target, TransformOptions, build as build_api, transform,
+        BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, ContextError, Engine,
+        EngineName, Loader, Packages, Target, TransformOptions, build as build_api, context,
+        transform,
     };
 
     fn build(mut options: BuildOptions) -> super::BuildResult {
@@ -2985,6 +3346,260 @@ mod tests {
     fn code(result: super::TransformResult) -> String {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         String::from_utf8(result.code).expect("transform output is UTF-8")
+    }
+
+    fn context_test_directory(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-context-{name}-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create context test directory");
+        directory
+    }
+
+    fn context_options(directory: &std::path::Path) -> BuildOptions {
+        BuildOptions {
+            bundle: true,
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            ..BuildOptions::default()
+        }
+    }
+
+    #[test]
+    fn validates_build_context_creation_without_scanning_entries() {
+        assert_eq!(
+            ContextError::default().to_string(),
+            "Context creation failed"
+        );
+
+        let topology_error = context(BuildOptions {
+            outfile: "out.js".into(),
+            outdir: "out".into(),
+            ..BuildOptions::default()
+        })
+        .err()
+        .expect("invalid output topology");
+        assert_eq!(
+            topology_error
+                .errors
+                .first()
+                .map(|message| message.text.as_str()),
+            Some("Cannot use both \"outfile\" and \"outdir\"")
+        );
+
+        let external_error = context(BuildOptions {
+            external: vec!["react".into()],
+            ..BuildOptions::default()
+        })
+        .err()
+        .expect("external requires bundling");
+        assert!(
+            external_error
+                .errors
+                .iter()
+                .any(|message| message.text == "Cannot use \"external\" without \"bundle\"")
+        );
+
+        let loader_error = context(BuildOptions {
+            loader: HashMap::from([("js".into(), Loader::Js)]),
+            ..BuildOptions::default()
+        })
+        .err()
+        .expect("loader extensions start with a dot");
+        assert!(
+            loader_error
+                .errors
+                .iter()
+                .any(|message| message.text == "Invalid file extension: \"js\"")
+        );
+
+        let directory = context_test_directory("no-scan");
+        let build_context =
+            context(context_options(&directory)).expect("missing entry is valid at creation");
+        std::fs::write(directory.join("entry.js"), "console.log('created later')")
+            .expect("create entry after context");
+        let result = build_context.rebuild();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(
+            String::from_utf8_lossy(&result.output_files[0].contents).contains("created later")
+        );
+        std::fs::remove_dir_all(directory).expect("remove context test directory");
+    }
+
+    #[test]
+    fn build_context_recovers_from_missing_files_and_syntax_errors() {
+        let directory = context_test_directory("recovery");
+        let build_context =
+            context(context_options(&directory)).expect("create context before entry exists");
+
+        let missing = build_context.rebuild();
+        assert!(!missing.errors.is_empty());
+
+        std::fs::write(directory.join("entry.js"), "if (").expect("write invalid entry");
+        let invalid = build_context.rebuild();
+        assert!(!invalid.errors.is_empty());
+
+        std::fs::write(directory.join("entry.js"), "console.log('recovered')")
+            .expect("repair entry");
+        let recovered = build_context.rebuild();
+        assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+        assert!(String::from_utf8_lossy(&recovered.output_files[0].contents).contains("recovered"));
+        std::fs::remove_dir_all(directory).expect("remove context test directory");
+    }
+
+    #[test]
+    fn build_context_rebuild_observes_edits_and_new_directory_entries() {
+        let directory = context_test_directory("edits");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {value} from './a.js'; console.log(value)",
+        )
+        .expect("write entry");
+        std::fs::write(directory.join("a.js"), "export const value = 'first'")
+            .expect("write first dependency");
+        let build_context = context(context_options(&directory)).expect("create context");
+
+        let first = build_context.rebuild();
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert!(String::from_utf8_lossy(&first.output_files[0].contents).contains("first"));
+
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {value} from './b.js'; console.log(value)",
+        )
+        .expect("edit entry");
+        std::fs::write(directory.join("b.js"), "export const value = 'second'")
+            .expect("create dependency after first build");
+        let second = build_context.rebuild();
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        let output = String::from_utf8_lossy(&second.output_files[0].contents);
+        assert!(output.contains("second"), "{output}");
+        assert!(!output.contains("first"), "{output}");
+        std::fs::remove_dir_all(directory).expect("remove context test directory");
+    }
+
+    #[test]
+    fn build_context_disposal_is_shared_idempotent_and_independent() {
+        let directory_a = context_test_directory("dispose-a");
+        let directory_b = context_test_directory("dispose-b");
+        std::fs::write(directory_a.join("entry.js"), "console.log('a')").expect("write entry a");
+        std::fs::write(directory_b.join("entry.js"), "console.log('b')").expect("write entry b");
+        let context_a = context(context_options(&directory_a)).expect("create context a");
+        let context_a_clone = context_a.clone();
+        let context_b = context(context_options(&directory_b)).expect("create context b");
+
+        context_a.dispose();
+        context_a.dispose();
+        for disposed in [&context_a, &context_a_clone] {
+            let result = disposed.rebuild();
+            assert!(result.errors.is_empty());
+            assert!(result.warnings.is_empty());
+            assert!(result.metafile.is_empty());
+            assert!(result.output_files.is_empty());
+        }
+
+        let independent = context_b.rebuild();
+        assert!(independent.errors.is_empty(), "{:?}", independent.errors);
+        assert!(
+            String::from_utf8_lossy(&independent.output_files[0].contents).contains("console.log")
+        );
+        std::fs::remove_dir_all(directory_a).expect("remove context test directory a");
+        std::fs::remove_dir_all(directory_b).expect("remove context test directory b");
+    }
+
+    #[test]
+    fn build_context_is_send_sync_and_merges_overlapping_rebuilds() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<super::BuildContext>();
+        assert_send_sync::<super::BuildResult>();
+        assert_send_sync::<crate::internal::cache::CacheSet>();
+        assert_send_sync::<crate::internal::config::Options>();
+
+        let build_context = context(BuildOptions::default()).expect("create empty context");
+        let invocation_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let first_context = build_context.clone();
+        let first_count = invocation_count.clone();
+        let first = std::thread::spawn(move || {
+            first_context.rebuild_with(
+                move || {
+                    first_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    started_sender.send(()).expect("signal active rebuild");
+                    release_receiver.recv().expect("release active rebuild");
+                    super::BuildResult {
+                        metafile: "merged".into(),
+                        ..super::BuildResult::default()
+                    }
+                },
+                || {},
+            )
+        });
+        started_receiver.recv().expect("first rebuild started");
+
+        let (joined_sender, joined_receiver) = std::sync::mpsc::channel();
+        let second_context = build_context.clone();
+        let second_count = invocation_count.clone();
+        let second = std::thread::spawn(move || {
+            second_context.rebuild_with(
+                move || {
+                    second_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    super::BuildResult {
+                        metafile: "unexpected second build".into(),
+                        ..super::BuildResult::default()
+                    }
+                },
+                move || joined_sender.send(()).expect("signal merged rebuild"),
+            )
+        });
+        joined_receiver.recv().expect("second rebuild merged");
+        release_sender.send(()).expect("finish active rebuild");
+
+        let first_result = first.join().expect("first rebuild thread");
+        let second_result = second.join().expect("second rebuild thread");
+        assert_eq!(first_result.metafile, "merged");
+        assert_eq!(second_result.metafile, "merged");
+        assert_eq!(
+            invocation_count.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[test]
+    fn build_context_dispose_waits_for_an_active_rebuild() {
+        let build_context = context(BuildOptions::default()).expect("create empty context");
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let rebuild_context = build_context.clone();
+        let rebuild = std::thread::spawn(move || {
+            rebuild_context.rebuild_with(
+                move || {
+                    started_sender.send(()).expect("signal active rebuild");
+                    release_receiver.recv().expect("release active rebuild");
+                    super::BuildResult::default()
+                },
+                || {},
+            )
+        });
+        started_receiver.recv().expect("rebuild started");
+
+        let (waiting_sender, waiting_receiver) = std::sync::mpsc::channel();
+        let dispose_context = build_context.clone();
+        let dispose = std::thread::spawn(move || {
+            dispose_context
+                .dispose_with(move || waiting_sender.send(()).expect("signal dispose wait"));
+        });
+        waiting_receiver
+            .recv()
+            .expect("dispose observed the active rebuild");
+        assert!(!dispose.is_finished());
+        release_sender.send(()).expect("finish active rebuild");
+        rebuild.join().expect("rebuild thread");
+        dispose.join().expect("dispose thread");
+        assert!(build_context.rebuild().output_files.is_empty());
     }
 
     #[test]
