@@ -6166,6 +6166,40 @@ mod tests {
     }
 
     #[test]
+    fn inlines_template_primitives_and_preserves_tag_receivers() {
+        let options = TransformOptions {
+            minify_syntax: true,
+            ..TransformOptions::default()
+        };
+        for (input, expected) in [
+            ("_ = `a${x}b${'y'}c`", "_ = `a${x}byc`;\n"),
+            ("_ = `a${'x'}b${y}c`", "_ = `axb${y}c`;\n"),
+            ("_ = `a${'x'}b${'y'}c`", "_ = \"axbyc\";\n"),
+            ("tag`a${x}b${'y'}c`", "tag`a${x}b${\"y\"}c`;\n"),
+            ("x.y``", "x.y``;\n"),
+            ("x[y]``", "x[y]``;\n"),
+            ("(1, x.y)``", "(0, x.y)``;\n"),
+            ("(1, x[y])``", "(0, x[y])``;\n"),
+            ("(true && x.y)``", "(0, x.y)``;\n"),
+            ("(true && x[y])``", "(0, x[y])``;\n"),
+            ("(false || x.y)``", "(0, x.y)``;\n"),
+            ("(false || x[y])``", "(0, x[y])``;\n"),
+            ("(null ?? x.y)``", "(0, x.y)``;\n"),
+            ("(null ?? x[y])``", "(0, x[y])``;\n"),
+            (
+                "function f(a) { let c = a.b; return c`` }",
+                "function f(a) {\n  return (0, a.b)``;\n}\n",
+            ),
+            (
+                "function f(a) { let c = a.b; return c`${x}` }",
+                "function f(a) {\n  return (0, a.b)`${x}`;\n}\n",
+            ),
+        ] {
+            assert_eq!(code(transform(input, options.clone())), expected, "{input}");
+        }
+    }
+
+    #[test]
     fn inlines_single_use_locals_with_ordering_guards() {
         assert_eq!(
             code(transform(

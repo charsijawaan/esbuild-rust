@@ -2530,7 +2530,16 @@ impl Printer<'_> {
     ) {
         let is_tagged = template.tag_or_nil.data.is_some();
         if is_tagged {
-            if is_optional_chain(&template.tag_or_nil) {
+            let tag_is_property_access = matches!(
+                template.tag_or_nil.data.as_deref(),
+                Some(ExprData::Dot(_) | ExprData::Index(_))
+            );
+            if !template.tag_was_originally_property_access && tag_is_property_access {
+                self.output.extend_from_slice(b"(0,");
+                self.print_optional_space();
+                self.print_expr_at(&template.tag_or_nil, Precedence::Lowest);
+                self.output.push(b')');
+            } else if is_optional_chain(&template.tag_or_nil) {
                 self.output.push(b'(');
                 self.print_expr_at(&template.tag_or_nil, Precedence::Lowest);
                 self.output.push(b')');

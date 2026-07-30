@@ -5389,6 +5389,13 @@ fn visit_expr_with_target_and_context(
             for part in &mut template.parts {
                 visit_expr(core, &mut part.value, resolve_identifiers);
             }
+            if core.should_fold_type_script_constant_expressions || core.options.minify_syntax {
+                let replacement = inline_primitives_into_template(expression.loc, template);
+                if let Some(replacement) = replacement.data {
+                    *data = *replacement;
+                    return;
+                }
+            }
         }
         ExprData::InlinedEnum(inlined) => {
             visit_expr(core, &mut inlined.value, resolve_identifiers);

@@ -227,6 +227,7 @@ pub(crate) fn parse_tagged_template_suffix(
         return None;
     }
     let loc = tag.loc;
+    let tag_was_originally_property_access = is_property_access(&tag);
     let head_loc = lexer.loc();
     let (_, head_raw) = lexer.cooked_and_raw_template_contents();
     let head_raw = String::from_utf8(head_raw).expect("template source text must be valid UTF-8");
@@ -259,6 +260,7 @@ pub(crate) fn parse_tagged_template_suffix(
         loc,
         ExprData::Template(TemplateExpr {
             tag_or_nil: tag,
+            tag_was_originally_property_access,
             head_raw,
             parts,
             head_loc,
