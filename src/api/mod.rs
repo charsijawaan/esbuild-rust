@@ -6030,6 +6030,29 @@ mod tests {
     }
 
     #[test]
+    fn distributes_safe_operators_out_of_comma_left_operands() {
+        assert_eq!(
+            code(transform(
+                "function unary(){return [-(a,b),+(a,b),~(a,b),!(a,b),void(a,b),\
+                 typeof(a,b),delete(a,b)]}\
+                 (a,b)&&c;(a,b)==c;(a,b)+c;a&&(b,c);a==(b,c);a+(b,c)",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "function unary() {\n",
+                "  return [(a, -b), (a, +b), (a, ~b), (a, !b), (a, void b), ",
+                "typeof (a, b), delete (a, b)];\n",
+                "}\n",
+                "a, b && c, a, b == c, a, b + c, a && (b, c), a == (b, c), ",
+                "a + (b, c);\n",
+            )
+        );
+    }
+
+    #[test]
     fn inlines_single_use_locals_with_ordering_guards() {
         assert_eq!(
             code(transform(

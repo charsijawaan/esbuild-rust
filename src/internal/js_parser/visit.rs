@@ -4653,6 +4653,28 @@ fn visit_expr_with_target_and_context(
                 };
                 if let Some(number) = replacement {
                     *data = ExprData::Number(number);
+                    return;
+                }
+            }
+            if core.options.minify_syntax
+                && !matches!(unary.op, OpCode::UnaryDelete | OpCode::UnaryTypeof)
+                && let Some(ExprData::Binary(comma)) = unary.value.data.as_deref()
+                && comma.op == OpCode::BinaryComma
+            {
+                let replacement = join_with_comma(
+                    comma.left.clone(),
+                    Expr::new(
+                        comma.right.loc,
+                        ExprData::Unary(UnaryExpr {
+                            value: comma.right.clone(),
+                            op: unary.op,
+                            ..UnaryExpr::default()
+                        }),
+                    ),
+                );
+                if let Some(replacement) = replacement.data {
+                    *data = *replacement;
+                    return;
                 }
             }
         }
@@ -4724,6 +4746,27 @@ fn visit_expr_with_target_and_context(
                     && let Some(right) = binary.right.data.as_deref().cloned()
                 {
                     *data = right;
+                    return;
+                }
+            }
+            if core.options.minify_syntax
+                && binary.op != OpCode::BinaryComma
+                && let Some(ExprData::Binary(comma)) = binary.left.data.as_deref()
+                && comma.op == OpCode::BinaryComma
+            {
+                let replacement = join_with_comma(
+                    comma.left.clone(),
+                    Expr::new(
+                        comma.right.loc,
+                        ExprData::Binary(BinaryExpr {
+                            left: comma.right.clone(),
+                            right: binary.right.clone(),
+                            op: binary.op,
+                        }),
+                    ),
+                );
+                if let Some(replacement) = replacement.data {
+                    *data = *replacement;
                     return;
                 }
             }
