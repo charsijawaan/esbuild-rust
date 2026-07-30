@@ -1,5 +1,7 @@
 //! Port of esbuild's public `pkg/api` package.
 
+mod watcher;
+
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
@@ -15,7 +17,7 @@ use crate::internal::{
     cache::CacheSet,
     config::{self, Mode},
     css_parser, css_printer,
-    fs::{Fs, MockKind, RealFsOptions, mock_fs, real_fs},
+    fs::{Fs, MockKind, RealFsOptions, WatchData, mock_fs, real_fs},
     helpers::{
         encode_string_as_shortest_data_url, escape_closing_tag, mime_type_by_extension,
         quote_for_json, string_to_utf16,
@@ -35,6 +37,7 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
 };
+use watcher::Watcher;
 
 struct TransformRenamer {
     base: Box<dyn Renamer>,
@@ -821,6 +824,24 @@ impl fmt::Display for ContextError {
 
 impl std::error::Error for ContextError {}
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WatchOptions {
+    pub delay: i64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WatchError {
+    pub message: String,
+}
+
+impl fmt::Display for WatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WatchError {}
+
 #[derive(Clone)]
 pub struct BuildContext {
     inner: Arc<BuildContextInner>,
@@ -837,6 +858,7 @@ struct BuildContextState {
     disposed: bool,
     active: Option<Arc<InFlightBuild>>,
     latest_hashes: HashMap<String, String>,
+    watcher: Option<Arc<Watcher>>,
 }
 
 #[derive(Default)]
@@ -887,18 +909,28 @@ impl BuildContext {
     pub fn rebuild(&self) -> BuildResult {
         self.rebuild_with(
             || {
-                let old_hashes = self
-                    .inner
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .latest_hashes
-                    .clone();
+                let (old_hashes, watcher) = {
+                    let state = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (state.latest_hashes.clone(), state.watcher.clone())
+                };
+                let watch_data = Mutex::new(WatchData::default());
                 let result = build_with_output_state(
                     self.inner.options.clone(),
                     &self.inner.cache,
                     Some(&old_hashes),
+                    watcher.as_ref().map(|_| &watch_data),
                 );
+                if let Some(watcher) = watcher {
+                    watcher.set_watch_data(
+                        watch_data
+                            .into_inner()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    );
+                }
                 let latest_hashes = result
                     .output_files
                     .iter()
@@ -913,6 +945,53 @@ impl BuildContext {
             },
             || {},
         )
+    }
+
+    /// Enables polling watch mode and starts the initial watch build asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this context is disposed or watch mode is already enabled.
+    pub fn watch(&self, options: WatchOptions) -> Result<(), WatchError> {
+        let (watcher, previous_build) = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.disposed {
+                return Err(WatchError {
+                    message: "Cannot watch a disposed context".into(),
+                });
+            }
+            if state.watcher.is_some() {
+                return Err(WatchError {
+                    message: "Watch mode has already been enabled".into(),
+                });
+            }
+            let watcher = Watcher::new(options.delay);
+            let previous_build = state.active.clone();
+            state.watcher = Some(watcher.clone());
+            (watcher, previous_build)
+        };
+
+        let weak_inner = Arc::downgrade(&self.inner);
+        watcher.start(Arc::new(move || {
+            if let Some(inner) = weak_inner.upgrade() {
+                let _ = BuildContext { inner }.rebuild();
+            }
+        }));
+
+        let weak_inner = Arc::downgrade(&self.inner);
+        std::thread::spawn(move || {
+            if let Some(previous_build) = previous_build {
+                let _ = previous_build.wait();
+            }
+            if let Some(inner) = weak_inner.upgrade() {
+                let _ = BuildContext { inner }.rebuild();
+            }
+        });
+        Ok(())
     }
 
     fn rebuild_with(
@@ -992,7 +1071,11 @@ impl BuildContext {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.disposed = true;
         let active = state.active.clone();
+        let watcher = state.watcher.clone();
         drop(state);
+        if let Some(watcher) = watcher {
+            watcher.stop();
+        }
         if let Some(active) = active {
             waiting_for_build();
             let _ = active.wait();
@@ -1263,6 +1346,20 @@ fn render_metafile_table(table: &[MetafileTableEntry], options: AnalyzeMetafileO
 
 fn output_file_hash(contents: &[u8]) -> String {
     STANDARD_NO_PAD.encode(xxhash::sum64(contents).to_le_bytes())
+}
+
+struct WatchDataRecorder<'a> {
+    file_system: &'a dyn Fs,
+    sink: &'a Mutex<WatchData>,
+}
+
+impl Drop for WatchDataRecorder<'_> {
+    fn drop(&mut self) {
+        *self
+            .sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.file_system.watch_data();
+    }
 }
 
 fn parse_tsconfig_raw(
@@ -2156,7 +2253,7 @@ pub fn build(options: BuildOptions) -> BuildResult {
 }
 
 fn build_with_cache(options: BuildOptions, cache: &CacheSet) -> BuildResult {
-    build_with_output_state(options, cache, None)
+    build_with_output_state(options, cache, None, None)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2164,6 +2261,7 @@ fn build_with_output_state(
     options: BuildOptions,
     cache: &CacheSet,
     previous_hashes: Option<&HashMap<String, String>>,
+    watch_data_sink: Option<&Mutex<WatchData>>,
 ) -> BuildResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
     let target_features = validate_target_features(
@@ -2179,6 +2277,7 @@ fn build_with_output_state(
     let allow_overwrite = options.allow_overwrite;
     let file_system = match real_fs(RealFsOptions {
         abs_working_dir: options.abs_working_dir.clone(),
+        want_watch_data: watch_data_sink.is_some(),
         ..RealFsOptions::default()
     }) {
         Ok(file_system) => file_system,
@@ -2193,6 +2292,10 @@ fn build_with_output_state(
             };
         }
     };
+    let _watch_data_recorder = watch_data_sink.map(|sink| WatchDataRecorder {
+        file_system: file_system.as_ref(),
+        sink,
+    });
     let entry_point_count = options.entry_points.len()
         + options.entry_points_advanced.len()
         + usize::from(options.stdin.is_some());
@@ -2593,6 +2696,7 @@ fn build_with_output_state(
         tsconfig_raw: options.tsconfig_raw,
         stdin,
         needs_metafile: options.metafile,
+        watch_mode: watch_data_sink.is_some(),
         ..config::Options::default()
     };
     let mut entry_points: Vec<_> = options
@@ -3387,8 +3491,8 @@ mod tests {
     use super::{
         BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
         BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, ContextError, Engine,
-        EngineName, Loader, Packages, Target, TransformOptions, build as build_api, context,
-        transform,
+        EngineName, Loader, Packages, Target, TransformOptions, WatchOptions, build as build_api,
+        context, transform,
     };
 
     fn build(mut options: BuildOptions) -> super::BuildResult {
@@ -3418,6 +3522,17 @@ mod tests {
             outdir: "out".into(),
             abs_working_dir: directory.to_string_lossy().into_owned(),
             ..BuildOptions::default()
+        }
+    }
+
+    fn wait_for_context_change(description: &str, mut predicate: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !predicate() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
 
@@ -3742,6 +3857,215 @@ mod tests {
             entry_path.exists(),
             "recovered rebuild did not restore output"
         );
+        std::fs::remove_dir_all(directory).expect("remove context test directory");
+    }
+
+    #[test]
+    fn build_context_watch_rebuilds_and_recovers_automatically() {
+        let directory = context_test_directory("watch-recovery");
+        let output_path = directory.join("out.js");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {value} from './dep.js'; console.log(value)",
+        )
+        .expect("write watched entry");
+        std::fs::write(directory.join("dep.js"), "export const value = 'one'")
+            .expect("write watched dependency");
+        let build_context = context(BuildOptions {
+            bundle: true,
+            entry_points: vec!["entry.js".into()],
+            outfile: "out.js".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            write: true,
+            ..BuildOptions::default()
+        })
+        .expect("create watched context");
+
+        build_context
+            .watch(WatchOptions::default())
+            .expect("enable watch mode");
+        assert_eq!(
+            build_context
+                .watch(WatchOptions::default())
+                .expect_err("watch mode cannot be enabled twice")
+                .message,
+            "Watch mode has already been enabled"
+        );
+        wait_for_context_change("initial watch build", || {
+            std::fs::read_to_string(&output_path).is_ok_and(|output| output.contains("one"))
+        });
+
+        std::fs::write(directory.join("dep.js"), "export const value = 'two'")
+            .expect("edit watched dependency");
+        wait_for_context_change("dependency rebuild", || {
+            std::fs::read_to_string(&output_path).is_ok_and(|output| output.contains("two"))
+        });
+
+        std::fs::write(directory.join("entry.js"), "if (").expect("break watched entry");
+        wait_for_context_change("failed rebuild cleanup", || !output_path.exists());
+
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {value} from './dep.js'; console.log('fixed', value)",
+        )
+        .expect("repair watched entry");
+        wait_for_context_change("recovered watch rebuild", || {
+            std::fs::read_to_string(&output_path).is_ok_and(|output| output.contains("fixed"))
+        });
+
+        build_context.dispose();
+        let stopped_output = std::fs::read(&output_path).expect("read output before stopped edit");
+        std::fs::write(
+            directory.join("dep.js"),
+            "export const value = 'after dispose'",
+        )
+        .expect("edit dependency after dispose");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            std::fs::read(&output_path).expect("read output after stopped edit"),
+            stopped_output
+        );
+        assert_eq!(
+            build_context
+                .watch(WatchOptions::default())
+                .expect_err("disposed context cannot be watched")
+                .message,
+            "Cannot watch a disposed context"
+        );
+        std::fs::remove_dir_all(directory).expect("remove context test directory");
+    }
+
+    #[test]
+    fn build_context_watch_honors_delay_and_tracks_failed_or_manual_builds() {
+        let directory = context_test_directory("watch-delay");
+        let output_path = directory.join("out.js");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {value} from './dep.js'; console.log(value)",
+        )
+        .expect("write watched entry");
+        std::fs::write(directory.join("dep.js"), "export const value = 'initial'")
+            .expect("write watched dependency");
+        let build_context = context(BuildOptions {
+            bundle: true,
+            entry_points: vec!["entry.js".into()],
+            outfile: "out.js".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            write: true,
+            ..BuildOptions::default()
+        })
+        .expect("create watched context");
+        build_context
+            .watch(WatchOptions { delay: 250 })
+            .expect("enable delayed watch mode");
+        wait_for_context_change("initial delayed watch build", || {
+            std::fs::read_to_string(&output_path).is_ok_and(|output| output.contains("initial"))
+        });
+
+        std::fs::write(directory.join("dep.js"), "export const value = 'delayed'")
+            .expect("edit delayed dependency");
+        std::thread::sleep(std::time::Duration::from_millis(125));
+        assert!(
+            std::fs::read_to_string(&output_path)
+                .expect("read output during delay")
+                .contains("initial")
+        );
+        wait_for_context_change("delayed dependency rebuild", || {
+            std::fs::read_to_string(&output_path).is_ok_and(|output| output.contains("delayed"))
+        });
+
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {value} from './missing.js'; console.log(value)",
+        )
+        .expect("introduce missing watched dependency");
+        wait_for_context_change("missing dependency failure", || !output_path.exists());
+        std::fs::write(
+            directory.join("missing.js"),
+            "export const value = 'appeared'",
+        )
+        .expect("create missing watched dependency");
+        wait_for_context_change("missing dependency recovery", || {
+            std::fs::read_to_string(&output_path).is_ok_and(|output| output.contains("appeared"))
+        });
+
+        std::fs::write(
+            directory.join("manual.js"),
+            "export const value = 'manual one'",
+        )
+        .expect("write manual dependency");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import {value} from './manual.js'; console.log(value)",
+        )
+        .expect("switch dependency before manual build");
+        let manual = build_context.rebuild();
+        assert!(manual.errors.is_empty(), "{:?}", manual.errors);
+        std::fs::write(
+            directory.join("manual.js"),
+            "export const value = 'manual two'",
+        )
+        .expect("edit dependency from manual build");
+        wait_for_context_change("manual build watch snapshot", || {
+            std::fs::read_to_string(&output_path).is_ok_and(|output| output.contains("manual two"))
+        });
+
+        build_context.dispose();
+        std::fs::remove_dir_all(directory).expect("remove context test directory");
+    }
+
+    #[test]
+    fn build_context_watch_waits_for_a_preexisting_non_watch_build() {
+        let directory = context_test_directory("watch-active-build");
+        let output_path = directory.join("out.js");
+        std::fs::write(directory.join("entry.js"), "console.log('watch build')")
+            .expect("write watched entry");
+        let build_context = context(BuildOptions {
+            bundle: true,
+            entry_points: vec!["entry.js".into()],
+            outfile: "out.js".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            write: true,
+            ..BuildOptions::default()
+        })
+        .expect("create watched context");
+
+        let preexisting = std::sync::Arc::new(super::InFlightBuild::default());
+        build_context
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active = Some(preexisting.clone());
+        build_context
+            .watch(WatchOptions::default())
+            .expect("enable watch mode during active build");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            !output_path.exists(),
+            "watch startup incorrectly reused the non-watch build"
+        );
+
+        {
+            let mut state = build_context
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                state
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| std::sync::Arc::ptr_eq(active, &preexisting))
+            );
+            state.active = None;
+            preexisting.finish(super::InFlightOutcome::Completed(
+                super::BuildResult::default(),
+            ));
+        }
+        wait_for_context_change("distinct initial watch build", || output_path.exists());
+
+        build_context.dispose();
         std::fs::remove_dir_all(directory).expect("remove context test directory");
     }
 

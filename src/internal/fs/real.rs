@@ -6,6 +6,7 @@ use super::{
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -386,9 +387,10 @@ impl Fs for RealFs {
                     let watched = path.clone();
                     let old_contents = data.file_contents;
                     Arc::new(move || {
-                        if fs::read_to_string(&watched).ok().as_deref()
-                            == Some(old_contents.as_str())
-                        {
+                        let contents = fs::read(&watched)
+                            .ok()
+                            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                        if contents.as_deref() == Some(old_contents.as_str()) {
                             String::new()
                         } else {
                             watched.clone()
@@ -463,9 +465,10 @@ fn directory_change(path: &str, accessed: Option<&Arc<Mutex<AccessedEntries>>>) 
         .collect();
     for (name, was_present) in &accessed.was_present {
         if *was_present != lookup.contains_key(name) {
-            return lookup
-                .get(name)
-                .map_or_else(|| path.into(), |actual| format!("{path}/{actual}"));
+            return lookup.get(name).map_or_else(
+                || path.into(),
+                |actual| Path::new(path).join(actual).to_string_lossy().into_owned(),
+            );
         }
     }
     String::new()
@@ -486,7 +489,7 @@ fn modification_key(path: &str) -> Result<ModKey, FsError> {
     }
     let duration = modified
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| FsError::new(FsErrorKind::Other, error.to_string()))?;
+        .map_err(|error| FsError::new(FsErrorKind::InvalidInput, error.to_string()))?;
     let mut key = ModKey {
         size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
         mtime_sec: i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
