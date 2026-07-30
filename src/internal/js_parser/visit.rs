@@ -694,6 +694,20 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
         if !old_control_flow_dead {
             inline_single_use_declarations(core, statements);
         }
+        for statement in statements.iter_mut() {
+            let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() else {
+                continue;
+            };
+            let helpers = make_helper_context(|reference| {
+                core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                    == SymbolKind::Unbound
+            });
+            expression.value = helpers
+                .simplify_unused_expr(&expression.value, core.options.unsupported_js_features);
+            if expression.value.data.is_none() {
+                statement.data = None;
+            }
+        }
         absorb_expressions_into_for_initializers(statements);
         merge_adjacent_throws(core, statements);
     }

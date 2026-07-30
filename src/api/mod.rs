@@ -6017,6 +6017,16 @@ mod tests {
             code(transform("(function*(){})()", TransformOptions::default())),
             concat!("(function* () {\n", "})();\n")
         );
+        assert_eq!(
+            code(transform(
+                "let x=()=>{let y=()=>{z()};y()}",
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!("let x = () => {\n", "  z();\n", "};\n")
+        );
     }
 
     #[test]
