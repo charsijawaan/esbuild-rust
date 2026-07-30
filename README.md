@@ -16,7 +16,7 @@ upstream revision is the acceptance criterion. Upstream tests are translated
 or exercised as differential tests as each subsystem lands.
 
 This repository is a bounded experimental snapshot. Its release binary passes
-all 12 scenarios in the bounded compiler/CLI evaluation, with the same runtime
+all 13 scenarios in the bounded compiler/CLI evaluation, with the same runtime
 results as the pinned upstream executable. That is encouraging, but it is not
 evidence of complete compatibility and this project is not a drop-in or
 production-ready esbuild replacement.

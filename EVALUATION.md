@@ -7,16 +7,16 @@ suite, a security audit, or a production-readiness claim.
 
 ## Snapshot
 
-- Rust feature checkpoint: `1e048eb23635263924ebef64000b6053450064ad`
+- Rust feature checkpoint: `fb7a1ce208c74c3fcc2c336f4267d584b00580df`
 - Upstream esbuild: `6ff1d8b0d8c134e867a397eef39702a223ebef9e`
   (version 0.28.1)
 - Evaluation date: 2026-07-31
 - Toolchain: Rust 1.96.0, Node.js 24.15.0
 - Build: `cargo build --release --locked`
-- Rust source: 108,812 physical lines across tracked `*.rs` files
-- Repository tests: 837 passing
-- Approximate whole-product surface: 71.3%
-- Approximate selected native compiler/bundler/API core: 98.6%
+- Rust source: 109,034 physical lines across tracked `*.rs` files
+- Repository tests: 839 passing
+- Approximate whole-product surface: 71.4%
+- Approximate selected native compiler/bundler/API core: 98.7%
 
 The two percentages have different denominators. Whole-product surface includes
 serve, service protocols, language wrappers, WebAssembly, npm packaging, and
@@ -27,9 +27,9 @@ differential probes, and known gaps; neither is an official coverage metric.
 
 ## Result
 
-The release-mode Rust CLI passed 12 of 12 representative scenarios. The pinned
+The release-mode Rust CLI passed 13 of 13 representative scenarios. The pinned
 upstream executable also passed all scenarios, and the generated programs had
-the same standard output in all 12 cases.
+the same standard output in all 13 cases.
 
 | Scenario | Rust | Upstream | Runtime parity | Rust output | Upstream output |
 | --- | --- | --- | --- | ---: | ---: |
@@ -45,6 +45,7 @@ the same standard output in all 12 cases.
 | stdin CommonJS transform | pass | pass | yes | 955 B | 963 B |
 | stdin IIFE global | pass | pass | yes | 1,037 B | 1,051 B |
 | transform ignores ambient tsconfig | pass | pass | yes | 142 B | 142 B |
+| absolute path controls | pass | pass | yes | 906 B | 910 B |
 
 Output sizes are the total bytes emitted for each scenario, so the source-map
 row includes its map and metafile. Textual output is not expected to be
@@ -93,5 +94,5 @@ includes:
   minifier, and cross-platform filesystem parity;
 - the full upstream test corpus, security review, and performance benchmarking.
 
-The 837 local tests and this 12-case matrix make the snapshot inspectable and
+The 839 local tests and this 13-case matrix make the snapshot inspectable and
 useful, but upstream esbuild should remain the production choice.
