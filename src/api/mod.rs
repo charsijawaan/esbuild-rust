@@ -27,8 +27,8 @@ use crate::internal::{
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
     logger::{
-        DeferLogKind, Log, Msg, MsgData, MsgKind, MsgLocation, OutputOptions, Path, PrettyPaths,
-        Source, TerminalInfo, msg_id_to_string, string_to_maximum_msg_id,
+        DeferLogKind, Log, Msg, MsgData, MsgKind, MsgLocation, OutputOptions, Path, PathStyle,
+        PrettyPaths, Source, TerminalInfo, msg_id_to_string, string_to_maximum_msg_id,
     },
     renamer::{Renamer, new_no_op_renamer},
     resolver,
@@ -353,6 +353,7 @@ pub struct Engine {
 pub struct TransformOptions {
     pub sourcefile: String,
     pub loader: Loader,
+    pub abs_paths: AbsPaths,
     pub format: BuildFormat,
     pub global_name: String,
     pub target: Target,
@@ -391,6 +392,7 @@ impl Default for TransformOptions {
         Self {
             sourcefile: String::new(),
             loader: Loader::default(),
+            abs_paths: AbsPaths::default(),
             format: BuildFormat::default(),
             global_name: String::new(),
             target: Target::default(),
@@ -953,6 +955,42 @@ pub enum BuildTreeShaking {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AbsPaths(u8);
+
+impl AbsPaths {
+    pub const CODE: Self = Self(1 << 0);
+    pub const LOG: Self = Self(1 << 1);
+    pub const METAFILE: Self = Self(1 << 2);
+
+    #[must_use]
+    pub const fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 == flag.0
+    }
+}
+
+impl std::ops::BitOr for AbsPaths {
+    type Output = Self;
+
+    fn bitor(self, right: Self) -> Self::Output {
+        Self(self.0 | right.0)
+    }
+}
+
+impl std::ops::BitOrAssign for AbsPaths {
+    fn bitor_assign(&mut self, right: Self) {
+        self.0 |= right.0;
+    }
+}
+
+const fn internal_path_style(abs_paths: AbsPaths, flag: AbsPaths) -> PathStyle {
+    if abs_paths.contains(flag) {
+        PathStyle::Absolute
+    } else {
+        PathStyle::Relative
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BuildJsx {
     #[default]
     Transform,
@@ -1403,6 +1441,7 @@ pub struct BuildOptions {
     pub tsconfig: String,
     pub tsconfig_raw: String,
     pub metafile: bool,
+    pub abs_paths: AbsPaths,
     pub format: BuildFormat,
     pub platform: BuildPlatform,
     pub target: Target,
@@ -1470,6 +1509,7 @@ impl Default for BuildOptions {
             tsconfig: String::new(),
             tsconfig_raw: String::new(),
             metafile: false,
+            abs_paths: AbsPaths::default(),
             format: BuildFormat::default(),
             platform: BuildPlatform::default(),
             target: Target::default(),
@@ -2963,7 +3003,10 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
         ));
     }
 
-    let (mut logged_errors, _) = public_messages(log.done());
+    let (mut logged_errors, _) = public_messages_with_path_style(
+        log.done(),
+        internal_path_style(options.abs_paths, AbsPaths::LOG),
+    );
     logged_errors.extend(errors);
     logged_errors
 }
@@ -3020,6 +3063,9 @@ fn activate_plugin_resolve(
         preserve_symlinks: options.preserve_symlinks,
         tsconfig_path,
         tsconfig_raw: options.tsconfig_raw.clone(),
+        log_path_style: internal_path_style(options.abs_paths, AbsPaths::LOG),
+        code_path_style: internal_path_style(options.abs_paths, AbsPaths::CODE),
+        metafile_path_style: internal_path_style(options.abs_paths, AbsPaths::METAFILE),
         plugins: prepared_plugins.plugins.clone(),
         ..config::Options::default()
     };
@@ -3160,7 +3206,8 @@ fn run_plugin_resolve(
         options.plugin_data,
         raw_tsconfig.as_ref(),
     );
-    let (mut errors, warnings) = public_messages(log.done());
+    let (mut errors, warnings) =
+        public_messages_with_path_style(log.done(), runtime.options.log_path_style);
     let Some(resolved) = resolved else {
         if errors.is_empty() {
             errors.push(plugin_resolve_failure(
@@ -3319,6 +3366,7 @@ fn build_with_output_state_core(
     watch_data_sink: Option<&Mutex<WatchData>>,
 ) -> BuildResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
     let target_features = validate_target_features(
         &log,
         options.target,
@@ -3546,7 +3594,7 @@ fn build_with_output_state_core(
             },
         );
         if !ok {
-            let (errors, warnings) = public_messages(log.done());
+            let (errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
             return BuildResult {
                 errors,
                 warnings,
@@ -3598,7 +3646,7 @@ fn build_with_output_state_core(
         ts_always_strict = tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
     }
     if log.has_errors() {
-        let (errors, warnings) = public_messages(log.done());
+        let (errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
         return BuildResult {
             errors,
             warnings,
@@ -3706,6 +3754,9 @@ fn build_with_output_state_core(
             BuildSourceMap::Inline => config::SourceMap::Inline,
             BuildSourceMap::InlineAndExternal => config::SourceMap::InlineAndExternal,
         },
+        log_path_style,
+        code_path_style: internal_path_style(options.abs_paths, AbsPaths::CODE),
+        metafile_path_style: internal_path_style(options.abs_paths, AbsPaths::METAFILE),
         source_root: options.source_root,
         exclude_sources_content: options.sources_content == BuildSourcesContent::Exclude,
         legal_comments: internal_legal_comments(options.legal_comments, bundle),
@@ -3784,7 +3835,7 @@ fn build_with_output_state_core(
         &mut internal_options,
         "API",
     );
-    let (mut errors, warnings) = public_messages(log.done());
+    let (mut errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
     if errors.is_empty() {
         errors.extend(
             compiled
@@ -3840,6 +3891,7 @@ fn build_with_output_state_core(
 pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> TransformResult {
     let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
     let mut options = options;
+    let log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
     let target_features = validate_target_features(
         &log,
         options.target,
@@ -3913,7 +3965,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
             },
         );
         if !ok {
-            let (errors, warnings) = public_messages(log.done());
+            let (errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
             return TransformResult {
                 errors,
                 warnings,
@@ -3922,7 +3974,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         }
     }
     if log.has_errors() {
-        let (errors, warnings) = public_messages(log.done());
+        let (errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
         return TransformResult {
             errors,
             warnings,
@@ -3983,7 +4035,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
     };
 
     let messages = log.done();
-    let (errors, warnings) = public_messages(messages);
+    let (errors, warnings) = public_messages_with_path_style(messages, log_path_style);
     let mut legal_comments = Vec::new();
     let mut source_map = Vec::new();
     if errors.is_empty() {
@@ -4090,6 +4142,7 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
             ..BuildStdin::default()
         }),
         outfile: output_file,
+        abs_paths: options.abs_paths,
         format: options.format,
         platform: options.platform,
         target: options.target,
@@ -4435,6 +4488,8 @@ fn transform_javascript(
         target_features.unsupported_js_feature_overrides;
     parser_options.unsupported_js_feature_overrides_mask =
         target_features.unsupported_js_feature_overrides_mask;
+    parser_options.log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
+    parser_options.code_path_style = internal_path_style(options.abs_paths, AbsPaths::CODE);
     parser_options.minify_syntax = options.minify_syntax;
     parser_options.minify_identifiers = options.minify_identifiers;
     parser_options.minify_whitespace = options.minify_whitespace;
@@ -4614,7 +4669,10 @@ fn local_css_names(
     names
 }
 
-fn public_messages(messages: Vec<Msg>) -> (Vec<Message>, Vec<Message>) {
+fn public_messages_with_path_style(
+    messages: Vec<Msg>,
+    path_style: PathStyle,
+) -> (Vec<Message>, Vec<Message>) {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     for message in messages {
@@ -4627,13 +4685,18 @@ fn public_messages(messages: Vec<Msg>) -> (Vec<Message>, Vec<Message>) {
             id: msg_id_to_string(message.id).into(),
             plugin_name: message.plugin_name,
             text: message.data.text,
-            location: message.data.location.map(public_location),
+            location: message
+                .data
+                .location
+                .map(|location| public_location(location, path_style)),
             notes: message
                 .notes
                 .into_iter()
                 .map(|note| Note {
                     text: note.text,
-                    location: note.location.map(public_location),
+                    location: note
+                        .location
+                        .map(|location| public_location(location, path_style)),
                 })
                 .collect(),
             detail: message.data.user_detail,
@@ -4647,9 +4710,9 @@ fn public_messages(messages: Vec<Msg>) -> (Vec<Message>, Vec<Message>) {
     (errors, warnings)
 }
 
-fn public_location(location: MsgLocation) -> Location {
+fn public_location(location: MsgLocation, path_style: PathStyle) -> Location {
     Location {
-        file: location.file.rel,
+        file: location.file.select(path_style).to_string(),
         namespace: location.namespace,
         line: location.line,
         column: location.column,
@@ -4688,11 +4751,11 @@ mod tests {
     };
 
     use super::{
-        BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions, BuildPlatform,
-        BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking, ContextError, Engine,
-        EngineName, Loader, OnLoadOptions, OnLoadResult, OnResolveOptions, OnResolveResult,
-        Packages, Plugin, PluginError, ResolveKind, SideEffects, Target, TransformOptions,
-        WatchOptions, build as build_api, context, transform,
+        AbsPaths, BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments, BuildOptions,
+        BuildPlatform, BuildSourceMap, BuildSourcesContent, BuildStdin, BuildTreeShaking,
+        ContextError, Engine, EngineName, Loader, OnLoadOptions, OnLoadResult, OnResolveOptions,
+        OnResolveResult, Packages, Plugin, PluginError, ResolveKind, SideEffects, Target,
+        TransformOptions, WatchOptions, build as build_api, context, transform,
     };
 
     fn build(mut options: BuildOptions) -> super::BuildResult {
@@ -6810,6 +6873,103 @@ mod tests {
         assert!(result.metafile.contains("\"out/entry.js\": {"));
         assert!(result.metafile.contains("\"bytesInOutput\":"));
         assert!(result.metafile.ends_with("}\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn selects_absolute_code_log_and_metafile_paths_independently() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-abs-paths-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        let broken = directory.join("broken.js");
+        std::fs::write(&entry, "export const answer = 42").expect("write entry");
+        std::fs::write(&broken, "export const = 42").expect("write broken entry");
+        let absolute_entry = std::fs::canonicalize(&entry)
+            .expect("canonicalize entry")
+            .to_string_lossy()
+            .into_owned();
+        let absolute_broken = std::fs::canonicalize(&broken)
+            .expect("canonicalize broken entry")
+            .to_string_lossy()
+            .into_owned();
+
+        let build_entry = |abs_paths| {
+            build(BuildOptions {
+                entry_points: vec!["entry.js".into()],
+                outdir: "out".into(),
+                abs_working_dir: directory.to_string_lossy().into_owned(),
+                metafile: true,
+                abs_paths,
+                ..BuildOptions::default()
+            })
+        };
+        let relative = build_entry(AbsPaths::default());
+        let code_only = build_entry(AbsPaths::CODE);
+        let metafile_only = build_entry(AbsPaths::METAFILE);
+        for result in [&relative, &code_only, &metafile_only] {
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+        }
+
+        let relative_code = String::from_utf8_lossy(&relative.output_files[0].contents);
+        let absolute_code = String::from_utf8_lossy(&code_only.output_files[0].contents);
+        let metafile_code = String::from_utf8_lossy(&metafile_only.output_files[0].contents);
+        assert!(relative_code.contains("// entry.js"), "{relative_code}");
+        assert!(!relative_code.contains(&absolute_entry), "{relative_code}");
+        assert!(
+            absolute_code.contains(&format!("// {absolute_entry}")),
+            "{absolute_code}"
+        );
+        assert!(!metafile_code.contains(&absolute_entry), "{metafile_code}");
+
+        let relative_metafile: serde_json::Value =
+            serde_json::from_str(&relative.metafile).expect("relative metafile is JSON");
+        let absolute_metafile: serde_json::Value =
+            serde_json::from_str(&metafile_only.metafile).expect("absolute metafile is JSON");
+        assert!(relative_metafile["inputs"].get("entry.js").is_some());
+        assert!(
+            absolute_metafile["inputs"]
+                .get(absolute_entry.as_str())
+                .is_some(),
+            "{absolute_metafile}"
+        );
+
+        let build_broken = |abs_paths| {
+            build(BuildOptions {
+                entry_points: vec!["broken.js".into()],
+                outdir: "out".into(),
+                abs_working_dir: directory.to_string_lossy().into_owned(),
+                abs_paths,
+                ..BuildOptions::default()
+            })
+        };
+        let relative_error = build_broken(AbsPaths::CODE);
+        let absolute_error = build_broken(AbsPaths::LOG);
+        assert_eq!(
+            relative_error.errors[0]
+                .location
+                .as_ref()
+                .map(|location| location.file.as_str()),
+            Some("broken.js")
+        );
+        assert_eq!(
+            absolute_error.errors[0]
+                .location
+                .as_ref()
+                .map(|location| location.file.as_str()),
+            Some(absolute_broken.as_str())
+        );
+
+        let combined = AbsPaths::CODE | AbsPaths::LOG | AbsPaths::METAFILE;
+        assert!(combined.contains(AbsPaths::CODE));
+        assert!(combined.contains(AbsPaths::LOG));
+        assert!(combined.contains(AbsPaths::METAFILE));
+        assert!(!AbsPaths::CODE.contains(AbsPaths::LOG));
+        assert!(!AbsPaths::CODE.contains(AbsPaths::CODE | AbsPaths::LOG));
+
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

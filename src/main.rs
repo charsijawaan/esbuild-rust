@@ -8,10 +8,11 @@ use std::{
 
 use esbuild_rs::{
     api::{
-        AnalyzeMetafileOptions, BuildEntryPoint, BuildFormat, BuildJsx, BuildLegalComments,
-        BuildOptions, BuildPlatform, BuildSourceMap, BuildSourcesContent, BuildStdin,
-        BuildTreeShaking, Engine, EngineName, FormatMessagesOptions, Loader, Message, MessageKind,
-        Packages, Target, TransformOptions, analyze_metafile, build, format_messages, transform,
+        AbsPaths, AnalyzeMetafileOptions, BuildEntryPoint, BuildFormat, BuildJsx,
+        BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap, BuildSourcesContent,
+        BuildStdin, BuildTreeShaking, Engine, EngineName, FormatMessagesOptions, Loader, Message,
+        MessageKind, Packages, Target, TransformOptions, analyze_metafile, build, format_messages,
+        transform,
     },
     internal::cli_helpers,
 };
@@ -121,6 +122,7 @@ fn run_with_stdin_and_node_paths(
     let mut tsconfig_raw = String::new();
     let mut metafile_path = String::new();
     let mut analyze = AnalyzeMode::Disabled;
+    let mut abs_paths = AbsPaths::default();
     let mut format = BuildFormat::Default;
     let mut platform = BuildPlatform::Browser;
     let mut global_name = String::new();
@@ -321,6 +323,26 @@ fn run_with_stdin_and_node_paths(
                 return Err("Invalid empty metafile path".into());
             }
             metafile_path = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--abs-paths=") {
+            let mut parsed = AbsPaths::default();
+            if !value.is_empty() {
+                for path_kind in value.split(',') {
+                    parsed |= match path_kind {
+                        "code" => AbsPaths::CODE,
+                        "log" => AbsPaths::LOG,
+                        "metafile" => AbsPaths::METAFILE,
+                        _ => {
+                            return Err(format!(
+                                "Invalid value {path_kind:?} in {argument:?}\n\n\
+                                 Valid values are \"code\", \"log\", or \"metafile\"."
+                            ));
+                        }
+                    };
+                }
+            }
+            abs_paths = parsed;
             continue;
         }
         if let Some(value) = argument.strip_prefix("--format=") {
@@ -602,6 +624,7 @@ fn run_with_stdin_and_node_paths(
             tsconfig,
             tsconfig_raw,
             metafile: !metafile_path.is_empty() || analyze != AnalyzeMode::Disabled,
+            abs_paths,
             format,
             platform,
             target: options.target,
@@ -765,6 +788,7 @@ fn run_with_stdin_and_node_paths(
     options.define = defines;
     options.pure = pure;
     options.keep_names = keep_names;
+    options.abs_paths = abs_paths;
     options.format = format;
     options.global_name = global_name;
     options.platform = platform;
@@ -905,6 +929,7 @@ fn help_text() -> String {
          \x20\x20--tsconfig=FILE\n\
          \x20\x20--tsconfig-raw=JSON\n\
          \x20\x20--metafile=FILE\n\
+         \x20\x20--abs-paths=KIND[,KIND...]\n\
          \x20\x20--format=iife|cjs|esm\n\
          \x20\x20--platform=browser|node|neutral\n\
          \x20\x20--target=TARGETS\n\
@@ -1054,6 +1079,14 @@ mod tests {
         assert!(run(&["--drop-labels=".into()]).is_err());
         assert!(run(&["--drop-labels=DEV,".into()]).is_err());
         assert!(run(&["--pure:".into()]).is_err());
+        assert_eq!(
+            run(&["--abs-paths=nope".into()])
+                .err()
+                .expect("invalid absolute path kind"),
+            "Invalid value \"nope\" in \"--abs-paths=nope\"\n\n\
+             Valid values are \"code\", \"log\", or \"metafile\"."
+        );
+        assert!(run(&["--abs-paths=".into(), "--version".into()]).is_ok());
     }
 
     #[test]
@@ -1091,6 +1124,35 @@ mod tests {
         let output = String::from_utf8(output).expect("bundle output is UTF-8");
         assert!(output.contains("console.log(\"cli bundle\");"));
         assert!(output.starts_with("(() => {\n"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn emits_absolute_source_paths_in_cli_code() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-cli-abs-paths-{unique}"));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let entry = directory.join("entry.js");
+        std::fs::write(&entry, "console.log('absolute code path')").expect("write entry file");
+        let canonical_entry = std::fs::canonicalize(&entry).expect("canonicalize entry file");
+
+        let Output::Code(output) = run(&[
+            "--bundle".into(),
+            "--abs-paths=code".into(),
+            entry.to_string_lossy().into_owned(),
+        ])
+        .expect("bundle succeeds") else {
+            panic!("expected bundled code");
+        };
+        let output = String::from_utf8(output).expect("bundle output is UTF-8");
+        assert!(
+            output.contains(&format!("// {}", canonical_entry.display())),
+            "{output}"
+        );
+
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 

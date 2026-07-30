@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -274,6 +275,36 @@ const cases = [
       }
     },
   },
+  {
+    name: "absolute path controls",
+    files: {
+      "entry.js": "console.log(42);\n",
+    },
+    args: (output) => [
+      "entry.js",
+      "--bundle",
+      "--platform=node",
+      "--format=cjs",
+      "--abs-paths=code,metafile",
+      `--metafile=${join(output, "meta.json")}`,
+      `--outfile=${join(output, "bundle.cjs")}`,
+    ],
+    run: (output) => join(output, "bundle.cjs"),
+    expected: "42",
+    verify: (output, caseRoot) => {
+      const absoluteEntry = realpathSync(join(caseRoot, "entry.js"));
+      const code = readFileSync(join(output, "bundle.cjs"), "utf8");
+      const metafile = JSON.parse(
+        readFileSync(join(output, "meta.json"), "utf8"),
+      );
+      if (!code.includes(`// ${absoluteEntry}`)) {
+        throw new Error("generated code did not use the absolute source path");
+      }
+      if (!Object.hasOwn(metafile.inputs, absoluteEntry)) {
+        throw new Error("metafile did not use the absolute input path");
+      }
+    },
+  },
 ];
 
 const byteSize = (path) => {
@@ -332,7 +363,7 @@ const runCase = (binary, testCase, caseRoot, output) => {
   }
 
   try {
-    testCase.verify?.(output);
+    testCase.verify?.(output, caseRoot);
   } catch (error) {
     return {
       ok: false,
