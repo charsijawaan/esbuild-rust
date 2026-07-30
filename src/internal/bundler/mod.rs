@@ -10,14 +10,14 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
     ast::{AssertOrWithKeyword, ImportKind, ImportRecordFlags, Index32, Ref},
-    cache::{CacheSet, SourceIndexCache, SourceIndexKind},
+    cache::{CacheSet, SourceIndexKind},
     compat::{CssFeature, JsFeature},
     config::{
-        Loader, Mode, Options, PathPlaceholder, PathPlaceholders, PathTemplate, Platform,
+        self, Loader, Mode, Options, PathPlaceholder, PathPlaceholders, PathTemplate, Platform,
         PluginData, has_placeholder, substitute_template, template_to_string,
     },
     css_parser,
-    fs::Fs,
+    fs::{EntryKind, Fs},
     graph::{
         CssRepr, EntryPoint as GraphEntryPoint, InputFile, InputFileRepr, JsRepr, OutputFile,
         SideEffects, SideEffectsKind,
@@ -29,7 +29,7 @@ use crate::internal::{
     js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
     js_parser::{self, HelperCall},
     linker,
-    logger::{self, LineColumnTracker, Log, Path, Range, Source},
+    logger::{self, LineColumnTracker, Log, Msg, MsgKind, Path, Range, Source},
     resolver::{self, ResolveResult, ResolverContext},
     runtime,
     sourcemap::LineOffsetTable,
@@ -297,6 +297,28 @@ pub struct EntryPoint {
     pub input_path_in_file_namespace: bool,
 }
 
+fn entry_point_is_file(file_system: &dyn Fs, entry_point: &EntryPoint) -> bool {
+    if entry_point.input_path_in_file_namespace {
+        return true;
+    }
+    if entry_point.input_path.contains('*') {
+        return false;
+    }
+    let absolute_path = if file_system.is_abs(&entry_point.input_path) {
+        entry_point.input_path.clone()
+    } else {
+        file_system.join(&[file_system.cwd(), &entry_point.input_path])
+    };
+    let directory = file_system.dir(&absolute_path);
+    let base = file_system.base(&absolute_path);
+    let (entries, error, _) = file_system.read_directory(&directory);
+    error.is_none()
+        && entries
+            .get(&base)
+            .0
+            .is_some_and(|entry| entry.kind(file_system) == EntryKind::File)
+}
+
 #[must_use]
 pub fn default_extension_to_loader_map() -> HashMap<String, Loader> {
     [
@@ -333,7 +355,7 @@ pub fn parse_file_with_unique_key_prefix(
     options: &Options,
     unique_key_prefix: &str,
 ) -> ParseResult {
-    parse_file_with_cache(log, source, loader, options, unique_key_prefix, None)
+    parse_file_with_cache(log, source, loader, options, unique_key_prefix, "", None)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -343,6 +365,7 @@ fn parse_file_with_cache(
     mut loader: Loader,
     options: &Options,
     unique_key_prefix: &str,
+    plugin_name: &str,
     caches: Option<&CacheSet>,
 ) -> ParseResult {
     let (_, base, extension) =
@@ -353,7 +376,7 @@ fn parse_file_with_cache(
             &format!("{base}{extension}"),
         );
     }
-    if loader != Loader::Copy {
+    if loader != Loader::Copy && plugin_name.is_empty() {
         for attribute in source.key_path.import_attributes.decode_into_array() {
             if attribute.key != "type" {
                 log.add_error(
@@ -585,13 +608,426 @@ fn parse_file_with_cache(
         }
     }
 
+    if !plugin_name.is_empty()
+        && result.file.input_file.side_effects.kind == SideEffectsKind::NoSideEffectsPureData
+    {
+        result.file.input_file.side_effects.kind = SideEffectsKind::NoSideEffectsPureDataFromPlugin;
+    }
     result
+}
+
+fn log_plugin_messages(
+    log: &Log,
+    default_plugin_name: &str,
+    messages: Vec<Msg>,
+    thrown_error: Option<String>,
+    import_source: Option<&Source>,
+    import_path_range: Range,
+) -> bool {
+    let mut did_log_error = false;
+    let mut tracker = LineColumnTracker::new(import_source);
+    for mut message in messages {
+        if message.plugin_name.is_empty() {
+            message.plugin_name = default_plugin_name.to_string();
+        }
+        if message.data.location.is_none() {
+            message.data.location = tracker.msg_location_or_none(import_path_range);
+        } else if import_source.is_some() {
+            message.notes.push(tracker.msg_data(
+                import_path_range,
+                format!("The plugin {default_plugin_name:?} was triggered by this import"),
+            ));
+        }
+        did_log_error |= message.kind == MsgKind::Error;
+        log.add_msg(message);
+    }
+    if let Some(text) = thrown_error {
+        let mut message = Msg {
+            data: tracker.msg_data(import_path_range, text),
+            ..Msg::new(MsgKind::Error, "")
+        };
+        message.plugin_name = default_plugin_name.to_string();
+        log.add_msg(message);
+        did_log_error = true;
+    }
+    did_log_error
+}
+
+fn touch_plugin_watch_paths(
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    watch_files: &[String],
+    watch_dirs: &[String],
+) {
+    for path in watch_files {
+        let _ = caches.fs_cache.read_file(file_system, path);
+    }
+    for path in watch_dirs {
+        let (entries, error, _) = file_system.read_directory(path);
+        if error.is_none() {
+            let _ = entries.sorted_keys();
+        }
+    }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
+fn resolve_with_plugins(
+    log: &Log,
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    options: &Options,
+    importer: &Path,
+    path: &str,
+    import_attributes: &logger::ImportAttributes,
+    kind: ImportKind,
+    abs_resolve_dir: &str,
+    plugin_data: Option<PluginData>,
+    import_source: Option<&Source>,
+    import_path_range: Range,
+    tsconfig: Option<&resolver::TsConfigJson>,
+    is_require: bool,
+) -> (Option<ResolveResult>, bool) {
+    let apply_path = Path {
+        text: path.to_string(),
+        namespace: importer.namespace.clone(),
+        ..Path::default()
+    };
+    for plugin in &options.plugins {
+        for on_resolve in &plugin.on_resolve {
+            let (Some(filter), Some(callback)) = (&on_resolve.filter, &on_resolve.callback) else {
+                continue;
+            };
+            if !config::plugin_applies_to_path(&apply_path, filter, &on_resolve.namespace) {
+                continue;
+            }
+            let args = config::OnResolveArgs {
+                path: path.to_string(),
+                resolve_dir: abs_resolve_dir.to_string(),
+                plugin_data: plugin_data.clone(),
+                importer: importer.clone(),
+                kind,
+                with: import_attributes.clone(),
+            };
+            let mut plugin_result =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(args))) {
+                    Ok(result) => result,
+                    Err(_) => config::OnResolveResult {
+                        thrown_error: Some("Plugin onResolve callback panicked".into()),
+                        ..config::OnResolveResult::default()
+                    },
+                };
+            let plugin_name = if plugin_result.plugin_name.is_empty() {
+                plugin.name.clone()
+            } else {
+                plugin_result.plugin_name.clone()
+            };
+            touch_plugin_watch_paths(
+                file_system,
+                caches,
+                &plugin_result.abs_watch_files,
+                &plugin_result.abs_watch_dirs,
+            );
+            if log_plugin_messages(
+                log,
+                &plugin_name,
+                std::mem::take(&mut plugin_result.messages),
+                plugin_result.thrown_error.take(),
+                import_source,
+                import_path_range,
+            ) {
+                return (None, true);
+            }
+
+            let namespace_from_plugin = plugin_result.path.namespace.clone();
+            if plugin_result.path.namespace.is_empty() && !plugin_result.external {
+                plugin_result.path.namespace = "file".into();
+            }
+            if plugin_result.path.text.is_empty() {
+                if plugin_result.external {
+                    plugin_result.path = Path {
+                        text: path.to_string(),
+                        ..Path::default()
+                    };
+                } else {
+                    continue;
+                }
+            }
+            if plugin_result.path.namespace == "file"
+                && !file_system.is_abs(&plugin_result.path.text)
+            {
+                let text = if namespace_from_plugin == "file" {
+                    format!(
+                        "Plugin {plugin_name:?} returned a path in the \"file\" namespace that is not an absolute path: {}",
+                        plugin_result.path.text
+                    )
+                } else {
+                    format!(
+                        "Plugin {plugin_name:?} returned a non-absolute path: {} (set a namespace if this is not a file path)",
+                        plugin_result.path.text
+                    )
+                };
+                let mut tracker = LineColumnTracker::new(import_source);
+                log.add_error(Some(&mut tracker), import_path_range, text);
+                return (None, true);
+            }
+            plugin_result
+                .path
+                .import_attributes
+                .clone_from(import_attributes);
+            let side_effects_data =
+                plugin_result
+                    .is_side_effect_free
+                    .then(|| resolver::SideEffectsData {
+                        plugin_name,
+                        ..resolver::SideEffectsData::default()
+                    });
+            return (
+                Some(ResolveResult {
+                    path_pair: resolver::PathPair {
+                        primary: plugin_result.path,
+                        is_external: plugin_result.external,
+                        ..resolver::PathPair::default()
+                    },
+                    plugin_data: plugin_result.plugin_data,
+                    primary_side_effects_data: side_effects_data,
+                    ..ResolveResult::default()
+                }),
+                false,
+            );
+        }
+    }
+
+    let mut result = resolver::resolve_with_metadata(
+        log,
+        file_system,
+        abs_resolve_dir,
+        path,
+        &options.extension_order,
+        options.platform,
+        (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
+        is_require,
+        ResolverContext {
+            tsconfig,
+            external_settings: Some(&options.external_settings),
+            external_packages: options.external_packages,
+            preserve_symlinks: options.preserve_symlinks,
+            conditions: Some(&options.conditions),
+            package_aliases: Some(&options.package_aliases),
+            node_paths: Some(&options.abs_node_paths),
+            ..ResolverContext::default()
+        },
+    );
+    if let Some(result) = &mut result {
+        let is_external = result.path_pair.is_external;
+        for path in result.path_pair.iter_mut() {
+            if path.namespace.is_empty() && !is_external {
+                path.namespace = "file".into();
+            }
+            path.import_attributes.clone_from(import_attributes);
+        }
+    }
+    (result, false)
+}
+
+struct LoadedFile {
+    loader: Loader,
+    abs_resolve_dir: String,
+    plugin_name: String,
+    plugin_data: Option<PluginData>,
+}
+
+#[derive(Clone)]
+struct PendingFile {
+    path: Path,
+    source_index: u32,
+    resolve_metadata: ResolveResult,
+    import_source: Option<Source>,
+    import_path_range: Range,
+}
+
+fn enqueue_dependencies(
+    result: &ParseResult,
+    caches: &CacheSet,
+    queued: &mut HashSet<u32>,
+    pending: &mut Vec<PendingFile>,
+) {
+    let records = result
+        .file
+        .input_file
+        .repr
+        .as_ref()
+        .and_then(InputFileRepr::import_records);
+    for (record_index, resolve_result) in result.resolve_results.iter().enumerate() {
+        let Some(resolve_result) = resolve_result else {
+            continue;
+        };
+        if resolve_result.path_pair.is_external {
+            continue;
+        }
+        let dependency_path = &resolve_result.path_pair.primary;
+        let dependency_index = caches
+            .source_index_cache
+            .get(dependency_path.clone(), SourceIndexKind::Normal);
+        if queued.insert(dependency_index) {
+            pending.push(PendingFile {
+                path: dependency_path.clone(),
+                source_index: dependency_index,
+                resolve_metadata: resolve_result.clone(),
+                import_source: Some(result.file.input_file.source.clone()),
+                import_path_range: records
+                    .and_then(|records| records.get(record_index))
+                    .map_or_else(Range::default, |record| record.range),
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn load_file_with_plugins(
+    log: &Log,
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    options: &Options,
+    source: &mut Source,
+    plugin_data: Option<PluginData>,
+    import_source: Option<&Source>,
+    import_path_range: Range,
+) -> Option<LoadedFile> {
+    let args = config::OnLoadArgs {
+        plugin_data,
+        path: source.key_path.clone(),
+    };
+    for plugin in &options.plugins {
+        for on_load in &plugin.on_load {
+            let (Some(filter), Some(callback)) = (&on_load.filter, &on_load.callback) else {
+                continue;
+            };
+            if !config::plugin_applies_to_path(&source.key_path, filter, &on_load.namespace) {
+                continue;
+            }
+            let mut plugin_result =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    callback(args.clone())
+                })) {
+                    Ok(result) => result,
+                    Err(_) => config::OnLoadResult {
+                        thrown_error: Some("Plugin onLoad callback panicked".into()),
+                        ..config::OnLoadResult::default()
+                    },
+                };
+            let plugin_name = if plugin_result.plugin_name.is_empty() {
+                plugin.name.clone()
+            } else {
+                plugin_result.plugin_name.clone()
+            };
+            touch_plugin_watch_paths(
+                file_system,
+                caches,
+                &plugin_result.abs_watch_files,
+                &plugin_result.abs_watch_dirs,
+            );
+            if log_plugin_messages(
+                log,
+                &plugin_name,
+                std::mem::take(&mut plugin_result.messages),
+                plugin_result.thrown_error.take(),
+                import_source,
+                import_path_range,
+            ) {
+                if options.watch_mode && source.key_path.namespace == "file" {
+                    let _ = caches
+                        .fs_cache
+                        .read_file(file_system, &source.key_path.text);
+                }
+                return None;
+            }
+            let Some(contents) = plugin_result.contents else {
+                continue;
+            };
+            source.contents = Arc::from(contents.into_bytes());
+            let loader = if plugin_result.loader == Loader::None {
+                Loader::Js
+            } else {
+                plugin_result.loader
+            };
+            if plugin_result.abs_resolve_dir.is_empty() && source.key_path.namespace == "file" {
+                plugin_result.abs_resolve_dir = file_system.dir(&source.key_path.text);
+            }
+            if options.watch_mode && source.key_path.namespace == "file" {
+                let _ = caches
+                    .fs_cache
+                    .read_file(file_system, &source.key_path.text);
+            }
+            return Some(LoadedFile {
+                loader,
+                abs_resolve_dir: plugin_result.abs_resolve_dir,
+                plugin_name,
+                plugin_data: plugin_result.plugin_data,
+            });
+        }
+    }
+
+    if source.key_path.is_disabled() {
+        return Some(LoadedFile {
+            loader: Loader::Empty,
+            abs_resolve_dir: String::new(),
+            plugin_name: String::new(),
+            plugin_data: None,
+        });
+    }
+    if source.key_path.namespace == "file" {
+        let (contents, error, _) = caches
+            .fs_cache
+            .read_file(file_system, &source.key_path.text);
+        if let Some(error) = error {
+            let mut tracker = LineColumnTracker::new(import_source);
+            log.add_error(
+                Some(&mut tracker),
+                import_path_range,
+                format!(
+                    "Could not read from file {:?}: {}",
+                    source.key_path.text, error.message
+                ),
+            );
+            return None;
+        }
+        source.contents = Arc::from(contents.into_bytes());
+        return Some(LoadedFile {
+            loader: Loader::Default,
+            abs_resolve_dir: file_system.dir(&source.key_path.text),
+            plugin_name: String::new(),
+            plugin_data: None,
+        });
+    }
+    Some(LoadedFile {
+        loader: Loader::None,
+        abs_resolve_dir: String::new(),
+        plugin_name: String::new(),
+        plugin_data: None,
+    })
+}
+
+fn rewrite_external_path(file_system: &dyn Fs, options: &Options, mut path: Path) -> Path {
+    if path.namespace == "file"
+        && let Some(mut relative_path) = file_system.rel(&options.abs_output_dir, &path.text)
+    {
+        relative_path = relative_path.replace('\\', "/");
+        if resolver::is_package_path(&relative_path) {
+            relative_path = format!("./{relative_path}");
+        }
+        path.text = relative_path;
+    }
+    path
 }
 
 pub fn resolve_import_records(
     log: &Log,
     file_system: &dyn Fs,
-    source_index_cache: &SourceIndexCache,
+    caches: &CacheSet,
     options: &Options,
     tsconfig: Option<&resolver::TsConfigJson>,
     result: &mut ParseResult,
@@ -599,7 +1035,7 @@ pub fn resolve_import_records(
     resolve_import_records_from_directory(
         log,
         file_system,
-        source_index_cache,
+        caches,
         options,
         tsconfig,
         None,
@@ -607,10 +1043,11 @@ pub fn resolve_import_records(
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn resolve_import_records_from_directory(
     log: &Log,
     file_system: &dyn Fs,
-    source_index_cache: &SourceIndexCache,
+    caches: &CacheSet,
     options: &Options,
     tsconfig: Option<&resolver::TsConfigJson>,
     source_directory: Option<&str>,
@@ -620,6 +1057,7 @@ fn resolve_import_records_from_directory(
         return;
     }
     let source = result.file.input_file.source.clone();
+    let plugin_data = result.file.plugin_data.clone();
     let source_directory =
         source_directory.map_or_else(|| file_system.dir(&source.key_path.text), str::to_string);
     let Some(records) = result
@@ -633,6 +1071,10 @@ fn resolve_import_records_from_directory(
     };
     result.resolve_results = vec![None; records.len()];
     let mut tracker = LineColumnTracker::new(Some(&source));
+    let mut resolution_cache: HashMap<
+        (ImportKind, String, logger::ImportAttributes),
+        (Option<ResolveResult>, bool),
+    > = HashMap::new();
 
     for (record_index, record) in records.iter_mut().enumerate() {
         if record.source_index.is_valid()
@@ -665,50 +1107,77 @@ fn resolve_import_records_from_directory(
                 )
             })
             .unwrap_or_default();
-        let Some(mut resolve_result) = resolver::resolve_with_metadata(
-            log,
-            file_system,
-            &source_directory,
-            &record.path.text,
-            &options.extension_order,
-            options.platform,
-            (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
-            is_require,
-            ResolverContext {
-                tsconfig,
-                external_settings: Some(&options.external_settings),
-                external_packages: options.external_packages,
-                preserve_symlinks: options.preserve_symlinks,
-                conditions: Some(&options.conditions),
-                package_aliases: Some(&options.package_aliases),
-                node_paths: Some(&options.abs_node_paths),
-                ..ResolverContext::default()
-            },
-        ) else {
-            if !record
-                .flags
-                .contains(ImportRecordFlags::HANDLES_IMPORT_ERRORS)
+        let cache_key = (
+            record.kind,
+            record.path.text.clone(),
+            import_attributes.clone(),
+        );
+        let (resolve_result, did_log_plugin_error) =
+            if let Some(cached) = resolution_cache.get(&cache_key) {
+                cached.clone()
+            } else {
+                let resolved = resolve_with_plugins(
+                    log,
+                    file_system,
+                    caches,
+                    options,
+                    &source.key_path,
+                    &record.path.text,
+                    &import_attributes,
+                    record.kind,
+                    &source_directory,
+                    plugin_data.clone(),
+                    Some(&source),
+                    record.range,
+                    tsconfig,
+                    is_require,
+                );
+                resolution_cache.insert(cache_key.clone(), resolved.clone());
+                resolved
+            };
+        let Some(resolve_result) = resolve_result else {
+            if !did_log_plugin_error
+                && !record
+                    .flags
+                    .contains(ImportRecordFlags::HANDLES_IMPORT_ERRORS)
             {
                 log.add_error(
                     Some(&mut tracker),
                     record.range,
                     format!("Could not resolve {:?}", record.path.text),
                 );
+                if let Some(cached) = resolution_cache.get_mut(&cache_key) {
+                    cached.1 = true;
+                }
             }
             continue;
         };
-        for path in resolve_result.path_pair.iter_mut() {
-            path.import_attributes.clone_from(&import_attributes);
-        }
 
         if record.kind == ImportKind::RequireResolve {
             if resolve_result.path_pair.is_external {
+                record.path = rewrite_external_path(
+                    file_system,
+                    options,
+                    resolve_result.path_pair.primary.clone(),
+                );
+                if resolve_result.primary_side_effects_data.is_some() {
+                    record.flags |= ImportRecordFlags::IS_EXTERNAL_WITHOUT_SIDE_EFFECTS;
+                }
                 result.resolve_results[record_index] = Some(resolve_result);
             }
             continue;
         }
-        if !resolve_result.path_pair.is_external {
-            record.source_index = Index32::new(source_index_cache.get(
+        if resolve_result.path_pair.is_external {
+            record.path = rewrite_external_path(
+                file_system,
+                options,
+                resolve_result.path_pair.primary.clone(),
+            );
+            if resolve_result.primary_side_effects_data.is_some() {
+                record.flags |= ImportRecordFlags::IS_EXTERNAL_WITHOUT_SIDE_EFFECTS;
+            }
+        } else {
+            record.source_index = Index32::new(caches.source_index_cache.get(
                 resolve_result.path_pair.primary.clone(),
                 SourceIndexKind::Normal,
             ));
@@ -840,6 +1309,7 @@ pub fn scan_bundle(
         Loader::Js,
         options,
         unique_key_prefix,
+        "",
         Some(caches),
     );
     if runtime_result.ok {
@@ -925,33 +1395,19 @@ pub fn scan_bundle(
             loader,
             &file_options,
             unique_key_prefix,
+            "",
             Some(caches),
         );
         resolve_import_records_from_directory(
             log,
             file_system,
-            &caches.source_index_cache,
+            caches,
             &file_options,
             tsconfig.as_ref(),
-            (!stdin.abs_resolve_dir.is_empty()).then_some(stdin.abs_resolve_dir.as_str()),
+            Some(stdin.abs_resolve_dir.as_str()),
             &mut result,
         );
-        for resolve_result in result.resolve_results.iter().flatten() {
-            if resolve_result.path_pair.is_external {
-                continue;
-            }
-            let dependency_path = &resolve_result.path_pair.primary;
-            let dependency_index = caches
-                .source_index_cache
-                .get(dependency_path.clone(), SourceIndexKind::Normal);
-            if queued.insert(dependency_index) {
-                pending.push((
-                    dependency_path.clone(),
-                    dependency_index,
-                    resolve_result.clone(),
-                ));
-            }
-        }
+        enqueue_dependencies(&result, caches, &mut queued, &mut pending);
         let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
         bundle
             .files
@@ -968,38 +1424,48 @@ pub fn scan_bundle(
         }
     }
     for entry_point in entry_points {
-        let input_path = if file_system.is_abs(&entry_point.input_path)
-            || entry_point.input_path.starts_with("./")
-            || entry_point.input_path.starts_with("../")
+        let input_path_in_file_namespace = entry_point_is_file(file_system, entry_point);
+        let input_path = if input_path_in_file_namespace
+            && !file_system.is_abs(&entry_point.input_path)
+            && !entry_point.input_path.starts_with("./")
+            && !entry_point.input_path.starts_with("../")
         {
-            entry_point.input_path.clone()
+            format!("./{}", entry_point.input_path)
         } else {
-            file_system.join(&[file_system.cwd(), &entry_point.input_path])
+            entry_point.input_path.clone()
         };
-        let Some(resolved) = resolver::resolve_with_metadata(
+        let importer = Path {
+            namespace: if input_path_in_file_namespace {
+                "file".into()
+            } else {
+                String::new()
+            },
+            ..Path::default()
+        };
+        let (resolved, did_log_plugin_error) = resolve_with_plugins(
             log,
             file_system,
-            file_system.cwd(),
+            caches,
+            options,
+            &importer,
             &input_path,
-            &options.extension_order,
-            options.platform,
-            (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
+            &logger::ImportAttributes::default(),
+            ImportKind::EntryPoint,
+            file_system.cwd(),
+            None,
+            None,
+            Range::default(),
+            None,
             false,
-            ResolverContext {
-                external_settings: Some(&options.external_settings),
-                external_packages: options.external_packages,
-                preserve_symlinks: options.preserve_symlinks,
-                conditions: Some(&options.conditions),
-                package_aliases: Some(&options.package_aliases),
-                node_paths: Some(&options.abs_node_paths),
-                ..ResolverContext::default()
-            },
-        ) else {
-            log.add_error(
-                None,
-                Range::default(),
-                format!("Could not resolve {:?}", entry_point.input_path),
-            );
+        );
+        let Some(resolved) = resolved else {
+            if !did_log_plugin_error {
+                log.add_error(
+                    None,
+                    Range::default(),
+                    format!("Could not resolve {:?}", entry_point.input_path),
+                );
+            }
             continue;
         };
         if resolved.path_pair.is_external {
@@ -1017,53 +1483,83 @@ pub fn scan_bundle(
         let source_index = caches
             .source_index_cache
             .get(path.clone(), SourceIndexKind::Normal);
+        let output_path_was_auto_generated = entry_point.output_path.is_empty();
+        let output_path = if output_path_was_auto_generated && path.namespace != "file" {
+            let mut output_path =
+                sanitize_file_path_for_virtual_module_path(&entry_point.input_path);
+            let (_, _, extension) = logger::platform_independent_path_dir_base_ext(&output_path);
+            output_path.truncate(output_path.len() - extension.len());
+            output_path
+        } else {
+            entry_point.output_path.clone()
+        };
         bundle.entry_points.push(GraphEntryPoint {
-            output_path: entry_point.output_path.clone(),
+            output_path,
             source_index,
-            output_path_was_auto_generated: entry_point.output_path.is_empty(),
+            output_path_was_auto_generated,
         });
         if queued.insert(source_index) {
-            pending.push((path, source_index, resolved));
+            pending.push(PendingFile {
+                path,
+                source_index,
+                resolve_metadata: resolved,
+                import_source: None,
+                import_path_range: Range::default(),
+            });
         }
     }
 
     let mut cursor = 0;
     while cursor < pending.len() {
-        let (path, source_index, resolve_metadata) = pending[cursor].clone();
+        let PendingFile {
+            path,
+            source_index,
+            resolve_metadata,
+            import_source,
+            import_path_range,
+        } = pending[cursor].clone();
         cursor += 1;
-        let loader = if path.is_disabled() {
-            Loader::Empty
-        } else {
-            Loader::Default
-        };
-        let (contents, error, _) = caches.fs_cache.read_file(file_system, &path.text);
-        if let Some(error) = error {
-            log.add_error(
-                None,
-                Range::default(),
-                format!(
-                    "Could not read from file {:?}: {}",
-                    path.text, error.message
-                ),
-            );
-            continue;
+        let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
+        if bundle.files.len() < needed_length {
+            bundle
+                .files
+                .resize_with(needed_length, ScannerFile::default);
         }
-        let relative_path = file_system
-            .rel(file_system.cwd(), &path.text)
-            .unwrap_or_else(|| path.text.clone());
-        let absolute_path = path.text.clone();
-        let source = Source {
+        let relative_path = if path.namespace == "file" {
+            file_system
+                .rel(file_system.cwd(), &path.text)
+                .unwrap_or_else(|| path.text.clone())
+        } else {
+            format!("{}:{}", path.namespace, path.text)
+        };
+        let absolute_path = if path.namespace == "file" {
+            path.text.clone()
+        } else {
+            relative_path.clone()
+        };
+        let mut source = Source {
             index: source_index,
             key_path: path,
             pretty_paths: logger::PrettyPaths {
                 abs: absolute_path,
                 rel: relative_path,
             },
-            contents: Arc::from(contents.into_bytes()),
             ..Source::default()
         };
+        let Some(loaded) = load_file_with_plugins(
+            log,
+            file_system,
+            caches,
+            options,
+            &mut source,
+            resolve_metadata.plugin_data.clone(),
+            import_source.as_ref(),
+            import_path_range,
+        ) else {
+            continue;
+        };
         let mut file_options = options.clone();
-        let tsconfig = if options.tsconfig_raw.is_empty() {
+        let tsconfig = if options.tsconfig_raw.is_empty() && source.key_path.namespace == "file" {
             find_nearest_tsconfig(
                 log,
                 file_system,
@@ -1090,17 +1586,20 @@ pub fn scan_bundle(
                 file_options.ts_always_strict = Some(Arc::new(ts_always_strict.clone()));
             }
         }
-        file_options.module_type_data.module_type = if source.key_path.text.ends_with(".mjs") {
+        file_options.module_type_data.module_type = if source.key_path.namespace == "file"
+            && source.key_path.text.ends_with(".mjs")
+        {
             ModuleType::EsmMjs
-        } else if source.key_path.text.ends_with(".mts") {
+        } else if source.key_path.namespace == "file" && source.key_path.text.ends_with(".mts") {
             ModuleType::EsmMts
-        } else if source.key_path.text.ends_with(".cjs") {
+        } else if source.key_path.namespace == "file" && source.key_path.text.ends_with(".cjs") {
             ModuleType::CommonJsCjs
-        } else if source.key_path.text.ends_with(".cts") {
+        } else if source.key_path.namespace == "file" && source.key_path.text.ends_with(".cts") {
             ModuleType::CommonJsCts
-        } else if [".js", ".jsx", ".ts", ".tsx"]
-            .iter()
-            .any(|extension| source.key_path.text.ends_with(extension))
+        } else if source.key_path.namespace == "file"
+            && [".js", ".jsx", ".ts", ".tsx"]
+                .iter()
+                .any(|extension| source.key_path.text.ends_with(extension))
         {
             resolve_metadata.module_type_data.module_type
         } else {
@@ -1109,11 +1608,13 @@ pub fn scan_bundle(
         let mut result = parse_file_with_cache(
             log,
             source,
-            loader,
+            loaded.loader,
             &file_options,
             unique_key_prefix,
+            &loaded.plugin_name,
             Some(caches),
         );
+        result.file.plugin_data = loaded.plugin_data;
         if result.file.input_file.side_effects.kind == SideEffectsKind::HasSideEffects
             && let Some(side_effects_data) = &resolve_metadata.primary_side_effects_data
         {
@@ -1122,38 +1623,18 @@ pub fn scan_bundle(
                 kind: SideEffectsKind::NoSideEffectsPackageJson,
             };
         }
-        resolve_import_records(
+        resolve_import_records_from_directory(
             log,
             file_system,
-            &caches.source_index_cache,
+            caches,
             &file_options,
             tsconfig.as_ref(),
+            Some(&loaded.abs_resolve_dir),
             &mut result,
         );
 
-        for resolve_result in result.resolve_results.iter().flatten() {
-            if resolve_result.path_pair.is_external {
-                continue;
-            }
-            let dependency_path = &resolve_result.path_pair.primary;
-            let dependency_index = caches
-                .source_index_cache
-                .get(dependency_path.clone(), SourceIndexKind::Normal);
-            if queued.insert(dependency_index) {
-                pending.push((
-                    dependency_path.clone(),
-                    dependency_index,
-                    resolve_result.clone(),
-                ));
-            }
-        }
+        enqueue_dependencies(&result, caches, &mut queued, &mut pending);
 
-        let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
-        if bundle.files.len() < needed_length {
-            bundle
-                .files
-                .resize_with(needed_length, ScannerFile::default);
-        }
         if result.ok {
             resolution_slots.insert(source_index, std::mem::take(&mut result.resolve_results));
             bundle.files[usize::try_from(source_index).expect("source index fits usize")] =
@@ -2151,18 +2632,24 @@ mod tests {
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32},
-        cache::{CacheSet, SourceIndexCache},
+        cache::CacheSet,
         compat::JsFeature,
-        config::{Format, Loader, Mode, Options, PathPlaceholder, Platform},
+        config::{
+            self, Format, Loader, Mode, OnLoad, OnLoadResult, OnResolve, OnResolveResult, Options,
+            PathPlaceholder, Platform, Plugin, compile_filter_for_plugin,
+        },
         fs::{MockKind, mock_fs},
         graph::{EntryPoint, InputFile, InputFileRepr, JsRepr, SideEffectsKind},
         js_ast::ExportsKind,
-        logger::{DeferLogKind, Log, Path, Source},
+        logger::{DeferLogKind, Log, Msg, MsgKind, Path, Source},
         runtime,
     };
     use std::{
         collections::{HashMap, HashSet},
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
 
     #[test]
@@ -2595,7 +3082,7 @@ mod tests {
             Loader::Js,
             &options,
         );
-        let cache = SourceIndexCache::new();
+        let cache = CacheSet::default();
         resolve_import_records(&log, &file_system, &cache, &options, None, &mut result);
 
         assert_eq!(result.resolve_results.len(), 2);
@@ -2654,7 +3141,7 @@ mod tests {
             assert_eq!(records[0].kind, ImportKind::Stmt);
             records[1].flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
         }
-        let cache = SourceIndexCache::new();
+        let cache = CacheSet::default();
         resolve_import_records(&log, &file_system, &cache, &options, None, &mut result);
 
         let records = result
@@ -2694,7 +3181,7 @@ mod tests {
         resolve_import_records(
             &log,
             &file_system,
-            &SourceIndexCache::new(),
+            &CacheSet::default(),
             &options,
             None,
             &mut result,
@@ -2702,6 +3189,662 @@ mod tests {
         let messages = log.done();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].data.text, "Could not resolve \"./missing\"");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn plugins_resolve_and_load_virtual_modules_with_plugin_data() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import value from 'virtual:answer'; console.log(value)".into(),
+                ),
+                ("/project/dep.js".into(), "export const base = 41".into()),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let resolve_data: config::PluginData = Arc::new("resolve-data".to_string());
+        let load_data: config::PluginData = Arc::new("load-data".to_string());
+        let saw_resolve_to_load = Arc::new(AtomicBool::new(false));
+        let saw_load_to_resolve = Arc::new(AtomicBool::new(false));
+        let load_fallthrough_count = Arc::new(AtomicUsize::new(0));
+
+        let plugin = Plugin {
+            name: "virtual".into(),
+            on_resolve: vec![
+                OnResolve {
+                    filter: Some(
+                        compile_filter_for_plugin("virtual", "OnResolve", "^virtual:")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some({
+                        let resolve_data = resolve_data.clone();
+                        Arc::new(move |args| {
+                            assert_eq!(args.kind, ImportKind::Stmt);
+                            assert_eq!(args.path, "virtual:answer");
+                            assert_eq!(args.importer.text, "/project/entry.js");
+                            assert_eq!(args.importer.namespace, "file");
+                            OnResolveResult {
+                                path: Path {
+                                    text: "answer".into(),
+                                    namespace: "virtual".into(),
+                                    ..Path::default()
+                                },
+                                plugin_data: Some(resolve_data.clone()),
+                                ..OnResolveResult::default()
+                            }
+                        })
+                    }),
+                    name: "virtual".into(),
+                    ..OnResolve::default()
+                },
+                OnResolve {
+                    filter: Some(
+                        compile_filter_for_plugin("virtual", "OnResolve", r"^\./dep$")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some({
+                        let saw_load_to_resolve = saw_load_to_resolve.clone();
+                        Arc::new(move |args| {
+                            let received = args
+                                .plugin_data
+                                .as_deref()
+                                .and_then(|data| data.downcast_ref::<String>());
+                            saw_load_to_resolve.store(
+                                received.is_some_and(|value| value == "load-data"),
+                                Ordering::SeqCst,
+                            );
+                            OnResolveResult::default()
+                        })
+                    }),
+                    name: "virtual".into(),
+                    namespace: "virtual".into(),
+                },
+            ],
+            on_load: vec![
+                OnLoad {
+                    filter: Some(
+                        compile_filter_for_plugin("virtual", "OnLoad", "^answer$")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some({
+                        let load_fallthrough_count = load_fallthrough_count.clone();
+                        Arc::new(move |_| {
+                            load_fallthrough_count.fetch_add(1, Ordering::SeqCst);
+                            OnLoadResult::default()
+                        })
+                    }),
+                    name: "virtual".into(),
+                    namespace: "virtual".into(),
+                },
+                OnLoad {
+                    filter: Some(
+                        compile_filter_for_plugin("virtual", "OnLoad", "^answer$")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some({
+                        let saw_resolve_to_load = saw_resolve_to_load.clone();
+                        let load_data = load_data.clone();
+                        Arc::new(move |args| {
+                            let received = args
+                                .plugin_data
+                                .as_deref()
+                                .and_then(|data| data.downcast_ref::<String>());
+                            saw_resolve_to_load.store(
+                                received.is_some_and(|value| value == "resolve-data"),
+                                Ordering::SeqCst,
+                            );
+                            OnLoadResult {
+                                contents: Some(
+                                    "import {base} from './dep'; export default base + 1".into(),
+                                ),
+                                abs_resolve_dir: "/project".into(),
+                                plugin_data: Some(load_data.clone()),
+                                loader: Loader::Js,
+                                ..OnLoadResult::default()
+                            }
+                        })
+                    }),
+                    name: "virtual".into(),
+                    namespace: "virtual".into(),
+                },
+            ],
+            ..Plugin::default()
+        };
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            extension_order: vec![".js".into()],
+            plugins: vec![plugin],
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        let messages = log.done();
+        assert!(
+            messages.is_empty(),
+            "{:?}",
+            messages
+                .iter()
+                .map(|message| &message.data.text)
+                .collect::<Vec<_>>()
+        );
+        assert!(saw_resolve_to_load.load(Ordering::SeqCst));
+        assert!(saw_load_to_resolve.load(Ordering::SeqCst));
+        assert_eq!(load_fallthrough_count.load(Ordering::SeqCst), 1);
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains("console.log"), "{output}");
+        assert!(output.contains("41"), "{output}");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn plugins_intercept_entry_points_and_validate_file_namespace_paths() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let saw_entry = Arc::new(AtomicBool::new(false));
+        let plugin = Plugin {
+            name: "entry".into(),
+            on_resolve: vec![OnResolve {
+                filter: Some(
+                    compile_filter_for_plugin("entry", "OnResolve", "^virtual-entry$")
+                        .expect("valid filter"),
+                ),
+                callback: Some({
+                    let saw_entry = saw_entry.clone();
+                    Arc::new(move |args| {
+                        saw_entry.store(
+                            args.kind == ImportKind::EntryPoint
+                                && args.importer.namespace.is_empty(),
+                            Ordering::SeqCst,
+                        );
+                        OnResolveResult {
+                            path: Path {
+                                text: "entry".into(),
+                                namespace: "virtual".into(),
+                                ..Path::default()
+                            },
+                            ..OnResolveResult::default()
+                        }
+                    })
+                }),
+                name: "entry".into(),
+                ..OnResolve::default()
+            }],
+            on_load: vec![OnLoad {
+                filter: Some(
+                    compile_filter_for_plugin("entry", "OnLoad", "^entry$").expect("valid filter"),
+                ),
+                callback: Some(Arc::new(|_| OnLoadResult {
+                    contents: Some("console.log('virtual entry')".into()),
+                    loader: Loader::Js,
+                    ..OnLoadResult::default()
+                })),
+                name: "entry".into(),
+                namespace: "virtual".into(),
+            }],
+            ..Plugin::default()
+        };
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            plugins: vec![plugin],
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "virtual-entry".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        assert!(log.done().is_empty());
+        assert!(saw_entry.load(Ordering::SeqCst));
+        assert!(
+            String::from_utf8_lossy(&compiled.output_files[0].contents).contains("virtual entry")
+        );
+        assert_eq!(compiled.output_files[0].abs_path, "/out/virtual-entry.js");
+
+        let invalid_log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let mut invalid_options = Options {
+            mode: Mode::Bundle,
+            plugins: vec![Plugin {
+                name: "invalid".into(),
+                on_resolve: vec![OnResolve {
+                    filter: Some(
+                        compile_filter_for_plugin("invalid", "OnResolve", "^bad$")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some(Arc::new(|_| OnResolveResult {
+                        path: Path {
+                            text: "relative.js".into(),
+                            ..Path::default()
+                        },
+                        ..OnResolveResult::default()
+                    })),
+                    name: "invalid".into(),
+                    ..OnResolve::default()
+                }],
+                ..Plugin::default()
+            }],
+            ..Options::default()
+        };
+        let _ = scan_bundle(
+            &invalid_log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "bad".into(),
+                input_path_in_file_namespace: false,
+                ..super::EntryPoint::default()
+            }],
+            &mut invalid_options,
+            "TEST",
+        );
+        let messages = invalid_log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].data.text,
+            "Plugin \"invalid\" returned a non-absolute path: relative.js (set a namespace if this is not a file path)"
+        );
+    }
+
+    #[test]
+    fn plugin_external_results_preserve_paths_and_side_effect_metadata() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let options = Options {
+            mode: Mode::Bundle,
+            plugins: vec![Plugin {
+                name: "external".into(),
+                on_resolve: vec![OnResolve {
+                    filter: Some(
+                        compile_filter_for_plugin("external", "OnResolve", "^pkg$")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some(Arc::new(|_| OnResolveResult {
+                        external: true,
+                        is_side_effect_free: true,
+                        ..OnResolveResult::default()
+                    })),
+                    name: "external".into(),
+                    ..OnResolve::default()
+                }],
+                ..Plugin::default()
+            }],
+            ..Options::default()
+        };
+        let mut result = parse_file(
+            &log,
+            source("/project/entry.js", b"import 'pkg'"),
+            Loader::Js,
+            &options,
+        );
+        resolve_import_records(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &options,
+            None,
+            &mut result,
+        );
+        let record = &result
+            .file
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+            .expect("import records")[0];
+        assert_eq!(record.path.text, "pkg");
+        assert!(
+            record
+                .flags
+                .contains(ImportRecordFlags::IS_EXTERNAL_WITHOUT_SIDE_EFFECTS)
+        );
+        assert!(
+            result.resolve_results[0]
+                .as_ref()
+                .is_some_and(|result| result.path_pair.is_external)
+        );
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn plugins_substitute_external_require_resolve_paths() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let options = Options {
+            mode: Mode::Bundle,
+            plugins: vec![Plugin {
+                name: "external".into(),
+                on_resolve: vec![OnResolve {
+                    filter: Some(
+                        compile_filter_for_plugin("external", "OnResolve", "^pkg$")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some(Arc::new(|args| {
+                        assert_eq!(args.kind, ImportKind::RequireResolve);
+                        OnResolveResult {
+                            path: Path {
+                                text: "replacement".into(),
+                                ..Path::default()
+                            },
+                            external: true,
+                            ..OnResolveResult::default()
+                        }
+                    })),
+                    name: "external".into(),
+                    ..OnResolve::default()
+                }],
+                ..Plugin::default()
+            }],
+            ..Options::default()
+        };
+        let mut result = parse_file(
+            &log,
+            source("/project/entry.js", b"require.resolve('pkg')"),
+            Loader::Js,
+            &options,
+        );
+        resolve_import_records(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &options,
+            None,
+            &mut result,
+        );
+        let records = result
+            .file
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+            .expect("import records");
+        assert_eq!(records[0].path.text, "replacement");
+        assert!(
+            result.resolve_results[0]
+                .as_ref()
+                .is_some_and(|result| result.path_pair.is_external)
+        );
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
+    fn repeated_unresolved_imports_are_resolved_and_logged_once() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let options = Options {
+            mode: Mode::Bundle,
+            plugins: vec![Plugin {
+                name: "counter".into(),
+                on_resolve: vec![OnResolve {
+                    filter: Some(
+                        compile_filter_for_plugin("counter", "OnResolve", "^missing$")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some({
+                        let callback_count = callback_count.clone();
+                        Arc::new(move |_| {
+                            callback_count.fetch_add(1, Ordering::SeqCst);
+                            OnResolveResult::default()
+                        })
+                    }),
+                    name: "counter".into(),
+                    ..OnResolve::default()
+                }],
+                ..Plugin::default()
+            }],
+            ..Options::default()
+        };
+        let mut result = parse_file(
+            &log,
+            source(
+                "/project/entry.js",
+                b"import 'missing'; import value from 'missing'; console.log(value)",
+            ),
+            Loader::Js,
+            &options,
+        );
+        resolve_import_records(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &options,
+            None,
+            &mut result,
+        );
+        let messages = log.done();
+        assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].data.text, "Could not resolve \"missing\"");
+    }
+
+    #[test]
+    fn virtual_modules_without_resolve_directories_cannot_resolve_relative_imports() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([("dep.js".into(), "export default 123".into())]),
+            MockKind::Unix,
+            "/project",
+        );
+        let plugin = Plugin {
+            name: "virtual".into(),
+            on_resolve: vec![OnResolve {
+                filter: Some(
+                    compile_filter_for_plugin("virtual", "OnResolve", "^virtual-entry$")
+                        .expect("valid filter"),
+                ),
+                callback: Some(Arc::new(|_| OnResolveResult {
+                    path: Path {
+                        text: "entry".into(),
+                        namespace: "virtual".into(),
+                        ..Path::default()
+                    },
+                    ..OnResolveResult::default()
+                })),
+                name: "virtual".into(),
+                ..OnResolve::default()
+            }],
+            on_load: vec![OnLoad {
+                filter: Some(
+                    compile_filter_for_plugin("virtual", "OnLoad", "^entry$")
+                        .expect("valid filter"),
+                ),
+                callback: Some(Arc::new(|_| OnLoadResult {
+                    contents: Some("import './dep.js'".into()),
+                    loader: Loader::Js,
+                    ..OnLoadResult::default()
+                })),
+                name: "virtual".into(),
+                namespace: "virtual".into(),
+            }],
+            ..Plugin::default()
+        };
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into()],
+            plugins: vec![plugin],
+            ..Options::default()
+        };
+        let _ = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "virtual-entry".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].data.text, "Could not resolve \"./dep.js\"");
+    }
+
+    #[test]
+    fn plugin_errors_stop_resolution_without_duplicate_generic_errors() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
+        let later_callback_count = Arc::new(AtomicUsize::new(0));
+        let options = Options {
+            mode: Mode::Bundle,
+            plugins: vec![Plugin {
+                name: "broken".into(),
+                on_resolve: vec![
+                    OnResolve {
+                        filter: Some(
+                            compile_filter_for_plugin("broken", "OnResolve", "^pkg$")
+                                .expect("valid filter"),
+                        ),
+                        callback: Some(Arc::new(|_| OnResolveResult {
+                            messages: vec![crate::internal::logger::Msg::new(
+                                crate::internal::logger::MsgKind::Error,
+                                "plugin failure",
+                            )],
+                            ..OnResolveResult::default()
+                        })),
+                        name: "broken".into(),
+                        ..OnResolve::default()
+                    },
+                    OnResolve {
+                        filter: Some(
+                            compile_filter_for_plugin("broken", "OnResolve", "^pkg$")
+                                .expect("valid filter"),
+                        ),
+                        callback: Some({
+                            let later_callback_count = later_callback_count.clone();
+                            Arc::new(move |_| {
+                                later_callback_count.fetch_add(1, Ordering::SeqCst);
+                                OnResolveResult::default()
+                            })
+                        }),
+                        name: "broken".into(),
+                        ..OnResolve::default()
+                    },
+                ],
+                ..Plugin::default()
+            }],
+            ..Options::default()
+        };
+        let mut result = parse_file(
+            &log,
+            source("/project/entry.js", b"import 'pkg'"),
+            Loader::Js,
+            &options,
+        );
+        resolve_import_records(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &options,
+            None,
+            &mut result,
+        );
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].data.text, "plugin failure");
+        assert_eq!(messages[0].plugin_name, "broken");
+        assert!(messages[0].data.location.is_some());
+        assert_eq!(later_callback_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn plugin_load_errors_point_to_the_triggering_import() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([(
+                "/project/entry.js".into(),
+                "import value from 'virtual'; console.log(value)".into(),
+            )]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            extension_order: vec![".js".into()],
+            plugins: vec![Plugin {
+                name: "broken-load".into(),
+                on_resolve: vec![OnResolve {
+                    filter: Some(
+                        compile_filter_for_plugin("broken-load", "OnResolve", "^virtual$")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some(Arc::new(|_| OnResolveResult {
+                        path: Path {
+                            text: "module".into(),
+                            namespace: "virtual".into(),
+                            ..Path::default()
+                        },
+                        ..OnResolveResult::default()
+                    })),
+                    name: "broken-load".into(),
+                    ..OnResolve::default()
+                }],
+                on_load: vec![OnLoad {
+                    filter: Some(
+                        compile_filter_for_plugin("broken-load", "OnLoad", "^module$")
+                            .expect("valid filter"),
+                    ),
+                    callback: Some(Arc::new(|_| OnLoadResult {
+                        messages: vec![Msg::new(MsgKind::Error, "load failure")],
+                        ..OnLoadResult::default()
+                    })),
+                    name: "broken-load".into(),
+                    namespace: "virtual".into(),
+                }],
+                ..Plugin::default()
+            }],
+            ..Options::default()
+        };
+        let _ = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].data.text, "load failure");
+        assert_eq!(messages[0].plugin_name, "broken-load");
+        let location = messages[0]
+            .data
+            .location
+            .as_ref()
+            .expect("triggering import location");
+        assert_eq!(location.file.rel, "entry.js");
+        assert_eq!(
+            String::from_utf8_lossy(&location.line_text),
+            "import value from 'virtual'; console.log(value)"
+        );
     }
 
     #[test]

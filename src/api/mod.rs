@@ -2704,7 +2704,6 @@ fn build_with_output_state(
         .into_iter()
         .map(|input_path| bundler::EntryPoint {
             input_path,
-            input_path_in_file_namespace: true,
             ..bundler::EntryPoint::default()
         })
         .collect();
@@ -2712,7 +2711,7 @@ fn build_with_output_state(
         bundler::EntryPoint {
             input_path: entry.input_path,
             output_path: entry.output_path,
-            input_path_in_file_namespace: true,
+            ..bundler::EntryPoint::default()
         }
     }));
     let compiled = bundler::bundle_javascript(

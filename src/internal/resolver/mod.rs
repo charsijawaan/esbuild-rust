@@ -530,6 +530,9 @@ fn resolve_file_or_package_core(
             different_case: None,
         });
     }
+    if source_dir.is_empty() {
+        return None;
+    }
     if let Some(tsconfig) = context.tsconfig {
         if let Some(candidates) = match_tsconfig_path_candidates(tsconfig, import_path, file_system)
         {

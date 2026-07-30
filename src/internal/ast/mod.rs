@@ -5,7 +5,7 @@ use crate::internal::logger::{Loc, Path, Range};
 use std::ops::{BitOr, BitOrAssign};
 use std::sync::LazyLock;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 #[repr(u8)]
 pub enum ImportKind {
     #[default]
