@@ -15,13 +15,13 @@ type and ownership systems allow it. Behavioral compatibility with the pinned
 upstream revision is the acceptance criterion. Upstream tests are translated
 or exercised as differential tests as each subsystem lands.
 
-This repository is an actively evolving experimental port. Its release binary
-passes all 9 scenarios in the bounded bundler evaluation, with the same runtime
+This repository is a bounded experimental snapshot. Its release binary passes
+all 12 scenarios in the bounded compiler/CLI evaluation, with the same runtime
 results as the pinned upstream executable. That is encouraging, but it is not
 evidence of complete compatibility and this project is not a drop-in or
 production-ready esbuild replacement.
 
-See [EVALUATION.md](EVALUATION.md) for the reproducible bundler evaluation,
+See [EVALUATION.md](EVALUATION.md) for the reproducible compiler/CLI evaluation,
 [PORTING.md](PORTING.md) for the package matrix, and
 [UPSTREAM.md](UPSTREAM.md) for the exact upstream revision.
 
@@ -32,7 +32,7 @@ cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-## Bundler evaluation
+## Compiler/CLI evaluation
 
 ```sh
 cargo build --release --locked

@@ -218,6 +218,62 @@ const cases = [
       }
     },
   },
+  {
+    name: "stdin CommonJS transform",
+    files: {},
+    args: () => ["--loader=js", "--format=cjs"],
+    stdin: "export const answer = 42; console.log(module.exports.answer);\n",
+    stdoutFile: (output) => join(output, "transform.cjs"),
+    run: (output) => join(output, "transform.cjs"),
+    expected: "42",
+    verify: (output) => {
+      const code = readFileSync(join(output, "transform.cjs"), "utf8");
+      if (!code.includes("module.exports = __toCommonJS")) {
+        throw new Error("CommonJS transform did not publish ESM exports");
+      }
+      if (Buffer.byteLength(code) >= 2_000) {
+        throw new Error("CommonJS transform retained too much helper runtime");
+      }
+    },
+  },
+  {
+    name: "stdin IIFE global",
+    files: {},
+    args: () => [
+      "--loader=js",
+      "--format=iife",
+      "--global-name=Result",
+    ],
+    stdin:
+      "export const answer = 42; Promise.resolve().then(() => console.log(Result.answer));\n",
+    stdoutFile: (output) => join(output, "transform.cjs"),
+    run: (output) => join(output, "transform.cjs"),
+    expected: "42",
+    verify: (output) => {
+      const code = readFileSync(join(output, "transform.cjs"), "utf8");
+      if (!code.includes("var Result = (() => {")) {
+        throw new Error("IIFE transform did not assign the requested global");
+      }
+    },
+  },
+  {
+    name: "transform ignores tsconfig",
+    files: {
+      "tsconfig.json": '{"compilerOptions":{"jsxFactory":"ambient"}}\n',
+    },
+    args: () => ["--loader=jsx", "--format=esm"],
+    stdin:
+      "const React = { createElement: (tag, props) => [tag, props] }; console.log(JSON.stringify(<div />));\n",
+    stdoutFile: (output) => join(output, "transform.mjs"),
+    run: (output) => join(output, "transform.mjs"),
+    expected: '["div",null]',
+    verify: (output) => {
+      const code = readFileSync(join(output, "transform.mjs"), "utf8");
+      if (!code.includes('React.createElement("div", null)')) {
+        throw new Error("formatted transform discovered the ambient tsconfig");
+      }
+    },
+  },
 ];
 
 const byteSize = (path) => {
@@ -235,6 +291,7 @@ const runCase = (binary, testCase, caseRoot, output) => {
   const build = spawnSync(binary, testCase.args(output), {
     cwd: caseRoot,
     encoding: "utf8",
+    input: testCase.stdin,
     timeout: 30_000,
   });
   if (build.status !== 0) {
@@ -244,6 +301,9 @@ const runCase = (binary, testCase, caseRoot, output) => {
       stdout: "",
       bytes: byteSize(output),
     };
+  }
+  if (testCase.stdoutFile) {
+    writeFileSync(testCase.stdoutFile(output), build.stdout);
   }
 
   const runFile = testCase.run(output);
