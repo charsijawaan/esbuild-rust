@@ -276,6 +276,21 @@ const cases = [
     },
   },
   {
+    name: "stdin tree shaking",
+    files: {},
+    args: () => ["--tree-shaking=true"],
+    stdin: 'const unused = "REMOVE_ME"; console.log(42);\n',
+    stdoutFile: (output) => join(output, "transform.cjs"),
+    run: (output) => join(output, "transform.cjs"),
+    expected: "42",
+    verify: (output) => {
+      const code = readFileSync(join(output, "transform.cjs"), "utf8");
+      if (code.includes("REMOVE_ME") || code.includes("unused")) {
+        throw new Error("transform tree shaking did not remove unused code");
+      }
+    },
+  },
+  {
     name: "absolute path controls",
     files: {
       "entry.js": "console.log(42);\n",

@@ -789,6 +789,7 @@ fn run_with_stdin_and_node_paths(
     options.pure = pure;
     options.keep_names = keep_names;
     options.abs_paths = abs_paths;
+    options.tree_shaking = tree_shaking;
     options.format = format;
     options.global_name = global_name;
     options.platform = platform;
@@ -1375,6 +1376,34 @@ mod tests {
         }
 
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn controls_tree_shaking_for_transforms() {
+        let input = Some(b"const dead = 1; console.log('live')".as_slice());
+        for (setting, should_keep_dead) in [("true", false), ("false", true)] {
+            let Output::Code(output) =
+                run_with_stdin(&[format!("--tree-shaking={setting}")], input)
+                    .expect("transform succeeds")
+            else {
+                panic!("expected transformed code");
+            };
+            let output = String::from_utf8(output).expect("transform output is UTF-8");
+            assert_eq!(output.contains("dead"), should_keep_dead, "{output}");
+            assert!(output.contains("console.log(\"live\")"), "{output}");
+        }
+
+        let baseline = run_with_stdin(&["--loader=text".into()], Some(&[0xff]))
+            .expect("binary text transform succeeds");
+        let explicit = run_with_stdin(
+            &["--loader=text".into(), "--tree-shaking=true".into()],
+            Some(&[0xff]),
+        )
+        .expect("tree shaking does not require UTF-8 for text");
+        let (Output::Code(baseline), Output::Code(explicit)) = (baseline, explicit) else {
+            panic!("expected transformed code");
+        };
+        assert_eq!(explicit, baseline);
     }
 
     #[test]

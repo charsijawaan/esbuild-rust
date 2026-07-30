@@ -372,6 +372,7 @@ pub struct TransformOptions {
     pub banner: String,
     pub footer: String,
     pub line_limit: usize,
+    pub tree_shaking: BuildTreeShaking,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
     pub minify_syntax: bool,
@@ -411,6 +412,7 @@ impl Default for TransformOptions {
             banner: String::new(),
             footer: String::new(),
             line_limit: 0,
+            tree_shaking: BuildTreeShaking::default(),
             minify_whitespace: false,
             minify_identifiers: false,
             minify_syntax: false,
@@ -3981,7 +3983,12 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
             ..TransformResult::default()
         };
     }
-    if options.format != BuildFormat::Default {
+    let needs_tree_shaking_linker = options.tree_shaking == BuildTreeShaking::Enabled
+        && matches!(
+            options.loader,
+            Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None
+        );
+    if options.format != BuildFormat::Default || needs_tree_shaking_linker {
         return transform_with_linker(input.as_ref(), options);
     }
     let input_contents = Arc::<[u8]>::from(input.as_ref());
@@ -4154,6 +4161,7 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
         sources_content: options.sources_content,
         legal_comments: options.legal_comments,
         line_limit: options.line_limit,
+        tree_shaking: options.tree_shaking,
         jsx: options.jsx,
         jsx_factory: options.jsx_factory,
         jsx_fragment: options.jsx_fragment,
@@ -8559,6 +8567,66 @@ mod tests {
         }
 
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn exposes_transform_tree_shaking_control() {
+        let input = "const dead = 1; console.log('live')";
+        let default = code(transform(input, TransformOptions::default()));
+        let enabled = code(transform(
+            input,
+            TransformOptions {
+                tree_shaking: BuildTreeShaking::Enabled,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(default.contains("dead"), "{default}");
+        assert!(!enabled.contains("dead"), "{enabled}");
+
+        let iife_default = code(transform(
+            input,
+            TransformOptions {
+                format: BuildFormat::Iife,
+                ..TransformOptions::default()
+            },
+        ));
+        let iife_disabled = code(transform(
+            input,
+            TransformOptions {
+                format: BuildFormat::Iife,
+                tree_shaking: BuildTreeShaking::Disabled,
+                ..TransformOptions::default()
+            },
+        ));
+        assert!(!iife_default.contains("dead"), "{iife_default}");
+        assert!(iife_disabled.contains("dead"), "{iife_disabled}");
+        assert!(enabled.contains("console.log(\"live\")"), "{enabled}");
+    }
+
+    #[test]
+    fn transform_tree_shaking_preserves_binary_loader_inputs() {
+        for loader in [Loader::Text, Loader::Binary] {
+            let baseline = transform(
+                [0xff],
+                TransformOptions {
+                    loader,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(baseline.errors.is_empty(), "{:?}", baseline.errors);
+            for tree_shaking in [BuildTreeShaking::Enabled, BuildTreeShaking::Disabled] {
+                let result = transform(
+                    [0xff],
+                    TransformOptions {
+                        loader,
+                        tree_shaking,
+                        ..TransformOptions::default()
+                    },
+                );
+                assert!(result.errors.is_empty(), "{:?}", result.errors);
+                assert_eq!(result.code, baseline.code, "{loader:?} {tree_shaking:?}");
+            }
+        }
     }
 
     #[test]
