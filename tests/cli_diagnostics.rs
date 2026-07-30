@@ -58,3 +58,43 @@ fn syntax_errors_include_source_excerpt_and_summary() {
          1 error\n"
     );
 }
+
+#[test]
+fn formatted_stdin_does_not_discover_an_ambient_tsconfig() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after epoch")
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("esbuild-rs-transform-tsconfig-{unique}"));
+    std::fs::create_dir_all(&directory).expect("create test directory");
+    std::fs::write(
+        directory.join("tsconfig.json"),
+        r#"{"compilerOptions":{"jsxFactory":"ambient"}}"#,
+    )
+    .expect("write ambient tsconfig");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_esbuild"))
+        .args(["--loader=jsx", "--format=esm"])
+        .current_dir(&directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn esbuild");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(b"<div />")
+        .expect("write JSX");
+    let output = child.wait_with_output().expect("wait for esbuild");
+    std::fs::remove_dir_all(directory).expect("remove test directory");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    assert!(
+        stdout.contains("React.createElement(\"div\", null)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("ambient("), "{stdout}");
+}

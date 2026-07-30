@@ -353,6 +353,8 @@ pub struct Engine {
 pub struct TransformOptions {
     pub sourcefile: String,
     pub loader: Loader,
+    pub format: BuildFormat,
+    pub global_name: String,
     pub target: Target,
     pub engines: Vec<Engine>,
     pub supported: HashMap<String, bool>,
@@ -389,6 +391,8 @@ impl Default for TransformOptions {
         Self {
             sourcefile: String::new(),
             loader: Loader::default(),
+            format: BuildFormat::default(),
+            global_name: String::new(),
             target: Target::default(),
             engines: Vec::new(),
             supported: HashMap::new(),
@@ -3892,6 +3896,42 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         };
         options.loader = loader;
     }
+    if !options.global_name.is_empty() {
+        let (_, ok) = js_parser::parse_global_name(
+            log.clone(),
+            Source {
+                key_path: crate::internal::logger::Path {
+                    text: "(global name)".into(),
+                    ..crate::internal::logger::Path::default()
+                },
+                pretty_paths: PrettyPaths {
+                    abs: "(global name)".into(),
+                    rel: "(global name)".into(),
+                },
+                contents: Arc::from(options.global_name.as_bytes()),
+                ..Source::default()
+            },
+        );
+        if !ok {
+            let (errors, warnings) = public_messages(log.done());
+            return TransformResult {
+                errors,
+                warnings,
+                ..TransformResult::default()
+            };
+        }
+    }
+    if log.has_errors() {
+        let (errors, warnings) = public_messages(log.done());
+        return TransformResult {
+            errors,
+            warnings,
+            ..TransformResult::default()
+        };
+    }
+    if options.format != BuildFormat::Default {
+        return transform_with_linker(input.as_ref(), options);
+    }
     let input_contents = Arc::<[u8]>::from(input.as_ref());
     let source = Source {
         pretty_paths: PrettyPaths {
@@ -4007,6 +4047,102 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         map: source_map,
         legal_comments,
     }
+}
+
+fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformResult {
+    let Ok(input) = String::from_utf8(input.to_vec()) else {
+        return TransformResult {
+            errors: vec![Message {
+                text: "Formatted transform input must be valid UTF-8".into(),
+                kind: MessageKind::Error,
+                ..Message::default()
+            }],
+            ..TransformResult::default()
+        };
+    };
+    let output_file = if options.sourcefile.is_empty() {
+        "<stdin>-out".to_string()
+    } else {
+        format!("{}-out", options.sourcefile)
+    };
+    let is_css = matches!(
+        options.loader,
+        Loader::Css | Loader::GlobalCss | Loader::LocalCss
+    );
+    let (banner, footer, css_banner, css_footer) = if is_css {
+        (String::new(), String::new(), options.banner, options.footer)
+    } else {
+        (options.banner, options.footer, String::new(), String::new())
+    };
+    // Transform is intentionally isolated from project configuration. A
+    // non-empty raw config prevents the build scanner from walking the real
+    // file system for a nearby tsconfig.json.
+    let tsconfig_raw = if options.tsconfig_raw.is_empty() {
+        "{}".into()
+    } else {
+        options.tsconfig_raw
+    };
+    let result = build(BuildOptions {
+        stdin: Some(BuildStdin {
+            contents: input,
+            sourcefile: options.sourcefile,
+            loader: options.loader,
+            ..BuildStdin::default()
+        }),
+        outfile: output_file,
+        format: options.format,
+        platform: options.platform,
+        target: options.target,
+        engines: options.engines,
+        supported: options.supported,
+        global_name: options.global_name,
+        sourcemap: options.sourcemap,
+        source_root: options.source_root,
+        sources_content: options.sources_content,
+        legal_comments: options.legal_comments,
+        line_limit: options.line_limit,
+        jsx: options.jsx,
+        jsx_factory: options.jsx_factory,
+        jsx_fragment: options.jsx_fragment,
+        jsx_import_source: options.jsx_import_source,
+        jsx_development: options.jsx_development,
+        jsx_side_effects: options.jsx_side_effects,
+        minify_whitespace: options.minify_whitespace,
+        minify_identifiers: options.minify_identifiers,
+        minify_syntax: options.minify_syntax,
+        ascii_only: options.ascii_only,
+        drop_console: options.drop_console,
+        drop_debugger: options.drop_debugger,
+        drop_labels: options.drop_labels,
+        ignore_annotations: options.ignore_annotations,
+        banner,
+        footer,
+        css_banner,
+        css_footer,
+        define: options.define,
+        pure: options.pure,
+        keep_names: options.keep_names,
+        tsconfig_raw,
+        ..BuildOptions::default()
+    });
+    let mut transformed = TransformResult {
+        errors: result.errors,
+        warnings: result.warnings,
+        ..TransformResult::default()
+    };
+    for output in result.output_files {
+        if output.path.ends_with(".LEGAL.txt") {
+            transformed.legal_comments = output.contents;
+        } else if std::path::Path::new(&output.path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("map"))
+        {
+            transformed.map = output.contents;
+        } else {
+            transformed.code = output.contents;
+        }
+    }
+    transformed
 }
 
 fn generate_transform_source_map(
@@ -7362,6 +7498,137 @@ mod tests {
         );
         assert_eq!(output.matches("nested: [1, 2]").count(), 1);
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn transforms_module_formats_and_iife_global_names() {
+        let common_js = transform(
+            "export const x = 1",
+            TransformOptions {
+                format: BuildFormat::CommonJs,
+                ..TransformOptions::default()
+            },
+        );
+        let common_js = code(common_js);
+        assert!(
+            common_js.contains("module.exports = __toCommonJS"),
+            "{common_js}"
+        );
+        assert!(common_js.contains("const x = 1;"), "{common_js}");
+        assert!(
+            common_js.len() < 1_500,
+            "formatted transforms must tree-shake the helper runtime: {} bytes",
+            common_js.len()
+        );
+        assert!(!common_js.contains("__using"), "{common_js}");
+
+        let es_module = transform(
+            "export const x = 1",
+            TransformOptions {
+                format: BuildFormat::EsModule,
+                ..TransformOptions::default()
+            },
+        );
+        let es_module = code(es_module);
+        assert!(es_module.contains("const x = 1;"), "{es_module}");
+        assert!(es_module.contains("export { x };"), "{es_module}");
+
+        let iife = transform(
+            "export const x = 1",
+            TransformOptions {
+                format: BuildFormat::Iife,
+                global_name: "My.Library".into(),
+                ..TransformOptions::default()
+            },
+        );
+        let iife = code(iife);
+        assert!(iife.starts_with("var My;\n"), "{iife}");
+        assert!(iife.contains("(My ||= {}).Library = (() => {"), "{iife}");
+        assert!(iife.contains("return __toCommonJS"), "{iife}");
+
+        let invalid = transform(
+            "export const x = 1",
+            TransformOptions {
+                global_name: "not/a/global".into(),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(!invalid.errors.is_empty());
+        assert!(invalid.code.is_empty());
+        assert_eq!(
+            invalid.errors[0]
+                .location
+                .as_ref()
+                .map(|location| location.file.as_str()),
+            Some("(global name)")
+        );
+
+        let baseline = transform("export const x = 1", TransformOptions::default());
+        let ignored = transform(
+            "export const x = 1",
+            TransformOptions {
+                global_name: "Valid.ButUnused".into(),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(ignored.errors.is_empty(), "{:?}", ignored.errors);
+        assert_eq!(ignored.code, baseline.code);
+    }
+
+    #[test]
+    fn formatted_transforms_preserve_external_source_maps() {
+        let result = transform(
+            "export const answer = 42",
+            TransformOptions {
+                sourcefile: "input.js".into(),
+                format: BuildFormat::CommonJs,
+                sourcemap: BuildSourceMap::External,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(!result.code.is_empty());
+        assert!(!result.map.is_empty());
+        assert!(!String::from_utf8_lossy(&result.code).contains("sourceMappingURL"));
+        let source_map: serde_json::Value =
+            serde_json::from_slice(&result.map).expect("formatted transform source map is JSON");
+        assert_eq!(source_map["version"], 3);
+        assert_eq!(source_map["sources"][0], "input.js");
+    }
+
+    #[test]
+    fn formatted_css_transforms_route_banner_and_footer() {
+        let result = transform(
+            "a { color: red }",
+            TransformOptions {
+                loader: Loader::Css,
+                format: BuildFormat::EsModule,
+                banner: "/* before */".into(),
+                footer: "/* after */".into(),
+                ..TransformOptions::default()
+            },
+        );
+        let output = code(result);
+        assert!(output.starts_with("/* before */\n"), "{output}");
+        assert!(output.ends_with("/* after */\n"), "{output}");
+        assert!(output.contains("color: red"), "{output}");
+    }
+
+    #[test]
+    fn formatted_transforms_reject_invalid_utf8_without_replacement() {
+        let result = transform(
+            [0xff],
+            TransformOptions {
+                format: BuildFormat::CommonJs,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.code.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(
+            result.errors[0].text,
+            "Formatted transform input must be valid UTF-8"
+        );
     }
 
     #[test]

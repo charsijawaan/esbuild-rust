@@ -765,6 +765,8 @@ fn run_with_stdin_and_node_paths(
     options.define = defines;
     options.pure = pure;
     options.keep_names = keep_names;
+    options.format = format;
+    options.global_name = global_name;
     options.platform = platform;
     options.legal_comments = legal_comments;
     options.sourcemap = sourcemap;
@@ -1357,6 +1359,33 @@ mod tests {
             String::from_utf8(output).expect("transform output is UTF-8"),
             "keep();\n"
         );
+    }
+
+    #[test]
+    fn formats_standard_input_modules_and_global_names() {
+        let Output::Code(common_js) =
+            run_with_stdin(&["--format=cjs".into()], Some(b"export const answer = 42"))
+                .expect("CommonJS transform succeeds")
+        else {
+            panic!("expected CommonJS code");
+        };
+        let common_js = String::from_utf8(common_js).expect("CommonJS output is UTF-8");
+        assert!(
+            common_js.contains("module.exports = __toCommonJS"),
+            "{common_js}"
+        );
+        assert!(common_js.contains("const answer = 42;"), "{common_js}");
+
+        let Output::Code(iife) = run_with_stdin(
+            &["--format=iife".into(), "--global-name=Result".into()],
+            Some(b"export const answer = 42"),
+        )
+        .expect("IIFE transform succeeds") else {
+            panic!("expected IIFE code");
+        };
+        let iife = String::from_utf8(iife).expect("IIFE output is UTF-8");
+        assert!(iife.starts_with("var Result = (() => {"), "{iife}");
+        assert!(iife.contains("return __toCommonJS"), "{iife}");
     }
 
     #[test]

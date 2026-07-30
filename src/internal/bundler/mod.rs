@@ -1424,11 +1424,21 @@ pub fn scan_bundle(
     let mut bundle = ScannedBundle::default();
 
     let runtime_source = runtime::source(options.unsupported_js_features);
+    let runtime_options = Options {
+        defines: Some(Arc::new(config::process_defines(&[]))),
+        unsupported_js_features: options.unsupported_js_features,
+        minify_syntax: options.minify_syntax,
+        minify_identifiers: options.minify_identifiers,
+        // The runtime is a library of helpers. It must always be tree-shaken
+        // independently of whether tree shaking is enabled for user code.
+        tree_shaking: true,
+        ..Options::default()
+    };
     let runtime_result = parse_file_with_cache(
         log,
         runtime_source,
         Loader::Js,
-        options,
+        &runtime_options,
         unique_key_prefix,
         "",
         Some(caches),
