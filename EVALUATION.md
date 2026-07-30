@@ -7,16 +7,16 @@ suite, a security audit, or a production-readiness claim.
 
 ## Snapshot
 
-- Rust feature checkpoint: `67e6c5ae26dd42de300c1e9173ff46c5704a13b8`
+- Rust feature checkpoint: `c569513a2364369e10e90bb078220acacd881a59`
 - Upstream esbuild: `6ff1d8b0d8c134e867a397eef39702a223ebef9e`
   (version 0.28.1)
 - Evaluation date: 2026-07-31
 - Toolchain: Rust 1.96.0, Node.js 24.15.0
 - Build: `cargo build --release --locked`
-- Rust source: 109,131 physical lines across tracked `*.rs` files
-- Repository tests: 842 passing
-- Approximate whole-product surface: 71.5%
-- Approximate selected native compiler/bundler/API core: 98.8%
+- Rust source: 109,331 physical lines across tracked `*.rs` files
+- Repository tests: 847 passing
+- Approximate whole-product surface: 71.6%
+- Approximate selected native compiler/bundler/API core: 98.9%
 
 The two percentages have different denominators. Whole-product surface includes
 serve, service protocols, language wrappers, WebAssembly, npm packaging, and
@@ -27,9 +27,9 @@ differential probes, and known gaps; neither is an official coverage metric.
 
 ## Result
 
-The release-mode Rust CLI passed 14 of 14 representative scenarios. The pinned
+The release-mode Rust CLI passed 15 of 15 representative scenarios. The pinned
 upstream executable also passed all scenarios, and the generated programs had
-the same standard output in all 14 cases.
+the same standard output in all 15 cases.
 
 | Scenario | Rust | Upstream | Runtime parity | Rust output | Upstream output |
 | --- | --- | --- | --- | ---: | ---: |
@@ -40,6 +40,7 @@ the same standard output in all 14 cases.
 | JSX transform | pass | pass | yes | 188 B | 184 B |
 | Node built-in external | pass | pass | yes | 116 B | 121 B |
 | CSS extraction | pass | pass | yes | 92 B | 92 B |
+| CSS gradient compatibility | pass | pass | yes | 144 B | 144 B |
 | Source map and metafile | pass | pass | yes | 1,075 B | 1,081 B |
 | ESM code splitting | pass | pass | yes | 233 B | 233 B |
 | stdin CommonJS transform | pass | pass | yes | 955 B | 963 B |
@@ -90,10 +91,10 @@ includes:
 - injection, property mangling and mangle caches, plus portions of public
   logging and absolute-path controls;
 - explicit resource-management lowering, standard decorators, import-glob
-  bundling, and advanced CSS color/gradient behavior;
+  bundling, and advanced CSS color/interpolation behavior;
 - exhaustive package-manager, resolver, syntax, diagnostic, source-map,
   minifier, and cross-platform filesystem parity;
 - the full upstream test corpus, security review, and performance benchmarking.
 
-The 842 local tests and this 14-case matrix make the snapshot inspectable and
+The 847 local tests and this 15-case matrix make the snapshot inspectable and
 useful, but upstream esbuild should remain the production choice.
