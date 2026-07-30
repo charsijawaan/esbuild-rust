@@ -616,8 +616,35 @@ fn parse_file_with_cache(
     result
 }
 
+fn sanitize_plugin_location(file_system: &dyn Fs, location: &mut logger::MsgLocation) {
+    if location.namespace.is_empty() {
+        location.namespace = "file".into();
+    }
+    if location.file == logger::PrettyPaths::default() {
+        return;
+    }
+    let absolute_path = location.file.abs.clone();
+    let relative_path = if location.namespace == "file" {
+        file_system
+            .rel(file_system.cwd(), &absolute_path)
+            .unwrap_or_else(|| absolute_path.clone())
+            .replace('\\', "/")
+    } else {
+        format!("{}:{absolute_path}", location.namespace)
+    };
+    location.file = logger::PrettyPaths {
+        abs: if location.namespace == "file" {
+            absolute_path
+        } else {
+            relative_path.clone()
+        },
+        rel: relative_path,
+    };
+}
+
 fn log_plugin_messages(
     log: &Log,
+    file_system: &dyn Fs,
     default_plugin_name: &str,
     messages: Vec<Msg>,
     thrown_error: Option<String>,
@@ -630,9 +657,23 @@ fn log_plugin_messages(
         if message.plugin_name.is_empty() {
             message.plugin_name = default_plugin_name.to_string();
         }
+        for note in &mut message.notes {
+            if let Some(location) = &mut note.location {
+                sanitize_plugin_location(file_system, location);
+            }
+        }
+        let had_explicit_location = message.data.location.is_some();
         if message.data.location.is_none() {
             message.data.location = tracker.msg_location_or_none(import_path_range);
-        } else if import_source.is_some() {
+        } else if let Some(location) = &mut message.data.location {
+            sanitize_plugin_location(file_system, location);
+            if location.file == logger::PrettyPaths::default()
+                && let Some(import_source) = import_source
+            {
+                location.file.clone_from(&import_source.pretty_paths);
+            }
+        }
+        if had_explicit_location && import_source.is_some() {
             message.notes.push(tracker.msg_data(
                 import_path_range,
                 format!("The plugin {default_plugin_name:?} was triggered by this import"),
@@ -733,6 +774,7 @@ fn resolve_with_plugins(
             );
             if log_plugin_messages(
                 log,
+                file_system,
                 &plugin_name,
                 std::mem::take(&mut plugin_result.messages),
                 plugin_result.thrown_error.take(),
@@ -932,6 +974,7 @@ fn load_file_with_plugins(
             );
             if log_plugin_messages(
                 log,
+                file_system,
                 &plugin_name,
                 std::mem::take(&mut plugin_result.messages),
                 plugin_result.thrown_error.take(),

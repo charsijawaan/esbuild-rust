@@ -4390,6 +4390,105 @@ mod tests {
     }
 
     #[test]
+    fn public_plugin_message_locations_are_sanitized() {
+        let directory = context_test_directory("plugin-message-location");
+        std::fs::write(
+            directory.join("entry.js"),
+            "import value from 'virtual:location'; console.log(value)",
+        )
+        .expect("write plugin location entry");
+        let result = build(BuildOptions {
+            entry_points: vec!["entry.js".into()],
+            outdir: "out".into(),
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            plugins: vec![Plugin::new("location-plugin", |plugin_build| {
+                plugin_build.on_resolve(
+                    OnResolveOptions {
+                        filter: "^virtual:location$".into(),
+                        ..OnResolveOptions::default()
+                    },
+                    |_| {
+                        Ok(OnResolveResult {
+                            errors: vec![
+                                super::Message {
+                                    text: "namespaced location".into(),
+                                    location: Some(super::Location {
+                                        file: "file1".into(),
+                                        namespace: "ns1".into(),
+                                        line_text: "bad".into(),
+                                        ..super::Location::default()
+                                    }),
+                                    notes: vec![super::Note {
+                                        text: "namespaced note".into(),
+                                        location: Some(super::Location {
+                                            file: "note1".into(),
+                                            namespace: "notes".into(),
+                                            ..super::Location::default()
+                                        }),
+                                    }],
+                                    ..super::Message::default()
+                                },
+                                super::Message {
+                                    text: "importer fallback".into(),
+                                    location: Some(super::Location::default()),
+                                    ..super::Message::default()
+                                },
+                            ],
+                            ..OnResolveResult::default()
+                        })
+                    },
+                );
+                Ok(())
+            })],
+            ..BuildOptions::default()
+        });
+        let namespaced = result
+            .errors
+            .iter()
+            .find(|error| error.text == "namespaced location")
+            .expect("namespaced plugin error");
+        assert_eq!(
+            namespaced
+                .location
+                .as_ref()
+                .map(|location| location.file.as_str()),
+            Some("ns1:file1")
+        );
+        assert_eq!(
+            namespaced
+                .notes
+                .first()
+                .and_then(|note| note.location.as_ref())
+                .map(|location| location.file.as_str()),
+            Some("notes:note1")
+        );
+        assert!(
+            namespaced.notes.iter().any(|note| {
+                note.text == "The plugin \"location-plugin\" was triggered by this import"
+                    && note
+                        .location
+                        .as_ref()
+                        .is_some_and(|location| location.file == "entry.js")
+            }),
+            "{:?}",
+            namespaced.notes
+        );
+        let fallback = result
+            .errors
+            .iter()
+            .find(|error| error.text == "importer fallback")
+            .expect("fallback plugin error");
+        assert_eq!(
+            fallback
+                .location
+                .as_ref()
+                .map(|location| location.file.as_str()),
+            Some("entry.js")
+        );
+        std::fs::remove_dir_all(directory).expect("remove plugin location directory");
+    }
+
+    #[test]
     fn public_plugin_watch_paths_rebuild_without_rerunning_setup() {
         let directory = context_test_directory("plugin-watch");
         let watched_path = directory.join("data.txt");
