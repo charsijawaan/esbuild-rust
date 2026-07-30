@@ -24,8 +24,9 @@ use crate::internal::{
 
 use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properties};
 use super::{
-    lower_typescript::lower_nested_type_script_statements, parser_core::ParserCore,
-    standalone_helpers::is_simple_parameter_list,
+    lower_typescript::lower_nested_type_script_statements,
+    parser_core::ParserCore,
+    standalone_helpers::{is_simple_parameter_list, is_unsightly_primitive},
 };
 
 fn symbol_name(core: &ParserCore, reference: crate::internal::ast::Ref) -> String {
@@ -4629,32 +4630,88 @@ fn visit_expr_with_target_and_context(
                 resolve_identifiers,
                 unary.op.unary_assign_target(),
             );
-            if core.options.minify_syntax && unary.op == OpCode::UnaryVoid {
-                let helpers = make_helper_context(|reference| {
-                    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
-                        == SymbolKind::Unbound
-                });
-                if helpers.expr_can_be_removed_if_unused(&unary.value) {
-                    *data = ExprData::Undefined;
-                    return;
-                }
-            }
-            if core.should_fold_type_script_constant_expressions {
-                let number = crate::internal::js_ast::to_number_without_side_effects(
-                    unary.value.data.as_deref(),
-                );
-                let replacement = match unary.op {
-                    OpCode::UnaryPositive => number,
-                    OpCode::UnaryNegative => number.map(|value| -value),
-                    OpCode::UnaryComplement => {
-                        number.map(|value| f64::from(!crate::internal::js_ast::to_int32(value)))
+            match unary.op {
+                OpCode::UnaryTypeof => {
+                    if let Some(value) = crate::internal::js_ast::typeof_without_side_effects(
+                        unary.value.data.as_deref(),
+                    ) {
+                        *data = ExprData::String(StringExpr {
+                            value: string_to_utf16(value.as_bytes()),
+                            ..StringExpr::default()
+                        });
+                        return;
                     }
-                    _ => None,
-                };
-                if let Some(number) = replacement {
-                    *data = ExprData::Number(number);
-                    return;
                 }
+                OpCode::UnaryNot => {
+                    if core.options.minify_syntax {
+                        let helpers = make_helper_context(|reference| {
+                            core.symbols
+                                [usize::try_from(reference.inner_index).expect("symbol index")]
+                            .kind
+                                == SymbolKind::Unbound
+                        });
+                        unary.value = helpers.simplify_boolean_expr(&unary.value);
+                    }
+                    if let Some((value, crate::internal::js_ast::SideEffects::NoSideEffects)) =
+                        crate::internal::js_ast::to_boolean_with_side_effects(
+                            unary.value.data.as_deref(),
+                        )
+                    {
+                        *data = ExprData::Boolean(!value);
+                        return;
+                    }
+                    if core.options.minify_syntax
+                        && let Some(replacement) =
+                            crate::internal::js_ast::maybe_simplify_not(&unary.value)
+                        && let Some(replacement) = replacement.data
+                    {
+                        *data = *replacement;
+                        return;
+                    }
+                }
+                OpCode::UnaryVoid => {
+                    let should_remove = if core.options.minify_syntax {
+                        let helpers = make_helper_context(|reference| {
+                            core.symbols
+                                [usize::try_from(reference.inner_index).expect("symbol index")]
+                            .kind
+                                == SymbolKind::Unbound
+                        });
+                        helpers.expr_can_be_removed_if_unused(&unary.value)
+                    } else {
+                        is_unsightly_primitive(unary.value.data.as_deref())
+                    };
+                    if should_remove {
+                        *data = ExprData::Undefined;
+                        return;
+                    }
+                }
+                OpCode::UnaryPositive | OpCode::UnaryNegative => {
+                    if let Some(mut number) =
+                        crate::internal::js_ast::to_number_without_side_effects(
+                            unary.value.data.as_deref(),
+                        )
+                    {
+                        if unary.op == OpCode::UnaryNegative {
+                            number = -number;
+                        }
+                        *data = ExprData::Number(number);
+                        return;
+                    }
+                }
+                OpCode::UnaryComplement
+                    if core.should_fold_type_script_constant_expressions
+                        || core.options.minify_syntax =>
+                {
+                    if let Some(number) = crate::internal::js_ast::to_number_without_side_effects(
+                        unary.value.data.as_deref(),
+                    ) {
+                        *data =
+                            ExprData::Number(f64::from(!crate::internal::js_ast::to_int32(number)));
+                        return;
+                    }
+                }
+                _ => {}
             }
             if core.options.minify_syntax
                 && !matches!(unary.op, OpCode::UnaryDelete | OpCode::UnaryTypeof)

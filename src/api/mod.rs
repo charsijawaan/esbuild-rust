@@ -6053,6 +6053,47 @@ mod tests {
     }
 
     #[test]
+    fn folds_unary_constants_with_upstream_side_effect_guards() {
+        let input = "x=+5;x=-5;x=~5;x=!5;x=typeof 5;x=+\"\";x=+[];x=+{};x=+/1/;\
+                     x=+[1];x=+\"123\";x=+\"-123\";x=+\"0x10\";\
+                     x=+{toString:()=>1};x=+{valueOf:()=>1}";
+        assert_eq!(
+            code(transform(input, TransformOptions::default())),
+            concat!(
+                "x = 5;\n",
+                "x = -5;\n",
+                "x = ~5;\n",
+                "x = false;\n",
+                "x = \"number\";\n",
+                "x = 0;\n",
+                "x = 0;\n",
+                "x = NaN;\n",
+                "x = NaN;\n",
+                "x = +[1];\n",
+                "x = 123;\n",
+                "x = -123;\n",
+                "x = +\"0x10\";\n",
+                "x = +{ toString: () => 1 };\n",
+                "x = +{ valueOf: () => 1 };\n",
+            )
+        );
+        assert_eq!(
+            code(transform(
+                input,
+                TransformOptions {
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            )),
+            concat!(
+                "x = 5, x = -5, x = -6, x = !1, x = \"number\", x = 0, x = 0, ",
+                "x = NaN, x = NaN, x = +[1], x = 123, x = -123, x = +\"0x10\", ",
+                "x = +{ toString: () => 1 }, x = +{ valueOf: () => 1 };\n",
+            )
+        );
+    }
+
+    #[test]
     fn inlines_single_use_locals_with_ordering_guards() {
         assert_eq!(
             code(transform(
