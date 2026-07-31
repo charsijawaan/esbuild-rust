@@ -18,31 +18,56 @@ use esbuild_rs::{
 };
 
 fn format_cli_messages(arguments: &[String], messages: &[Message], kind: MessageKind) -> String {
-    let color = if arguments.iter().any(|argument| argument == "--color=true") {
-        true
-    } else if arguments.iter().any(|argument| argument == "--color=false") {
-        false
-    } else {
-        io::stderr().is_terminal()
-    };
+    let mut output = format_cli_message_details(arguments, messages, kind);
+    output.push_str(&cli_message_summary(messages, kind));
+    output
+}
+
+fn format_cli_message_details(
+    arguments: &[String],
+    messages: &[Message],
+    kind: MessageKind,
+) -> String {
     let terminal_width = esbuild_rs::internal::logger::get_terminal_info(&io::stderr()).width;
-    let mut output = format_messages(
+    format_messages(
         messages.to_vec(),
         FormatMessagesOptions {
             terminal_width,
             kind,
-            color,
+            color: cli_color(arguments),
         },
     )
-    .concat();
+    .concat()
+}
+
+fn cli_message_summary(messages: &[Message], kind: MessageKind) -> String {
     let noun = match (kind, messages.len()) {
         (MessageKind::Error, 1) => "error",
         (MessageKind::Error, _) => "errors",
         (MessageKind::Warning, 1) => "warning",
         (MessageKind::Warning, _) => "warnings",
     };
-    write!(&mut output, "{} {noun}", messages.len()).expect("writing to a string cannot fail");
-    output
+    format!("{} {noun}", messages.len())
+}
+
+fn prepend_cli_warnings(error: String, warning_details: &str) -> String {
+    if warning_details.is_empty() {
+        error
+    } else {
+        format!("{warning_details}{error}")
+    }
+}
+
+fn cli_color(arguments: &[String]) -> bool {
+    arguments
+        .iter()
+        .filter_map(|argument| match argument.as_str() {
+            "--color" | "--color=true" => Some(true),
+            "--color=false" => Some(false),
+            _ => None,
+        })
+        .next_back()
+        .unwrap_or_else(|| io::stderr().is_terminal())
 }
 
 fn main() {
@@ -182,6 +207,18 @@ fn run_with_stdin_and_node_paths(
         if argument == "--analyze=verbose" {
             analyze = AnalyzeMode::Verbose;
             continue;
+        }
+        if matches!(
+            argument.as_str(),
+            "--color" | "--color=true" | "--color=false"
+        ) {
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--color=") {
+            return Err(format!(
+                "Invalid value {value:?} in {argument:?}\n\n\
+                 Valid values are \"true\" or \"false\"."
+            ));
         }
         if argument == "--splitting" {
             splitting = true;
@@ -683,58 +720,83 @@ fn run_with_stdin_and_node_paths(
                 MessageKind::Error,
             ));
         }
-        for warning in result.warnings {
-            eprintln!("warning: {}", warning.text);
-        }
+        let warning_details = if result.warnings.is_empty() {
+            String::new()
+        } else {
+            format_cli_message_details(arguments, &result.warnings, MessageKind::Warning)
+        };
+        let warning_summary = if result.warnings.is_empty() {
+            String::new()
+        } else {
+            cli_message_summary(&result.warnings, MessageKind::Warning)
+        };
+        let mut stderr = warning_details.clone();
         if !allow_overwrite && (!outdir.is_empty() || !outfile.is_empty()) {
             for output in &result.output_files {
                 if fs::canonicalize(&output.path)
                     .ok()
                     .is_some_and(|path| canonical_input_paths.contains(&path))
                 {
-                    return Err(format!(
-                        "Refusing to overwrite input file {:?} (use \"--allow-overwrite\" to allow this)",
-                        output.path
+                    return Err(prepend_cli_warnings(
+                        format!(
+                            "Refusing to overwrite input file {:?} (use \"--allow-overwrite\" to allow this)",
+                            output.path
+                        ),
+                        &warning_details,
                     ));
                 }
             }
         }
-        let analysis = if analyze == AnalyzeMode::Disabled {
-            String::new()
-        } else {
-            format!(
-                "{}\n",
+        if analyze != AnalyzeMode::Disabled {
+            writeln!(
+                &mut stderr,
+                "{}",
                 analyze_metafile(
                     &result.metafile,
                     AnalyzeMetafileOptions {
+                        color: cli_color(arguments),
                         verbose: analyze == AnalyzeMode::Verbose,
-                        ..AnalyzeMetafileOptions::default()
                     }
                 )
             )
-        };
+            .expect("writing to a string cannot fail");
+        }
+        if !warning_summary.is_empty() {
+            writeln!(&mut stderr, "{warning_summary}").expect("writing to a string cannot fail");
+        }
         if outdir.is_empty() && outfile.is_empty() {
             let [output] = result.output_files.as_slice() else {
-                return Err("Must use \"--outdir\" when there are multiple output files".into());
+                return Err(prepend_cli_warnings(
+                    "Must use \"--outdir\" when there are multiple output files".into(),
+                    &warning_details,
+                ));
             };
             let output = Output::Code(output.contents.clone());
-            return Ok(if analysis.is_empty() {
+            return Ok(if stderr.is_empty() {
                 output
             } else {
                 Output::WithStderr {
                     output: Box::new(output),
-                    stderr: analysis,
+                    stderr,
                 }
             });
         }
         for output in result.output_files {
             let path = std::path::Path::new(&output.path);
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+                fs::create_dir_all(parent).map_err(|error| {
+                    prepend_cli_warnings(
+                        format!("Could not create {}: {error}", parent.display()),
+                        &warning_details,
+                    )
+                })?;
             }
-            fs::write(path, output.contents)
-                .map_err(|error| format!("Could not write {:?}: {error}", output.path))?;
+            fs::write(path, output.contents).map_err(|error| {
+                prepend_cli_warnings(
+                    format!("Could not write {:?}: {error}", output.path),
+                    &warning_details,
+                )
+            })?;
         }
         if !metafile_path.is_empty() {
             let path = std::path::Path::new(&metafile_path);
@@ -742,19 +804,27 @@ fn run_with_stdin_and_node_paths(
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
             {
-                fs::create_dir_all(parent)
-                    .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+                fs::create_dir_all(parent).map_err(|error| {
+                    prepend_cli_warnings(
+                        format!("Could not create {}: {error}", parent.display()),
+                        &warning_details,
+                    )
+                })?;
             }
-            fs::write(path, result.metafile)
-                .map_err(|error| format!("Could not write {metafile_path:?}: {error}"))?;
+            fs::write(path, result.metafile).map_err(|error| {
+                prepend_cli_warnings(
+                    format!("Could not write {metafile_path:?}: {error}"),
+                    &warning_details,
+                )
+            })?;
         }
         let output = Output::Text(String::new());
-        return Ok(if analysis.is_empty() {
+        return Ok(if stderr.is_empty() {
             output
         } else {
             Output::WithStderr {
                 output: Box::new(output),
-                stderr: analysis,
+                stderr,
             }
         });
     }
@@ -830,10 +900,18 @@ fn run_with_stdin_and_node_paths(
             MessageKind::Error,
         ));
     }
-    for warning in result.warnings {
-        eprintln!("warning: {}", warning.text);
-    }
-    Ok(Output::Code(result.code))
+    let output = Output::Code(result.code);
+    Ok(if result.warnings.is_empty() {
+        output
+    } else {
+        Output::WithStderr {
+            output: Box::new(output),
+            stderr: format!(
+                "{}\n",
+                format_cli_messages(arguments, &result.warnings, MessageKind::Warning)
+            ),
+        }
+    })
 }
 
 fn parse_targets(value: &str, argument: &str) -> Result<(Target, Vec<Engine>), String> {
@@ -924,6 +1002,7 @@ fn help_text() -> String {
          Options:\n\
          \x20\x20--bundle\n\
          \x20\x20--analyze[=verbose]\n\
+         \x20\x20--color[=true|false]\n\
          \x20\x20--outdir=DIR\n\
          \x20\x20--outfile=FILE\n\
          \x20\x20--outbase=DIR\n\
@@ -1057,6 +1136,7 @@ mod tests {
             panic!("expected help text");
         };
         assert!(help.contains("Usage: esbuild"));
+        assert!(help.contains("--color[=true|false]"));
         let Output::Text(version) = run(&["--version".into()]).expect("version succeeds") else {
             panic!("expected version text");
         };
@@ -1081,6 +1161,13 @@ mod tests {
         assert!(run(&["--drop-labels=DEV,".into()]).is_err());
         assert!(run(&["--pure:".into()]).is_err());
         assert_eq!(
+            run(&["--color=wat".into()])
+                .err()
+                .expect("invalid color value"),
+            "Invalid value \"wat\" in \"--color=wat\"\n\n\
+             Valid values are \"true\" or \"false\"."
+        );
+        assert_eq!(
             run(&["--abs-paths=nope".into()])
                 .err()
                 .expect("invalid absolute path kind"),
@@ -1104,6 +1191,90 @@ mod tests {
                 .expect("loader should be rejected"),
             "\"loader\" without extension only applies when reading from stdin"
         );
+    }
+
+    #[test]
+    fn forces_cli_diagnostic_colors_with_last_flag_wins() {
+        let error_for = |arguments: &[&str]| {
+            run_with_stdin(
+                &arguments
+                    .iter()
+                    .map(|argument| (*argument).to_string())
+                    .collect::<Vec<_>>(),
+                Some(b"const = 1"),
+            )
+            .err()
+            .expect("invalid JavaScript should fail")
+        };
+
+        assert!(error_for(&["--color"]).contains("\x1b["));
+        assert!(error_for(&["--color=true"]).contains("\x1b["));
+        assert!(!error_for(&["--color=false"]).contains("\x1b["));
+        assert!(!error_for(&["--color=true", "--color=false"]).contains("\x1b["));
+        assert!(error_for(&["--color=false", "--color=true"]).contains("\x1b["));
+    }
+
+    #[test]
+    fn formats_transform_and_build_warnings_with_cli_colors() {
+        for bundle in [false, true] {
+            for (color, expect_color) in [("--color=true", true), ("--color=false", false)] {
+                let mut arguments = vec!["--loader=css".into(), color.into()];
+                if bundle {
+                    arguments.push("--bundle".into());
+                }
+                let Output::WithStderr { output, stderr } =
+                    run_with_stdin(&arguments, Some(b"//")).expect("CSS warning is non-fatal")
+                else {
+                    panic!("expected formatted warning output");
+                };
+                assert!(matches!(*output, Output::Code(_)));
+                assert!(stderr.contains("[js-comment-in-css]"), "{stderr}");
+                assert!(stderr.contains("<stdin>:1:0"), "{stderr}");
+                assert!(stderr.ends_with("1 warning\n"), "{stderr:?}");
+                assert_eq!(stderr.contains("\x1b["), expect_color, "{stderr:?}");
+            }
+        }
+
+        let Output::WithStderr { stderr, .. } = run_with_stdin(
+            &[
+                "--bundle".into(),
+                "--analyze".into(),
+                "--loader=css".into(),
+                "--color=false".into(),
+            ],
+            Some(b"//"),
+        )
+        .expect("warnings and analysis should both be returned") else {
+            panic!("expected warning and analysis output");
+        };
+        let warning = stderr.find("Comments in CSS").expect("warning detail");
+        let analysis = stderr.find("100.0%").expect("analysis table");
+        let summary = stderr.rfind("1 warning").expect("warning summary");
+        assert!(warning < analysis && analysis < summary, "{stderr}");
+        assert!(stderr.ends_with("1 warning\n"), "{stderr:?}");
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let output_directory =
+            std::env::temp_dir().join(format!("esbuild-rs-cli-color-write-error-{unique}"));
+        std::fs::create_dir_all(&output_directory).expect("create output directory");
+        let error = run_with_stdin(
+            &[
+                "--bundle".into(),
+                "--loader=css".into(),
+                "--color=false".into(),
+                format!("--outfile={}", output_directory.display()),
+            ],
+            Some(b"//"),
+        )
+        .err()
+        .expect("writing to a directory should fail");
+        assert!(error.contains("[js-comment-in-css]"), "{error}");
+        assert!(error.contains("Could not write"), "{error}");
+        assert!(!error.contains("\x1b["), "{error:?}");
+        std::fs::remove_dir_all(output_directory).expect("remove output directory");
     }
 
     #[test]
@@ -1867,6 +2038,19 @@ mod tests {
             assert!(stderr.contains("100.0%"), "{stderr}");
             assert_eq!(stderr.contains('─'), verbose, "{stderr}");
             assert!(stderr.ends_with("\n\n"), "{stderr:?}");
+        }
+        for (color, expect_color) in [("--color=true", true), ("--color=false", false)] {
+            let Output::WithStderr { output, stderr } = run(&[
+                "--bundle".into(),
+                "--analyze".into(),
+                color.into(),
+                entry.to_string_lossy().into_owned(),
+            ])
+            .expect("colored analysis succeeds") else {
+                panic!("expected analysis output");
+            };
+            assert!(matches!(*output, Output::Code(_)));
+            assert_eq!(stderr.contains("\x1b["), expect_color, "{stderr:?}");
         }
 
         std::fs::remove_dir_all(directory).expect("remove test directory");
