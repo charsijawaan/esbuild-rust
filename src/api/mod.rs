@@ -5,7 +5,8 @@ mod watcher;
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
-    fmt, fs as std_fs,
+    fmt::{self, Write as _},
+    fs as std_fs,
     io::{self, Write as _},
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Condvar, Mutex, RwLock, Weak},
@@ -73,94 +74,123 @@ struct KeepNameHelper {
     value: String,
 }
 
-fn transform_keep_name_renamer(
+#[derive(Default)]
+struct TransformRuntimeHelpers {
+    keep_name: KeepNameHelper,
+    pow: String,
+}
+
+fn runtime_helper_refs(ast: &crate::internal::js_ast::Ast, alias: &str) -> HashSet<Ref> {
+    ast.named_imports
+        .iter()
+        .filter_map(|(reference, import)| (import.alias == alias).then_some(*reference))
+        .chain(
+            ast.module_scope
+                .as_ref()
+                .into_iter()
+                .flat_map(|scope| {
+                    scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .generated
+                        .clone()
+                })
+                .filter(|reference| {
+                    ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                        .original_name
+                        == alias
+                }),
+        )
+        .collect()
+}
+
+fn unique_runtime_helper_name(base: &str, used_names: &mut HashSet<String>) -> String {
+    let mut name = base.to_string();
+    let mut suffix = 2;
+    while used_names.contains(&name) {
+        name = format!("{base}{suffix}");
+        suffix += 1;
+    }
+    used_names.insert(name.clone());
+    name
+}
+
+fn transform_runtime_renamer(
     ast: &crate::internal::js_ast::Ast,
     symbols: SymbolMap,
     keep_names: bool,
     minify_identifiers: bool,
-) -> (TransformRenamer, KeepNameHelper) {
+) -> (TransformRenamer, TransformRuntimeHelpers) {
     let mut overrides = HashMap::new();
-    let helper_refs = if keep_names {
-        ast.named_imports
-            .iter()
-            .filter_map(|(reference, import)| (import.alias == "__name").then_some(*reference))
-            .chain(
-                ast.module_scope
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|scope| {
-                        scope
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .generated
-                            .clone()
-                    })
-                    .filter(|reference| {
-                        ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
-                            .original_name
-                            == "__name"
-                    }),
-            )
-            .collect::<HashSet<_>>()
+    let keep_name_refs = if keep_names {
+        runtime_helper_refs(ast, "__name")
     } else {
         HashSet::new()
     };
-    let helper_use_count = helper_refs
+    let pow_refs = runtime_helper_refs(ast, "__pow");
+    let keep_name_use_count = keep_name_refs
         .iter()
         .map(|reference| {
             ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
                 .use_count_estimate
         })
         .sum::<u32>();
-    let (base, mut helper) = transform_base_renamer(
+    let pow_use_count = pow_refs
+        .iter()
+        .map(|reference| {
+            ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                .use_count_estimate
+        })
+        .sum::<u32>();
+    let (base, mut helpers) = transform_base_renamer(
         ast,
         &symbols,
         minify_identifiers,
-        (!helper_refs.is_empty()).then_some(helper_use_count),
+        (!keep_name_refs.is_empty()).then_some(keep_name_use_count),
+        (!pow_refs.is_empty()).then_some(pow_use_count),
     );
-    if !helper_refs.is_empty() {
-        if !minify_identifiers {
-            let helper_indices = helper_refs
-                .iter()
-                .map(|reference| reference.inner_index)
-                .collect::<HashSet<_>>();
-            let used_names = ast
-                .symbols
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| {
-                    !helper_indices.contains(&u32::try_from(*index).expect("symbol index fits u32"))
-                })
-                .map(|(_, symbol)| symbol.original_name.as_str())
-                .collect::<HashSet<_>>();
-            helper.name = "__name".into();
-            let mut suffix = 2;
-            while used_names.contains(helper.name.as_str()) {
-                helper.name = format!("__name{suffix}");
-                suffix += 1;
-            }
-            helper.def_prop = "__defProp".into();
-            suffix = 2;
-            while used_names.contains(helper.def_prop.as_str()) || helper.def_prop == helper.name {
-                helper.def_prop = format!("__defProp{suffix}");
-                suffix += 1;
-            }
-            helper.target = "target".into();
-            helper.value = "value".into();
+    if !minify_identifiers && (!keep_name_refs.is_empty() || !pow_refs.is_empty()) {
+        let helper_indices = keep_name_refs
+            .iter()
+            .chain(&pow_refs)
+            .map(|reference| reference.inner_index)
+            .collect::<HashSet<_>>();
+        let mut used_names = ast
+            .symbols
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                !helper_indices.contains(&u32::try_from(*index).expect("symbol index fits u32"))
+            })
+            .map(|(_, symbol)| symbol.original_name.clone())
+            .collect::<HashSet<_>>();
+        if !pow_refs.is_empty() {
+            helpers.pow = unique_runtime_helper_name("__pow", &mut used_names);
         }
-        overrides.extend(
-            helper_refs
-                .into_iter()
-                .map(|reference| (reference, helper.name.clone())),
-        );
+        if !keep_name_refs.is_empty() {
+            helpers.keep_name.name = unique_runtime_helper_name("__name", &mut used_names);
+            helpers.keep_name.def_prop = unique_runtime_helper_name("__defProp", &mut used_names);
+            helpers.keep_name.target = "target".into();
+            helpers.keep_name.value = "value".into();
+        }
     }
+    overrides.extend(
+        keep_name_refs
+            .into_iter()
+            .map(|reference| (reference, helpers.keep_name.name.clone())),
+    );
+    overrides.extend(
+        pow_refs
+            .into_iter()
+            .map(|reference| (reference, helpers.pow.clone())),
+    );
     (
         TransformRenamer {
             base,
             symbols,
             overrides,
         },
-        helper,
+        helpers,
     )
 }
 
@@ -169,7 +199,8 @@ fn transform_base_renamer(
     symbols: &SymbolMap,
     minify_identifiers: bool,
     keep_name_use_count: Option<u32>,
-) -> (Box<dyn Renamer>, KeepNameHelper) {
+    pow_use_count: Option<u32>,
+) -> (Box<dyn Renamer>, TransformRuntimeHelpers) {
     if minify_identifiers {
         let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
         let mut reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
@@ -218,10 +249,12 @@ fn transform_base_renamer(
             let name = renamer.allocate_synthetic_default_top_level_slot(use_count.wrapping_add(2));
             (def_prop, name)
         });
+        let pow_slot = pow_use_count
+            .map(|use_count| renamer.allocate_synthetic_default_top_level_slot(use_count));
         let minifier =
             DEFAULT_NAME_MINIFIER_JS.shuffle_by_char_freq(ast.char_freq.unwrap_or_default());
         renamer.assign_names_by_frequency(&minifier);
-        let helper = keep_name_slots
+        let keep_name = keep_name_slots
             .map(|(def_prop, name)| KeepNameHelper {
                 def_prop: renamer.name_for_synthetic_default_slot(def_prop),
                 name: renamer.name_for_synthetic_default_slot(name),
@@ -229,7 +262,13 @@ fn transform_base_renamer(
                 value: renamer.name_for_synthetic_default_slot(1),
             })
             .unwrap_or_default();
-        (Box::new(renamer), helper)
+        let pow = pow_slot
+            .map(|slot| renamer.name_for_synthetic_default_slot(slot))
+            .unwrap_or_default();
+        (
+            Box::new(renamer),
+            TransformRuntimeHelpers { keep_name, pow },
+        )
     } else {
         let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
         let reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
@@ -245,35 +284,64 @@ fn transform_base_renamer(
             nested_scopes.extend(part.scopes.iter().cloned());
         }
         renamer.assign_names_by_scope(&HashMap::from([(0, nested_scopes)]));
-        (Box::new(renamer), KeepNameHelper::default())
+        (Box::new(renamer), TransformRuntimeHelpers::default())
     }
 }
 
-fn prepend_keep_name_helper(code: &mut Vec<u8>, helper: &KeepNameHelper, minify_whitespace: bool) {
-    if helper.name.is_empty() {
-        return;
-    }
+fn prepend_transform_runtime_helpers(
+    code: &mut Vec<u8>,
+    helpers: &TransformRuntimeHelpers,
+    minify_whitespace: bool,
+) {
+    let mut prefix = String::new();
     let KeepNameHelper {
         def_prop,
         name,
         target,
         value,
-    } = helper;
-    let value_property = if value == "value" {
-        "value".into()
-    } else {
-        format!("value: {value}")
-    };
-    let helper = if minify_whitespace {
-        let value_property = value_property.replace(' ', "");
-        format!(
-            "var {def_prop}=Object.defineProperty;var {name}=({target},{value})=>{def_prop}({target},\"name\",{{{value_property},configurable:true}});"
-        )
-    } else {
-        format!(
-            "var {def_prop} = Object.defineProperty;\nvar {name} = ({target}, {value}) => {def_prop}({target}, \"name\", {{ {value_property}, configurable: true }});\n"
-        )
-    };
+    } = &helpers.keep_name;
+    if !name.is_empty() {
+        if minify_whitespace {
+            write!(prefix, "var {def_prop}=Object.defineProperty;")
+                .expect("writing to a string cannot fail");
+        } else {
+            writeln!(prefix, "var {def_prop} = Object.defineProperty;")
+                .expect("writing to a string cannot fail");
+        }
+    }
+    if !helpers.pow.is_empty() {
+        if minify_whitespace {
+            write!(prefix, "var {}=Math.pow;", helpers.pow)
+                .expect("writing to a string cannot fail");
+        } else {
+            writeln!(prefix, "var {} = Math.pow;", helpers.pow)
+                .expect("writing to a string cannot fail");
+        }
+    }
+    if !name.is_empty() {
+        let value_property = if value == "value" {
+            "value".into()
+        } else {
+            format!("value: {value}")
+        };
+        if minify_whitespace {
+            let value_property = value_property.replace(' ', "");
+            write!(
+                prefix,
+                "var {name}=({target},{value})=>{def_prop}({target},\"name\",{{{value_property},configurable:true}});"
+            )
+            .expect("writing to a string cannot fail");
+        } else {
+            writeln!(
+                prefix,
+                "var {name} = ({target}, {value}) => {def_prop}({target}, \"name\", {{ {value_property}, configurable: true }});"
+            )
+            .expect("writing to a string cannot fail");
+        }
+    }
+    if prefix.is_empty() {
+        return;
+    }
     let insertion = if code.starts_with(b"#!") {
         code.iter()
             .position(|byte| *byte == b'\n')
@@ -281,7 +349,7 @@ fn prepend_keep_name_helper(code: &mut Vec<u8>, helper: &KeepNameHelper, minify_
     } else {
         0
     };
-    code.splice(insertion..insertion, helper.bytes());
+    code.splice(insertion..insertion, prefix.bytes());
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -4520,7 +4588,7 @@ fn transform_javascript(
     }
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&ast.symbols);
-    let (renamer, helper) = transform_keep_name_renamer(
+    let (renamer, helpers) = transform_runtime_renamer(
         &ast,
         symbols,
         options.keep_names,
@@ -4539,7 +4607,7 @@ fn transform_javascript(
     };
     let mut code = printed.js;
     let printed_len = code.len();
-    prepend_keep_name_helper(&mut code, &helper, options.minify_whitespace);
+    prepend_transform_runtime_helpers(&mut code, &helpers, options.minify_whitespace);
     let source_map_prefix_len = code.len() - printed_len;
     if options.minify_whitespace && !code.is_empty() && code.last() != Some(&b'\n') {
         code.push(b'\n');
@@ -8089,6 +8157,221 @@ mod tests {
             String::from_utf8_lossy(&built.output_files[0].contents).contains("catch (e)"),
             "{}",
             String::from_utf8_lossy(&built.output_files[0].contents)
+        );
+    }
+
+    #[test]
+    fn lowers_plain_exponentiation_at_target_and_override_boundaries() {
+        let source = "let result = a ** b; result **= c;";
+        let lowered = concat!(
+            "var __pow = Math.pow;\n",
+            "let result = __pow(a, b);\n",
+            "result **= c;\n",
+        );
+        let preserved = "let result = a ** b;\nresult **= c;\n";
+
+        assert_eq!(
+            transform_code(
+                source,
+                TransformOptions {
+                    target: Target::Es2015,
+                    ..TransformOptions::default()
+                },
+            ),
+            lowered
+        );
+        assert_eq!(
+            transform_code(
+                source,
+                TransformOptions {
+                    target: Target::Es2016,
+                    ..TransformOptions::default()
+                },
+            ),
+            preserved
+        );
+        assert_eq!(
+            transform_code(
+                source,
+                TransformOptions {
+                    target: Target::Es2015,
+                    supported: HashMap::from([("exponent-operator".into(), true)]),
+                    ..TransformOptions::default()
+                },
+            ),
+            preserved
+        );
+        assert_eq!(
+            transform_code(
+                source,
+                TransformOptions {
+                    target: Target::EsNext,
+                    supported: HashMap::from([("exponent-operator".into(), false)]),
+                    ..TransformOptions::default()
+                },
+            ),
+            lowered
+        );
+    }
+
+    #[test]
+    fn lowers_plain_exponentiation_with_stable_helper_semantics() {
+        let source = "let right=a**b**c;\
+                      let left=(a**b)**c;\
+                      let operands=(x(),y())**(z(),w());\
+                      let updates=x++**--y;";
+        assert_eq!(
+            transform_code(
+                source,
+                TransformOptions {
+                    target: Target::Es2015,
+                    ..TransformOptions::default()
+                },
+            ),
+            concat!(
+                "var __pow = Math.pow;\n",
+                "let right = __pow(a, __pow(b, c));\n",
+                "let left = __pow(__pow(a, b), c);\n",
+                "let operands = __pow((x(), y()), (z(), w()));\n",
+                "let updates = __pow(x++, --y);\n",
+            )
+        );
+
+        let collision = transform_code(
+            "let __pow = 1; use(__pow, a ** b, c ** d);",
+            TransformOptions {
+                target: Target::Es2015,
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(
+            collision,
+            concat!(
+                "var __pow2 = Math.pow;\n",
+                "let __pow = 1;\n",
+                "use(__pow, __pow2(a, b), __pow2(c, d));\n",
+            )
+        );
+        assert_eq!(collision.matches("Math.pow").count(), 1);
+        assert_eq!(collision.matches("__pow2(").count(), 2);
+
+        let with_keep_names = transform_code(
+            "function foo() {} foo ** bar",
+            TransformOptions {
+                target: Target::Es2015,
+                keep_names: true,
+                ..TransformOptions::default()
+            },
+        );
+        let def_prop = with_keep_names.find("var __defProp").expect("__defProp");
+        let pow = with_keep_names.find("var __pow").expect("__pow");
+        let name = with_keep_names.find("var __name").expect("__name");
+        let function = with_keep_names.find("function foo").expect("user code");
+        assert!(
+            def_prop < pow && pow < name && name < function,
+            "{with_keep_names}"
+        );
+
+        let minify_source = "let result=a**b**c;";
+        assert_eq!(
+            transform_code(
+                minify_source,
+                TransformOptions {
+                    target: Target::Es2015,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                },
+            ),
+            "var __pow = Math.pow;\nlet result = __pow(a, __pow(b, c));\n"
+        );
+        assert_eq!(
+            transform_code(
+                minify_source,
+                TransformOptions {
+                    target: Target::Es2015,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                },
+            ),
+            "var __pow=Math.pow;let result=__pow(a,__pow(b,c));\n"
+        );
+        assert_eq!(
+            transform_code(
+                minify_source,
+                TransformOptions {
+                    target: Target::Es2015,
+                    minify_identifiers: true,
+                    ..TransformOptions::default()
+                },
+            ),
+            "var e = Math.pow;\nlet result = e(a, e(b, c));\n"
+        );
+        assert_eq!(
+            transform_code(
+                minify_source,
+                TransformOptions {
+                    target: Target::Es2015,
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                },
+            ),
+            "var e=Math.pow;let result=e(a,e(b,c));\n"
+        );
+    }
+
+    #[test]
+    fn bundles_plain_exponentiation_through_the_runtime_helper() {
+        let source = "let __pow=1;console.log(__pow,a**b,c**d,a**=b)";
+        let build_for = |target, supported| {
+            let result = build_api(BuildOptions {
+                bundle: true,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    ..BuildStdin::default()
+                }),
+                target,
+                supported,
+                minify_whitespace: true,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            String::from_utf8(result.output_files[0].contents.clone()).expect("JavaScript output")
+        };
+
+        let lowered = build_for(Target::Es2015, HashMap::new());
+        assert_eq!(lowered.matches("Math.pow").count(), 1, "{lowered}");
+        assert!(lowered.contains("__pow(a,b)"), "{lowered}");
+        assert!(lowered.contains("__pow(c,d)"), "{lowered}");
+        assert!(lowered.contains("a**=b"), "{lowered}");
+
+        let supported_boundary = build_for(Target::Es2016, HashMap::new());
+        assert!(
+            !supported_boundary.contains("Math.pow"),
+            "{supported_boundary}"
+        );
+        assert!(supported_boundary.contains("a**b"), "{supported_boundary}");
+
+        let forced_supported = build_for(
+            Target::Es2015,
+            HashMap::from([("exponent-operator".into(), true)]),
+        );
+        assert!(!forced_supported.contains("Math.pow"), "{forced_supported}");
+        assert!(forced_supported.contains("a**b"), "{forced_supported}");
+
+        let forced_unsupported = build_for(
+            Target::EsNext,
+            HashMap::from([("exponent-operator".into(), false)]),
+        );
+        assert_eq!(
+            forced_unsupported.matches("Math.pow").count(),
+            1,
+            "{forced_unsupported}"
+        );
+        assert!(
+            forced_unsupported.contains("__pow(a,b)"),
+            "{forced_unsupported}"
         );
     }
 

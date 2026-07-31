@@ -4813,6 +4813,25 @@ fn visit_expr_with_target_and_context(
                 *data = *folded;
                 return;
             }
+            if binary.op == OpCode::BinaryPower
+                && core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::EXPONENT_OPERATOR)
+            {
+                let lowered = core.call_runtime(
+                    expression.loc,
+                    "__pow",
+                    vec![
+                        std::mem::take(&mut binary.left),
+                        std::mem::take(&mut binary.right),
+                    ],
+                );
+                if let Some(lowered) = lowered.data {
+                    *data = *lowered;
+                }
+                return;
+            }
             if core.options.minify_syntax && binary.op == OpCode::BinaryComma {
                 let helpers = make_helper_context(|reference| {
                     core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind

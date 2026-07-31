@@ -1702,7 +1702,7 @@ mod tests {
         compat::JsFeature,
         config::Format,
         helpers::string_to_utf16,
-        js_ast::{Expr, ExprData, LocalKind, StmtData, StringExpr},
+        js_ast::{Expr, ExprData, LocalKind, OpCode, StmtData, StringExpr},
         js_parser::Options,
         logger::{DeferLogKind, Loc, Log, Msg, MsgId, MsgKind, Path, Source},
         runtime,
@@ -1923,6 +1923,106 @@ mod tests {
         assert!(log.done().is_empty());
         assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::None);
         assert_eq!(ast.top_level_await_keyword.len, 0);
+    }
+
+    #[test]
+    fn lowers_plain_exponentiation_and_tracks_runtime_import_metadata() {
+        let (ast, ok, log) = parse_source_with_options(
+            "let right = a ** b ** c;\
+             let left = (a ** b) ** c;\
+             let operands = (before(), value) ** (-power);\
+             let updates = base++ ** --exponent;\
+             let assigned = 0;\
+             assigned **= rhs;",
+            Options {
+                unsupported_js_features: JsFeature::EXPONENT_OPERATOR,
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.import_records.len(), 1);
+        assert_eq!(
+            ast.import_records[0].source_index.get_index(),
+            runtime::SOURCE_INDEX
+        );
+        assert_eq!(ast.named_imports.len(), 1);
+        let (pow_ref, pow_import) = ast
+            .named_imports
+            .iter()
+            .next()
+            .expect("generated __pow import");
+        assert_eq!(pow_import.alias, "__pow");
+        assert_eq!(
+            ast.symbols[usize::try_from(pow_ref.inner_index).expect("symbol index")]
+                .use_count_estimate,
+            6
+        );
+        assert_eq!(ast.parts[1].import_record_indices, [0]);
+
+        let statements = &ast.parts.last().expect("user code part").statements;
+        let initializer = |index: usize| {
+            let Some(StmtData::Local(local)) = statements[index].data.as_deref() else {
+                panic!("expected local declaration");
+            };
+            &local.declarations[0].value_or_nil
+        };
+
+        let Some(ExprData::Call(right)) = initializer(0).data.as_deref() else {
+            panic!("expected outer right-associative __pow call");
+        };
+        assert!(matches!(
+            right.args[1].data.as_deref(),
+            Some(ExprData::Call(_))
+        ));
+        assert!(!matches!(
+            right.args[0].data.as_deref(),
+            Some(ExprData::Call(_))
+        ));
+
+        let Some(ExprData::Call(left)) = initializer(1).data.as_deref() else {
+            panic!("expected outer left-grouped __pow call");
+        };
+        assert!(matches!(
+            left.args[0].data.as_deref(),
+            Some(ExprData::Call(_))
+        ));
+        assert!(!matches!(
+            left.args[1].data.as_deref(),
+            Some(ExprData::Call(_))
+        ));
+
+        let Some(ExprData::Call(operands)) = initializer(2).data.as_deref() else {
+            panic!("expected __pow call for comma and unary operands");
+        };
+        assert!(matches!(
+            operands.args[0].data.as_deref(),
+            Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryComma
+        ));
+        assert!(matches!(
+            operands.args[1].data.as_deref(),
+            Some(ExprData::Unary(unary)) if unary.op == OpCode::UnaryNegative
+        ));
+
+        let Some(ExprData::Call(updates)) = initializer(3).data.as_deref() else {
+            panic!("expected __pow call for update operands");
+        };
+        assert!(matches!(
+            updates.args[0].data.as_deref(),
+            Some(ExprData::Unary(unary)) if unary.op == OpCode::UnaryPostIncrement
+        ));
+        assert!(matches!(
+            updates.args[1].data.as_deref(),
+            Some(ExprData::Unary(unary)) if unary.op == OpCode::UnaryPreDecrement
+        ));
+
+        let Some(StmtData::Expr(assignment)) = statements[5].data.as_deref() else {
+            panic!("expected exponentiation assignment expression");
+        };
+        assert!(matches!(
+            assignment.value.data.as_deref(),
+            Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryPowerAssign
+        ));
     }
 
     #[test]
