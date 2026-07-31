@@ -8811,7 +8811,7 @@ mod tests {
     }
 
     #[test]
-    fn lowers_unsupported_gradient_positions_in_css_builds() {
+    fn lowers_unsupported_css_features_in_builds() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock is after epoch")
@@ -8821,7 +8821,7 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("create test directory");
         std::fs::write(
             directory.join("entry.css"),
-            ".entry { background: linear-gradient(red 10% 20%, blue) }",
+            ".entry { color: ReBeCcApUrPlE; background: linear-gradient(red 10% 20%, blue) }",
         )
         .expect("write CSS entry");
 
@@ -8829,13 +8829,17 @@ mod tests {
             entry_points: vec!["entry.css".into()],
             outdir: "out".into(),
             abs_working_dir: directory.to_string_lossy().into_owned(),
-            supported: HashMap::from([("gradient-double-position".into(), false)]),
+            supported: HashMap::from([
+                ("gradient-double-position".into(), false),
+                ("rebecca-purple".into(), false),
+            ]),
             ..BuildOptions::default()
         });
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
         assert!(output.contains("red 10%,\n      red 20%"), "{output}");
         assert!(!output.contains("red 10% 20%"), "{output}");
+        assert!(output.contains("color: #663399"), "{output}");
 
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
@@ -11112,6 +11116,25 @@ mod tests {
             )),
             "a{color:#f0f8ff;background-color:#639;outline-color:#2f4f4f;caret-color:navy;fill:#f0f;stroke:transparent}\n"
         );
+    }
+
+    #[test]
+    fn derives_rebecca_purple_compatibility_from_browser_targets() {
+        let transform_for_ie = |version: &str| {
+            code(transform(
+                "a { color: ReBeCcApUrPlE }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    engines: vec![Engine {
+                        name: EngineName::Ie,
+                        version: version.into(),
+                    }],
+                    ..TransformOptions::default()
+                },
+            ))
+        };
+        assert_eq!(transform_for_ie("10"), "a {\n  color: #663399;\n}\n");
+        assert_eq!(transform_for_ie("11"), "a {\n  color: ReBeCcApUrPlE;\n}\n");
     }
 
     #[test]

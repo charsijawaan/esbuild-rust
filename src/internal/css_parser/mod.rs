@@ -1869,10 +1869,24 @@ fn next_non_whitespace_kind(
         .map_or(TokenKind::EndOfFile, |token| token.kind)
 }
 
-fn minify_single_color(tokens: &mut [Token]) {
+fn lower_and_minify_single_color(
+    tokens: &mut [Token],
+    minify_syntax: bool,
+    unsupported_css_features: CssFeature,
+) {
     let [token] = tokens else {
         return;
     };
+    if token.kind == TokenKind::Ident
+        && unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
+        && token.text.eq_ignore_ascii_case("rebeccapurple")
+    {
+        token.kind = TokenKind::Hash;
+        token.text = "663399".into();
+    }
+    if !minify_syntax {
+        return;
+    }
     if token.kind == TokenKind::Ident {
         let Some(hex) = named_color_hex(&token.text.to_ascii_lowercase()) else {
             return;
@@ -2169,9 +2183,13 @@ fn lower_and_minify_gradient(
     let Some((kind, mut leading, mut stops)) = parse_gradient(token) else {
         return;
     };
-    if minify_syntax {
+    if minify_syntax || unsupported_css_features.contains(CssFeature::REBECCA_PURPLE) {
         for stop in &mut stops {
-            minify_single_color(std::slice::from_mut(&mut stop.color));
+            lower_and_minify_single_color(
+                std::slice::from_mut(&mut stop.color),
+                minify_syntax,
+                unsupported_css_features,
+            );
         }
     }
     if unsupported_css_features.contains(CssFeature::GRADIENT_DOUBLE_POSITION) {
@@ -2657,17 +2675,26 @@ fn process_declaration(
     unsupported_css_features: CssFeature,
 ) {
     let key = key.to_ascii_lowercase();
+    let lower_rebecca_purple = unsupported_css_features.contains(CssFeature::REBECCA_PURPLE);
     if minify_syntax {
         minify_numeric_tokens(value);
+    }
+    if minify_syntax || lower_rebecca_purple {
         if is_single_color_property(&key) {
-            minify_single_color(value);
+            lower_and_minify_single_color(value, minify_syntax, unsupported_css_features);
         } else if key == "background" {
             for token in value.iter_mut() {
-                minify_single_color(std::slice::from_mut(token));
+                lower_and_minify_single_color(
+                    std::slice::from_mut(token),
+                    minify_syntax,
+                    unsupported_css_features,
+                );
             }
         }
     }
-    if (minify_syntax || unsupported_css_features.contains(CssFeature::GRADIENT_DOUBLE_POSITION))
+    if (minify_syntax
+        || unsupported_css_features.contains(CssFeature::GRADIENT_DOUBLE_POSITION)
+        || lower_rebecca_purple)
         && matches!(
             key.as_str(),
             "background" | "background-image" | "border-image" | "mask-image"
@@ -2681,6 +2708,14 @@ fn process_declaration(
                 unsupported_css_features,
             );
         }
+    }
+    if key == "box-shadow" && (minify_syntax || lower_rebecca_purple) {
+        lower_and_minify_box_shadows(
+            value,
+            minify_syntax,
+            minify_whitespace,
+            unsupported_css_features,
+        );
     }
     if !minify_syntax {
         return;
@@ -2716,9 +2751,6 @@ fn process_declaration(
     }
     if key == "transform" {
         minify_transforms(value);
-    }
-    if key == "box-shadow" {
-        minify_box_shadows(value, minify_whitespace);
     }
 }
 
@@ -3767,13 +3799,23 @@ fn is_font_size(token: &Token) -> bool {
             )
 }
 
-fn minify_box_shadows(tokens: &mut Vec<Token>, minify_whitespace: bool) {
+fn lower_and_minify_box_shadows(
+    tokens: &mut Vec<Token>,
+    minify_syntax: bool,
+    minify_whitespace: bool,
+    unsupported_css_features: CssFeature,
+) {
     let original = std::mem::take(tokens);
     let mut start = 0;
     for index in 0..=original.len() {
         if index == original.len() || original[index].kind == TokenKind::Comma {
             let mut shadow = original[start..index].to_vec();
-            minify_box_shadow(&mut shadow, minify_whitespace);
+            lower_and_minify_box_shadow(
+                &mut shadow,
+                minify_syntax,
+                minify_whitespace,
+                unsupported_css_features,
+            );
             tokens.extend(shadow);
             if index < original.len() {
                 tokens.push(original[index].clone());
@@ -3783,7 +3825,12 @@ fn minify_box_shadows(tokens: &mut Vec<Token>, minify_whitespace: bool) {
     }
 }
 
-fn minify_box_shadow(tokens: &mut Vec<Token>, minify_whitespace: bool) {
+fn lower_and_minify_box_shadow(
+    tokens: &mut Vec<Token>,
+    minify_syntax: bool,
+    minify_whitespace: bool,
+    unsupported_css_features: CssFeature,
+) {
     let mut inset_count = 0;
     let mut color_count = 0;
     let mut numbers_begin = 0;
@@ -3795,7 +3842,9 @@ fn minify_box_shadow(tokens: &mut Vec<Token>, minify_whitespace: bool) {
             if numbers_done {
                 found_unexpected_token = true;
             }
-            token.turn_length_into_number_if_zero();
+            if minify_syntax {
+                token.turn_length_into_number_if_zero();
+            }
             if numbers_count == 0 {
                 numbers_begin = index;
             }
@@ -3806,7 +3855,11 @@ fn minify_box_shadow(tokens: &mut Vec<Token>, minify_whitespace: bool) {
             }
             if token_looks_like_color(token) {
                 color_count += 1;
-                minify_single_color(std::slice::from_mut(token));
+                lower_and_minify_single_color(
+                    std::slice::from_mut(token),
+                    minify_syntax,
+                    unsupported_css_features,
+                );
             } else if token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("inset") {
                 inset_count += 1;
             } else {
@@ -3814,7 +3867,8 @@ fn minify_box_shadow(tokens: &mut Vec<Token>, minify_whitespace: bool) {
             }
         }
     }
-    if inset_count <= 1
+    if minify_syntax
+        && inset_count <= 1
         && color_count <= 1
         && numbers_count > 2
         && numbers_count <= 4
@@ -4787,6 +4841,56 @@ mod tests {
                 },
             ),
             "a{background:linear-gradient(green,red 10%,red 20%,#ff0 70%,#ff0 80%,#000)}"
+        );
+    }
+
+    #[test]
+    fn lowers_unsupported_rebecca_purple_colors() {
+        let input = "a {\
+                       color: ReBeCcApUrPlE;\
+                       background: ReBeCcApUrPlE;\
+                       box-shadow: 0px 0px 0px 0px ReBeCcApUrPlE, inset 1px 2px rebeccapurple;\
+                       text-shadow: 0 0 rebeccapurple;\
+                       --x: rebeccapurple\
+                     }\
+                     b { background-image: linear-gradient(ReBeCcApUrPlE, blue) }";
+        let lowered = parse_and_print_with_parser_options(
+            input,
+            Options {
+                unsupported_css_features: CssFeature::REBECCA_PURPLE,
+                ..Options::default()
+            },
+        );
+        assert_eq!(
+            lowered,
+            "a {\n\
+             \x20\x20color: #663399;\n\
+             \x20\x20background: #663399;\n\
+             \x20\x20box-shadow: 0px 0px 0px 0px #663399, inset 1px 2px #663399;\n\
+             \x20\x20text-shadow: 0 0 rebeccapurple;\n\
+             \x20\x20--x: rebeccapurple;\n\
+             }\n\
+             b {\n\
+             \x20\x20background-image: linear-gradient(#663399, blue);\n\
+             }\n"
+        );
+
+        let supported = parse_and_print_with_parser_options(input, Options::default());
+        assert!(!supported.contains("#663399"), "{supported}");
+        assert!(supported.contains("color: ReBeCcApUrPlE"), "{supported}");
+
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: ReBeCcApUrPlE; box-shadow: 0px 0px 0px 0px ReBeCcApUrPlE }\
+                 b { background-image: linear-gradient(ReBeCcApUrPlE, blue) }",
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    unsupported_css_features: CssFeature::REBECCA_PURPLE,
+                    ..Options::default()
+                },
+            ),
+            "a{color:#639;box-shadow:0 0 #639}b{background-image:linear-gradient(#639,#00f)}"
         );
     }
 
