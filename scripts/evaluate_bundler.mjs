@@ -82,6 +82,31 @@ const cases = [
     },
   },
   {
+    name: "JavaScript target lowering",
+    files: {
+      "entry.js": "console.log(Number(40n) + 2 ** 1);\n",
+    },
+    args: (output) => [
+      "entry.js",
+      "--bundle",
+      "--platform=node",
+      "--format=cjs",
+      "--target=es2015",
+      `--outfile=${join(output, "bundle.cjs")}`,
+    ],
+    run: (output) => join(output, "bundle.cjs"),
+    expected: "42",
+    verify: (output) => {
+      const code = readFileSync(join(output, "bundle.cjs"), "utf8");
+      if (!code.includes("Math.pow") || !code.includes("BigInt(")) {
+        throw new Error("old-target JavaScript helpers were not emitted");
+      }
+      if (code.includes("40n") || code.includes("**")) {
+        throw new Error("unsupported old-target JavaScript syntax survived");
+      }
+    },
+  },
+  {
     name: "CommonJS require",
     files: {
       "entry.cjs":
@@ -245,6 +270,33 @@ const cases = [
       }
       if (css.includes("red 10% 20%")) {
         throw new Error("unsupported double-position gradient syntax survived");
+      }
+    },
+  },
+  {
+    name: "CSS media range compatibility",
+    files: {
+      "entry.js": "import './style.css'; console.log('media-ok');\n",
+      "style.css":
+        "@media (width >= 100px) { .card { color: red } }\n",
+    },
+    args: (output) => [
+      "entry.js",
+      "--bundle",
+      "--platform=node",
+      "--format=cjs",
+      "--supported:media-range=false",
+      `--outdir=${output}`,
+    ],
+    run: (output) => join(output, "entry.js"),
+    expected: "media-ok",
+    verify: (output) => {
+      const css = readFileSync(join(output, "entry.css"), "utf8");
+      if (!css.includes("(min-width: 100px)")) {
+        throw new Error("media range query was not lowered");
+      }
+      if (css.includes("width >= 100px")) {
+        throw new Error("unsupported media range syntax survived");
       }
     },
   },
