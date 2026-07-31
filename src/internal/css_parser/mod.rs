@@ -1872,11 +1872,27 @@ fn next_non_whitespace_kind(
 fn lower_and_minify_single_color(
     tokens: &mut [Token],
     minify_syntax: bool,
+    minify_whitespace: bool,
     unsupported_css_features: CssFeature,
 ) {
     let [token] = tokens else {
         return;
     };
+    if token.kind == TokenKind::Hash
+        && unsupported_css_features.contains(CssFeature::HEX_RGBA)
+        && matches!(token.text.len(), 4 | 8)
+    {
+        if let Some((red, green, blue, alpha)) = parse_hex_color(&token.text) {
+            generate_color_token(
+                token,
+                (red, green, blue, alpha),
+                minify_syntax,
+                minify_whitespace,
+                unsupported_css_features,
+            );
+        }
+        return;
+    }
     if token.kind == TokenKind::Ident
         && unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
         && token.text.eq_ignore_ascii_case("rebeccapurple")
@@ -1894,12 +1910,24 @@ fn lower_and_minify_single_color(
         let Some((red, green, blue, alpha)) = parse_hex_color(hex) else {
             return;
         };
-        set_color_token(token, red, green, blue, alpha);
+        generate_color_token(
+            token,
+            (red, green, blue, alpha),
+            minify_syntax,
+            minify_whitespace,
+            unsupported_css_features,
+        );
         return;
     }
     if token.kind == TokenKind::Hash {
         if let Some((red, green, blue, alpha)) = parse_hex_color(&token.text) {
-            set_color_token(token, red, green, blue, alpha);
+            generate_color_token(
+                token,
+                (red, green, blue, alpha),
+                minify_syntax,
+                minify_whitespace,
+                unsupported_css_features,
+            );
         }
         return;
     }
@@ -1917,7 +1945,13 @@ fn lower_and_minify_single_color(
             None
         };
         if let Some((red, green, blue, alpha)) = color {
-            set_color_token(token, red, green, blue, alpha);
+            generate_color_token(
+                token,
+                (red, green, blue, alpha),
+                minify_syntax,
+                minify_whitespace,
+                unsupported_css_features,
+            );
         }
     }
 }
@@ -2183,11 +2217,15 @@ fn lower_and_minify_gradient(
     let Some((kind, mut leading, mut stops)) = parse_gradient(token) else {
         return;
     };
-    if minify_syntax || unsupported_css_features.contains(CssFeature::REBECCA_PURPLE) {
+    if minify_syntax
+        || unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
+        || unsupported_css_features.contains(CssFeature::HEX_RGBA)
+    {
         for stop in &mut stops {
             lower_and_minify_single_color(
                 std::slice::from_mut(&mut stop.color),
                 minify_syntax,
+                minify_whitespace,
                 unsupported_css_features,
             );
         }
@@ -2448,22 +2486,86 @@ fn parse_gradient_position(token: &Token, kind: GradientKind) -> Option<(f64, St
     }
 }
 
-fn set_color_token(token: &mut Token, red: u8, green: u8, blue: u8, alpha: u8) {
+fn generate_color_token(
+    token: &mut Token,
+    color: (u8, u8, u8, u8),
+    minify_syntax: bool,
+    minify_whitespace: bool,
+    unsupported_css_features: CssFeature,
+) {
+    let (red, green, blue, alpha) = color;
     token.children = None;
     if alpha == 255 {
         let hex = format!("{red:02x}{green:02x}{blue:02x}");
-        if let Some(name) = short_color_name(&hex) {
-            token.kind = TokenKind::Ident;
-            token.text = name.into();
-            return;
+        if minify_syntax {
+            if let Some(name) = short_color_name(&hex) {
+                token.kind = TokenKind::Ident;
+                token.text = name.into();
+                return;
+            }
+            token.text = compact_hex(&hex);
+        } else {
+            token.text = hex;
         }
         token.kind = TokenKind::Hash;
-        token.text = compact_hex(&hex);
-    } else {
+    } else if !unsupported_css_features.contains(CssFeature::HEX_RGBA) {
         token.kind = TokenKind::Hash;
-        token.text = compact_hex(&format!("{red:02x}{green:02x}{blue:02x}{alpha:02x}"));
+        let hex = format!("{red:02x}{green:02x}{blue:02x}{alpha:02x}");
+        token.text = if minify_syntax {
+            compact_hex(&hex)
+        } else {
+            hex
+        };
+    } else {
+        let comma = gradient_comma(token.loc, minify_whitespace);
+        token.kind = TokenKind::Function;
+        token.text = "rgba".into();
+        token.children = Some(vec![
+            color_number_token(token.loc, red.to_string()),
+            comma.clone(),
+            color_number_token(token.loc, green.to_string()),
+            comma.clone(),
+            color_number_token(token.loc, blue.to_string()),
+            comma,
+            color_number_token(token.loc, alpha_fraction(alpha).into()),
+        ]);
     }
 }
+
+fn color_number_token(loc: Loc, text: String) -> Token {
+    Token {
+        loc,
+        kind: TokenKind::Number,
+        text,
+        ..Token::default()
+    }
+}
+
+fn alpha_fraction(alpha: u8) -> &'static str {
+    let index = usize::from(alpha) * 4;
+    ALPHA_FRACTION_TABLE[index..index + 4].trim_end()
+}
+
+// Every four characters in this table are the shortest decimal fraction for
+// the corresponding 8-bit alpha value. This is copied from pinned upstream.
+const ALPHA_FRACTION_TABLE: &str = concat!(
+    "0   .004.008.01 .016.02 .024.027.03 .035.04 .043.047.05 .055.06 ",
+    ".063.067.07 .075.08 .082.086.09 .094.098.1  .106.11 .114.118.12 ",
+    ".125.13 .133.137.14 .145.15 .153.157.16 .165.17 .173.176.18 .184",
+    ".19 .192.196.2  .204.208.21 .216.22 .224.227.23 .235.24 .243.247",
+    ".25 .255.26 .263.267.27 .275.28 .282.286.29 .294.298.3  .306.31 ",
+    ".314.318.32 .325.33 .333.337.34 .345.35 .353.357.36 .365.37 .373",
+    ".376.38 .384.39 .392.396.4  .404.408.41 .416.42 .424.427.43 .435",
+    ".44 .443.447.45 .455.46 .463.467.47 .475.48 .482.486.49 .494.498",
+    ".5  .506.51 .514.518.52 .525.53 .533.537.54 .545.55 .553.557.56 ",
+    ".565.57 .573.576.58 .584.59 .592.596.6  .604.608.61 .616.62 .624",
+    ".627.63 .635.64 .643.647.65 .655.66 .663.667.67 .675.68 .682.686",
+    ".69 .694.698.7  .706.71 .714.718.72 .725.73 .733.737.74 .745.75 ",
+    ".753.757.76 .765.77 .773.776.78 .784.79 .792.796.8  .804.808.81 ",
+    ".816.82 .824.827.83 .835.84 .843.847.85 .855.86 .863.867.87 .875",
+    ".88 .882.886.89 .894.898.9  .906.91 .914.918.92 .925.93 .933.937",
+    ".94 .945.95 .953.957.96 .965.97 .973.976.98 .984.99 .992.9961   ",
+);
 
 fn compact_hex(hex: &str) -> String {
     let bytes = hex.as_bytes();
@@ -2675,18 +2777,25 @@ fn process_declaration(
     unsupported_css_features: CssFeature,
 ) {
     let key = key.to_ascii_lowercase();
-    let lower_rebecca_purple = unsupported_css_features.contains(CssFeature::REBECCA_PURPLE);
+    let lower_color_syntax = unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
+        || unsupported_css_features.contains(CssFeature::HEX_RGBA);
     if minify_syntax {
         minify_numeric_tokens(value);
     }
-    if minify_syntax || lower_rebecca_purple {
+    if minify_syntax || lower_color_syntax {
         if is_single_color_property(&key) {
-            lower_and_minify_single_color(value, minify_syntax, unsupported_css_features);
+            lower_and_minify_single_color(
+                value,
+                minify_syntax,
+                minify_whitespace,
+                unsupported_css_features,
+            );
         } else if key == "background" {
             for token in value.iter_mut() {
                 lower_and_minify_single_color(
                     std::slice::from_mut(token),
                     minify_syntax,
+                    minify_whitespace,
                     unsupported_css_features,
                 );
             }
@@ -2694,7 +2803,7 @@ fn process_declaration(
     }
     if (minify_syntax
         || unsupported_css_features.contains(CssFeature::GRADIENT_DOUBLE_POSITION)
-        || lower_rebecca_purple)
+        || lower_color_syntax)
         && matches!(
             key.as_str(),
             "background" | "background-image" | "border-image" | "mask-image"
@@ -2709,7 +2818,7 @@ fn process_declaration(
             );
         }
     }
-    if key == "box-shadow" && (minify_syntax || lower_rebecca_purple) {
+    if key == "box-shadow" && (minify_syntax || lower_color_syntax) {
         lower_and_minify_box_shadows(
             value,
             minify_syntax,
@@ -3858,6 +3967,7 @@ fn lower_and_minify_box_shadow(
                 lower_and_minify_single_color(
                     std::slice::from_mut(token),
                     minify_syntax,
+                    minify_whitespace,
                     unsupported_css_features,
                 );
             } else if token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("inset") {
@@ -4717,7 +4827,7 @@ fn known_at_rule_preserves_legal_comments(name: &str) -> bool {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use super::{Options, SymbolMode, make_dead_rule_mangler, parse};
+    use super::{ALPHA_FRACTION_TABLE, Options, SymbolMode, make_dead_rule_mangler, parse};
     use crate::internal::{
         ast::{ImportKind, SymbolKind, SymbolMap},
         compat::CssFeature,
@@ -4891,6 +5001,115 @@ mod tests {
                 },
             ),
             "a{color:#639;box-shadow:0 0 #639}b{background-image:linear-gradient(#639,#00f)}"
+        );
+    }
+
+    #[test]
+    fn lowers_unsupported_hex_rgba_colors() {
+        assert_eq!(ALPHA_FRACTION_TABLE.len(), 256 * 4);
+        let options = Options {
+            unsupported_css_features: CssFeature::HEX_RGBA,
+            ..Options::default()
+        };
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: #0123 } b { color: #1230 } c { color: #1234 }\
+                 d { color: #123f } e { color: #12345678 } f { color: #ff00007f }",
+                options,
+            ),
+            "a {\n\
+             \x20\x20color: rgba(0, 17, 34, .2);\n\
+             }\n\
+             b {\n\
+             \x20\x20color: rgba(17, 34, 51, 0);\n\
+             }\n\
+             c {\n\
+             \x20\x20color: rgba(17, 34, 51, .267);\n\
+             }\n\
+             d {\n\
+             \x20\x20color: #112233;\n\
+             }\n\
+             e {\n\
+             \x20\x20color: rgba(18, 52, 86, .47);\n\
+             }\n\
+             f {\n\
+             \x20\x20color: rgba(255, 0, 0, .498);\n\
+             }\n"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a{color:#00000001}b{color:#00000002}c{color:#00000003}\
+                 d{color:#0000007f}e{color:#000000fe}",
+                Options {
+                    minify_whitespace: true,
+                    ..options
+                },
+            ),
+            "a{color:rgba(0,0,0,.004)}b{color:rgba(0,0,0,.008)}\
+             c{color:rgba(0,0,0,.01)}d{color:rgba(0,0,0,.498)}\
+             e{color:rgba(0,0,0,.996)}"
+        );
+
+        let supported =
+            parse_and_print_with_parser_options("a { color: #11223344 }", Options::default());
+        assert!(supported.contains("#11223344"), "{supported}");
+        let compact = parse_and_print_with_parser_options(
+            "a { color: #11223344 }",
+            Options {
+                minify_syntax: true,
+                minify_whitespace: true,
+                ..Options::default()
+            },
+        );
+        assert_eq!(compact, "a{color:#1234}");
+    }
+
+    #[test]
+    fn lowers_hex_rgba_across_color_declaration_contexts() {
+        let options = Options {
+            unsupported_css_features: CssFeature::HEX_RGBA,
+            ..Options::default()
+        };
+        let output = parse_and_print_with_parser_options(
+            "a {\
+               background: border-box #11223344;\
+               box-shadow: 0px 0px 0px 0px #1234, inset 1px 2px #12345678\
+             }\
+             b { background-image: linear-gradient(#11223344 10%, blue) }\
+             c { text-shadow: 0 0 #1234; --x: #1234 }",
+            options,
+        );
+        assert!(
+            output.contains("background: border-box rgba(17, 34, 51, .267)"),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "box-shadow: 0px 0px 0px 0px rgba(17, 34, 51, .267), \
+                 inset 1px 2px rgba(18, 52, 86, .47)"
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains("linear-gradient(rgba(17, 34, 51, .267) 10%, blue)"),
+            "{output}"
+        );
+        assert!(output.contains("text-shadow: 0 0 #1234"), "{output}");
+        assert!(output.contains("--x: #1234"), "{output}");
+
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: rgba(255, 0, 0, .5) }\
+                 b { color: hsla(120, 100%, 25%, .25) }\
+                 c { color: hwb(240 0% 0% / 75%) }",
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..options
+                },
+            ),
+            "a{color:rgba(255,0,0,.5)}b{color:rgba(0,128,0,.25)}\
+             c{color:rgba(0,0,255,.75)}"
         );
     }
 

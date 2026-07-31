@@ -8821,7 +8821,8 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("create test directory");
         std::fs::write(
             directory.join("entry.css"),
-            ".entry { color: ReBeCcApUrPlE; background: linear-gradient(red 10% 20%, blue) }",
+            ".entry { color: ReBeCcApUrPlE; border-color: #1234; \
+             background: linear-gradient(red 10% 20%, blue) }",
         )
         .expect("write CSS entry");
 
@@ -8831,6 +8832,7 @@ mod tests {
             abs_working_dir: directory.to_string_lossy().into_owned(),
             supported: HashMap::from([
                 ("gradient-double-position".into(), false),
+                ("hex-rgba".into(), false),
                 ("rebecca-purple".into(), false),
             ]),
             ..BuildOptions::default()
@@ -8840,6 +8842,10 @@ mod tests {
         assert!(output.contains("red 10%,\n      red 20%"), "{output}");
         assert!(!output.contains("red 10% 20%"), "{output}");
         assert!(output.contains("color: #663399"), "{output}");
+        assert!(
+            output.contains("border-color: rgba(17, 34, 51, .267)"),
+            "{output}"
+        );
 
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
@@ -11151,6 +11157,28 @@ mod tests {
             )),
             "a{color:#010203}b{color:#01020380}c{color:#0305087f}d{color:red}e{color:#ff8000}f{color:#ff0}g{color:#0ff}h{color:#7f00ff}i{color:#9f80607f}j{color:#693}k{color:#663399bf}l{color:#555}m{color:hwb(90deg,20%,40%)}n{color:hsl(var(--x) var(--y) var(--z))}\n"
         );
+    }
+
+    #[test]
+    fn derives_hex_rgba_compatibility_from_browser_targets() {
+        let transform_for_chrome = |version: &str| {
+            code(transform(
+                "a { color: #1234 }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    engines: vec![Engine {
+                        name: EngineName::Chrome,
+                        version: version.into(),
+                    }],
+                    ..TransformOptions::default()
+                },
+            ))
+        };
+        assert_eq!(
+            transform_for_chrome("61"),
+            "a {\n  color: rgba(17, 34, 51, .267);\n}\n"
+        );
+        assert_eq!(transform_for_chrome("62"), "a {\n  color: #1234;\n}\n");
     }
 
     #[test]
