@@ -301,6 +301,36 @@ const cases = [
     },
   },
   {
+    name: "CSS modern color compatibility",
+    files: {
+      "entry.js": "import './style.css'; console.log('color-ok');\n",
+      "style.css":
+        ".card { color: rgb(1 2 3 / 4%); background: hsl(.5turn 20% 30%) }\n",
+    },
+    args: (output) => [
+      "entry.js",
+      "--bundle",
+      "--platform=node",
+      "--format=cjs",
+      "--supported:modern-rgb-hsl=false",
+      `--outdir=${output}`,
+    ],
+    run: (output) => join(output, "entry.js"),
+    expected: "color-ok",
+    verify: (output) => {
+      const css = readFileSync(join(output, "entry.css"), "utf8");
+      if (
+        !css.includes("rgba(1, 2, 3, 0.04)") ||
+        !css.includes("hsl(180, 20%, 30%)")
+      ) {
+        throw new Error("modern RGB/HSL syntax was not lowered");
+      }
+      if (css.includes("rgb(1 2 3") || css.includes(".5turn")) {
+        throw new Error("unsupported modern color syntax survived");
+      }
+    },
+  },
+  {
     name: "Source map + metafile",
     files: {
       "entry.js": "const answer = 40 + 2; console.log(answer);\n",
