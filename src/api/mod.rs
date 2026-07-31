@@ -8162,13 +8162,9 @@ mod tests {
 
     #[test]
     fn lowers_plain_exponentiation_at_target_and_override_boundaries() {
-        let source = "let result = a ** b; result **= c;";
-        let lowered = concat!(
-            "var __pow = Math.pow;\n",
-            "let result = __pow(a, b);\n",
-            "result **= c;\n",
-        );
-        let preserved = "let result = a ** b;\nresult **= c;\n";
+        let source = "let result = a ** b;";
+        let lowered = concat!("var __pow = Math.pow;\n", "let result = __pow(a, b);\n");
+        let preserved = "let result = a ** b;\n";
 
         assert_eq!(
             transform_code(
@@ -8211,6 +8207,72 @@ mod tests {
                 },
             ),
             lowered
+        );
+    }
+
+    #[test]
+    fn guards_unlowered_exponentiation_assignment_at_target_and_override_boundaries() {
+        let source = "base **= power";
+        let message = "Transforming exponentiation assignment operators to the configured target \
+                       environment (\"es2015\") is not supported yet";
+        assert_transform_error(
+            &transform(
+                source,
+                TransformOptions {
+                    target: Target::Es2015,
+                    ..TransformOptions::default()
+                },
+            ),
+            message,
+            5,
+            3,
+        );
+
+        assert_eq!(
+            transform_code(
+                source,
+                TransformOptions {
+                    target: Target::Es2016,
+                    ..TransformOptions::default()
+                },
+            ),
+            "base **= power;\n"
+        );
+        assert_eq!(
+            transform_code(
+                source,
+                TransformOptions {
+                    target: Target::Es2015,
+                    supported: HashMap::from([("exponent-operator".into(), true)]),
+                    ..TransformOptions::default()
+                },
+            ),
+            "base **= power;\n"
+        );
+        assert_transform_error(
+            &transform(
+                source,
+                TransformOptions {
+                    target: Target::EsNext,
+                    supported: HashMap::from([("exponent-operator".into(), false)]),
+                    ..TransformOptions::default()
+                },
+            ),
+            "Transforming exponentiation assignment operators to the configured target \
+             environment (\"esnext\" + 1 override) is not supported yet",
+            5,
+            3,
+        );
+
+        assert_eq!(
+            transform_code(
+                "base ** power",
+                TransformOptions {
+                    target: Target::Es2015,
+                    ..TransformOptions::default()
+                },
+            ),
+            "var __pow = Math.pow;\n__pow(base, power);\n"
         );
     }
 
@@ -8323,7 +8385,7 @@ mod tests {
 
     #[test]
     fn bundles_plain_exponentiation_through_the_runtime_helper() {
-        let source = "let __pow=1;console.log(__pow,a**b,c**d,a**=b)";
+        let source = "let __pow=1;console.log(__pow,a**b,c**d)";
         let build_for = |target, supported| {
             let result = build_api(BuildOptions {
                 bundle: true,
@@ -8344,7 +8406,6 @@ mod tests {
         assert_eq!(lowered.matches("Math.pow").count(), 1, "{lowered}");
         assert!(lowered.contains("__pow(a,b)"), "{lowered}");
         assert!(lowered.contains("__pow(c,d)"), "{lowered}");
-        assert!(lowered.contains("a**=b"), "{lowered}");
 
         let supported_boundary = build_for(Target::Es2016, HashMap::new());
         assert!(

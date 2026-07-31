@@ -2,7 +2,7 @@
 
 use crate::internal::{
     compat::JsFeature,
-    js_ast::{BinaryExpr, Expr, ExprData, IfExpr, Precedence, SpreadExpr},
+    js_ast::{BinaryExpr, Expr, ExprData, IfExpr, OpCode, Precedence, SpreadExpr},
     js_lexer::{CommentBefore, Lexer, Token},
 };
 
@@ -29,6 +29,12 @@ use super::{
     syntax_super::parse_super_prefix,
     syntax_yield_await::parse_await_or_yield_prefix,
 };
+
+fn mark_unlowered_exponentiation_assignment(core: &mut ParserCore, lexer: &Lexer, op: OpCode) {
+    if op == OpCode::BinaryPowerAssign {
+        core.mark_syntax_feature(JsFeature::EXPONENT_OPERATOR, lexer.range());
+    }
+}
 
 pub(crate) fn parse_expression(
     core: &mut ParserCore,
@@ -172,6 +178,7 @@ pub(crate) fn parse_expression_suffix(
                 "Cannot mix \"??\" with \"||\" or \"&&\" without parentheses",
             );
         }
+        mark_unlowered_exponentiation_assignment(core, lexer, operator.op);
         lexer.next();
         let right_minimum = if operator.is_right_associative {
             match operator.precedence {

@@ -1356,6 +1356,8 @@ impl ParserCore {
             "async functions".to_owned()
         } else if feature == JsFeature::ASYNC_GENERATOR {
             "async generator functions".to_owned()
+        } else if feature == JsFeature::EXPONENT_OPERATOR {
+            "exponentiation assignment operators".to_owned()
         } else {
             self.add_error_range(
                 range,
