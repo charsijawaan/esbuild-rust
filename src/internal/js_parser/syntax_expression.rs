@@ -281,10 +281,20 @@ fn parse_prefix(
         .expect("object token was checked"),
         Token::OpenParen => {
             let paren_loc = lexer.loc();
+            // This may be an arrow function, so create the argument scope before
+            // parsing the parameters. Default values can contain nested scopes,
+            // and those scopes must be children of the arrow's argument scope.
+            // This mirrors esbuild's speculative scope handling in parseParenExpr.
+            let scope_index = core.push_scope_for_parse_pass(
+                crate::internal::js_ast::ScopeKind::FunctionArgs,
+                paren_loc,
+            );
             lexer.next();
             if lexer.token == Token::CloseParen {
-                return parse_empty_parenthesized_arrow(core, lexer, paren_loc)
+                let result = parse_empty_parenthesized_arrow(core, lexer, paren_loc)
                     .unwrap_or_else(|| lexer.unexpected());
+                core.pop_scope();
+                return result;
             }
             let mut expr = parse_parenthesized_item(core, lexer);
             if core.options.ts.parse {
@@ -324,9 +334,15 @@ fn parse_prefix(
                 super::syntax_typescript::try_skip_arrow_return_type(lexer);
             }
             if lexer.token == Token::EqualsGreaterThan {
-                parse_arrow_after_parenthesized_expression(core, lexer, paren_loc, expr)
-                    .expect("arrow token was checked")
+                let result =
+                    parse_arrow_after_parenthesized_expression(core, lexer, paren_loc, expr)
+                        .expect("arrow token was checked");
+                core.pop_scope();
+                result
             } else {
+                // It was an ordinary parenthesized expression. Remove the
+                // speculative argument scope but retain any nested child scopes.
+                core.pop_and_flatten_scope(scope_index);
                 if has_trailing_comma || has_rest {
                     lexer.unexpected();
                 }

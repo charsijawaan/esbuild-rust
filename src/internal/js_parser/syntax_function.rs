@@ -87,7 +87,8 @@ fn parse_async_prefix_with_kind(
         let arg_reference = core.store_name_in_ref(lexer.identifier.clone());
         lexer.next();
         if lexer.token == Token::EqualsGreaterThan {
-            return Some(parse_arrow_body(
+            core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::FunctionArgs, loc);
+            let result = parse_arrow_body(
                 core,
                 lexer,
                 loc,
@@ -103,7 +104,9 @@ fn parse_async_prefix_with_kind(
                 true,
                 false,
                 false,
-            ));
+            );
+            core.pop_scope();
+            return Some(result);
         }
     }
 

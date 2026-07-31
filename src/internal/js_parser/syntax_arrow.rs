@@ -40,15 +40,10 @@ pub(crate) fn parse_identifier_or_arrow_prefix(
             },
             ..Arg::default()
         };
-        return Some(parse_arrow_body(
-            core,
-            lexer,
-            loc,
-            vec![arg],
-            false,
-            false,
-            false,
-        ));
+        core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::FunctionArgs, loc);
+        let result = parse_arrow_body(core, lexer, loc, vec![arg], false, false, false);
+        core.pop_scope();
+        return Some(result);
     }
 
     Some(Expr::new(
@@ -78,7 +73,7 @@ pub(crate) fn parse_empty_parenthesized_arrow(
         loc,
         Vec::new(),
         false,
-        false,
+        true,
         false,
     ))
 }
@@ -114,7 +109,7 @@ pub(crate) fn parse_arrow_after_parenthesized_expression(
         loc,
         args,
         false,
-        false,
+        true,
         has_rest_arg,
     ))
 }
@@ -347,7 +342,6 @@ pub(crate) fn parse_arrow_body(
     }
     let arrow_loc = lexer.loc();
     lexer.expect(Token::EqualsGreaterThan);
-    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::FunctionArgs, arrow_loc);
     let mut args = args;
     for argument in &mut args {
         core.declare_binding(
@@ -383,7 +377,10 @@ pub(crate) fn parse_arrow_body(
             false,
         )
     } else {
-        let body_loc = lexer.loc();
+        // Match upstream esbuild: expression-bodied arrows use the "=>"
+        // location for their function-body scope. Using the expression's first
+        // token collides with speculative parenthesis scopes for `x => (x)`.
+        let body_loc = arrow_loc;
         core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::FunctionBody, body_loc);
         let value = parse_expression(core, lexer, Precedence::Comma, true);
         core.pop_scope();
@@ -404,8 +401,6 @@ pub(crate) fn parse_arrow_body(
         )
     };
     core.fn_or_arrow_data_parse = old_context;
-    core.pop_scope();
-
     Expr::new(
         loc,
         ExprData::Arrow(ArrowExpr {
@@ -474,7 +469,10 @@ pub(crate) fn parse_async_arrow_from_call(
     } else {
         core.add_error_range(lexer.range(), "Invalid arrow function parameter list");
     }
-    parse_arrow_body(core, lexer, loc, args, true, false, has_rest_arg)
+    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::FunctionArgs, loc);
+    let result = parse_arrow_body(core, lexer, loc, args, true, false, has_rest_arg);
+    core.pop_scope();
+    result
 }
 
 #[cfg(test)]
@@ -510,6 +508,38 @@ mod tests {
             ));
             assert_eq!(lexer.token, Token::EndOfFile);
         }
+    }
+
+    #[test]
+    fn parenthesized_arrow_scope_precedes_default_value_scopes() {
+        let text = "(node, handler = () => {}) => handler(node)";
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(text.as_bytes()),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        assert!(matches!(
+            expression.data.as_deref(),
+            Some(ExprData::Arrow(_))
+        ));
+
+        let kinds = core
+            .scope_refs_in_order()
+            .into_iter()
+            .map(|scope| scope.lock().unwrap().kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                crate::internal::js_ast::ScopeKind::FunctionArgs,
+                crate::internal::js_ast::ScopeKind::FunctionArgs,
+                crate::internal::js_ast::ScopeKind::FunctionBody,
+                crate::internal::js_ast::ScopeKind::FunctionBody,
+            ]
+        );
     }
 
     #[test]

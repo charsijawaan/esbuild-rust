@@ -310,7 +310,11 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             return parse_label_statement(core, lexer, loc, name_loc, reference);
         }
         let expression = if lexer.token == Token::EqualsGreaterThan {
-            parse_arrow_body(
+            core.push_scope_for_parse_pass(
+                crate::internal::js_ast::ScopeKind::FunctionArgs,
+                name_loc,
+            );
+            let result = parse_arrow_body(
                 core,
                 lexer,
                 name_loc,
@@ -326,7 +330,9 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
                 false,
                 false,
                 false,
-            )
+            );
+            core.pop_scope();
+            result
         } else {
             Expr::new(
                 name_loc,

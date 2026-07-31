@@ -64,6 +64,10 @@ fn compute_reserved_names_for_scope(
 }
 
 pub trait Renamer: Sync {
+    fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
+        reference
+    }
+
     fn name_for_symbol(&self, reference: Ref) -> String;
 
     fn original_name_for_symbol(&self, reference: Ref) -> String {
@@ -85,6 +89,10 @@ pub fn new_no_op_renamer(symbols: SymbolMap) -> NoOpRenamer {
 }
 
 impl Renamer for NoOpRenamer {
+    fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
+        self.symbols.follow_symbols_const(reference)
+    }
+
     fn name_for_symbol(&self, reference: Ref) -> String {
         let reference = self.symbols.follow_symbols_const(reference);
         self.symbols.get(reference).original_name.clone()
@@ -326,6 +334,10 @@ impl MinifyRenamer {
 }
 
 impl Renamer for MinifyRenamer {
+    fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
+        self.symbols.follow_symbols_const(reference)
+    }
+
     fn name_for_symbol(&self, reference: Ref) -> String {
         let reference = self.symbols.follow_symbols_const(reference);
         let symbol = self.symbols.get(reference);
@@ -626,6 +638,10 @@ impl NumberRenamer {
 }
 
 impl Renamer for NumberRenamer {
+    fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
+        self.symbols.follow_symbols_const(reference)
+    }
+
     fn name_for_symbol(&self, reference: Ref) -> String {
         let reference = self.symbols.follow_symbols_const(reference);
         let name = &self.names[reference.source_index as usize][reference.inner_index as usize];

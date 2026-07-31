@@ -49,6 +49,10 @@ struct TransformRenamer {
 }
 
 impl Renamer for TransformRenamer {
+    fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
+        reference
+    }
+
     fn name_for_symbol(&self, reference: Ref) -> String {
         let reference = self.symbols.follow_symbols_const(reference);
         self.overrides

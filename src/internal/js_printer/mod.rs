@@ -1,6 +1,9 @@
 //! Port of upstream `internal/js_printer`.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::internal::ast::{
     INVALID_REF, ImportKind, ImportPhase, ImportRecord, ImportRecordFlags, Ref,
@@ -50,6 +53,7 @@ pub struct RequireOrImportMeta {
 #[derive(Clone, Copy)]
 pub struct LinkerOptions<'a> {
     pub require_or_import_meta_for_source: &'a dyn Fn(u32) -> RequireOrImportMeta,
+    pub const_values: Option<&'a HashMap<Ref, crate::internal::js_ast::ConstValue>>,
     pub to_common_js_ref: Ref,
     pub to_esm_ref: Ref,
     pub runtime_require_ref: Ref,
@@ -777,18 +781,7 @@ impl Printer<'_> {
             }
             StmtData::Expr(expression) => {
                 self.print_indent();
-                let wrap = matches!(
-                    expression.value.data.as_deref(),
-                    Some(ExprData::Object(_) | ExprData::Class(_))
-                ) || matches!(
-                    expression.value.data.as_deref(),
-                    Some(ExprData::Function(function)) if !function.is_parenthesized
-                ) || matches!(
-                    expression.value.data.as_deref(),
-                    Some(ExprData::Binary(binary))
-                        if binary.op == OpCode::BinaryAssign
-                            && matches!(binary.left.data.as_deref(), Some(ExprData::Object(_)))
-                );
+                let wrap = expression_starts_with_brace_or_function(&expression.value);
                 if wrap {
                     self.output.push(b'(');
                 }
@@ -1245,7 +1238,11 @@ impl Printer<'_> {
     }
 
     fn print_loop_body(&mut self, body: &Stmt, is_single_line: bool) {
-        if is_single_line && !matches!(body.data.as_deref(), Some(StmtData::Block(_))) {
+        if body.data.is_none() {
+            self.print_optional_space();
+            self.output.push(b';');
+            self.print_newline();
+        } else if is_single_line && !matches!(body.data.as_deref(), Some(StmtData::Block(_))) {
             self.print_optional_space();
             let indent = std::mem::take(&mut self.indent);
             self.print_stmt(body);
@@ -1879,10 +1876,34 @@ impl Printer<'_> {
             ExprData::NewTarget(_) => self.output.extend_from_slice(b"new.target"),
             ExprData::ImportMeta(_) => self.output.extend_from_slice(b"import.meta"),
             ExprData::Identifier(identifier) => {
-                self.print_symbol_expr(identifier.reference);
+                let reference = self.renamer.canonical_ref_for_symbol(identifier.reference);
+                if let Some(value) = self
+                    .linker_options
+                    .and_then(|options| options.const_values)
+                    .and_then(|values| values.get(&reference))
+                {
+                    self.print_expr_at(
+                        &crate::internal::js_ast::const_value_to_expr(expr.loc, value),
+                        level,
+                    );
+                } else {
+                    self.print_symbol_expr(identifier.reference);
+                }
             }
             ExprData::ImportIdentifier(identifier) => {
-                self.print_symbol_expr(identifier.reference);
+                let reference = self.renamer.canonical_ref_for_symbol(identifier.reference);
+                if let Some(value) = self
+                    .linker_options
+                    .and_then(|options| options.const_values)
+                    .and_then(|values| values.get(&reference))
+                {
+                    self.print_expr_at(
+                        &crate::internal::js_ast::const_value_to_expr(expr.loc, value),
+                        level,
+                    );
+                } else {
+                    self.print_symbol_expr(identifier.reference);
+                }
             }
             ExprData::PrivateIdentifier(identifier) => {
                 self.print_identifier(&self.renamer.name_for_symbol(identifier.reference));
@@ -2007,6 +2028,14 @@ impl Printer<'_> {
                     binary.op == OpCode::BinaryComma,
                 );
                 self.print_binary_operator(binary.op);
+                if self.options.minify_whitespace
+                    && ((binary.op == OpCode::BinaryAdd
+                        && expression_starts_with_sign(&binary.right, true))
+                        || (binary.op == OpCode::BinarySubtract
+                            && expression_starts_with_sign(&binary.right, false)))
+                {
+                    self.output.push(b' ');
+                }
                 if binary.op.is_right_associative() {
                     self.print_expr_at_with_usage(
                         &binary.right,
@@ -2976,6 +3005,51 @@ fn expression_starts_with_identifier(expression: &Expr, options: Options) -> boo
     }
 }
 
+fn expression_starts_with_brace_or_function(expression: &Expr) -> bool {
+    match expression.data.as_deref() {
+        Some(ExprData::Object(_) | ExprData::Class(_)) => true,
+        Some(ExprData::Function(function)) => !function.is_parenthesized,
+        Some(ExprData::Binary(binary)) => expression_starts_with_brace_or_function(&binary.left),
+        Some(ExprData::If(conditional)) => {
+            expression_starts_with_brace_or_function(&conditional.test)
+        }
+        Some(ExprData::Dot(dot)) => expression_starts_with_brace_or_function(&dot.target),
+        Some(ExprData::Index(index)) => expression_starts_with_brace_or_function(&index.target),
+        Some(ExprData::Call(call)) => expression_starts_with_brace_or_function(&call.target),
+        Some(ExprData::Template(template)) if template.tag_or_nil.data.is_some() => {
+            expression_starts_with_brace_or_function(&template.tag_or_nil)
+        }
+        Some(ExprData::InlinedEnum(inlined)) => {
+            expression_starts_with_brace_or_function(&inlined.value)
+        }
+        Some(ExprData::Annotation(annotation)) => {
+            expression_starts_with_brace_or_function(&annotation.value)
+        }
+        _ => false,
+    }
+}
+
+fn expression_starts_with_sign(expression: &Expr, positive: bool) -> bool {
+    match expression.data.as_deref() {
+        Some(ExprData::Unary(unary)) => {
+            if positive {
+                matches!(unary.op, OpCode::UnaryPositive | OpCode::UnaryPreIncrement)
+            } else {
+                matches!(unary.op, OpCode::UnaryNegative | OpCode::UnaryPreDecrement)
+            }
+        }
+        Some(ExprData::Binary(binary)) => expression_starts_with_sign(&binary.left, positive),
+        Some(ExprData::If(conditional)) => expression_starts_with_sign(&conditional.test, positive),
+        Some(ExprData::InlinedEnum(inlined)) => {
+            expression_starts_with_sign(&inlined.value, positive)
+        }
+        Some(ExprData::Annotation(annotation)) => {
+            expression_starts_with_sign(&annotation.value, positive)
+        }
+        _ => false,
+    }
+}
+
 fn new_target_needs_space(target: &Expr, options: Options) -> bool {
     let Some(data) = target.data.as_deref() else {
         return false;
@@ -3179,6 +3253,100 @@ mod tests {
     }
 
     #[test]
+    fn wraps_object_literal_when_nested_expression_starts_a_statement() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                b"for (var key in value) if ({}.hasOwnProperty.call(value, key)) copy()".as_slice(),
+            ),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(
+            log.clone(),
+            source,
+            js_parser::Options {
+                minify_syntax: true,
+                ..js_parser::Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        let output = print(
+            &ast,
+            &renamer,
+            Options {
+                minify_whitespace: true,
+                ..Options::default()
+            },
+        )
+        .js;
+        let output = String::from_utf8(output).expect("printer output is UTF-8");
+        assert!(output.contains("({}.hasOwnProperty.call(value,key)&&copy())"));
+    }
+
+    #[test]
+    fn preserves_empty_loop_body_when_minifying() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(b"function drain() { for (; keepGoing; advance()); }".as_slice()),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        let output = print(
+            &ast,
+            &renamer,
+            Options {
+                minify_whitespace: true,
+                ..Options::default()
+            },
+        )
+        .js;
+        assert_eq!(
+            String::from_utf8(output).expect("printer output is UTF-8"),
+            "function drain(){for(;keepGoing;advance());}"
+        );
+    }
+
+    #[test]
+    fn separates_adjacent_plus_and_minus_tokens_when_minifying() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(b"a + +b; a + ++b; a - -b; a - --b;".as_slice()),
+            identifier_name: "entry".into(),
+            ..Source::default()
+        };
+        let (ast, ok) = js_parser::parse(log.clone(), source, js_parser::Options::default());
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        let output = print(
+            &ast,
+            &renamer,
+            Options {
+                minify_whitespace: true,
+                ..Options::default()
+            },
+        )
+        .js;
+        assert_eq!(
+            String::from_utf8(output).expect("printer output is UTF-8"),
+            "a+ +b;a+ ++b;a- -b;a- --b;"
+        );
+    }
+
+    #[test]
     fn lowers_linked_require_and_import_expressions() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let source = Source {
@@ -3245,6 +3413,7 @@ mod tests {
                 Options::default(),
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
+                    const_values: None,
                     to_common_js_ref,
                     to_esm_ref: INVALID_REF,
                     runtime_require_ref: INVALID_REF,
@@ -3306,6 +3475,7 @@ mod tests {
                 Options::default(),
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
+                    const_values: None,
                     to_common_js_ref: INVALID_REF,
                     to_esm_ref: INVALID_REF,
                     runtime_require_ref: INVALID_REF,
@@ -3359,6 +3529,7 @@ mod tests {
                 Options::default(),
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
+                    const_values: None,
                     to_common_js_ref: INVALID_REF,
                     to_esm_ref: INVALID_REF,
                     runtime_require_ref: INVALID_REF,
@@ -3412,6 +3583,7 @@ mod tests {
                 Options::default(),
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
+                    const_values: None,
                     to_common_js_ref: INVALID_REF,
                     to_esm_ref,
                     runtime_require_ref: INVALID_REF,
@@ -3453,6 +3625,7 @@ mod tests {
         let metadata = |_| panic!("external imports do not have linker metadata");
         let linker_options = LinkerOptions {
             require_or_import_meta_for_source: &metadata,
+            const_values: None,
             to_common_js_ref: INVALID_REF,
             to_esm_ref,
             runtime_require_ref,
@@ -3525,6 +3698,7 @@ mod tests {
                 Options::default(),
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
+                    const_values: None,
                     to_common_js_ref: INVALID_REF,
                     to_esm_ref,
                     runtime_require_ref,

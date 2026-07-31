@@ -184,9 +184,10 @@ impl ParserCore {
         if let Some(previous) = self.scopes_in_order.last() {
             assert!(
                 previous.loc.start < loc.start,
-                "Scope location {} must be greater than {}",
+                "Scope location {} must be greater than {} in {:?}",
                 loc.start,
-                previous.loc.start
+                previous.loc.start,
+                self.source.pretty_paths.select(self.options.log_path_style),
             );
         }
 

@@ -4176,6 +4176,8 @@ mod tests {
             .find(|output| output.abs_path.ends_with("/entry.css"))
             .expect("CSS output");
         assert!(String::from_utf8_lossy(&javascript.contents).contains("console.log(\"entry\")"));
+        assert!(!String::from_utf8_lossy(&javascript.contents).contains("style.css"));
+        assert!(!String::from_utf8_lossy(&javascript.contents).contains("import "));
         assert!(String::from_utf8_lossy(&css.contents).contains("color: blue"));
     }
 
@@ -4280,6 +4282,55 @@ mod tests {
         assert!(output.contains("console.log(value);"));
         assert!(!output.contains("import "));
         assert!(!output.contains("export "));
+    }
+
+    #[test]
+    fn inlines_imported_constants_after_tree_shaking_their_declarations() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import { scale } from './scale.js'; console.log(scale(2))".into(),
+                ),
+                (
+                    "/project/scale.js".into(),
+                    "import { durationSecond } from './duration.js'; export function scale(value) { return value * durationSecond }"
+                        .into(),
+                ),
+                (
+                    "/project/duration.js".into(),
+                    "export const durationSecond = 1000".into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::Iife,
+            tree_shaking: true,
+            minify_syntax: true,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
+        assert!(output.contains("return value * 1e3;"), "{output}");
+        assert!(!output.contains("durationSecond"), "{output}");
     }
 
     #[test]

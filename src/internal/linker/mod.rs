@@ -5321,6 +5321,7 @@ pub fn compute_cross_chunk_dependencies(
         if chunks[chunk_index].is_entry_point {
             for (other_chunk_index, other_chunk) in chunks.iter().enumerate() {
                 if chunk_index != other_chunk_index
+                    && chunks[chunk_index].is_css == other_chunk.is_css
                     && other_chunk
                         .entry_bits
                         .has_bit(chunks[chunk_index].entry_point_bit)
@@ -6926,6 +6927,7 @@ pub fn compile_part_range_for_chunk(
         |source_index| require_or_import_meta_for_source(graph, source_index);
     let linker_options = crate::internal::js_printer::LinkerOptions {
         require_or_import_meta_for_source: &require_or_import_meta_for_source,
+        const_values: Some(&graph.const_values),
         to_common_js_ref: runtime_refs.to_common_js_ref,
         to_esm_ref: runtime_refs.to_esm_ref,
         runtime_require_ref: runtime_refs.runtime_require_ref,
