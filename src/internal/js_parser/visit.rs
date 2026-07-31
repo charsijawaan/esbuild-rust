@@ -9,7 +9,8 @@ use crate::internal::{
         SymbolFlags, SymbolKind,
     },
     compat::JsFeature,
-    helpers::{string_to_utf16, utf16_to_string},
+    config::pretty_print_target_environment,
+    helpers::{is_inside_node_modules, string_to_utf16, utf16_to_string},
     js_ast::{
         Arg, AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
         ClassStaticBlock, Decl, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody,
@@ -20,6 +21,7 @@ use crate::internal::{
         inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
         is_primitive_literal, join_with_comma, make_helper_context, mangle_object_spread,
     },
+    logger::{MsgId, MsgKind},
 };
 
 use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properties};
@@ -577,12 +579,14 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.pop_scope();
             }
             Some(StmtData::Try(try_statement)) => {
+                core.visit_try_body_depth += 1;
                 visit_block(
                     core,
                     try_statement.block_loc,
                     &mut try_statement.block,
                     resolve_identifiers,
                 );
+                core.visit_try_body_depth -= 1;
                 if let Some(catch) = &mut try_statement.catch {
                     core.push_scope_for_visit_pass(ScopeKind::CatchBinding, catch.loc);
                     if catch.binding_or_nil.data.is_some() {
@@ -2259,6 +2263,7 @@ fn visit_block(
 fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identifiers: bool) {
     let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
     let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
+    let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);
     let old_new_target_allowed = std::mem::replace(&mut core.visit_new_target_allowed, true);
     let old_is_async_generator = std::mem::replace(
         &mut core.visit_is_async_generator,
@@ -2328,6 +2333,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     core.pop_scope();
     core.visit_loop_depth = old_loop_depth;
     core.visit_switch_depth = old_switch_depth;
+    core.visit_try_body_depth = old_try_body_depth;
     core.visit_new_target_allowed = old_new_target_allowed;
     core.visit_is_async_generator = old_is_async_generator;
 }
@@ -2446,6 +2452,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
         if let Some(static_block) = &mut property.class_static_block {
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
+            let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);
             let old_new_target_allowed =
                 std::mem::replace(&mut core.visit_new_target_allowed, true);
             core.push_scope_for_visit_pass(ScopeKind::ClassStaticInit, static_block.loc);
@@ -2464,6 +2471,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;
             core.visit_switch_depth = old_switch_depth;
+            core.visit_try_body_depth = old_try_body_depth;
             core.visit_new_target_allowed = old_new_target_allowed;
         }
     }
@@ -5536,6 +5544,7 @@ fn visit_expr_with_target_and_context(
         ExprData::Arrow(arrow) => {
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
+            let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);
             let old_is_async_generator =
                 std::mem::replace(&mut core.visit_is_async_generator, false);
             core.push_next_scope_for_visit_pass(ScopeKind::FunctionArgs);
@@ -5587,6 +5596,7 @@ fn visit_expr_with_target_and_context(
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;
             core.visit_switch_depth = old_switch_depth;
+            core.visit_try_body_depth = old_try_body_depth;
             core.visit_is_async_generator = old_is_async_generator;
             if core.options.minify_syntax
                 && collapse_expression_statements_into_return(&mut arrow.body.block.statements)
@@ -5850,11 +5860,44 @@ fn visit_expr_with_target_and_context(
         | ExprData::NameOfSymbol(_)
         | ExprData::JsxText(_)
         | ExprData::Missing
-        | ExprData::BigInt(_)
         | ExprData::RegExp(_)
         | ExprData::RequireString(_)
         | ExprData::RequireResolveString(_)
         | ExprData::ImportString(_) => {}
+        ExprData::BigInt(_) => {
+            if core
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::BIGINT)
+            {
+                let kind = if core.visit_try_body_depth > 0
+                    || is_inside_node_modules(&core.source.key_path.text)
+                {
+                    MsgKind::Debug
+                } else {
+                    MsgKind::Warning
+                };
+                let environment = pretty_print_target_environment(
+                    &core.options.original_target_env,
+                    core.options.unsupported_js_feature_overrides_mask,
+                );
+                let range = core.source.range_of_number(expression.loc);
+                if let Some(log) = core.log.clone() {
+                    log.add_id(
+                        MsgId::JsBigInt,
+                        kind,
+                        Some(&mut core.tracker),
+                        range,
+                        format!(
+                            "Big integer literals are not available in {environment} and may crash \
+                             at run-time"
+                        ),
+                    );
+                }
+                let reference = core.make_big_int_ref();
+                core.record_usage(reference);
+            }
+        }
         ExprData::String(string) => {
             if string.legacy_octal_loc.start > 0 {
                 let range = core

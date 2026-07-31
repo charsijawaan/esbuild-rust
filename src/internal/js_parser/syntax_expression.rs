@@ -17,9 +17,9 @@ use super::{
     syntax_import::parse_import_prefix,
     syntax_jsx::parse_jsx_element_prefix,
     syntax_literals::{
-        parse_array_prefix, parse_big_int_or_string_if_unsupported, parse_numeric_literal,
-        parse_regular_expression_literal, parse_simple_prefix, parse_string_literal,
-        parse_unary_prefix, parse_untagged_template_prefix,
+        parse_array_prefix, parse_numeric_literal, parse_regular_expression_literal,
+        parse_simple_prefix, parse_string_literal, parse_unary_prefix,
+        parse_untagged_template_prefix,
     },
     syntax_new::parse_new_prefix,
     syntax_object::parse_object_literal_prefix,
@@ -255,9 +255,12 @@ fn parse_prefix(
         .expect("template token was checked"),
         Token::NumericLiteral => parse_numeric_literal(core, lexer),
         Token::BigIntegerLiteral => {
-            let expr = parse_big_int_or_string_if_unsupported(core, lexer);
+            let loc = lexer.loc();
+            let value = std::str::from_utf8(&lexer.identifier.string)
+                .expect("big integer tokens must be valid ASCII")
+                .to_string();
             lexer.next();
-            expr
+            Expr::new(loc, ExprData::BigInt(value))
         }
         Token::Slash | Token::SlashEquals => parse_regular_expression_literal(lexer),
         Token::OpenBracket => parse_array_prefix(lexer, |lexer| {
@@ -404,6 +407,30 @@ mod tests {
         js_parser::{Options, parser_types::AwaitOrYield},
         logger::{DeferLogKind, Log, Source},
     };
+
+    #[test]
+    fn preserves_unsupported_bigint_expressions_for_printer_lowering() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"0xCAFE_BABEn"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log.clone(), source.clone(), TsOptions::default());
+        let options = Options {
+            unsupported_js_features: crate::internal::compat::JsFeature::BIGINT,
+            original_target_env: "es2019".into(),
+            ..Options::default()
+        };
+        let mut core = super::ParserCore::new_with_log(source, options, log.clone());
+        let expression = parse_expression(&mut core, &mut lexer, Precedence::Lowest, true);
+        assert!(matches!(
+            expression.data.as_deref(),
+            Some(ExprData::BigInt(value)) if value == "0xCAFEBABE"
+        ));
+        let messages = log.done();
+        assert!(messages.is_empty());
+        assert_eq!(lexer.token, Token::EndOfFile);
+    }
 
     #[test]
     fn parses_prefix_suffix_binary_and_conditional_as_one_expression() {

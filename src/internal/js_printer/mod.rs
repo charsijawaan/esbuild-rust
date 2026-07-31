@@ -408,6 +408,36 @@ pub fn format_non_negative_float(value: f64, minify_whitespace: bool) -> String 
     result
 }
 
+fn bigint_to_decimal(value: &str) -> String {
+    let (digits, radix) = if let Some(digits) = value
+        .strip_prefix("0b")
+        .or_else(|| value.strip_prefix("0B"))
+    {
+        (digits, 2)
+    } else if let Some(digits) = value
+        .strip_prefix("0o")
+        .or_else(|| value.strip_prefix("0O"))
+    {
+        (digits, 8)
+    } else if let Some(digits) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        (digits, 16)
+    } else {
+        (value, 10)
+    };
+    num_bigint::BigUint::parse_bytes(digits.as_bytes(), radix)
+        .expect("lexer only produces valid big integer tokens")
+        .to_str_radix(10)
+}
+
+fn bigint_can_be_exact_number(decimal: &str) -> bool {
+    decimal
+        .parse::<f64>()
+        .is_ok_and(|number| number.is_finite() && format!("{number:.0}") == decimal)
+}
+
 fn simplify_exponent(result: &mut String) {
     let Some(exponent_index) = result.find('e') else {
         return;
@@ -1731,6 +1761,11 @@ impl Printer<'_> {
         let Some(data) = expr.data.as_deref() else {
             return;
         };
+        let lower_bigint = matches!(data, ExprData::BigInt(_))
+            && self
+                .options
+                .unsupported_features
+                .contains(JsFeature::BIGINT);
         let original_name = match data {
             ExprData::Identifier(identifier) => {
                 self.renamer.original_name_for_symbol(identifier.reference)
@@ -1743,6 +1778,7 @@ impl Printer<'_> {
             && match data {
                 ExprData::Call(call) => call.can_be_unwrapped_if_unused,
                 ExprData::New(new) => new.can_be_unwrapped_if_unused,
+                ExprData::BigInt(_) => lower_bigint,
                 _ => false,
             };
         let wrap_for_new_target = is_new_target
@@ -1756,9 +1792,11 @@ impl Printer<'_> {
                 ExprData::Index(index) => index.optional_chain != OptionalChain::None,
                 _ => false,
             };
+        let wrap_lowered_bigint = lower_bigint && (level >= Precedence::New || is_new_target);
         let wrap = own_level < level
             || (has_pure_comment && level >= Precedence::Postfix)
-            || wrap_for_new_target;
+            || wrap_for_new_target
+            || wrap_lowered_bigint;
         if wrap {
             self.output.push(b'(');
         }
@@ -1794,9 +1832,31 @@ impl Printer<'_> {
             ExprData::Number(value) => self
                 .output
                 .extend_from_slice(format_number(*value, level, self.options, false).as_bytes()),
-            ExprData::BigInt(value) => {
+            ExprData::BigInt(value) if !lower_bigint => {
                 self.output.extend_from_slice(value.as_bytes());
                 self.output.push(b'n');
+            }
+            ExprData::BigInt(value) => {
+                if has_pure_comment {
+                    self.output.extend_from_slice(b"/* @__PURE__ */ ");
+                }
+                let decimal = self.options.minify_syntax.then(|| bigint_to_decimal(value));
+                let use_quotes = decimal
+                    .as_deref()
+                    .is_none_or(|decimal| !bigint_can_be_exact_number(decimal));
+                let printed_value = decimal
+                    .as_deref()
+                    .filter(|decimal| decimal.len() < value.len())
+                    .unwrap_or(value);
+                self.output.extend_from_slice(b"BigInt(");
+                if use_quotes {
+                    self.output.push(b'"');
+                }
+                self.output.extend_from_slice(printed_value.as_bytes());
+                if use_quotes {
+                    self.output.push(b'"');
+                }
+                self.output.push(b')');
             }
             ExprData::String(value) => {
                 if value.prefer_template
@@ -2069,7 +2129,9 @@ impl Printer<'_> {
                     self.output.extend_from_slice(b"/* @__PURE__ */ ");
                 }
                 self.output.extend_from_slice(b"new");
-                if !self.options.minify_whitespace || new_target_needs_space(&new.target) {
+                if !self.options.minify_whitespace
+                    || new_target_needs_space(&new.target, self.options)
+                {
                     self.output.push(b' ');
                 }
                 self.print_expr_at_with_usage_and_new_target(
@@ -2914,7 +2976,7 @@ fn expression_starts_with_identifier(expression: &Expr, options: Options) -> boo
     }
 }
 
-fn new_target_needs_space(target: &Expr) -> bool {
+fn new_target_needs_space(target: &Expr, options: Options) -> bool {
     let Some(data) = target.data.as_deref() else {
         return false;
     };
@@ -2935,19 +2997,21 @@ fn new_target_needs_space(target: &Expr) -> bool {
         | ExprData::Identifier(_)
         | ExprData::ImportIdentifier(_)
         | ExprData::NameOfSymbol(_)
-        | ExprData::Number(_)
-        | ExprData::BigInt(_) => true,
+        | ExprData::Number(_) => true,
+        ExprData::BigInt(_) => !options.unsupported_features.contains(JsFeature::BIGINT),
         ExprData::Dot(dot) => {
-            dot.optional_chain == OptionalChain::None && new_target_needs_space(&dot.target)
+            dot.optional_chain == OptionalChain::None
+                && new_target_needs_space(&dot.target, options)
         }
         ExprData::Index(index) => {
-            index.optional_chain == OptionalChain::None && new_target_needs_space(&index.target)
+            index.optional_chain == OptionalChain::None
+                && new_target_needs_space(&index.target, options)
         }
         ExprData::Template(template) if template.tag_or_nil.data.is_some() => {
-            new_target_needs_space(&template.tag_or_nil)
+            new_target_needs_space(&template.tag_or_nil, options)
         }
-        ExprData::InlinedEnum(inlined) => new_target_needs_space(&inlined.value),
-        ExprData::Annotation(annotation) => new_target_needs_space(&annotation.value),
+        ExprData::InlinedEnum(inlined) => new_target_needs_space(&inlined.value, options),
+        ExprData::Annotation(annotation) => new_target_needs_space(&annotation.value, options),
         _ => false,
     }
 }

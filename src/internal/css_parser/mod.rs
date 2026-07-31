@@ -1906,7 +1906,10 @@ fn lower_and_minify_single_color(
         token.kind = TokenKind::Hash;
         token.text = "663399".into();
     }
-    if !minify_syntax {
+    let lower_hwb = token.kind == TokenKind::Function
+        && unsupported_css_features.contains(CssFeature::HWB)
+        && token.text.eq_ignore_ascii_case("hwb");
+    if !(minify_syntax || lower_hwb) {
         return;
     }
     if token.kind == TokenKind::Ident {
@@ -2226,6 +2229,7 @@ fn lower_and_minify_gradient(
     if minify_syntax
         || unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
         || unsupported_css_features.contains(CssFeature::HEX_RGBA)
+        || unsupported_css_features.contains(CssFeature::HWB)
     {
         for stop in &mut stops {
             lower_and_minify_single_color(
@@ -2784,7 +2788,8 @@ fn process_declaration(
 ) {
     let key = key.to_ascii_lowercase();
     let lower_color_syntax = unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
-        || unsupported_css_features.contains(CssFeature::HEX_RGBA);
+        || unsupported_css_features.contains(CssFeature::HEX_RGBA)
+        || unsupported_css_features.contains(CssFeature::HWB);
     if minify_syntax {
         minify_numeric_tokens(value);
     }
@@ -5166,6 +5171,192 @@ mod tests {
             ),
             "a{color:rgba(255,0,0,.5)}b{color:rgba(0,128,0,.25)}\
             c{color:rgba(0,0,255,.75)}"
+        );
+    }
+
+    #[test]
+    fn lowers_unsupported_hwb_colors() {
+        let options = Options {
+            unsupported_css_features: CssFeature::HWB,
+            ..Options::default()
+        };
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: HWB(90deg 20% 40%);\
+                     outline-color: hwb(.75turn 20% 40% / .6667);\
+                     fill: hwb(1deg 40% 80%);\
+                     stroke: hwb(1deg 9000% 50%) }",
+                options,
+            ),
+            "a {\n\
+             \x20\x20color: #669933;\n\
+             \x20\x20outline-color: #663399aa;\n\
+             \x20\x20fill: #555555;\n\
+             \x20\x20stroke: #aaaaaa;\n\
+             }\n"
+        );
+
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: hwb(90deg 20% 40%);\
+                     outline-color: hwb(.75turn 20% 40% / .6667) }",
+                Options {
+                    minify_whitespace: true,
+                    ..options
+                },
+            ),
+            "a{color:#669933;outline-color:#663399aa}"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: hwb(90deg 20% 40%);\
+                     outline-color: hwb(.75turn 20% 40% / .6667) }",
+                Options {
+                    minify_syntax: true,
+                    ..options
+                },
+            ),
+            "a {\n  color: #693;\n  outline-color: #639a;\n}\n"
+        );
+
+        let invalid = "a { color: hwb(90deg, 20%, 40%);\
+                           fill: hwb(none 20% 40%);\
+                           stroke: hwb(90deg 20% none) }";
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                invalid,
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..options
+                },
+            ),
+            "a{color:hwb(90deg,20%,40%);fill:hwb(none 20% 40%);stroke:hwb(90deg 20% none)}"
+        );
+
+        let supported = parse_and_print_with_parser_options(
+            "a { color: HWB(90deg 20% 40%) }",
+            Options::default(),
+        );
+        assert_eq!(supported, "a {\n  color: HWB(90deg 20% 40%);\n}\n");
+    }
+
+    #[test]
+    fn lowers_hwb_alpha_for_hex_rgba_compatibility() {
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: hwb(90 20% 40% / .2);\
+                     outline-color: hwb(270 20% 40% / .6667) }",
+                Options {
+                    unsupported_css_features: CssFeature::HWB,
+                    ..Options::default()
+                },
+            ),
+            "a {\n  color: #66993333;\n  outline-color: #663399aa;\n}\n"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: hwb(90 20% 40% / .2) }",
+                Options {
+                    unsupported_css_features: CssFeature::HWB | CssFeature::HEX_RGBA,
+                    ..Options::default()
+                },
+            ),
+            "a {\n  color: rgba(102, 153, 51, .2);\n}\n"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: hwb(90 20% 40% / .2);\
+                     outline-color: hwb(270 20% 40% / .6667) }",
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    unsupported_css_features: CssFeature::HWB | CssFeature::HEX_RGBA,
+                    ..Options::default()
+                },
+            ),
+            "a{color:rgba(102,153,51,.2);outline-color:rgba(102,51,153,.667)}"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a { color: hwb(90 20% 40% / .2) }",
+                Options {
+                    unsupported_css_features: CssFeature::HEX_RGBA,
+                    ..Options::default()
+                },
+            ),
+            "a {\n  color: hwb(90 20% 40% / .2);\n}\n"
+        );
+    }
+
+    #[test]
+    fn lowers_hwb_across_color_declaration_contexts() {
+        let options = Options {
+            unsupported_css_features: CssFeature::HWB,
+            ..Options::default()
+        };
+        for property in [
+            "background-color",
+            "border-block-end-color",
+            "border-block-start-color",
+            "border-bottom-color",
+            "border-color",
+            "border-inline-end-color",
+            "border-inline-start-color",
+            "border-left-color",
+            "border-right-color",
+            "border-top-color",
+            "caret-color",
+            "color",
+            "column-rule-color",
+            "fill",
+            "flood-color",
+            "lighting-color",
+            "outline-color",
+            "stop-color",
+            "stroke",
+            "text-decoration-color",
+            "text-emphasis-color",
+        ] {
+            assert_eq!(
+                parse_and_print_with_parser_options(
+                    &format!("a {{ {property}: hwb(90 20% 40%) }}"),
+                    options,
+                ),
+                format!("a {{\n  {property}: #669933;\n}}\n"),
+                "{property}"
+            );
+        }
+
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a {\
+                   background: border-box hwb(90 20% 40%);\
+                   box-shadow: 0 0 hwb(90 20% 40%), inset 1px 2px hwb(270 20% 40% / .75);\
+                   text-shadow: 0 0 hwb(90 20% 40%);\
+                   border-color: hwb(90 20% 40%) hwb(270 20% 40%);\
+                   --x: hwb(90 20% 40%)\
+                 }\
+                 b {\
+                   background: linear-gradient(hwb(90 20% 40%) 10%, hwb(270 20% 40% / .75));\
+                   background-image: radial-gradient(hwb(90 20% 40%), blue);\
+                   border-image: conic-gradient(hwb(90 20% 40%), blue);\
+                   mask-image: linear-gradient(hwb(90 20% 40%), blue)\
+                 }",
+                Options {
+                    minify_whitespace: true,
+                    ..options
+                },
+            ),
+            "a{background:border-box #669933;\
+               box-shadow:0 0 #669933,inset 1px 2px #663399bf;\
+               text-shadow:0 0 hwb(90 20% 40%);\
+               border-color:hwb(90 20% 40%) hwb(270 20% 40%);\
+               --x: hwb(90 20% 40%)}\
+             b{background:linear-gradient(#669933 10%,#663399bf);\
+               background-image:radial-gradient(#669933,blue);\
+               border-image:conic-gradient(#669933,blue);\
+               mask-image:linear-gradient(#669933,blue)}"
         );
     }
 

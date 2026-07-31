@@ -3993,6 +3993,10 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
     }
     let input_contents = Arc::<[u8]>::from(input.as_ref());
     let source = Source {
+        key_path: Path {
+            text: sourcefile.clone(),
+            ..Path::default()
+        },
         pretty_paths: PrettyPaths {
             abs: sourcefile.clone(),
             rel: sourcefile.clone(),
@@ -4782,6 +4786,10 @@ mod tests {
     fn code(result: super::TransformResult) -> String {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         String::from_utf8(result.code).expect("transform output is UTF-8")
+    }
+
+    fn transform_code(source: &str, options: TransformOptions) -> String {
+        code(transform(source, options))
     }
 
     fn context_test_directory(name: &str) -> std::path::PathBuf {
@@ -8058,6 +8066,271 @@ mod tests {
     }
 
     #[test]
+    fn lowers_bigint_literals_for_unsupported_targets() {
+        assert_eq!(
+            transform_code(
+                "x = 0b100101n",
+                TransformOptions {
+                    target: Target::Es2020,
+                    ..TransformOptions::default()
+                }
+            ),
+            "x = 0b100101n;\n"
+        );
+        assert_eq!(
+            transform_code(
+                "x = 0b100101n",
+                TransformOptions {
+                    target: Target::Es2019,
+                    ..TransformOptions::default()
+                }
+            ),
+            "x = /* @__PURE__ */ BigInt(\"0b100101\");\n"
+        );
+        let warned = transform(
+            "x = 1n",
+            TransformOptions {
+                target: Target::Es2019,
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(warned.warnings.len(), 1);
+        assert_eq!(warned.warnings[0].id, "bigint");
+        assert_eq!(
+            warned.warnings[0].text,
+            "Big integer literals are not available in the configured target environment \
+             (\"es2019\") and may crash at run-time"
+        );
+        let location = warned.warnings[0]
+            .location
+            .as_ref()
+            .expect("BigInt warning location");
+        assert_eq!(location.line, 1);
+        assert_eq!(location.column, 4);
+        assert_eq!(location.length, 2);
+        assert_eq!(location.line_text, "x = 1n");
+        assert_eq!(
+            transform_code(
+                "x = 1n",
+                TransformOptions {
+                    target: Target::Es2019,
+                    supported: HashMap::from([("bigint".into(), true)]),
+                    ..TransformOptions::default()
+                }
+            ),
+            "x = 1n;\n"
+        );
+        assert_eq!(
+            transform_code(
+                "x = 1n",
+                TransformOptions {
+                    target: Target::Es2020,
+                    supported: HashMap::from([("bigint".into(), false)]),
+                    ..TransformOptions::default()
+                }
+            ),
+            "x = /* @__PURE__ */ BigInt(\"1\");\n"
+        );
+    }
+
+    #[test]
+    fn minifies_lowered_bigint_literals() {
+        assert_eq!(
+            transform_code(
+                "x = 0b100101n",
+                TransformOptions {
+                    target: Target::Es2019,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            ),
+            "x = /* @__PURE__ */ BigInt(37);\n"
+        );
+        assert_eq!(
+            transform_code(
+                "x = 0b100101n",
+                TransformOptions {
+                    target: Target::Es2019,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            ),
+            "x=BigInt(\"0b100101\");\n"
+        );
+        assert_eq!(
+            transform_code(
+                "x = 0b100101n",
+                TransformOptions {
+                    target: Target::Es2019,
+                    minify_syntax: true,
+                    minify_identifiers: true,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            ),
+            "x=BigInt(37);\n"
+        );
+        assert_eq!(
+            transform_code(
+                "x=0XFFn;y=0B101n;z=0O77n",
+                TransformOptions {
+                    target: Target::Es2019,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            ),
+            "x = /* @__PURE__ */ BigInt(255), y = /* @__PURE__ */ BigInt(5), z = /* @__PURE__ */ BigInt(63);\n"
+        );
+
+        assert_eq!(
+            transform_code(
+                "x = -123n; y = 0xFEDCBA9876543210n",
+                TransformOptions {
+                    target: Target::Es2019,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            ),
+            "x = -/* @__PURE__ */ BigInt(123), y = /* @__PURE__ */ \
+             BigInt(\"0xFEDCBA9876543210\");\n"
+        );
+        assert_eq!(
+            transform_code(
+                "1n; -2n; keep()",
+                TransformOptions {
+                    target: Target::Es2019,
+                    minify_syntax: true,
+                    ..TransformOptions::default()
+                }
+            ),
+            "keep();\n"
+        );
+    }
+
+    #[test]
+    fn lowers_bigint_literals_in_expression_contexts() {
+        assert_eq!(
+            transform_code(
+                "x = 1n.toString(); y = new (1n)()",
+                TransformOptions {
+                    target: Target::Es2019,
+                    minify_whitespace: true,
+                    ..TransformOptions::default()
+                }
+            ),
+            "x=BigInt(\"1\").toString();y=new(BigInt(\"1\"));\n"
+        );
+        assert_eq!(
+            transform_code(
+                "x = {1n: y, [2n]: z}",
+                TransformOptions {
+                    target: Target::Es2019,
+                    ..TransformOptions::default()
+                }
+            ),
+            "x = { \"1\": y, [/* @__PURE__ */ BigInt(\"2\")]: z };\n"
+        );
+        let property_keys = transform(
+            "x = {1n: y, [2n]: z}",
+            TransformOptions {
+                target: Target::Es2019,
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(property_keys.warnings.len(), 1);
+        assert_eq!(
+            transform_code(
+                "function f(BigInt) { return 1n }",
+                TransformOptions {
+                    target: Target::Es2019,
+                    ..TransformOptions::default()
+                }
+            ),
+            "function f(BigInt2) {\n  return /* @__PURE__ */ BigInt(\"1\");\n}\n"
+        );
+    }
+
+    #[test]
+    fn uses_contextual_bigint_warning_visibility() {
+        let contextual = transform(
+            "try {\n\
+             \x20 inside = 1n;\n\
+             \x20 function nested() { return 2n }\n\
+             } catch {\n\
+             \x20 caught = 3n\n\
+             } finally {\n\
+             \x20 final = 4n\n\
+             }",
+            TransformOptions {
+                target: Target::Es2019,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(contextual.errors.is_empty(), "{:?}", contextual.errors);
+        assert_eq!(
+            String::from_utf8_lossy(&contextual.code)
+                .matches("BigInt(")
+                .count(),
+            4
+        );
+        assert_eq!(contextual.warnings.len(), 3);
+        assert!(
+            contextual
+                .warnings
+                .iter()
+                .all(|warning| warning.id == "bigint")
+        );
+        assert_eq!(
+            contextual
+                .warnings
+                .iter()
+                .map(|warning| {
+                    warning
+                        .location
+                        .as_ref()
+                        .expect("BigInt warning location")
+                        .line
+                })
+                .collect::<Vec<_>>(),
+            [3, 5, 7]
+        );
+
+        let dependency = transform(
+            "value = 0XFFn",
+            TransformOptions {
+                sourcefile: "/project/node_modules/pkg/index.js".into(),
+                target: Target::Es2019,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(dependency.errors.is_empty(), "{:?}", dependency.errors);
+        assert!(dependency.warnings.is_empty(), "{:?}", dependency.warnings);
+        assert_eq!(
+            String::from_utf8_lossy(&dependency.code),
+            "value = /* @__PURE__ */ BigInt(\"0XFF\");\n"
+        );
+    }
+
+    #[test]
+    fn lowers_bigint_literals_in_build_api() {
+        let built = build_api(BuildOptions {
+            stdin: Some(BuildStdin {
+                contents: "x = 0b100101n".into(),
+                ..BuildStdin::default()
+            }),
+            target: Target::Es2019,
+            ..BuildOptions::default()
+        });
+        assert!(built.errors.is_empty(), "{:?}", built.errors);
+        assert_eq!(built.warnings.len(), 1);
+        assert_eq!(built.warnings[0].id, "bigint");
+        assert_eq!(
+            String::from_utf8_lossy(&built.output_files[0].contents),
+            "x = /* @__PURE__ */ BigInt(\"0b100101\");\n"
+        );
+    }
+
+    #[test]
     fn minifies_computed_primitive_object_keys() {
         assert_eq!(
             code(transform(
@@ -11179,6 +11452,45 @@ mod tests {
             "a {\n  color: rgba(17, 34, 51, .267);\n}\n"
         );
         assert_eq!(transform_for_chrome("62"), "a {\n  color: #1234;\n}\n");
+    }
+
+    #[test]
+    fn lowers_hwb_for_unsupported_browser_targets_and_overrides() {
+        let input = "a { color: hwb(90deg 20% 40%); outline-color: hwb(.75turn 20% 40% / .75) }";
+        let lowered = "a {\n\
+                       \x20\x20color: #669933;\n\
+                       \x20\x20outline-color: #663399bf;\n\
+                       }\n";
+        let preserved = "a {\n\
+                         \x20\x20color: hwb(90deg 20% 40%);\n\
+                         \x20\x20outline-color: hwb(.75turn 20% 40% / .75);\n\
+                         }\n";
+
+        let transform_for_chrome = |version: &str, supported| {
+            code(transform(
+                input,
+                TransformOptions {
+                    loader: Loader::Css,
+                    engines: vec![Engine {
+                        name: EngineName::Chrome,
+                        version: version.into(),
+                    }],
+                    supported,
+                    ..TransformOptions::default()
+                },
+            ))
+        };
+
+        assert_eq!(transform_for_chrome("100", HashMap::new()), lowered);
+        assert_eq!(transform_for_chrome("101", HashMap::new()), preserved);
+        assert_eq!(
+            transform_for_chrome("100", HashMap::from([("hwb".into(), true)])),
+            preserved
+        );
+        assert_eq!(
+            transform_for_chrome("101", HashMap::from([("hwb".into(), false)])),
+            lowered
+        );
     }
 
     #[test]

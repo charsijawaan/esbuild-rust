@@ -1702,7 +1702,7 @@ mod tests {
         helpers::string_to_utf16,
         js_ast::{Expr, ExprData, LocalKind, StmtData, StringExpr},
         js_parser::Options,
-        logger::{DeferLogKind, Loc, Log, MsgKind, Source},
+        logger::{DeferLogKind, Loc, Log, MsgId, MsgKind, Path, Source},
         runtime,
     };
 
@@ -1714,14 +1714,34 @@ mod tests {
         text: &str,
         options: Options,
     ) -> (crate::internal::js_ast::Ast, bool, Log) {
+        parse_source_at_path_with_options(text, "", options)
+    }
+
+    fn parse_source_at_path_with_options(
+        text: &str,
+        path: &str,
+        options: Options,
+    ) -> (crate::internal::js_ast::Ast, bool, Log) {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let source = Source {
             contents: Arc::from(text.as_bytes()),
             identifier_name: "entry".to_owned(),
+            key_path: Path {
+                text: path.to_owned(),
+                ..Path::default()
+            },
             ..Source::default()
         };
         let (ast, ok) = parse(log.clone(), source, options);
         (ast, ok, log)
+    }
+
+    fn unsupported_bigint_options() -> Options {
+        Options {
+            unsupported_js_features: crate::internal::compat::JsFeature::BIGINT,
+            original_target_env: "es2019".into(),
+            ..Options::default()
+        }
     }
 
     #[test]
@@ -1757,6 +1777,74 @@ mod tests {
             ast.parts[1].statements[1].data.as_deref(),
             Some(StmtData::If(_))
         ));
+    }
+
+    #[test]
+    fn uses_contextual_warning_kinds_for_unsupported_bigints() {
+        let (_, ok, log) = parse_source_with_options(
+            "try {\n\
+             \x20 direct = 0xCAFE_BABEn;\n\
+             \x20 function nested() { return 2n }\n\
+             } catch {\n\
+             \x20 caught = 3n\n\
+             } finally {\n\
+             \x20 final = 4n\n\
+             }",
+            unsupported_bigint_options(),
+        );
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 4);
+        assert!(messages.iter().all(|message| message.id == MsgId::JsBigInt));
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.kind)
+                .collect::<Vec<_>>(),
+            [
+                MsgKind::Debug,
+                MsgKind::Warning,
+                MsgKind::Warning,
+                MsgKind::Warning
+            ]
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| {
+                    message
+                        .data
+                        .location
+                        .as_ref()
+                        .expect("BigInt warning location")
+                        .length
+                })
+                .collect::<Vec<_>>(),
+            [12, 2, 2, 2]
+        );
+    }
+
+    #[test]
+    fn downgrades_unsupported_bigint_warnings_in_node_modules() {
+        let (_, ok, log) = parse_source_at_path_with_options(
+            "value = 123n",
+            "/project/node_modules/pkg/index.js",
+            unsupported_bigint_options(),
+        );
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, MsgId::JsBigInt);
+        assert_eq!(messages[0].kind, MsgKind::Debug);
+        assert_eq!(
+            messages[0]
+                .data
+                .location
+                .as_ref()
+                .expect("BigInt debug location")
+                .length,
+            4
+        );
     }
 
     #[test]
