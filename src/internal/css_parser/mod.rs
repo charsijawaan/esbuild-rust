@@ -1986,6 +1986,18 @@ fn lower_and_minify_single_color(
         token.kind = TokenKind::Hash;
         token.text = "663399".into();
     }
+    let lower_modern_rgb_hsl = token.kind == TokenKind::Function
+        && unsupported_css_features.contains(CssFeature::MODERN_RGB_HSL)
+        && matches!(
+            token.text.to_ascii_lowercase().as_str(),
+            "rgb" | "rgba" | "hsl" | "hsla"
+        );
+    if lower_modern_rgb_hsl {
+        lower_modern_rgb_hsl_function(token, minify_whitespace);
+        if !minify_syntax {
+            return;
+        }
+    }
     let lower_hwb = token.kind == TokenKind::Function
         && unsupported_css_features.contains(CssFeature::HWB)
         && token.text.eq_ignore_ascii_case("hwb");
@@ -2043,6 +2055,125 @@ fn lower_and_minify_single_color(
             );
         }
     }
+}
+
+fn lower_modern_rgb_hsl_function(token: &mut Token, minify_whitespace: bool) {
+    let is_hsl = token.text.eq_ignore_ascii_case("hsl") || token.text.eq_ignore_ascii_case("hsla");
+    let Some(args) = &mut token.children else {
+        return;
+    };
+
+    // Upstream normalizes the first HSL argument before validating the rest of
+    // the function. Keep this behavior for malformed functions too.
+    if is_hsl
+        && let Some(first) = args.first_mut()
+        && let Some(degrees) = degrees_for_angle(first)
+    {
+        first.kind = TokenKind::Number;
+        first.text = float_to_string_for_color(degrees);
+        first.unit_offset = 0;
+    }
+
+    let mut remove_alpha = false;
+    let mut add_alpha = false;
+    match args.len() {
+        3 if args.iter().all(|arg| arg.kind.is_numeric()) => {
+            remove_alpha = true;
+            let mut first = args[0].clone();
+            let mut second = args[1].clone();
+            let third = args[2].clone();
+            first.whitespace = WhitespaceFlags::default();
+            second.whitespace = WhitespaceFlags::default();
+            let comma = gradient_comma(token.loc, minify_whitespace);
+            *args = vec![first, comma.clone(), second, comma, third];
+        }
+
+        5 if args[0].kind.is_numeric()
+            && args[1].kind == TokenKind::Comma
+            && args[2].kind.is_numeric()
+            && args[3].kind == TokenKind::Comma
+            && args[4].kind.is_numeric() =>
+        {
+            remove_alpha = true;
+        }
+
+        5 if args[0].kind.is_numeric()
+            && args[1].kind.is_numeric()
+            && args[2].kind.is_numeric()
+            && args[3].kind == TokenKind::DelimSlash
+            && args[4].kind.is_numeric() =>
+        {
+            add_alpha = true;
+            let mut first = args[0].clone();
+            let mut second = args[1].clone();
+            let mut third = args[2].clone();
+            let alpha = lower_alpha_percentage_to_number(args[4].clone());
+            first.whitespace = WhitespaceFlags::default();
+            second.whitespace = WhitespaceFlags::default();
+            third.whitespace = WhitespaceFlags::default();
+            let comma = gradient_comma(token.loc, minify_whitespace);
+            *args = vec![
+                first,
+                comma.clone(),
+                second,
+                comma.clone(),
+                third,
+                comma,
+                alpha,
+            ];
+        }
+
+        7 if args[0].kind.is_numeric()
+            && args[1].kind == TokenKind::Comma
+            && args[2].kind.is_numeric()
+            && args[3].kind == TokenKind::Comma
+            && args[4].kind.is_numeric()
+            && args[5].kind == TokenKind::Comma
+            && args[6].kind.is_numeric() =>
+        {
+            add_alpha = true;
+            args[6] = lower_alpha_percentage_to_number(args[6].clone());
+        }
+
+        _ => {}
+    }
+
+    if remove_alpha {
+        if token.text.eq_ignore_ascii_case("rgba") {
+            token.text = "rgb".into();
+        } else if token.text.eq_ignore_ascii_case("hsla") {
+            token.text = "hsl".into();
+        }
+    } else if add_alpha {
+        if token.text.eq_ignore_ascii_case("rgb") {
+            token.text = "rgba".into();
+        } else if token.text.eq_ignore_ascii_case("hsl") {
+            token.text = "hsla".into();
+        }
+    }
+}
+
+fn lower_alpha_percentage_to_number(mut token: Token) -> Token {
+    if token.kind == TokenKind::Percentage
+        && let Ok(value) = token.percentage_value().parse::<f64>()
+        && value.is_finite()
+    {
+        token.kind = TokenKind::Number;
+        token.text = float_to_string_for_color(value / 100.0);
+        token.unit_offset = 0;
+    }
+    token
+}
+
+fn float_to_string_for_color(value: f64) -> String {
+    let mut text = format!("{value:.3}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
 }
 
 fn is_single_color_property(key: &str) -> bool {
@@ -2215,15 +2346,23 @@ fn parse_alpha_byte(token: Option<&Token>) -> Option<u8> {
 
 fn degrees_for_angle(token: &Token) -> Option<f64> {
     if token.kind == TokenKind::Number {
-        return token.text.parse().ok();
+        return token
+            .text
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite());
     }
     if token.kind != TokenKind::Dimension {
         return None;
     }
-    let value = token.dimension_value().parse::<f64>().ok()?;
+    let value = token
+        .dimension_value()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())?;
     Some(
         value
-            * match token.dimension_unit().to_ascii_lowercase().as_str() {
+            * match token.dimension_unit() {
                 "deg" => 1.0,
                 "grad" => 0.9,
                 "rad" => 180.0 / std::f64::consts::PI,
@@ -2310,6 +2449,7 @@ fn lower_and_minify_gradient(
         || unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
         || unsupported_css_features.contains(CssFeature::HEX_RGBA)
         || unsupported_css_features.contains(CssFeature::HWB)
+        || unsupported_css_features.contains(CssFeature::MODERN_RGB_HSL)
     {
         for stop in &mut stops {
             lower_and_minify_single_color(
@@ -2869,7 +3009,8 @@ fn process_declaration(
     let key = key.to_ascii_lowercase();
     let lower_color_syntax = unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
         || unsupported_css_features.contains(CssFeature::HEX_RGBA)
-        || unsupported_css_features.contains(CssFeature::HWB);
+        || unsupported_css_features.contains(CssFeature::HWB)
+        || unsupported_css_features.contains(CssFeature::MODERN_RGB_HSL);
     if minify_syntax {
         minify_numeric_tokens(value);
     }
@@ -5437,6 +5578,209 @@ mod tests {
                background-image:radial-gradient(#669933,blue);\
                border-image:conic-gradient(#669933,blue);\
                mask-image:linear-gradient(#669933,blue)}"
+        );
+    }
+
+    #[test]
+    fn lowers_unsupported_modern_rgb_hsl_branch_matrix() {
+        let input = "a{color:rgb(1 2 3)}\
+                     b{color:rgba(1% 2% 3%)}\
+                     c{color:hsl(1deg 2% 3%)}\
+                     d{color:hsla(200grad 2% 3%)}\
+                     e{color:rgb(1 2 3/4)}\
+                     f{color:rgba(1% 2% 3%/4%)}\
+                     g{color:hsl(1 2% 3%/4)}\
+                     h{color:hsla(1 2% 3%/4%)}\
+                     i{color:rgb(1,2,3)}\
+                     j{color:rgba(1,2,3)}\
+                     k{color:rgb(1,2,3,4%)}\
+                     l{color:hsla(1turn,2%,3%,.04%)}\
+                     m{color:RGB(1 2 3)}\
+                     n{color:RGBA(1 2 3)}\
+                     o{color:RGB(1 2 3/4)}\
+                     p{color:RGBA(1 2 3/4)}\
+                     q{color:HSL(1 2% 3%)}\
+                     r{color:HSLA(1 2% 3%)}\
+                     s{color:HSL(1 2% 3%/4)}\
+                     t{color:HSLA(1 2% 3%/4)}\
+                     u{color:hsl(6.283185307rad 2% 3%)}\
+                     v{color:hsl(.333333turn 2% 3%)}\
+                     w{color:hsl(-200grad 2% 3%)}\
+                     x{color:hsl(1DEG 2% 3%)}\
+                     y{color:rgb(1 2 3/33.333%)}\
+                     z{color:rgb(1 2 3/99.99%)}";
+        let options = Options {
+            minify_whitespace: true,
+            unsupported_css_features: CssFeature::MODERN_RGB_HSL,
+            ..Options::default()
+        };
+        assert_eq!(
+            parse_and_print_with_parser_options(input, options),
+            "a{color:rgb(1,2, 3)}\
+             b{color:rgb(1%,2%, 3%)}\
+             c{color:hsl(1,2%, 3%)}\
+             d{color:hsl(180,2%, 3%)}\
+             e{color:rgba(1,2,3,4)}\
+             f{color:rgba(1%,2%,3%,0.04)}\
+             g{color:hsla(1,2%,3%,4)}\
+             h{color:hsla(1,2%,3%,0.04)}\
+             i{color:rgb(1,2,3)}\
+             j{color:rgb(1,2,3)}\
+             k{color:rgba(1,2,3,0.04)}\
+             l{color:hsla(360,2%,3%,0)}\
+             m{color:RGB(1,2, 3)}\
+             n{color:rgb(1,2, 3)}\
+             o{color:rgba(1,2,3,4)}\
+             p{color:RGBA(1,2,3,4)}\
+             q{color:HSL(1,2%, 3%)}\
+             r{color:hsl(1,2%, 3%)}\
+             s{color:hsla(1,2%,3%,4)}\
+             t{color:HSLA(1,2%,3%,4)}\
+             u{color:hsl(360,2%, 3%)}\
+             v{color:hsl(120,2%, 3%)}\
+             w{color:hsl(-180,2%, 3%)}\
+             x{color:hsl(1DEG,2%, 3%)}\
+             y{color:rgba(1,2,3,0.333)}\
+             z{color:rgba(1,2,3,1)}"
+        );
+
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                input,
+                Options {
+                    minify_whitespace: true,
+                    ..Options::default()
+                }
+            ),
+            input
+        );
+    }
+
+    #[test]
+    fn lowers_modern_rgb_hsl_across_color_declaration_contexts() {
+        let options = Options {
+            minify_whitespace: true,
+            unsupported_css_features: CssFeature::MODERN_RGB_HSL,
+            ..Options::default()
+        };
+        for property in [
+            "background-color",
+            "border-block-end-color",
+            "border-block-start-color",
+            "border-bottom-color",
+            "border-inline-end-color",
+            "border-inline-start-color",
+            "border-left-color",
+            "border-right-color",
+            "border-top-color",
+            "caret-color",
+            "color",
+            "column-rule-color",
+            "fill",
+            "flood-color",
+            "lighting-color",
+            "outline-color",
+            "stop-color",
+            "stroke",
+            "text-decoration-color",
+            "text-emphasis-color",
+        ] {
+            assert_eq!(
+                parse_and_print_with_parser_options(
+                    &format!("a{{{property}:rgb(1 2 3/4%)}}"),
+                    options,
+                ),
+                format!("a{{{property}:rgba(1,2,3,0.04)}}"),
+                "{property}"
+            );
+        }
+
+        for gradient in [
+            "linear-gradient",
+            "repeating-linear-gradient",
+            "radial-gradient",
+            "repeating-radial-gradient",
+            "conic-gradient",
+            "repeating-conic-gradient",
+        ] {
+            assert_eq!(
+                parse_and_print_with_parser_options(
+                    &format!("a{{background-image:{gradient}(rgb(1 2 3),hsl(.5turn 20% 30%))}}"),
+                    options,
+                ),
+                format!("a{{background-image:{gradient}(rgb(1,2, 3),hsl(180,20%, 30%))}}"),
+                "{gradient}"
+            );
+        }
+
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a{background:border-box rgb(1 2 3/4%);\
+                   box-shadow:0 0 rgb(1 2 3/4%),inset 1px 2px hsl(.5turn 20% 30%);\
+                   text-shadow:0 0 rgb(1 2 3/4%);\
+                   border-color:rgb(1 2 3) hsl(.5turn 20% 30%);\
+                   --x:rgb(1 2 3/4%);\
+                   unknown:rgb(1 2 3/4%)}\
+                 b{background-image:linear-gradient(var(--x),rgb(1 2 3))}",
+                options,
+            ),
+            "a{background:border-box rgba(1,2,3,0.04);\
+               box-shadow:0 0 rgba(1,2,3,0.04),inset 1px 2px hsl(180,20%, 30%);\
+               text-shadow:0 0 rgb(1 2 3/4%);\
+               border-color:rgb(1 2 3) hsl(.5turn 20% 30%);\
+               --x:rgb(1 2 3/4%);\
+               unknown:rgb(1 2 3/4%)}\
+             b{background-image:linear-gradient(var(--x),rgb(1 2 3))}"
+        );
+    }
+
+    #[test]
+    fn lowers_modern_rgb_hsl_malformed_angles_and_minification() {
+        let options = Options {
+            minify_whitespace: true,
+            unsupported_css_features: CssFeature::MODERN_RGB_HSL,
+            ..Options::default()
+        };
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a{color:hsl(.5turn var(--x));\
+                   background:hsl(.5turn,foo);\
+                   border-color:hsl(.5turn foo bar baz);\
+                   outline-color:hsl(.5turn,var(--x),3%);\
+                   fill:rgb(var(--x) var(--y) var(--z));\
+                   stroke:rgb(1px 2 3)}",
+                options,
+            ),
+            "a{color:hsl(180 var(--x));\
+               background:hsl(180,foo);\
+               border-color:hsl(180 foo bar baz);\
+               outline-color:hsl(180,var(--x),3%);\
+               fill:rgb(var(--x) var(--y) var(--z));\
+               stroke:rgb(1px,2, 3)}"
+        );
+
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a{color:rgb(1 2 3/50%);outline-color:hsl(30 25% 50%/50%)}",
+                Options {
+                    minify_syntax: true,
+                    unsupported_css_features: CssFeature::MODERN_RGB_HSL,
+                    ..Options::default()
+                },
+            ),
+            "a {\n  color: #01020380;\n  outline-color: #9f806080;\n}\n"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a{color:rgb(1 2 3/50%)}",
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    unsupported_css_features: CssFeature::MODERN_RGB_HSL | CssFeature::HEX_RGBA,
+                    ..Options::default()
+                },
+            ),
+            "a{color:rgba(1,2,3,.5)}"
         );
     }
 
