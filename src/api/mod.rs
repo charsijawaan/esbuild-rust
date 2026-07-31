@@ -4792,6 +4792,33 @@ mod tests {
         code(transform(source, options))
     }
 
+    fn assert_api_error(
+        message: &super::Message,
+        text: &str,
+        line: usize,
+        column: usize,
+        length: usize,
+    ) {
+        assert_eq!(message.text, text);
+        let location = message.location.as_ref().expect("API error location");
+        assert_eq!(
+            (location.line, location.column, location.length),
+            (line, column, length)
+        );
+    }
+
+    fn assert_transform_error(
+        result: &super::TransformResult,
+        text: &str,
+        column: usize,
+        length: usize,
+    ) {
+        assert!(result.code.is_empty());
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert_api_error(&result.errors[0], text, 1, column, length);
+    }
+
     fn context_test_directory(name: &str) -> std::path::PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -8062,6 +8089,248 @@ mod tests {
             String::from_utf8_lossy(&built.output_files[0].contents).contains("catch (e)"),
             "{}",
             String::from_utf8_lossy(&built.output_files[0].contents)
+        );
+    }
+
+    #[test]
+    fn reports_unlowered_syntax_target_errors_with_exact_ranges() {
+        for (source, target, text, column, length) in [
+            (
+                "class C {}",
+                Target::Es5,
+                "Transforming class syntax to the configured target environment (\"es5\") is not \
+                 supported yet",
+                0,
+                5,
+            ),
+            (
+                "const x = 1",
+                Target::Es5,
+                "Transforming const to the configured target environment (\"es5\") is not \
+                 supported yet",
+                0,
+                5,
+            ),
+            (
+                "let x = 1",
+                Target::Es5,
+                "Transforming let to the configured target environment (\"es5\") is not \
+                 supported yet",
+                0,
+                3,
+            ),
+            (
+                "await work()",
+                Target::Es2021,
+                "Top-level await is not available in the configured target environment \
+                 (\"es2021\")",
+                0,
+                5,
+            ),
+        ] {
+            assert_transform_error(
+                &transform(
+                    source,
+                    TransformOptions {
+                        target,
+                        ..TransformOptions::default()
+                    },
+                ),
+                text,
+                column,
+                length,
+            );
+        }
+
+        for (source, text, column, length) in [
+            (
+                "declare class C {}",
+                "Transforming class syntax to the configured target environment (\"es5\") is not \
+                 supported yet",
+                8,
+                5,
+            ),
+            (
+                "declare const x: number",
+                "Transforming const to the configured target environment (\"es5\") is not \
+                 supported yet",
+                8,
+                5,
+            ),
+            (
+                "declare let x: number",
+                "Transforming let to the configured target environment (\"es5\") is not supported \
+                 yet",
+                8,
+                3,
+            ),
+        ] {
+            assert_transform_error(
+                &transform(
+                    source,
+                    TransformOptions {
+                        loader: Loader::Ts,
+                        target: Target::Es5,
+                        ..TransformOptions::default()
+                    },
+                ),
+                text,
+                column,
+                length,
+            );
+        }
+    }
+
+    #[test]
+    fn respects_syntax_guard_boundaries_and_supported_overrides() {
+        for (source, target) in [
+            ("class C {}", Target::Es2015),
+            ("const x = 1; let y = 2", Target::Es2015),
+            ("await work()", Target::Es2022),
+        ] {
+            let result = transform(
+                source,
+                TransformOptions {
+                    target,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+        }
+
+        let result = transform(
+            "class C {}; const x = 1; let y = 2",
+            TransformOptions {
+                target: Target::Es5,
+                supported: HashMap::from([("class".into(), true), ("const-and-let".into(), true)]),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let result = transform(
+            "await work()",
+            TransformOptions {
+                target: Target::Es2021,
+                supported: HashMap::from([("top-level-await".into(), true)]),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        assert_transform_error(
+            &transform(
+                "class C {}",
+                TransformOptions {
+                    target: Target::EsNext,
+                    supported: HashMap::from([("class".into(), false)]),
+                    ..TransformOptions::default()
+                },
+            ),
+            "Transforming class syntax to the configured target environment (\"esnext\" + 11 \
+             overrides) is not supported yet",
+            0,
+            5,
+        );
+        assert_transform_error(
+            &transform(
+                "const x = 1",
+                TransformOptions {
+                    target: Target::EsNext,
+                    supported: HashMap::from([("const-and-let".into(), false)]),
+                    ..TransformOptions::default()
+                },
+            ),
+            "Transforming const to the configured target environment (\"esnext\" + 1 override) is \
+             not supported yet",
+            0,
+            5,
+        );
+        assert_transform_error(
+            &transform(
+                "await work()",
+                TransformOptions {
+                    target: Target::EsNext,
+                    supported: HashMap::from([("top-level-await".into(), false)]),
+                    ..TransformOptions::default()
+                },
+            ),
+            "Top-level await is not available in the configured target environment (\"esnext\" + \
+             1 override)",
+            0,
+            5,
+        );
+    }
+
+    #[test]
+    fn rejects_top_level_await_for_cjs_and_iife_formats() {
+        for (format, name) in [(BuildFormat::CommonJs, "cjs"), (BuildFormat::Iife, "iife")] {
+            assert_transform_error(
+                &transform(
+                    "await work()",
+                    TransformOptions {
+                        format,
+                        target: Target::EsNext,
+                        ..TransformOptions::default()
+                    },
+                ),
+                &format!(
+                    "Top-level await is currently not supported with the {name:?} output format"
+                ),
+                0,
+                5,
+            );
+        }
+        let result = transform(
+            "await work()",
+            TransformOptions {
+                format: BuildFormat::EsModule,
+                target: Target::EsNext,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    #[test]
+    fn reports_syntax_guard_errors_through_build_api() {
+        let built = build_api(BuildOptions {
+            stdin: Some(BuildStdin {
+                contents: "class C {}".into(),
+                ..BuildStdin::default()
+            }),
+            target: Target::Es5,
+            ..BuildOptions::default()
+        });
+        assert!(built.output_files.is_empty());
+        assert!(built.warnings.is_empty());
+        assert_eq!(built.errors.len(), 1, "{:?}", built.errors);
+        assert_api_error(
+            &built.errors[0],
+            "Transforming class syntax to the configured target environment (\"es5\") is not \
+             supported yet",
+            1,
+            0,
+            5,
+        );
+
+        let built = build_api(BuildOptions {
+            stdin: Some(BuildStdin {
+                contents: "await work()".into(),
+                ..BuildStdin::default()
+            }),
+            format: BuildFormat::CommonJs,
+            target: Target::EsNext,
+            ..BuildOptions::default()
+        });
+        assert!(built.output_files.is_empty());
+        assert!(built.warnings.is_empty());
+        assert_eq!(built.errors.len(), 1, "{:?}", built.errors);
+        assert_api_error(
+            &built.errors[0],
+            "Top-level await is currently not supported with the \"cjs\" output format",
+            1,
+            0,
+            5,
         );
     }
 

@@ -1287,6 +1287,53 @@ impl ParserCore {
         }
     }
 
+    pub(crate) fn mark_syntax_feature(&mut self, feature: JsFeature, range: Range) -> bool {
+        if !self.options.unsupported_js_features.contains(feature) {
+            if feature == JsFeature::TOP_LEVEL_AWAIT
+                && !self.options.output_format.keep_esm_import_export_syntax()
+            {
+                self.add_error_range(
+                    range,
+                    format!(
+                        "Top-level await is currently not supported with the {:?} output format",
+                        self.options.output_format.as_str()
+                    ),
+                );
+                return true;
+            }
+            return false;
+        }
+
+        let environment = pretty_print_target_environment(
+            &self.options.original_target_env,
+            self.options.unsupported_js_feature_overrides_mask,
+        );
+        if feature == JsFeature::TOP_LEVEL_AWAIT {
+            self.add_error_range(
+                range,
+                format!("Top-level await is not available in {environment}"),
+            );
+            return true;
+        }
+
+        let name = if feature == JsFeature::CLASS {
+            "class syntax".to_owned()
+        } else if feature == JsFeature::CONST_AND_LET {
+            String::from_utf8_lossy(self.source.text_for_range(range)).into_owned()
+        } else {
+            self.add_error_range(
+                range,
+                format!("This feature is not available in {environment}"),
+            );
+            return true;
+        };
+        self.add_error_range(
+            range,
+            format!("Transforming {name} to {environment} is not supported yet"),
+        );
+        true
+    }
+
     fn check_for_unrepresentable_identifier(&mut self, loc: Loc, name: &str) {
         if self.options.ascii_only
             && self

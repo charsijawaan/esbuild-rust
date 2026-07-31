@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
+    compat::JsFeature,
     js_ast::{
         Arg, AwaitExpr, Binding, BindingData, BlockStmt, BreakStmt, Catch, ClassStmt, CommentStmt,
         ContinueStmt, Decl, DoWhileStmt, Expr, ExprData, ExprStmt, Finally, ForInStmt, ForOfStmt,
@@ -109,8 +110,11 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             == super::parser_types::AwaitOrYield::AllowExpression
     {
         let await_range = lexer.range();
-        if !core.is_inside_function_scope() && core.top_level_await_keyword.len == 0 {
-            core.top_level_await_keyword = await_range;
+        if !core.is_inside_function_scope() {
+            core.mark_syntax_feature(JsFeature::TOP_LEVEL_AWAIT, await_range);
+            if core.top_level_await_keyword.len == 0 {
+                core.top_level_await_keyword = await_range;
+            }
         }
         lexer.next();
         if !lexer.has_newline_before && lexer.is_contextual_keyword(b"using") {
@@ -209,6 +213,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
         );
     }
     if lexer.is_contextual_keyword(b"let") {
+        let let_range = lexer.range();
         let name_loc = lexer.loc();
         let reference = core.store_name_in_ref(lexer.identifier.clone());
         lexer.next();
@@ -219,6 +224,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             lexer.token,
             Token::Identifier | Token::OpenBracket | Token::OpenBrace
         ) {
+            core.mark_syntax_feature(JsFeature::CONST_AND_LET, let_range);
             return parse_local_declarations(core, lexer, loc, LocalKind::Let, true, true, true);
         }
         let value = parse_expression_suffix(
@@ -430,6 +436,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             parse_local_declarations(core, lexer, loc, LocalKind::Var, true, true, true)
         }
         Token::Const => {
+            core.mark_syntax_feature(JsFeature::CONST_AND_LET, lexer.range());
             lexer.next();
             if core.options.ts.parse && lexer.token == Token::Enum {
                 super::syntax_typescript::parse_enum_statement(core, lexer, false)
@@ -882,8 +889,11 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
                 "Cannot use \"await\" outside an async function",
             );
             await_range = Range::default();
-        } else if !core.is_inside_function_scope() && core.top_level_await_keyword.len == 0 {
-            core.top_level_await_keyword = await_range;
+        } else if !core.is_inside_function_scope() {
+            core.mark_syntax_feature(JsFeature::TOP_LEVEL_AWAIT, await_range);
+            if core.top_level_await_keyword.len == 0 {
+                core.top_level_await_keyword = await_range;
+            }
         }
         lexer.next();
     }
@@ -897,16 +907,19 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
             parse_local_declarations(core, lexer, init_loc, LocalKind::Var, false, false, false)
         }
         Token::Const => {
+            core.mark_syntax_feature(JsFeature::CONST_AND_LET, lexer.range());
             lexer.next();
             parse_local_declarations(core, lexer, init_loc, LocalKind::Const, false, false, false)
         }
         _ if lexer.is_contextual_keyword(b"let") => {
+            let let_range = lexer.range();
             let let_reference = core.store_name_in_ref(lexer.identifier.clone());
             lexer.next();
             if matches!(
                 lexer.token,
                 Token::Identifier | Token::OpenBracket | Token::OpenBrace
             ) {
+                core.mark_syntax_feature(JsFeature::CONST_AND_LET, let_range);
                 parse_local_declarations(core, lexer, init_loc, LocalKind::Let, false, false, false)
             } else {
                 Stmt::new(
@@ -973,8 +986,11 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
                 == super::parser_types::AwaitOrYield::AllowExpression =>
         {
             let await_range = lexer.range();
-            if !core.is_inside_function_scope() && core.top_level_await_keyword.len == 0 {
-                core.top_level_await_keyword = await_range;
+            if !core.is_inside_function_scope() {
+                core.mark_syntax_feature(JsFeature::TOP_LEVEL_AWAIT, await_range);
+                if core.top_level_await_keyword.len == 0 {
+                    core.top_level_await_keyword = await_range;
+                }
             }
             lexer.next();
             if !lexer.has_newline_before && lexer.is_contextual_keyword(b"using") {

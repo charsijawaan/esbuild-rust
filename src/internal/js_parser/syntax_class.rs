@@ -2,6 +2,7 @@
 
 use crate::internal::{
     ast::{LocRef, SymbolKind},
+    compat::JsFeature,
     config::{MaybeBool, TsTarget},
     helpers::string_to_utf16,
     js_ast::{
@@ -34,6 +35,7 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
     }
     let loc = lexer.loc();
     let class_keyword = lexer.range();
+    core.mark_syntax_feature(JsFeature::CLASS, class_keyword);
     lexer.next();
     core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::ClassName, loc);
 

@@ -1,5 +1,6 @@
 use crate::internal::{
     ast::{INVALID_REF, LocRef, Ref, SymbolKind},
+    compat::JsFeature,
     helpers::string_to_utf16,
     js_ast::{
         EnumStmt, EnumValue, Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, ScopeMember,
@@ -522,6 +523,7 @@ fn parse_declare_statement(
     lexer.next();
     match lexer.token {
         Token::Class => {
+            core.mark_syntax_feature(JsFeature::CLASS, lexer.range());
             lexer.next();
             lexer.expect(Token::Identifier);
             while lexer.token != Token::OpenBrace {
@@ -541,7 +543,12 @@ fn parse_declare_statement(
             skip_type_parameters(lexer);
             skip_type_script_method_signature(lexer);
         }
-        Token::Var | Token::Const => {
+        Token::Var => {
+            lexer.next();
+            skip_type_until_statement_end(lexer);
+        }
+        Token::Const => {
+            core.mark_syntax_feature(JsFeature::CONST_AND_LET, lexer.range());
             lexer.next();
             skip_type_until_statement_end(lexer);
         }
@@ -575,6 +582,7 @@ fn parse_declare_statement(
             skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
         }
         Token::Identifier if lexer.is_contextual_keyword(b"let") => {
+            core.mark_syntax_feature(JsFeature::CONST_AND_LET, lexer.range());
             lexer.next();
             skip_type_until_statement_end(lexer);
         }

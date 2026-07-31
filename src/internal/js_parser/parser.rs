@@ -1699,10 +1699,12 @@ mod tests {
 
     use super::{HelperCall, lazy_export_ast, parse};
     use crate::internal::{
+        compat::JsFeature,
+        config::Format,
         helpers::string_to_utf16,
         js_ast::{Expr, ExprData, LocalKind, StmtData, StringExpr},
         js_parser::Options,
-        logger::{DeferLogKind, Loc, Log, MsgId, MsgKind, Path, Source},
+        logger::{DeferLogKind, Loc, Log, Msg, MsgId, MsgKind, Path, Source},
         runtime,
     };
 
@@ -1742,6 +1744,26 @@ mod tests {
             original_target_env: "es2019".into(),
             ..Options::default()
         }
+    }
+
+    fn assert_syntax_guard_message(
+        message: &Msg,
+        text: &str,
+        line: usize,
+        column: usize,
+        length: usize,
+    ) {
+        assert_eq!(message.kind, MsgKind::Error);
+        assert_eq!(message.data.text, text);
+        let location = message
+            .data
+            .location
+            .as_ref()
+            .expect("syntax guard location");
+        assert_eq!(
+            (location.line, location.column, location.length),
+            (line, column, length)
+        );
     }
 
     #[test]
@@ -1901,6 +1923,141 @@ mod tests {
         assert!(log.done().is_empty());
         assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::None);
         assert_eq!(ast.top_level_await_keyword.len, 0);
+    }
+
+    #[test]
+    fn guards_unlowered_class_const_and_let_syntax() {
+        for (source, feature, name, length) in [
+            ("class C {}", JsFeature::CLASS, "class syntax", 5),
+            ("const x = 1", JsFeature::CONST_AND_LET, "const", 5),
+            ("let x = 1", JsFeature::CONST_AND_LET, "let", 3),
+        ] {
+            let (_, ok, log) = parse_source_with_options(
+                source,
+                Options {
+                    unsupported_js_features: feature,
+                    original_target_env: "\"es5\"".into(),
+                    ..Options::default()
+                },
+            );
+            assert!(ok);
+            let messages = log.done();
+            assert_eq!(messages.len(), 1, "{source:?}");
+            assert_syntax_guard_message(
+                &messages[0],
+                &format!(
+                    "Transforming {name} to the configured target environment (\"es5\") is not \
+                     supported yet"
+                ),
+                1,
+                0,
+                length,
+            );
+        }
+    }
+
+    #[test]
+    fn guards_typescript_declare_class_const_and_let_syntax() {
+        let mut options = Options {
+            unsupported_js_features: JsFeature::CLASS | JsFeature::CONST_AND_LET,
+            original_target_env: "\"es5\"".into(),
+            ..Options::default()
+        };
+        options.ts.parse = true;
+        let source = "declare class C {};\n\
+                      declare const x: number;\n\
+                      declare let y: number;\n\
+                      export declare class D {};\n\
+                      export declare const z: number;\n\
+                      export declare let w: number;";
+        let (_, ok, log) = parse_source_with_options(source, options);
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 6);
+        for (message, (name, line, column, length)) in messages.iter().zip([
+            ("class syntax", 1, 8, 5),
+            ("const", 2, 8, 5),
+            ("let", 3, 8, 3),
+            ("class syntax", 4, 15, 5),
+            ("const", 5, 15, 5),
+            ("let", 6, 15, 3),
+        ]) {
+            assert_syntax_guard_message(
+                message,
+                &format!(
+                    "Transforming {name} to the configured target environment (\"es5\") is not \
+                     supported yet"
+                ),
+                line,
+                column,
+                length,
+            );
+        }
+    }
+
+    #[test]
+    fn guards_every_top_level_await_and_allows_nested_async_await() {
+        let source = "await a(); await b(); for await (const x of y) {}";
+        let (ast, ok, log) = parse_source_with_options(
+            source,
+            Options {
+                unsupported_js_features: JsFeature::TOP_LEVEL_AWAIT,
+                original_target_env: "\"es2021\"".into(),
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        assert_eq!(ast.top_level_await_keyword.loc.start, 0);
+        assert_eq!(ast.top_level_await_keyword.len, 5);
+        let messages = log.done();
+        assert_eq!(messages.len(), 3);
+        for (message, column) in messages.iter().zip([0, 11, 26]) {
+            assert_syntax_guard_message(
+                message,
+                "Top-level await is not available in the configured target environment \
+                 (\"es2021\")",
+                1,
+                column,
+                5,
+            );
+        }
+
+        let (ast, ok, log) = parse_source_with_options(
+            "async function f() { await a(); for await (const x of y) {} }",
+            Options {
+                unsupported_js_features: JsFeature::TOP_LEVEL_AWAIT,
+                original_target_env: "\"es2021\"".into(),
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert_eq!(ast.top_level_await_keyword.len, 0);
+    }
+
+    #[test]
+    fn guards_top_level_await_in_non_esm_output_formats() {
+        for (format, name) in [(Format::CommonJs, "cjs"), (Format::Iife, "iife")] {
+            let (_, ok, log) = parse_source_with_options(
+                "await work()",
+                Options {
+                    output_format: format,
+                    ..Options::default()
+                },
+            );
+            assert!(ok);
+            let messages = log.done();
+            assert_eq!(messages.len(), 1);
+            assert_syntax_guard_message(
+                &messages[0],
+                &format!(
+                    "Top-level await is currently not supported with the {name:?} output format"
+                ),
+                1,
+                0,
+                5,
+            );
+        }
     }
 
     #[test]
