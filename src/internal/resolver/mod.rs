@@ -162,7 +162,7 @@ pub fn load_as_directory(
                     namespace: "file".into(),
                     ..Path::default()
                 },
-                contents: Arc::from(contents.into_bytes()),
+                contents: Arc::from(contents),
                 ..Source::default()
             };
             parse_package_json(
@@ -942,7 +942,7 @@ fn read_package_json(
             namespace: "file".into(),
             ..Path::default()
         },
-        contents: Arc::from(contents.into_bytes()),
+        contents: Arc::from(contents),
         ..Source::default()
     };
     parse_package_json(

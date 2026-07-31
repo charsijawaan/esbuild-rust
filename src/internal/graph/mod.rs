@@ -1,6 +1,6 @@
 //! Port of upstream `internal/graph`.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::internal::{
     ast::{ImportKind, ImportRecord, Index32, Ref, Symbol, SymbolKind, SymbolMap},
@@ -11,13 +11,14 @@ use crate::internal::{
     logger::{LineColumnTracker, Loc, Source},
     resolver::SideEffectsData,
     runtime,
-    sourcemap::SourceMap,
+    sourcemap::{LineOffsetTable, SourceMap},
 };
 
 #[derive(Clone, Debug, Default)]
 pub struct InputFile {
     pub repr: Option<InputFileRepr>,
     pub input_source_map: Option<SourceMap>,
+    pub source_map_line_offset_tables: Arc<[LineOffsetTable]>,
     pub additional_files: Vec<OutputFile>,
     pub unique_key_for_additional_file: String,
     pub side_effects: SideEffects,

@@ -105,10 +105,10 @@ impl Fs for MockFs {
     fn read_file(&self, path: &str) -> ReadFileResult {
         let path = self.normalize_slashes(path);
         if let Some(contents) = self.files.get(&path) {
-            return (contents.clone(), None, None);
+            return (contents.as_bytes().to_vec(), None, None);
         }
         let error = FsError::not_found(&path);
-        (String::new(), Some(error.clone()), Some(error))
+        (Vec::new(), Some(error.clone()), Some(error))
     }
 
     fn open_file(&self, path: &str) -> OpenFileResult {
@@ -418,8 +418,8 @@ mod tests {
             "/",
         );
         assert!(fs.read_file("/missing.txt").1.is_some());
-        assert_eq!(fs.read_file("/README.md").0, "// README.md");
-        assert_eq!(fs.read_file("/src/index.js").0, "// src/index.js");
+        assert_eq!(fs.read_file("/README.md").0, b"// README.md");
+        assert_eq!(fs.read_file("/src/index.js").0, b"// src/index.js");
         assert!(fs.read_directory("/missing").1.is_some());
 
         let src = fs.read_directory("/src").0;
@@ -451,9 +451,9 @@ mod tests {
             MockKind::Windows,
             "C:\\",
         );
-        assert_eq!(fs.read_file("C:\\README.md").0, "// README.md");
-        assert_eq!(fs.read_file("C:/src/index.js").0, "// src/index.js");
-        assert_eq!(fs.read_file("D:\\other\\file.txt").0, "// other/file.txt");
+        assert_eq!(fs.read_file("C:\\README.md").0, b"// README.md");
+        assert_eq!(fs.read_file("C:/src/index.js").0, b"// src/index.js");
+        assert_eq!(fs.read_file("D:\\other\\file.txt").0, b"// other/file.txt");
         assert!(fs.read_file("C:\\other\\file.txt").1.is_some());
         assert_eq!(fs.read_directory("C:\\src\\").0.peek_entry_count(), 2);
         assert_eq!(fs.read_directory("D:\\other").0.peek_entry_count(), 1);

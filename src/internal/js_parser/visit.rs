@@ -448,7 +448,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             Some(StmtData::ForIn(loop_statement)) => {
                 core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
-                visit_statement(core, &mut loop_statement.init, resolve_identifiers);
+                visit_for_loop_init(core, &mut loop_statement.init, resolve_identifiers, true);
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
                 validate_single_statement(
                     core,
@@ -465,7 +465,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             Some(StmtData::ForOf(loop_statement)) => {
                 core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
-                visit_statement(core, &mut loop_statement.init, resolve_identifiers);
+                visit_for_loop_init(core, &mut loop_statement.init, resolve_identifiers, true);
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
                 validate_single_statement(
                     core,
@@ -2074,6 +2074,28 @@ fn report_forbidden_single_statement(core: &mut ParserCore, loc: Loc) {
 
 fn visit_statement(core: &mut ParserCore, statement: &mut Stmt, resolve_identifiers: bool) {
     visit_statements(core, std::slice::from_mut(statement), resolve_identifiers);
+}
+
+fn visit_for_loop_init(
+    core: &mut ParserCore,
+    statement: &mut Stmt,
+    resolve_identifiers: bool,
+    is_in_or_of: bool,
+) {
+    match statement.data.as_deref_mut() {
+        Some(StmtData::Expr(expression)) => visit_expr_with_target(
+            core,
+            &mut expression.value,
+            resolve_identifiers,
+            if is_in_or_of {
+                AssignTarget::Replace
+            } else {
+                AssignTarget::None
+            },
+        ),
+        Some(StmtData::Local(_)) => visit_statement(core, statement, resolve_identifiers),
+        _ => panic!("Internal error: invalid for-loop initializer"),
+    }
 }
 
 fn identifier_binding(loc: Loc, reference: Ref) -> Binding {

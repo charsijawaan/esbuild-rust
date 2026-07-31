@@ -63,7 +63,7 @@ fn compute_reserved_names_for_scope(
     }
 }
 
-pub trait Renamer {
+pub trait Renamer: Sync {
     fn name_for_symbol(&self, reference: Ref) -> String;
 
     fn original_name_for_symbol(&self, reference: Ref) -> String {

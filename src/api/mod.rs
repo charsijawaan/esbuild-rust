@@ -4860,6 +4860,56 @@ mod tests {
         code(transform(source, options))
     }
 
+    #[test]
+    fn transforms_tsx_ternaries_after_parenthesized_jsx_without_arrow_backtracking() {
+        let source = r#"
+            const badge = verified ? (<span>verified · account</span>) : null;
+            const counter = content.length > 0 ? (
+                <span className={`count ${remaining < 20 ? "low" : ""}`}>{remaining}</span>
+            ) : null;
+            const format = (value: number): string => String(value);
+        "#;
+        let output = transform_code(
+            source,
+            TransformOptions {
+                loader: Loader::Tsx,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(output.contains("verified"), "{output}");
+        assert!(output.contains("String(value)"), "{output}");
+    }
+
+    #[test]
+    fn preserves_for_in_and_for_of_assignment_targets_when_minifying() {
+        let source = r#"
+            function keys(object) {
+                var key, result = "";
+                for (key in object) result += key;
+                return result;
+            }
+            function sum(values) {
+                var value, result = 0;
+                for (value of values) result += value;
+                return result;
+            }
+            console.log(keys({a: 1}), sum([20, 22]));
+        "#;
+        let output = transform_code(
+            source,
+            TransformOptions {
+                minify_syntax: true,
+                minify_identifiers: true,
+                minify_whitespace: true,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(!output.contains("for( in "), "{output}");
+        assert!(!output.contains("for( of "), "{output}");
+        assert!(output.contains(" in "), "{output}");
+        assert!(output.contains(" of "), "{output}");
+    }
+
     fn assert_api_error(
         message: &super::Message,
         text: &str,
@@ -9697,8 +9747,8 @@ mod tests {
             "import asset from './image.asset'; console.log(asset)",
         )
         .expect("write entry file");
-        std::fs::write(directory.join("image.asset"), b"binary asset contents")
-            .expect("write asset");
+        let asset_contents = b"\x89PNG\r\n\x1a\n\x00\xff\x80binary asset contents";
+        std::fs::write(directory.join("image.asset"), asset_contents).expect("write asset");
 
         let result = build(BuildOptions {
             entry_points: vec!["entry.js".into()],
@@ -9707,11 +9757,12 @@ mod tests {
             format: BuildFormat::Iife,
             loader: HashMap::from([(".asset".into(), Loader::File)]),
             public_path: "https://cdn.example/assets".into(),
+            sourcemap: BuildSourceMap::External,
             ..BuildOptions::default()
         });
 
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(result.output_files.len(), 2);
+        assert_eq!(result.output_files.len(), 3);
         let javascript = result
             .output_files
             .iter()
@@ -9720,9 +9771,19 @@ mod tests {
         let asset = result
             .output_files
             .iter()
-            .find(|output| !output.path.ends_with("/entry.js"))
+            .find(|output| {
+                std::path::Path::new(&output.path)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("asset"))
+            })
             .expect("asset output");
-        assert_eq!(asset.contents, b"binary asset contents");
+        assert!(
+            result
+                .output_files
+                .iter()
+                .any(|output| output.path.ends_with("/entry.js.map"))
+        );
+        assert_eq!(asset.contents, asset_contents);
         let asset_name = std::path::Path::new(&asset.path)
             .file_name()
             .expect("asset file name")

@@ -2738,7 +2738,8 @@ pub fn prepare_linker_graph<S: BuildHasher>(
     } else {
         INVALID_REF
     };
-    let runtime_refs = scan_runtime_refs_from_graph(&graph, unbound_module_ref);
+    let runtime_refs =
+        scan_runtime_refs_from_graph(&graph, unbound_module_ref, options.profiler_names);
     let scan_result = scan_imports_and_exports(
         &mut graph,
         options,
@@ -4961,21 +4962,26 @@ pub fn compile_prepared_css_asts(
                             .input_source_map
                             .clone()
                             .map(std::sync::Arc::new),
-                        crate::internal::sourcemap::generate_line_offset_tables(
-                            &file.input_file.source.contents,
-                            item.ast.approximate_line_count.max(0),
-                        ),
+                        if file.input_file.source_map_line_offset_tables.is_empty() {
+                            crate::internal::sourcemap::generate_line_offset_tables(
+                                &file.input_file.source.contents,
+                                item.ast.approximate_line_count.max(0),
+                            )
+                            .into()
+                        } else {
+                            file.input_file.source_map_line_offset_tables.clone()
+                        },
                         file.input_file.loader.can_have_source_map(),
                     )
                 } else {
-                    (None, Vec::new(), false)
+                    (None, std::sync::Arc::default(), false)
                 };
             let printed = css_printer::print(
                 &item.ast,
                 &graph.symbols,
                 css_printer::Options {
                     input_source_map,
-                    line_offset_tables,
+                    line_offset_tables: line_offset_tables.to_vec(),
                     local_names: local_names.clone(),
                     line_limit: options.line_limit,
                     input_source_index,
@@ -6549,11 +6555,19 @@ pub fn runtime_symbol_ref(graph: &LinkerGraph, name: &str) -> Ref {
 pub fn scan_runtime_refs_from_graph(
     graph: &LinkerGraph,
     unbound_module_ref: Ref,
+    profiler_names: bool,
 ) -> ScanRuntimeRefs {
     ScanRuntimeRefs {
         export_ref: runtime_symbol_ref(graph, "__export"),
-        common_js_ref: runtime_symbol_ref(graph, "__commonJS"),
-        esm_ref: runtime_symbol_ref(graph, "__esm"),
+        common_js_ref: runtime_symbol_ref(
+            graph,
+            if profiler_names {
+                "__commonJS"
+            } else {
+                "__commonJSMin"
+            },
+        ),
+        esm_ref: runtime_symbol_ref(graph, if profiler_names { "__esm" } else { "__esmMin" }),
         to_common_js_ref: runtime_symbol_ref(graph, "__toCommonJS"),
         unbound_module_ref,
     }
@@ -6564,10 +6578,18 @@ pub fn scan_runtime_refs_from_graph(
 pub fn chunk_runtime_refs_from_graph(
     graph: &LinkerGraph,
     unbound_module_ref: Option<Ref>,
+    profiler_names: bool,
 ) -> ChunkRuntimeRefs {
     ChunkRuntimeRefs {
-        common_js_ref: runtime_symbol_ref(graph, "__commonJS"),
-        esm_ref: runtime_symbol_ref(graph, "__esm"),
+        common_js_ref: runtime_symbol_ref(
+            graph,
+            if profiler_names {
+                "__commonJS"
+            } else {
+                "__commonJSMin"
+            },
+        ),
+        esm_ref: runtime_symbol_ref(graph, if profiler_names { "__esm" } else { "__esmMin" }),
         to_common_js_ref: runtime_symbol_ref(graph, "__toCommonJS"),
         to_esm_ref: runtime_symbol_ref(graph, "__toESM"),
         runtime_require_ref: runtime_symbol_ref(graph, "__require"),
@@ -6908,7 +6930,9 @@ pub fn compile_part_range_for_chunk(
         to_esm_ref: runtime_refs.to_esm_ref,
         runtime_require_ref: runtime_refs.runtime_require_ref,
     };
-    let printed = if options.source_map == crate::internal::config::SourceMap::None {
+    let mut printed = if options.source_map == crate::internal::config::SourceMap::None
+        || !file.input_file.loader.can_have_source_map()
+    {
         crate::internal::js_printer::print_linked(&tree, renamer, print_options, linker_options)
     } else {
         crate::internal::js_printer::print_linked_with_source_map(
@@ -6920,12 +6944,22 @@ pub fn compile_part_range_for_chunk(
                 .input_source_map
                 .clone()
                 .map(std::sync::Arc::new),
-            crate::internal::sourcemap::generate_line_offset_tables(
-                &file.input_file.source.contents,
-                repr.ast.approximate_line_count.max(0),
-            ),
+            if file.input_file.source_map_line_offset_tables.is_empty() {
+                crate::internal::sourcemap::generate_line_offset_tables(
+                    &file.input_file.source.contents,
+                    repr.ast.approximate_line_count.max(0),
+                )
+                .into()
+            } else {
+                file.input_file.source_map_line_offset_tables.clone()
+            },
         )
     };
+    if options.source_map != crate::internal::config::SourceMap::None
+        && !file.input_file.loader.can_have_source_map()
+    {
+        printed.source_map_chunk.should_ignore = true;
+    }
     CompiledPartRange {
         source_index: part_range.source_index,
         js: printed.js,
@@ -6936,6 +6970,11 @@ pub fn compile_part_range_for_chunk(
 }
 
 /// Compile every ordered JavaScript part range assigned to `chunk`.
+///
+/// # Panics
+///
+/// Panics if a worker fails while compiling a part range or a range is not
+/// compiled exactly once.
 #[must_use]
 pub fn compile_part_ranges_for_chunk(
     graph: &LinkerGraph,
@@ -6944,12 +6983,52 @@ pub fn compile_part_ranges_for_chunk(
     runtime_refs: ChunkRuntimeRefs,
     renamer: &dyn crate::internal::renamer::Renamer,
 ) -> Vec<CompiledPartRange> {
-    chunk
-        .parts_in_chunk_in_order
-        .iter()
-        .copied()
-        .map(|part_range| {
-            compile_part_range_for_chunk(graph, options, part_range, runtime_refs, renamer)
+    let part_ranges = &chunk.parts_in_chunk_in_order;
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(part_ranges.len());
+    if worker_count <= 1 {
+        return part_ranges
+            .iter()
+            .copied()
+            .map(|part_range| {
+                compile_part_range_for_chunk(graph, options, part_range, runtime_refs, renamer)
+            })
+            .collect();
+    }
+
+    let next_index = std::sync::atomic::AtomicUsize::new(0);
+    let results = (0..part_ranges.len())
+        .map(|_| std::sync::OnceLock::new())
+        .collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| {
+                loop {
+                    let index = next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&part_range) = part_ranges.get(index) else {
+                        break;
+                    };
+                    let did_set = results[index]
+                        .set(compile_part_range_for_chunk(
+                            graph,
+                            options,
+                            part_range,
+                            runtime_refs,
+                            renamer,
+                        ))
+                        .is_ok();
+                    assert!(did_set, "each part range must only be compiled once");
+                }
+            });
+        }
+    });
+    results
+        .into_iter()
+        .map(|result| {
+            result
+                .into_inner()
+                .expect("each part range must have a compiled result")
         })
         .collect()
 }
@@ -11570,6 +11649,8 @@ mod tests {
             "__toESM",
             "__require",
             "__reExport",
+            "__commonJSMin",
+            "__esmMin",
         ];
         let references: Vec<_> = (0..names.len())
             .map(|inner_index| Ref {
@@ -11606,16 +11687,16 @@ mod tests {
         for (name, &reference) in names.iter().zip(&references) {
             assert_eq!(runtime_symbol_ref(&graph, name), reference);
         }
-        let scan_refs = scan_runtime_refs_from_graph(&graph, unbound_module_ref);
+        let scan_refs = scan_runtime_refs_from_graph(&graph, unbound_module_ref, false);
         assert_eq!(scan_refs.export_ref, references[0]);
-        assert_eq!(scan_refs.common_js_ref, references[1]);
-        assert_eq!(scan_refs.esm_ref, references[2]);
+        assert_eq!(scan_refs.common_js_ref, references[7]);
+        assert_eq!(scan_refs.esm_ref, references[8]);
         assert_eq!(scan_refs.to_common_js_ref, references[3]);
         assert_eq!(scan_refs.unbound_module_ref, unbound_module_ref);
 
-        let chunk_refs = chunk_runtime_refs_from_graph(&graph, Some(unbound_module_ref));
-        assert_eq!(chunk_refs.common_js_ref, references[1]);
-        assert_eq!(chunk_refs.esm_ref, references[2]);
+        let chunk_refs = chunk_runtime_refs_from_graph(&graph, Some(unbound_module_ref), false);
+        assert_eq!(chunk_refs.common_js_ref, references[7]);
+        assert_eq!(chunk_refs.esm_ref, references[8]);
         assert_eq!(chunk_refs.to_common_js_ref, references[3]);
         assert_eq!(chunk_refs.to_esm_ref, references[4]);
         assert_eq!(chunk_refs.runtime_require_ref, references[5]);
@@ -11626,6 +11707,14 @@ mod tests {
                 unbound_module_ref: Some(unbound_module_ref),
             })
         );
+
+        let profiled_scan_refs = scan_runtime_refs_from_graph(&graph, unbound_module_ref, true);
+        assert_eq!(profiled_scan_refs.common_js_ref, references[1]);
+        assert_eq!(profiled_scan_refs.esm_ref, references[2]);
+        let profiled_chunk_refs =
+            chunk_runtime_refs_from_graph(&graph, Some(unbound_module_ref), true);
+        assert_eq!(profiled_chunk_refs.common_js_ref, references[1]);
+        assert_eq!(profiled_chunk_refs.esm_ref, references[2]);
     }
 
     #[test]

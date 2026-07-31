@@ -30,7 +30,7 @@ struct CompressedDir {
 
 struct CompressedFile {
     index: usize,
-    contents: Option<Result<String, FsError>>,
+    contents: Option<Result<Vec<u8>, FsError>>,
 }
 
 impl ZipFs {
@@ -128,7 +128,7 @@ impl Fs for ZipFs {
             .get(&key)
             .and_then(|file| file.contents.clone())
         {
-            return string_result(cached);
+            return byte_result(cached);
         }
 
         let contents = (|| {
@@ -139,14 +139,14 @@ impl Fs for ZipFs {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)
                 .map_err(|error| FsError::new(FsErrorKind::Other, error.to_string()))?;
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
+            Ok(bytes)
         })();
         archive
             .files
             .get_mut(&key)
             .expect("indexed ZIP file disappeared")
             .contents = Some(contents.clone());
-        string_result(contents)
+        byte_result(contents)
     }
 
     fn open_file(&self, path: &str) -> OpenFileResult {
@@ -324,16 +324,16 @@ pub fn mangle_yarn_pnp_virtual_path(path: &str) -> String {
         .map_or_else(|| path.into(), |(prefix, suffix)| prefix + &suffix)
 }
 
-fn string_result(result: Result<String, FsError>) -> ReadFileResult {
+fn byte_result(result: Result<Vec<u8>, FsError>) -> ReadFileResult {
     match result {
         Ok(contents) => (contents, None, None),
-        Err(error) => (String::new(), Some(error.clone()), Some(error)),
+        Err(error) => (Vec::new(), Some(error.clone()), Some(error)),
     }
 }
 
 fn missing_file(path: &str) -> ReadFileResult {
     let error = FsError::not_found(path);
-    (String::new(), Some(error.clone()), Some(error))
+    (Vec::new(), Some(error.clone()), Some(error))
 }
 
 fn missing_directory(path: &str) -> ReadDirectoryResult {
@@ -395,7 +395,7 @@ mod tests {
         .expect("real file system");
         let file_system = ZipFs::new(Box::new(inner));
         let virtual_file = format!("{}/pkg/index.js", zip_path.to_string_lossy());
-        assert_eq!(file_system.read_file(&virtual_file).0, "export default 1");
+        assert_eq!(file_system.read_file(&virtual_file).0, b"export default 1");
         let virtual_dir = format!("{}/pkg", zip_path.to_string_lossy());
         let entries = file_system.read_directory(&virtual_dir).0;
         assert_eq!(

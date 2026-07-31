@@ -9,9 +9,9 @@ use crate::internal::{
 use super::{
     parser_core::ParserCore,
     syntax_arrow::{
-        is_async_arrow_call, parse_arrow_after_parenthesized_expression,
-        parse_async_arrow_from_call, parse_empty_parenthesized_arrow,
-        parse_identifier_or_arrow_prefix,
+        expression_can_be_arrow_args, is_async_arrow_call,
+        parse_arrow_after_parenthesized_expression, parse_async_arrow_from_call,
+        parse_empty_parenthesized_arrow, parse_identifier_or_arrow_prefix,
     },
     syntax_class::parse_class_prefix,
     syntax_function::{parse_async_prefix, parse_function_prefix},
@@ -320,8 +320,8 @@ fn parse_prefix(
                 );
             }
             lexer.expect(Token::CloseParen);
-            if core.options.ts.parse {
-                super::syntax_typescript::skip_type_annotation(lexer, &[Token::EqualsGreaterThan]);
+            if core.options.ts.parse && expression_can_be_arrow_args(core, &expr) {
+                super::syntax_typescript::try_skip_arrow_return_type(lexer);
             }
             if lexer.token == Token::EqualsGreaterThan {
                 parse_arrow_after_parenthesized_expression(core, lexer, paren_loc, expr)

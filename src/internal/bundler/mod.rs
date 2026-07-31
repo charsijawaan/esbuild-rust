@@ -120,11 +120,37 @@ pub fn compile_javascript_bundle(
     options: &Options,
     unique_key_prefix: &str,
 ) -> CompiledBundle {
-    let mut prepared = prepare_linker_graph(bundle, options, unique_key_prefix, &HashMap::new());
+    let (mut prepared, source_map_line_offset_tables) =
+        if options.source_map == config::SourceMap::None {
+            (
+                prepare_linker_graph(bundle, options, unique_key_prefix, &HashMap::new()),
+                Vec::new(),
+            )
+        } else {
+            std::thread::scope(|scope| {
+                let source_map_task =
+                    scope.spawn(|| compute_source_map_line_offset_tables(&bundle.files));
+                let prepared =
+                    prepare_linker_graph(bundle, options, unique_key_prefix, &HashMap::new());
+                let tables = source_map_task
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                (prepared, tables)
+            })
+        };
+    for (file, tables) in prepared
+        .graph
+        .files
+        .iter_mut()
+        .zip(source_map_line_offset_tables)
+    {
+        file.input_file.source_map_line_offset_tables = tables.into();
+    }
     let runtime_refs = linker::chunk_runtime_refs_from_graph(
         &prepared.graph,
         (prepared.unbound_module_ref != crate::internal::ast::INVALID_REF)
             .then_some(prepared.unbound_module_ref),
+        options.profiler_names,
     );
     let chunk_paths: Vec<_> = prepared
         .chunks
@@ -288,6 +314,56 @@ pub fn bundle_javascript(
 pub struct DataForSourceMap {
     pub line_offset_tables: Vec<LineOffsetTable>,
     pub quoted_contents: Vec<Vec<u8>>,
+}
+
+fn compute_source_map_line_offset_tables(files: &[ScannerFile]) -> Vec<Vec<LineOffsetTable>> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let next_index = std::sync::atomic::AtomicUsize::new(0);
+    let results = (0..files.len())
+        .map(|_| std::sync::OnceLock::new())
+        .collect::<Vec<_>>();
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(files.len());
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| {
+                loop {
+                    let index = next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(file) = files.get(index) else {
+                        break;
+                    };
+                    let approximate_line_count = match file.input_file.repr.as_ref() {
+                        Some(InputFileRepr::Js(repr)) => repr.ast.approximate_line_count,
+                        Some(InputFileRepr::Css(repr)) => repr.ast.approximate_line_count,
+                        _ => 0,
+                    };
+                    let tables = if file.input_file.loader.can_have_source_map()
+                        && file.input_file.repr.is_some()
+                    {
+                        crate::internal::sourcemap::generate_line_offset_tables(
+                            &file.input_file.source.contents,
+                            approximate_line_count.max(0),
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    let did_set = results[index].set(tables).is_ok();
+                    assert!(did_set, "source-map data must only be computed once");
+                }
+            });
+        }
+    });
+    results
+        .into_iter()
+        .map(|result| {
+            result
+                .into_inner()
+                .expect("every input file must have source-map data")
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1116,7 +1192,7 @@ fn load_file_with_plugins(
             );
             return None;
         }
-        source.contents = Arc::from(contents.into_bytes());
+        source.contents = Arc::from(contents);
         return Some(LoadedFile {
             loader: Loader::Default,
             abs_resolve_dir: file_system.dir(&source.key_path.text),
@@ -1333,7 +1409,7 @@ fn find_nearest_tsconfig(
                 namespace: "file".into(),
                 ..Path::default()
             },
-            contents: Arc::from(contents.into_bytes()),
+            contents: Arc::from(contents),
             ..Source::default()
         };
         let mut extends = |text: &str, _range: Range| {

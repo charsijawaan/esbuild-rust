@@ -236,7 +236,7 @@ impl fmt::Display for FsError {
 impl std::error::Error for FsError {}
 
 pub type ReadDirectoryResult = (DirEntries, Option<FsError>, Option<FsError>);
-pub type ReadFileResult = (String, Option<FsError>, Option<FsError>);
+pub type ReadFileResult = (Vec<u8>, Option<FsError>, Option<FsError>);
 pub type OpenFileResult = (
     Option<Box<dyn OpenedFile>>,
     Option<FsError>,

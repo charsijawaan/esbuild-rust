@@ -509,7 +509,7 @@ pub fn print_with_source_map(
     renamer: &dyn Renamer,
     options: Options,
     input_source_map: Option<Arc<SourceMap>>,
-    line_offset_tables: Vec<LineOffsetTable>,
+    line_offset_tables: impl Into<Arc<[LineOffsetTable]>>,
 ) -> PrintResult {
     print_internal(
         tree,
@@ -532,7 +532,7 @@ pub fn print_linked_with_source_map(
     options: Options,
     linker_options: LinkerOptions<'_>,
     input_source_map: Option<Arc<SourceMap>>,
-    line_offset_tables: Vec<LineOffsetTable>,
+    line_offset_tables: impl Into<Arc<[LineOffsetTable]>>,
 ) -> PrintResult {
     print_internal(
         tree,

@@ -194,6 +194,19 @@ fn convert_expression_to_args(
     }
 }
 
+pub(crate) fn expression_can_be_arrow_args(core: &ParserCore, expression: &Expr) -> bool {
+    let mut args = Vec::new();
+    let mut has_rest_arg = false;
+    let mut syntax_features = Vec::new();
+    convert_expression_to_args(
+        core,
+        expression.clone(),
+        &mut args,
+        &mut has_rest_arg,
+        &mut syntax_features,
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 fn expression_to_binding(
     core: &ParserCore,

@@ -207,19 +207,39 @@ impl LineColumnOffset {
     }
 }
 
+#[inline]
 fn decode_utf8_rune(bytes: &[u8]) -> (char, usize) {
-    match std::str::from_utf8(bytes) {
-        Ok(text) => {
-            let character = text.chars().next().expect("input is non-empty");
-            (character, character.len_utf8())
+    let first = bytes[0];
+    if first < 0x80 {
+        return (char::from(first), 1);
+    }
+
+    let (width, mut code_point, minimum) = if first & 0xe0 == 0xc0 {
+        (2, u32::from(first & 0x1f), 0x80)
+    } else if first & 0xf0 == 0xe0 {
+        (3, u32::from(first & 0x0f), 0x800)
+    } else if first & 0xf8 == 0xf0 {
+        (4, u32::from(first & 0x07), 0x1_0000)
+    } else {
+        return ('\u{fffd}', 1);
+    };
+    let Some(continuations) = bytes.get(1..width) else {
+        return ('\u{fffd}', 1);
+    };
+
+    for continuation in continuations {
+        if continuation & 0xc0 != 0x80 {
+            return ('\u{fffd}', 1);
         }
-        Err(error) if error.valid_up_to() > 0 => {
-            let valid = std::str::from_utf8(&bytes[..error.valid_up_to()])
-                .expect("prefix reported as valid UTF-8");
-            let character = valid.chars().next().expect("valid prefix is non-empty");
-            (character, character.len_utf8())
-        }
-        Err(_) => ('\u{fffd}', 1),
+        code_point = (code_point << 6) | u32::from(continuation & 0x3f);
+    }
+
+    if code_point < minimum {
+        return ('\u{fffd}', 1);
+    }
+    match char::from_u32(code_point) {
+        Some(character) => (character, width),
+        None => ('\u{fffd}', 1),
     }
 }
 
@@ -485,7 +505,11 @@ pub fn generate_line_offset_tables(
             column_byte_offset = index - line_byte_offset;
             byte_offset_to_first_non_ascii =
                 i32::try_from(column_byte_offset).expect("source must fit in 32 bits");
-            columns_for_non_ascii = Some(Vec::new());
+            let bytes_until_ascii_line_break = contents[index..]
+                .iter()
+                .position(|byte| matches!(*byte, b'\r' | b'\n'))
+                .unwrap_or(contents.len() - index);
+            columns_for_non_ascii = Some(Vec::with_capacity(bytes_until_ascii_line_break + 1));
         }
 
         if let Some(columns) = &mut columns_for_non_ascii {
@@ -557,7 +581,7 @@ pub struct ChunkBuilder {
     source_map: Vec<u8>,
     quoted_names: Vec<Vec<u8>>,
     names_map: HashMap<String, u32>,
-    line_offset_tables: Vec<LineOffsetTable>,
+    line_offset_tables: Arc<[LineOffsetTable]>,
     previous_original_name: String,
     previous_state: SourceMapState,
     last_generated_update: usize,
@@ -574,7 +598,7 @@ pub struct ChunkBuilder {
 #[must_use]
 pub fn make_chunk_builder(
     input_source_map: Option<Arc<SourceMap>>,
-    line_offset_tables: Vec<LineOffsetTable>,
+    line_offset_tables: impl Into<Arc<[LineOffsetTable]>>,
     ascii_only: bool,
 ) -> ChunkBuilder {
     let cover_lines_without_mappings = input_source_map.is_none();
@@ -583,7 +607,7 @@ pub fn make_chunk_builder(
         source_map: Vec::new(),
         quoted_names: Vec::new(),
         names_map: HashMap::new(),
-        line_offset_tables,
+        line_offset_tables: line_offset_tables.into(),
         previous_original_name: String::new(),
         previous_state: SourceMapState::default(),
         last_generated_update: 0,
@@ -982,6 +1006,25 @@ mod tests {
         let chunk = builder.generate_chunk(b"x");
         assert_eq!(chunk.buffer.data, b"AAAA,CAAG");
         assert_eq!(chunk.final_generated_column, 1);
+    }
+
+    #[test]
+    fn utf8_rune_decoder_only_consumes_the_first_code_point() {
+        assert_eq!(super::decode_utf8_rune(b"a trailing suffix"), ('a', 1));
+        assert_eq!(
+            super::decode_utf8_rune("🙂 trailing suffix".as_bytes()),
+            ('🙂', 4)
+        );
+        assert_eq!(super::decode_utf8_rune(&[0xff, b'a']), ('\u{fffd}', 1));
+        assert_eq!(super::decode_utf8_rune(&[0xc0, 0x80]), ('\u{fffd}', 1));
+        assert_eq!(
+            super::decode_utf8_rune(&[0xed, 0xa0, 0x80]),
+            ('\u{fffd}', 1)
+        );
+        assert_eq!(
+            super::decode_utf8_rune(&[0xf4, 0x90, 0x80, 0x80]),
+            ('\u{fffd}', 1)
+        );
     }
 
     #[test]

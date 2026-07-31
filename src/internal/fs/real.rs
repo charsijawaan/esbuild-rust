@@ -41,7 +41,7 @@ enum WatchState {
 #[derive(Clone, Default)]
 struct PrivateWatchData {
     accessed_entries: Option<Arc<Mutex<AccessedEntries>>>,
-    file_contents: String,
+    file_contents: Vec<u8>,
     mod_key: ModKey,
     state: WatchState,
 }
@@ -180,11 +180,11 @@ impl Fs for RealFs {
         let _permit = FileOpenGuard::acquire();
         let result = fs::read(path);
         let (contents, canonical_error, original_error) = match result {
-            Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), None, None),
+            Ok(bytes) => (bytes, None, None),
             Err(error) => {
                 let original = fs_error(&error);
                 (
-                    String::new(),
+                    Vec::new(),
                     Some(canonical_file_error(&error)),
                     Some(original),
                 )
@@ -387,10 +387,8 @@ impl Fs for RealFs {
                     let watched = path.clone();
                     let old_contents = data.file_contents;
                     Arc::new(move || {
-                        let contents = fs::read(&watched)
-                            .ok()
-                            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-                        if contents.as_deref() == Some(old_contents.as_str()) {
+                        let contents = fs::read(&watched).ok();
+                        if contents.as_deref() == Some(old_contents.as_slice()) {
                             String::new()
                         } else {
                             watched.clone()
@@ -558,7 +556,7 @@ mod tests {
         .expect("real file system");
 
         let path = source.join("index.js").to_string_lossy().into_owned();
-        assert_eq!(file_system.read_file(&path).0, "let x = 1");
+        assert_eq!(file_system.read_file(&path).0, b"let x = 1");
         let mut opened = file_system.open_file(&path).0.expect("open");
         assert_eq!(opened.read(4, 9).expect("range"), b"x = 1");
         opened.close().expect("close");

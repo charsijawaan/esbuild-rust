@@ -170,7 +170,7 @@ pub struct FsCache {
 
 #[derive(Clone, Debug)]
 struct FsEntry {
-    contents: String,
+    contents: Vec<u8>,
     mod_key: ModKey,
     is_mod_key_usable: bool,
 }
@@ -452,8 +452,8 @@ mod tests {
             reads: AtomicUsize::new(0),
         };
         let cache = FsCache::default();
-        assert_eq!(cache.read_file(&fs, "/entry.js").0, "value();");
-        assert_eq!(cache.read_file(&fs, "/entry.js").0, "value();");
+        assert_eq!(cache.read_file(&fs, "/entry.js").0, b"value();");
+        assert_eq!(cache.read_file(&fs, "/entry.js").0, b"value();");
         assert_eq!(fs.reads.load(Ordering::Relaxed), 1);
     }
 

@@ -71,6 +71,44 @@ pub(crate) fn try_skip_type_arguments_in_expression(lexer: &mut Lexer) -> bool {
     }
 }
 
+pub(crate) fn try_skip_arrow_return_type(lexer: &mut Lexer) -> bool {
+    if lexer.token != Token::Colon {
+        return false;
+    }
+    let old_lexer = lexer.clone();
+    lexer.is_log_disabled = true;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        skip_type_annotation(
+            lexer,
+            &[
+                Token::EqualsGreaterThan,
+                Token::Comma,
+                Token::Semicolon,
+                Token::CloseBrace,
+                Token::CloseBracket,
+                Token::CloseParen,
+                Token::Equals,
+            ],
+        );
+        lexer.token == Token::EqualsGreaterThan
+    }));
+    match result {
+        Ok(true) => {
+            lexer.is_log_disabled = old_lexer.is_log_disabled;
+            true
+        }
+        Ok(false) => {
+            *lexer = old_lexer;
+            false
+        }
+        Err(payload) if payload.is::<crate::internal::js_lexer::LexerPanic>() => {
+            *lexer = old_lexer;
+            false
+        }
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 fn type_arguments_can_be_followed_by(lexer: &Lexer) -> bool {
     if lexer.has_newline_before {
         return true;
