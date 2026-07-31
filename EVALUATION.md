@@ -7,16 +7,16 @@ suite, a security audit, or a production-readiness claim.
 
 ## Snapshot
 
-- Rust feature checkpoint: `0d9a9d56bb0cc5827e5336b93ae919e82890ffe0`
+- Rust feature checkpoint: `1d0ff0440d4ef65b699aa6e64563841cb4ae3077`
 - Upstream esbuild: `6ff1d8b0d8c134e867a397eef39702a223ebef9e`
   (version 0.28.1)
 - Evaluation date: 2026-07-31
 - Toolchain: Rust 1.96.0, Node.js 24.15.0
 - Build: `cargo build --release --locked`
-- Rust source: 109,642 physical lines across tracked `*.rs` files
-- Repository tests: 851 passing
-- Approximate whole-product surface: 71.8%
-- Approximate selected native compiler/bundler/API core: 99.0%
+- Rust source: 110,224 physical lines across tracked `*.rs` files
+- Repository tests: 859 passing
+- Approximate whole-product surface: 55%
+- Approximate selected native compiler/bundler/API core: 75%
 
 The two percentages have different denominators. Whole-product surface includes
 serve, service protocols, language wrappers, WebAssembly, npm packaging, and
@@ -27,13 +27,14 @@ differential probes, and known gaps; neither is an official coverage metric.
 
 ## Result
 
-The release-mode Rust CLI passed 16 of 16 representative scenarios. The pinned
+The release-mode Rust CLI passed 17 of 17 representative scenarios. The pinned
 upstream executable also passed all scenarios, and the generated programs had
-the same standard output in all 16 cases.
+the same standard output in all 17 cases.
 
 | Scenario | Rust | Upstream | Runtime parity | Rust output | Upstream output |
 | --- | --- | --- | --- | ---: | ---: |
 | ESM graph and tree shaking | pass | pass | yes | 81 B | 79 B |
+| Production define and minify | pass | pass | yes | 17 B | 17 B |
 | CommonJS `require` | pass | pass | yes | 489 B | 480 B |
 | TypeScript modules | pass | pass | yes | 126 B | 122 B |
 | JSON loader | pass | pass | yes | 133 B | 133 B |
@@ -91,11 +92,14 @@ includes:
   distribution tooling;
 - injection, property mangling and mangle caches, plus portions of public
   logging control;
+- broad target-aware JavaScript lowering, including known gaps for optional
+  chaining, nullish/logical assignment, exponentiation, async syntax, object
+  rest/spread, class features, BigInt, and unsupported-target diagnostics;
 - explicit resource-management lowering, standard decorators, import-glob
-  bundling, and advanced CSS color/interpolation behavior;
+  bundling, and eight still-unwired CSS compatibility features;
 - exhaustive package-manager, resolver, syntax, diagnostic, source-map,
   minifier, and cross-platform filesystem parity;
 - the full upstream test corpus, security review, and performance benchmarking.
 
-The 851 local tests and this 16-case matrix make the snapshot inspectable and
+The 859 local tests and this 17-case matrix make the snapshot inspectable and
 useful, but upstream esbuild should remain the production choice.

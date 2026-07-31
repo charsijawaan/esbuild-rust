@@ -16,10 +16,16 @@ upstream revision is the acceptance criterion. Upstream tests are translated
 or exercised as differential tests as each subsystem lands.
 
 This repository is a bounded experimental snapshot. Its release binary passes
-all 16 scenarios in the bounded compiler/CLI evaluation, with the same runtime
+all 17 scenarios in the bounded compiler/CLI evaluation, with the same runtime
 results as the pinned upstream executable. That is encouraging, but it is not
 evidence of complete compatibility and this project is not a drop-in or
 production-ready esbuild replacement.
+
+The current engineering estimate is approximately 55% of the whole esbuild
+product surface and 75% of the selected native compiler/bundler/API core.
+These deliberately conservative figures account for absent service and
+packaging surfaces as well as known target-compatibility lowering gaps that
+the bounded smoke matrix does not exercise.
 
 See [EVALUATION.md](EVALUATION.md) for the reproducible compiler/CLI evaluation,
 [PORTING.md](PORTING.md) for the package matrix, and
