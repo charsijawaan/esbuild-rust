@@ -11,7 +11,9 @@ use crate::internal::{
 
 use super::{
     parser_core::ParserCore,
+    parser_types::{AwaitOrYield, FnOrArrowDataParse},
     syntax_expression::{parse_expression, parse_expression_suffix},
+    syntax_function::parse_function_tail,
 };
 
 pub(crate) fn skip_type_parameters(lexer: &mut Lexer) {
@@ -145,22 +147,6 @@ pub(crate) fn skip_class_implements_clause(lexer: &mut Lexer) {
         }
         lexer.next();
     }
-}
-
-pub(crate) fn skip_type_script_method_signature(lexer: &mut Lexer) {
-    lexer.expect(Token::OpenParen);
-    let mut depth = 1_usize;
-    while depth > 0 {
-        match lexer.token {
-            Token::OpenParen => depth += 1,
-            Token::CloseParen => depth -= 1,
-            Token::EndOfFile => lexer.expected(Token::CloseParen),
-            _ => {}
-        }
-        lexer.next();
-    }
-    skip_type_annotation(lexer, &[Token::Semicolon, Token::CloseBrace]);
-    lexer.expect_or_insert_semicolon();
 }
 
 pub(crate) fn skip_type_annotation(lexer: &mut Lexer, stop_tokens: &[Token]) {
@@ -631,7 +617,27 @@ fn parse_declare_function(
     }
     lexer.expect(Token::Identifier);
     skip_type_parameters(lexer);
-    skip_type_script_method_signature(lexer);
+    let _ = parse_function_tail(
+        core,
+        lexer,
+        None,
+        false,
+        true,
+        FnOrArrowDataParse {
+            await_policy: if async_range.is_some() {
+                AwaitOrYield::AllowExpression
+            } else {
+                AwaitOrYield::AllowIdentifier
+            },
+            yield_policy: if is_generator {
+                AwaitOrYield::AllowExpression
+            } else {
+                AwaitOrYield::AllowIdentifier
+            },
+            is_type_script_declare: true,
+            ..FnOrArrowDataParse::default()
+        },
+    );
 }
 
 pub(crate) fn parse_enum_statement(

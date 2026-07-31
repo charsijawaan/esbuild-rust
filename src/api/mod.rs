@@ -8465,6 +8465,164 @@ mod tests {
     }
 
     #[test]
+    fn reports_binding_and_spread_target_errors_with_exact_ranges() {
+        let source = "function f({a} = x, ...rest) {}\n\
+                      call(...x); new C(...y);\n\
+                      [a, {b}] = value;";
+        let result = transform(
+            source,
+            TransformOptions {
+                target: Target::Es5,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.code.is_empty());
+        assert!(result.warnings.is_empty());
+        let expected = [
+            ("destructuring", 1, 11, 1),
+            ("default arguments", 1, 15, 1),
+            ("rest arguments", 1, 20, 3),
+            ("rest arguments", 2, 5, 3),
+            ("rest arguments", 2, 18, 3),
+            ("destructuring", 3, 0, 1),
+            ("destructuring", 3, 4, 1),
+        ];
+        assert_eq!(result.errors.len(), expected.len());
+        for (message, (name, line, column, length)) in result.errors.iter().zip(expected) {
+            assert_api_error(
+                message,
+                &format!(
+                    "Transforming {name} to the configured target environment (\"es5\") is not \
+                     supported yet"
+                ),
+                line,
+                column,
+                length,
+            );
+        }
+
+        let built = build_api(BuildOptions {
+            stdin: Some(BuildStdin {
+                contents: "function f(a = 1, ...rest) {}".into(),
+                ..BuildStdin::default()
+            }),
+            target: Target::Es5,
+            ..BuildOptions::default()
+        });
+        assert!(built.output_files.is_empty());
+        assert_eq!(built.errors.len(), 2);
+        assert_api_error(
+            &built.errors[0],
+            "Transforming default arguments to the configured target environment (\"es5\") is \
+             not supported yet",
+            1,
+            13,
+            1,
+        );
+        assert_api_error(
+            &built.errors[1],
+            "Transforming rest arguments to the configured target environment (\"es5\") is not \
+             supported yet",
+            1,
+            18,
+            3,
+        );
+    }
+
+    #[test]
+    fn respects_binding_guard_boundaries_and_supported_overrides() {
+        let supported_in_es2015 =
+            "function f(a = 1, ...rest) {}; var [value] = input; call(...items)";
+        let result = transform(
+            supported_in_es2015,
+            TransformOptions {
+                target: Target::Es2015,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        assert_transform_error(
+            &transform(
+                "var [...[value]] = input",
+                TransformOptions {
+                    target: Target::Es2015,
+                    ..TransformOptions::default()
+                },
+            ),
+            "Transforming non-identifier array rest patterns to the configured target environment \
+             (\"es2015\") is not supported yet",
+            8,
+            1,
+        );
+        let result = transform(
+            "var [...[value]] = input",
+            TransformOptions {
+                target: Target::Es2016,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let result = transform(
+            "function f({a} = x, ...rest) {}; call(...items); var [...[value]] = input",
+            TransformOptions {
+                target: Target::Es5,
+                supported: HashMap::from([
+                    ("default-argument".into(), true),
+                    ("rest-argument".into(), true),
+                    ("destructuring".into(), true),
+                    ("nested-rest-binding".into(), true),
+                ]),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        for (source, feature, name, column, length) in [
+            (
+                "function f(value = 1) {}",
+                "default-argument",
+                "default arguments",
+                17,
+                1,
+            ),
+            ("call(...items)", "rest-argument", "rest arguments", 5, 3),
+            (
+                "var [value] = input",
+                "destructuring",
+                "destructuring",
+                4,
+                1,
+            ),
+            (
+                "var [...[value]] = input",
+                "nested-rest-binding",
+                "non-identifier array rest patterns",
+                8,
+                1,
+            ),
+        ] {
+            assert_transform_error(
+                &transform(
+                    source,
+                    TransformOptions {
+                        target: Target::EsNext,
+                        supported: HashMap::from([(feature.into(), false)]),
+                        ..TransformOptions::default()
+                    },
+                ),
+                &format!(
+                    "Transforming {name} to the configured target environment (\"esnext\" + 1 \
+                     override) is not supported yet"
+                ),
+                column,
+                length,
+            );
+        }
+    }
+
+    #[test]
     fn reports_generator_family_target_errors_with_exact_ranges() {
         for (source, text, column, length) in [
             (

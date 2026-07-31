@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
+    compat::JsFeature,
     js_ast::{
         Arg, ArrayBinding, ArrayBindingPattern, ArrowExpr, Binding, BindingData, Expr, ExprData,
         FunctionBody, IdentifierBinding, ObjectBindingPattern, OpCode, Precedence, PropertyBinding,
@@ -93,7 +94,18 @@ pub(crate) fn parse_arrow_after_parenthesized_expression(
     }
     let mut args = Vec::new();
     let mut has_rest_arg = false;
-    if !convert_expression_to_args(expression, &mut args, &mut has_rest_arg) {
+    let mut syntax_features = Vec::new();
+    if convert_expression_to_args(
+        core,
+        expression,
+        &mut args,
+        &mut has_rest_arg,
+        &mut syntax_features,
+    ) {
+        for (feature, range) in syntax_features {
+            core.mark_syntax_feature(feature, range);
+        }
+    } else {
         core.add_error_range(lexer.range(), "Invalid arrow function parameter list");
     }
     Some(parse_arrow_body(
@@ -108,9 +120,11 @@ pub(crate) fn parse_arrow_after_parenthesized_expression(
 }
 
 fn convert_expression_to_args(
+    core: &ParserCore,
     expression: Expr,
     args: &mut Vec<Arg>,
     has_rest_arg: &mut bool,
+    syntax_features: &mut Vec<(JsFeature, Range)>,
 ) -> bool {
     let loc = expression.loc;
     let Some(data) = expression.data else {
@@ -118,13 +132,23 @@ fn convert_expression_to_args(
     };
     match *data {
         ExprData::Binary(binary) if binary.op == OpCode::BinaryComma => {
-            convert_expression_to_args(binary.left, args, has_rest_arg)
-                && convert_expression_to_args(binary.right, args, has_rest_arg)
+            convert_expression_to_args(core, binary.left, args, has_rest_arg, syntax_features)
+                && convert_expression_to_args(
+                    core,
+                    binary.right,
+                    args,
+                    has_rest_arg,
+                    syntax_features,
+                )
         }
         ExprData::Binary(binary) if binary.op == OpCode::BinaryAssign => {
-            let Some(binding) = expression_to_binding(binary.left) else {
+            let Some(binding) = expression_to_binding(core, binary.left, syntax_features) else {
                 return false;
             };
+            syntax_features.push((
+                JsFeature::DEFAULT_ARGUMENT,
+                core.source.range_of_operator_before(binary.right.loc, b"="),
+            ));
             args.push(Arg {
                 binding,
                 default_or_nil: binary.right,
@@ -145,7 +169,8 @@ fn convert_expression_to_args(
             true
         }
         data @ (ExprData::Array(_) | ExprData::Object(_)) => {
-            let Some(binding) = expression_to_binding(Expr::new(loc, data)) else {
+            let Some(binding) = expression_to_binding(core, Expr::new(loc, data), syntax_features)
+            else {
                 return false;
             };
             args.push(Arg {
@@ -155,7 +180,7 @@ fn convert_expression_to_args(
             true
         }
         ExprData::Spread(spread) => {
-            let Some(binding) = expression_to_binding(spread.value) else {
+            let Some(binding) = expression_to_binding(core, spread.value, syntax_features) else {
                 return false;
             };
             args.push(Arg {
@@ -169,7 +194,12 @@ fn convert_expression_to_args(
     }
 }
 
-fn expression_to_binding(expression: Expr) -> Option<Binding> {
+#[allow(clippy::too_many_lines)]
+fn expression_to_binding(
+    core: &ParserCore,
+    expression: Expr,
+    syntax_features: &mut Vec<(JsFeature, Range)>,
+) -> Option<Binding> {
     let loc = expression.loc;
     match *expression.data? {
         ExprData::Identifier(identifier) => Some(Binding {
@@ -179,6 +209,10 @@ fn expression_to_binding(expression: Expr) -> Option<Binding> {
             }))),
         }),
         ExprData::Array(array) => {
+            syntax_features.push((
+                JsFeature::DESTRUCTURING,
+                core.source.range_of_operator_after(loc, b"["),
+            ));
             let mut items = Vec::with_capacity(array.items.len());
             let mut has_spread = false;
             for item in array.items {
@@ -197,7 +231,16 @@ fn expression_to_binding(expression: Expr) -> Option<Binding> {
                             unreachable!()
                         };
                         has_spread = true;
-                        (expression_to_binding(spread.value)?, Expr::default())
+                        if !matches!(spread.value.data.as_deref(), Some(ExprData::Identifier(_))) {
+                            syntax_features.push((
+                                JsFeature::NESTED_REST_BINDING,
+                                core.source.range_of_operator_after(spread.value.loc, b"["),
+                            ));
+                        }
+                        (
+                            expression_to_binding(core, spread.value, syntax_features)?,
+                            Expr::default(),
+                        )
                     }
                     Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryAssign => {
                         let ExprData::Binary(binary) =
@@ -205,9 +248,15 @@ fn expression_to_binding(expression: Expr) -> Option<Binding> {
                         else {
                             unreachable!()
                         };
-                        (expression_to_binding(binary.left)?, binary.right)
+                        (
+                            expression_to_binding(core, binary.left, syntax_features)?,
+                            binary.right,
+                        )
                     }
-                    _ => (expression_to_binding(item)?, Expr::default()),
+                    _ => (
+                        expression_to_binding(core, item, syntax_features)?,
+                        Expr::default(),
+                    ),
                 };
                 items.push(ArrayBinding {
                     binding,
@@ -226,11 +275,15 @@ fn expression_to_binding(expression: Expr) -> Option<Binding> {
             })
         }
         ExprData::Object(object) => {
+            syntax_features.push((
+                JsFeature::DESTRUCTURING,
+                core.source.range_of_operator_after(loc, b"{"),
+            ));
             let mut properties = Vec::with_capacity(object.properties.len());
             for property in object.properties {
                 if property.kind == PropertyKind::Spread {
                     properties.push(PropertyBinding {
-                        value: expression_to_binding(property.value_or_nil)?,
+                        value: expression_to_binding(core, property.value_or_nil, syntax_features)?,
                         loc: property.loc,
                         is_spread: true,
                         ..PropertyBinding::default()
@@ -242,7 +295,7 @@ fn expression_to_binding(expression: Expr) -> Option<Binding> {
                 }
                 properties.push(PropertyBinding {
                     key: property.key,
-                    value: expression_to_binding(property.value_or_nil)?,
+                    value: expression_to_binding(core, property.value_or_nil, syntax_features)?,
                     default_value_or_nil: property.initializer_or_nil,
                     loc: property.loc,
                     close_bracket_loc: property.close_bracket_loc,
@@ -391,10 +444,21 @@ pub(crate) fn parse_async_arrow_from_call(
     let mut args = Vec::new();
     let mut has_rest_arg = false;
     let mut valid = true;
+    let mut syntax_features = Vec::new();
     for argument in call.args {
-        valid &= convert_expression_to_args(argument, &mut args, &mut has_rest_arg);
+        valid &= convert_expression_to_args(
+            core,
+            argument,
+            &mut args,
+            &mut has_rest_arg,
+            &mut syntax_features,
+        );
     }
-    if !valid {
+    if valid {
+        for (feature, range) in syntax_features {
+            core.mark_syntax_feature(feature, range);
+        }
+    } else {
         core.add_error_range(lexer.range(), "Invalid arrow function parameter list");
     }
     parse_arrow_body(core, lexer, loc, args, true, false, has_rest_arg)

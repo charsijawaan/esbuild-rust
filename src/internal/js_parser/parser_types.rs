@@ -19,6 +19,7 @@ pub(crate) struct FnOrArrowDataParse {
     pub(crate) is_constructor: bool,
     pub(crate) is_this_disallowed: bool,
     pub(crate) is_return_disallowed: bool,
+    pub(crate) is_type_script_declare: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

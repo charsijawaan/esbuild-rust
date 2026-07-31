@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
+    compat::JsFeature,
     js_ast::{
         BinaryExpr, CallExpr, CallKind, Expr, ExprData, IndexExpr, OpCode, OptionalChain,
         Precedence, PrivateIdentifierExpr, SpreadExpr, UnaryExpr, is_property_access,
@@ -155,8 +156,9 @@ const fn precedence_before(precedence: Precedence) -> Precedence {
 }
 
 pub(crate) fn parse_call_args(
+    core: &mut ParserCore,
     lexer: &mut Lexer,
-    mut parse_arg: impl FnMut(&mut Lexer) -> Expr,
+    mut parse_arg: impl FnMut(&mut ParserCore, &mut Lexer) -> Expr,
 ) -> (Vec<Expr>, Loc, bool) {
     lexer.expect(Token::OpenParen);
     let mut args = Vec::new();
@@ -169,9 +171,10 @@ pub(crate) fn parse_call_args(
         let loc = lexer.loc();
         let is_spread = lexer.token == Token::DotDotDot;
         if is_spread {
+            core.mark_syntax_feature(JsFeature::REST_ARGUMENT, lexer.range());
             lexer.next();
         }
-        let mut argument = parse_arg(lexer);
+        let mut argument = parse_arg(core, lexer);
         if is_spread {
             argument = Expr::new(loc, ExprData::Spread(SpreadExpr { value: argument }));
         }
@@ -291,7 +294,7 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                             CallKind::Normal
                         };
                         let (args, close_paren_loc, is_multi_line) =
-                            parse_call_args(lexer, |lexer| {
+                            parse_call_args(core, lexer, |core, lexer| {
                                 parse_nested(core, lexer, Precedence::Comma)
                             });
                         left = Expr::new(
@@ -357,7 +360,9 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                     CallKind::Normal
                 };
                 let (args, close_paren_loc, is_multi_line) =
-                    parse_call_args(lexer, |lexer| parse_nested(core, lexer, Precedence::Comma));
+                    parse_call_args(core, lexer, |core, lexer| {
+                        parse_nested(core, lexer, Precedence::Comma)
+                    });
                 left = Expr::new(
                     left.loc,
                     ExprData::Call(CallExpr {
@@ -444,8 +449,9 @@ mod tests {
             contents: Arc::from(&b"(\n1, ...2,\n)"[..]),
             ..Source::default()
         };
-        let mut lexer = Lexer::new(log, source, TsOptions::default());
-        let (args, close, multiline) = parse_call_args(&mut lexer, |lexer| {
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let (args, close, multiline) = parse_call_args(&mut core, &mut lexer, |_, lexer| {
             let loc = lexer.loc();
             let value = lexer.number;
             lexer.next();

@@ -2,6 +2,7 @@
 
 use crate::internal::{
     ast::{INVALID_REF, LocRef, SymbolFlags, SymbolKind},
+    compat::JsFeature,
     js_ast::{
         Arg, Binding, BindingData, Expr, ExprData, Function, FunctionExpr, IdentifierBinding,
         Precedence,
@@ -247,6 +248,7 @@ pub(crate) fn parse_function_tail(
             break;
         }
         if lexer.token == Token::DotDotDot {
+            core.mark_syntax_feature(JsFeature::REST_ARGUMENT, lexer.range());
             lexer.next();
             has_rest_arg = true;
         }
@@ -266,6 +268,7 @@ pub(crate) fn parse_function_tail(
         core.declare_binding(SymbolKind::Hoisted, &mut binding);
 
         let default_or_nil = if !has_rest_arg && lexer.token == Token::Equals {
+            core.mark_syntax_feature(JsFeature::DEFAULT_ARGUMENT, lexer.range());
             lexer.next();
             parse_expression(core, lexer, Precedence::Comma, true)
         } else {
@@ -282,7 +285,12 @@ pub(crate) fn parse_function_tail(
             break;
         }
         if has_rest_arg {
-            lexer.expected(Token::CloseParen);
+            if body_context.is_type_script_declare {
+                lexer.next();
+            } else {
+                lexer.expected(Token::CloseParen);
+            }
+            break;
         }
         lexer.next();
     }

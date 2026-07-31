@@ -1338,7 +1338,15 @@ impl ParserCore {
             return true;
         }
 
-        let name = if feature == JsFeature::CLASS {
+        let name = if feature == JsFeature::DEFAULT_ARGUMENT {
+            "default arguments".to_owned()
+        } else if feature == JsFeature::REST_ARGUMENT {
+            "rest arguments".to_owned()
+        } else if feature == JsFeature::DESTRUCTURING {
+            "destructuring".to_owned()
+        } else if feature == JsFeature::NESTED_REST_BINDING {
+            "non-identifier array rest patterns".to_owned()
+        } else if feature == JsFeature::CLASS {
             "class syntax".to_owned()
         } else if feature == JsFeature::CONST_AND_LET {
             String::from_utf8_lossy(self.source.text_for_range(range)).into_owned()

@@ -2057,6 +2057,116 @@ mod tests {
     }
 
     #[test]
+    fn guards_parameter_binding_assignment_and_spread_syntax_with_exact_ranges() {
+        let source = "function f({a} = x, ...rest) {}\n\
+                      const arrow = ([a, ...[b]], ...[c]) => a\n\
+                      const defaults = (value = init) => value;\n\
+                      call(...x); new C(...y);\n\
+                      [a, {b}] = value;\n\
+                      try {} catch ({message}) {}\n\
+                      const view = <div>{...children}</div>;\n\
+                      (value = init);";
+        let mut options = Options {
+            unsupported_js_features: JsFeature::DEFAULT_ARGUMENT
+                | JsFeature::REST_ARGUMENT
+                | JsFeature::DESTRUCTURING
+                | JsFeature::NESTED_REST_BINDING,
+            original_target_env: "\"es5\"".into(),
+            ..Options::default()
+        };
+        options.jsx.parse = true;
+        let (_, ok, log) = parse_source_with_options(source, options);
+        assert!(ok);
+        let messages = log.done();
+        let expected = [
+            ("destructuring", 1, 11, 1),
+            ("default arguments", 1, 15, 1),
+            ("rest arguments", 1, 20, 3),
+            ("destructuring", 2, 15, 1),
+            ("destructuring", 2, 22, 1),
+            ("non-identifier array rest patterns", 2, 22, 1),
+            ("rest arguments", 2, 28, 3),
+            ("destructuring", 2, 31, 1),
+            ("default arguments", 3, 24, 1),
+            ("rest arguments", 4, 5, 3),
+            ("rest arguments", 4, 18, 3),
+            ("destructuring", 5, 0, 1),
+            ("destructuring", 5, 4, 1),
+            ("destructuring", 6, 14, 1),
+            ("rest arguments", 7, 19, 3),
+        ];
+        assert_eq!(messages.len(), expected.len());
+        for (message, (name, line, column, length)) in messages.iter().zip(expected) {
+            assert_syntax_guard_message(
+                message,
+                &format!(
+                    "Transforming {name} to the configured target environment (\"es5\") is not \
+                     supported yet"
+                ),
+                line,
+                column,
+                length,
+            );
+        }
+    }
+
+    #[test]
+    fn guards_typescript_ambient_and_abstract_parameter_syntax() {
+        let source = "declare function f({a}: T = x, ...rest: U[]): void;\n\
+                      abstract class C { abstract m([a, ...[b]]: V, q = y, ...z: W[]): void; }\n\
+                      declare function g(...items: any[],): void;";
+        let mut options = Options {
+            unsupported_js_features: JsFeature::DEFAULT_ARGUMENT
+                | JsFeature::REST_ARGUMENT
+                | JsFeature::DESTRUCTURING
+                | JsFeature::NESTED_REST_BINDING,
+            original_target_env: "\"es5\"".into(),
+            ..Options::default()
+        };
+        options.ts.parse = true;
+        let (_, ok, log) = parse_source_with_options(source, options);
+        assert!(ok);
+        let messages = log.done();
+        let expected = [
+            ("destructuring", 1, 19, 1),
+            ("default arguments", 1, 26, 1),
+            ("rest arguments", 1, 31, 3),
+            ("destructuring", 2, 30, 1),
+            ("destructuring", 2, 37, 1),
+            ("non-identifier array rest patterns", 2, 37, 1),
+            ("default arguments", 2, 48, 1),
+            ("rest arguments", 2, 53, 3),
+            ("rest arguments", 3, 19, 3),
+        ];
+        assert_eq!(messages.len(), expected.len());
+        for (message, (name, line, column, length)) in messages.iter().zip(expected) {
+            assert_syntax_guard_message(
+                message,
+                &format!(
+                    "Transforming {name} to the configured target environment (\"es5\") is not \
+                     supported yet"
+                ),
+                line,
+                column,
+                length,
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_apply_nested_rest_binding_guard_to_assignment_patterns() {
+        let (_, ok, log) = parse_source_with_options(
+            "[...[value]] = input",
+            Options {
+                unsupported_js_features: JsFeature::NESTED_REST_BINDING,
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
     fn guards_generator_family_syntax_across_all_function_forms() {
         let unsupported =
             JsFeature::GENERATOR | JsFeature::ASYNC_AWAIT | JsFeature::ASYNC_GENERATOR;

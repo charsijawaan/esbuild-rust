@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::internal::{
+    compat::JsFeature,
     helpers::string_to_utf16,
     js_ast::{
         DotExpr, Expr, ExprData, IdentifierExpr, JsxElementExpr, JsxTextExpr, Precedence, Property,
@@ -294,6 +295,7 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                     });
                 } else if lexer.token == Token::DotDotDot {
                     let spread_loc = lexer.loc();
+                    core.mark_syntax_feature(JsFeature::REST_ARGUMENT, lexer.range());
                     lexer.next();
                     nullable_children.push(Expr::new(
                         spread_loc,

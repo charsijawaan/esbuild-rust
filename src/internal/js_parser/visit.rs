@@ -4438,6 +4438,7 @@ fn visit_expr_with_target_and_context(
     assign_target: AssignTarget,
     context: ExprVisitContext,
 ) {
+    let expression_loc = expression.loc;
     if assign_target != AssignTarget::None {
         let is_pattern = match expression.data.as_deref() {
             Some(
@@ -4601,6 +4602,15 @@ fn visit_expr_with_target_and_context(
             }
         }
         ExprData::Array(array) => {
+            if assign_target != AssignTarget::None {
+                core.mark_syntax_feature(
+                    JsFeature::DESTRUCTURING,
+                    Range {
+                        loc: expression_loc,
+                        len: 1,
+                    },
+                );
+            }
             let mut has_spread = false;
             for item in &mut array.items {
                 has_spread |= matches!(item.data.as_deref(), Some(ExprData::Spread(_)));
@@ -5312,6 +5322,15 @@ fn visit_expr_with_target_and_context(
             }
         }
         ExprData::Object(object) => {
+            if assign_target != AssignTarget::None {
+                core.mark_syntax_feature(
+                    JsFeature::DESTRUCTURING,
+                    Range {
+                        loc: expression_loc,
+                        len: 1,
+                    },
+                );
+            }
             report_duplicate_properties(core, &object.properties, DuplicatePropertiesIn::Object);
             if assign_target == AssignTarget::None {
                 report_duplicate_proto_properties(core, &object.properties);

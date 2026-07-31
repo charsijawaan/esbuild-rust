@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
+    compat::JsFeature,
     helpers::string_to_utf16,
     js_ast::{
         ArrayBinding, ArrayBindingPattern, Binding, BindingData, Expr, ExprData, IdentifierBinding,
@@ -55,6 +56,7 @@ pub(crate) fn parse_binding(core: &mut ParserCore, lexer: &mut Lexer) -> Binding
 
 fn parse_array_binding(core: &mut ParserCore, lexer: &mut Lexer) -> Binding {
     let loc = lexer.loc();
+    core.mark_syntax_feature(JsFeature::DESTRUCTURING, lexer.range());
     lexer.expect(Token::OpenBracket);
     let mut is_single_line = !lexer.has_newline_before;
     let mut items = Vec::new();
@@ -74,6 +76,9 @@ fn parse_array_binding(core: &mut ParserCore, lexer: &mut Lexer) -> Binding {
             if lexer.token == Token::DotDotDot {
                 lexer.next();
                 has_spread = true;
+                if lexer.token != Token::Identifier {
+                    core.mark_syntax_feature(JsFeature::NESTED_REST_BINDING, lexer.range());
+                }
             }
             let binding = parse_binding(core, lexer);
             let default_value_or_nil = if !has_spread && lexer.token == Token::Equals {
@@ -120,6 +125,7 @@ fn parse_array_binding(core: &mut ParserCore, lexer: &mut Lexer) -> Binding {
 
 fn parse_object_binding(core: &mut ParserCore, lexer: &mut Lexer) -> Binding {
     let loc = lexer.loc();
+    core.mark_syntax_feature(JsFeature::DESTRUCTURING, lexer.range());
     lexer.expect(Token::OpenBrace);
     let mut is_single_line = !lexer.has_newline_before;
     let mut properties = Vec::new();

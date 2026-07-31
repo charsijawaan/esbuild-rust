@@ -365,7 +365,31 @@ fn parse_class_property(
 
     if is_type_only {
         if is_method {
-            super::syntax_typescript::skip_type_script_method_signature(lexer);
+            let is_constructor = !is_static && key_is_named(&key, "constructor");
+            let _ = parse_function_tail(
+                core,
+                lexer,
+                None,
+                false,
+                true,
+                FnOrArrowDataParse {
+                    await_policy: if is_async {
+                        AwaitOrYield::AllowExpression
+                    } else {
+                        AwaitOrYield::AllowIdentifier
+                    },
+                    yield_policy: if is_generator {
+                        AwaitOrYield::AllowExpression
+                    } else {
+                        AwaitOrYield::AllowIdentifier
+                    },
+                    allow_super_call: class_has_extends && is_constructor,
+                    allow_super_property: true,
+                    is_constructor,
+                    is_type_script_declare: true,
+                    ..FnOrArrowDataParse::default()
+                },
+            );
         } else {
             super::syntax_typescript::skip_type_annotation(
                 lexer,

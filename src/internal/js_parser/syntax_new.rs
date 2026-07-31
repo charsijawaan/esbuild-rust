@@ -38,7 +38,7 @@ pub(crate) fn parse_new_prefix(
         super::syntax_typescript::try_skip_type_arguments_in_expression(lexer);
     }
     let (args, close_paren_loc, is_multi_line) = if lexer.token == Token::OpenParen {
-        parse_call_args(lexer, |lexer| parse_argument(core, lexer))
+        parse_call_args(core, lexer, |core, lexer| parse_argument(core, lexer))
     } else {
         (Vec::new(), crate::internal::logger::Loc::default(), false)
     };

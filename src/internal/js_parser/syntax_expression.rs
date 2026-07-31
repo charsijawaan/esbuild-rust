@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
+    compat::JsFeature,
     js_ast::{BinaryExpr, Expr, ExprData, IfExpr, Precedence, SpreadExpr},
     js_lexer::{CommentBefore, Lexer, Token},
 };
@@ -387,6 +388,7 @@ fn parse_new_target(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
 fn parse_parenthesized_item(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
     if lexer.token == Token::DotDotDot {
         let loc = lexer.loc();
+        core.mark_syntax_feature(JsFeature::REST_ARGUMENT, lexer.range());
         lexer.next();
         let value = parse_expression(core, lexer, Precedence::Comma, true);
         Expr::new(loc, ExprData::Spread(SpreadExpr { value }))
