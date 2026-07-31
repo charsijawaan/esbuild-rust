@@ -58,14 +58,27 @@ fn prepend_cli_warnings(error: String, warning_details: &str) -> String {
     }
 }
 
+fn parse_bool_flag(argument: &str, flag: &str) -> Option<Result<bool, String>> {
+    let remainder = argument.strip_prefix(flag)?;
+    if remainder.is_empty() {
+        return Some(Ok(true));
+    }
+    let value = remainder.strip_prefix('=')?;
+    Some(match value {
+        "false" => Ok(false),
+        "true" => Ok(true),
+        _ => Err(format!(
+            "Invalid value {value:?} in {argument:?}\n\n\
+             Valid values are \"true\" or \"false\"."
+        )),
+    })
+}
+
 fn cli_color(arguments: &[String]) -> bool {
     arguments
         .iter()
-        .filter_map(|argument| match argument.as_str() {
-            "--color" | "--color=true" => Some(true),
-            "--color=false" => Some(false),
-            _ => None,
-        })
+        .filter_map(|argument| parse_bool_flag(argument, "--color"))
+        .filter_map(Result::ok)
         .next_back()
         .unwrap_or_else(|| io::stderr().is_terminal())
 }
@@ -190,10 +203,11 @@ fn run_with_stdin_and_node_paths(
         if argument == "--version" {
             return Ok(Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))));
         }
-        if argument == "--minify" {
-            options.minify_whitespace = true;
-            options.minify_identifiers = true;
-            options.minify_syntax = true;
+        if let Some(value) = parse_bool_flag(argument, "--minify") {
+            let value = value?;
+            options.minify_whitespace = value;
+            options.minify_identifiers = value;
+            options.minify_syntax = value;
             continue;
         }
         if argument == "--bundle" {
@@ -208,17 +222,9 @@ fn run_with_stdin_and_node_paths(
             analyze = AnalyzeMode::Verbose;
             continue;
         }
-        if matches!(
-            argument.as_str(),
-            "--color" | "--color=true" | "--color=false"
-        ) {
+        if let Some(value) = parse_bool_flag(argument, "--color") {
+            value?;
             continue;
-        }
-        if let Some(value) = argument.strip_prefix("--color=") {
-            return Err(format!(
-                "Invalid value {value:?} in {argument:?}\n\n\
-                 Valid values are \"true\" or \"false\"."
-            ));
         }
         if argument == "--splitting" {
             splitting = true;
@@ -247,8 +253,8 @@ fn run_with_stdin_and_node_paths(
             options.drop_labels = value.split(',').map(str::to_string).collect();
             continue;
         }
-        if argument == "--ignore-annotations" {
-            options.ignore_annotations = true;
+        if let Some(value) = parse_bool_flag(argument, "--ignore-annotations") {
+            options.ignore_annotations = value?;
             continue;
         }
         if argument == "--sourcemap" {
@@ -271,11 +277,11 @@ fn run_with_stdin_and_node_paths(
             source_root = value.into();
             continue;
         }
-        if let Some(value) = argument.strip_prefix("--sources-content=") {
-            sources_content = match value {
-                "true" => BuildSourcesContent::Include,
-                "false" => BuildSourcesContent::Exclude,
-                _ => return Err(format!("Invalid sources content setting {value:?}")),
+        if let Some(value) = parse_bool_flag(argument, "--sources-content") {
+            sources_content = if value? {
+                BuildSourcesContent::Include
+            } else {
+                BuildSourcesContent::Exclude
             };
             continue;
         }
@@ -290,11 +296,11 @@ fn run_with_stdin_and_node_paths(
             };
             continue;
         }
-        if let Some(value) = argument.strip_prefix("--tree-shaking=") {
-            tree_shaking = match value {
-                "true" => BuildTreeShaking::Enabled,
-                "false" => BuildTreeShaking::Disabled,
-                _ => return Err(format!("Invalid tree shaking setting {value:?}")),
+        if let Some(value) = parse_bool_flag(argument, "--tree-shaking") {
+            tree_shaking = if value? {
+                BuildTreeShaking::Enabled
+            } else {
+                BuildTreeShaking::Disabled
             };
             continue;
         }
@@ -319,20 +325,12 @@ fn run_with_stdin_and_node_paths(
             jsx_import_source = value.into();
             continue;
         }
-        if argument == "--jsx-dev" {
-            jsx_development = true;
+        if let Some(value) = parse_bool_flag(argument, "--jsx-dev") {
+            jsx_development = value?;
             continue;
         }
-        if argument == "--jsx-side-effects" {
-            jsx_side_effects = true;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--jsx-side-effects=") {
-            jsx_side_effects = match value {
-                "true" => true,
-                "false" => false,
-                _ => return Err(format!("Invalid JSX side effects setting {value:?}")),
-            };
+        if let Some(value) = parse_bool_flag(argument, "--jsx-side-effects") {
+            jsx_side_effects = value?;
             continue;
         }
         if let Some(value) = argument.strip_prefix("--outdir=") {
@@ -469,16 +467,16 @@ fn run_with_stdin_and_node_paths(
             };
             continue;
         }
-        if argument == "--minify-whitespace" {
-            options.minify_whitespace = true;
+        if let Some(value) = parse_bool_flag(argument, "--minify-whitespace") {
+            options.minify_whitespace = value?;
             continue;
         }
-        if argument == "--minify-identifiers" {
-            options.minify_identifiers = true;
+        if let Some(value) = parse_bool_flag(argument, "--minify-identifiers") {
+            options.minify_identifiers = value?;
             continue;
         }
-        if argument == "--minify-syntax" {
-            options.minify_syntax = true;
+        if let Some(value) = parse_bool_flag(argument, "--minify-syntax") {
+            options.minify_syntax = value?;
             continue;
         }
         if let Some(value) = argument.strip_prefix("--loader:") {
@@ -531,8 +529,8 @@ fn run_with_stdin_and_node_paths(
             pure.push(value.into());
             continue;
         }
-        if argument == "--keep-names" {
-            keep_names = true;
+        if let Some(value) = parse_bool_flag(argument, "--keep-names") {
+            keep_names = value?;
             continue;
         }
         if let Some(loader) = argument.strip_prefix("--loader=") {
@@ -1070,9 +1068,65 @@ fn help_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineName, Loader, Output, Target, parse_loader, parse_targets, run, run_with_stdin,
-        run_with_stdin_and_node_paths,
+        EngineName, Loader, Output, Target, parse_bool_flag, parse_loader, parse_targets, run,
+        run_with_stdin, run_with_stdin_and_node_paths,
     };
+
+    fn transform_code(arguments: &[&str], source: &[u8]) -> String {
+        let arguments = arguments
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect::<Vec<_>>();
+        let Output::Code(output) =
+            run_with_stdin(&arguments, Some(source)).expect("transform succeeds")
+        else {
+            panic!("expected transformed code");
+        };
+        String::from_utf8(output).expect("transform output is UTF-8")
+    }
+
+    #[test]
+    fn parses_upstream_boolean_flag_forms_without_prefix_collisions() {
+        for flag in [
+            "--minify",
+            "--minify-syntax",
+            "--minify-whitespace",
+            "--minify-identifiers",
+            "--tree-shaking",
+            "--ignore-annotations",
+            "--keep-names",
+            "--sources-content",
+            "--jsx-dev",
+            "--jsx-side-effects",
+            "--color",
+        ] {
+            assert_eq!(parse_bool_flag(flag, flag), Some(Ok(true)), "{flag}");
+            assert_eq!(
+                parse_bool_flag(&format!("{flag}=true"), flag),
+                Some(Ok(true)),
+                "{flag}"
+            );
+            assert_eq!(
+                parse_bool_flag(&format!("{flag}=false"), flag),
+                Some(Ok(false)),
+                "{flag}"
+            );
+            assert_eq!(
+                parse_bool_flag(&format!("{flag}=wat"), flag),
+                Some(Err(format!(
+                    "Invalid value \"wat\" in \"{flag}=wat\"\n\n\
+                     Valid values are \"true\" or \"false\"."
+                ))),
+                "{flag}"
+            );
+        }
+
+        assert_eq!(parse_bool_flag("--minify-syntax", "--minify"), None);
+        assert_eq!(
+            parse_bool_flag("--jsx-side-effects-extra", "--jsx-side-effects"),
+            None
+        );
+    }
 
     #[test]
     fn parses_loader_flags_and_file_extensions() {
@@ -1160,13 +1214,31 @@ mod tests {
         assert!(run(&["--drop-labels=".into()]).is_err());
         assert!(run(&["--drop-labels=DEV,".into()]).is_err());
         assert!(run(&["--pure:".into()]).is_err());
-        assert_eq!(
-            run(&["--color=wat".into()])
-                .err()
-                .expect("invalid color value"),
-            "Invalid value \"wat\" in \"--color=wat\"\n\n\
-             Valid values are \"true\" or \"false\"."
-        );
+        for flag in [
+            "--minify",
+            "--minify-syntax",
+            "--minify-whitespace",
+            "--minify-identifiers",
+            "--tree-shaking",
+            "--ignore-annotations",
+            "--keep-names",
+            "--sources-content",
+            "--jsx-dev",
+            "--jsx-side-effects",
+            "--color",
+        ] {
+            let argument = format!("{flag}=wat");
+            assert_eq!(
+                run(std::slice::from_ref(&argument))
+                    .err()
+                    .expect("invalid boolean value"),
+                format!(
+                    "Invalid value \"wat\" in \"{flag}=wat\"\n\n\
+                     Valid values are \"true\" or \"false\"."
+                ),
+                "{flag}"
+            );
+        }
         assert_eq!(
             run(&["--abs-paths=nope".into()])
                 .err()
@@ -1175,6 +1247,71 @@ mod tests {
              Valid values are \"code\", \"log\", or \"metafile\"."
         );
         assert!(run(&["--abs-paths=".into(), "--version".into()]).is_ok());
+    }
+
+    #[test]
+    fn accepts_all_common_boolean_cli_forms() {
+        for flag in [
+            "--minify",
+            "--minify-syntax",
+            "--minify-whitespace",
+            "--minify-identifiers",
+            "--tree-shaking",
+            "--ignore-annotations",
+            "--keep-names",
+            "--sources-content",
+            "--jsx-dev",
+            "--jsx-side-effects",
+        ] {
+            for suffix in ["", "=true", "=false"] {
+                let argument = format!("{flag}{suffix}");
+                let arguments = [argument];
+                let Output::Code(_) =
+                    run_with_stdin(&arguments, Some(b"let value = 1")).expect("valid boolean flag")
+                else {
+                    panic!("expected transformed code for {flag}{suffix}");
+                };
+            }
+        }
+    }
+
+    #[test]
+    fn boolean_minify_flags_use_last_value() {
+        let source = b"function outer(longParameterName) { \
+            let anotherLongName = longParameterName + 1; \
+            return anotherLongName \
+        } console.log(outer(globalValue))"
+            .as_slice();
+        let baseline = transform_code(&[], source);
+        let minified = transform_code(&["--minify"], source);
+        assert_ne!(minified, baseline);
+        assert_eq!(transform_code(&["--minify=true"], source), minified);
+        assert_eq!(transform_code(&["--minify=false"], source), baseline);
+        assert_eq!(
+            transform_code(&["--minify", "--minify=false"], source),
+            baseline
+        );
+        assert_eq!(
+            transform_code(&["--minify=false", "--minify"], source),
+            minified
+        );
+
+        for flag in [
+            "--minify-syntax=false",
+            "--minify-whitespace=false",
+            "--minify-identifiers=false",
+        ] {
+            assert_ne!(
+                transform_code(&["--minify", flag], source),
+                minified,
+                "{flag}"
+            );
+            assert_eq!(
+                transform_code(&[flag, "--minify"], source),
+                minified,
+                "{flag}"
+            );
+        }
     }
 
     #[test]
@@ -1551,15 +1688,16 @@ mod tests {
 
     #[test]
     fn controls_tree_shaking_for_transforms() {
-        let input = Some(b"const dead = 1; console.log('live')".as_slice());
-        for (setting, should_keep_dead) in [("true", false), ("false", true)] {
-            let Output::Code(output) =
-                run_with_stdin(&[format!("--tree-shaking={setting}")], input)
-                    .expect("transform succeeds")
-            else {
-                panic!("expected transformed code");
-            };
-            let output = String::from_utf8(output).expect("transform output is UTF-8");
+        let input = b"const dead = 1; console.log('live')".as_slice();
+        let cases: &[(&[&str], bool)] = &[
+            (&["--tree-shaking"], false),
+            (&["--tree-shaking=true"], false),
+            (&["--tree-shaking=false"], true),
+            (&["--tree-shaking", "--tree-shaking=false"], true),
+            (&["--tree-shaking=false", "--tree-shaking"], false),
+        ];
+        for &(arguments, should_keep_dead) in cases {
+            let output = transform_code(arguments, input);
             assert_eq!(output.contains("dead"), should_keep_dead, "{output}");
             assert!(output.contains("console.log(\"live\")"), "{output}");
         }
@@ -1745,39 +1883,52 @@ mod tests {
     }
 
     #[test]
-    fn configures_jsx_side_effects_for_transforms() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock is after epoch")
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("esbuild-rs-cli-jsx-side-effects-{unique}"));
-        std::fs::create_dir_all(&directory).expect("create test directory");
-        let entry = directory.join("entry.jsx");
-        std::fs::write(&entry, "<Widget />").expect("write entry file");
+    fn boolean_jsx_flags_use_last_value() {
+        let jsx = b"<Widget />";
+        let side_effectful = transform_code(
+            &[
+                "--loader=jsx",
+                "--jsx-side-effects=false",
+                "--jsx-side-effects",
+            ],
+            jsx,
+        );
+        assert!(!side_effectful.contains("@__PURE__"), "{side_effectful}");
+        let pure = transform_code(
+            &[
+                "--loader=jsx",
+                "--jsx-side-effects",
+                "--jsx-side-effects=false",
+            ],
+            jsx,
+        );
+        assert!(pure.contains("@__PURE__"), "{pure}");
 
-        let Output::Code(output) = run(&[
-            "--jsx-side-effects".into(),
-            entry.to_string_lossy().into_owned(),
-        ])
-        .expect("transform succeeds") else {
-            panic!("expected transformed code");
-        };
-        let output = String::from_utf8(output).expect("transform output is UTF-8");
-        assert_eq!(output, "React.createElement(Widget, null);\n");
-
-        let Output::Code(output) = run(&[
-            "--jsx=preserve".into(),
-            entry.to_string_lossy().into_owned(),
-        ])
-        .expect("transform succeeds") else {
-            panic!("expected transformed code");
-        };
+        let development = transform_code(
+            &[
+                "--loader=jsx",
+                "--jsx=automatic",
+                "--jsx-dev=false",
+                "--jsx-dev",
+            ],
+            b"<div />",
+        );
+        assert!(development.contains("jsx-dev-runtime"), "{development}");
+        let production = transform_code(
+            &[
+                "--loader=jsx",
+                "--jsx=automatic",
+                "--jsx-dev",
+                "--jsx-dev=false",
+            ],
+            b"<div />",
+        );
+        assert!(production.contains("jsx-runtime"), "{production}");
+        assert!(!production.contains("jsxDEV"), "{production}");
         assert_eq!(
-            String::from_utf8(output).expect("transform output is UTF-8"),
+            transform_code(&["--loader=jsx", "--jsx=preserve"], jsx),
             "<Widget />;\n"
         );
-        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
@@ -1807,18 +1958,17 @@ mod tests {
     }
 
     #[test]
-    fn keeps_names_for_transforms() {
-        let Output::Code(output) = run_with_stdin(
-            &["--keep-names".into()],
-            Some(b"const PreservedArrow = () => {}; console.log(PreservedArrow.name)"),
-        )
-        .expect("transform succeeds") else {
-            panic!("expected transformed code");
-        };
-        let output = String::from_utf8(output).expect("transform output is UTF-8");
-        assert!(output.contains("Object.defineProperty"));
-        assert!(output.contains("\"PreservedArrow\""));
-        assert!(output.contains("console.log(PreservedArrow.name)"));
+    fn boolean_keep_names_uses_last_value() {
+        let source = b"const PreservedArrow = () => {}; console.log(PreservedArrow.name)";
+        let kept = transform_code(&["--keep-names=false", "--keep-names"], source);
+        assert!(kept.contains("Object.defineProperty"), "{kept}");
+        assert!(kept.contains("\"PreservedArrow\""), "{kept}");
+        let removed = transform_code(&["--keep-names", "--keep-names=false"], source);
+        assert!(!removed.contains("Object.defineProperty"), "{removed}");
+        assert!(
+            removed.contains("console.log(PreservedArrow.name)"),
+            "{removed}"
+        );
     }
 
     #[test]
@@ -1933,26 +2083,32 @@ mod tests {
         let entry = directory.join("entry.js");
         std::fs::write(&entry, "console.log('cli source map')").expect("write entry file");
 
-        let Output::Text(output) = run(&[
-            "--bundle".into(),
-            "--sourcemap".into(),
-            "--source-root=https://cdn.example/source/".into(),
-            "--sources-content=false".into(),
-            format!("--outdir={}", output_directory.display()),
-            entry.to_string_lossy().into_owned(),
-        ])
-        .expect("bundle succeeds") else {
-            panic!("expected file output");
+        let build_source_map = |sources_content_flags: &[&str]| {
+            let mut arguments = vec![
+                "--bundle".into(),
+                "--sourcemap".into(),
+                "--source-root=https://cdn.example/source/".into(),
+            ];
+            arguments.extend(sources_content_flags.iter().map(|flag| (*flag).to_string()));
+            arguments.push(format!("--outdir={}", output_directory.display()));
+            arguments.push(entry.to_string_lossy().into_owned());
+            let Output::Text(output) = run(&arguments).expect("bundle succeeds") else {
+                panic!("expected file output");
+            };
+            assert!(output.is_empty());
+            std::fs::read_to_string(output_directory.join("entry.js.map")).expect("read map")
         };
-        assert!(output.is_empty());
-        let javascript =
-            std::fs::read_to_string(output_directory.join("entry.js")).expect("read JavaScript");
-        assert!(javascript.contains("//# sourceMappingURL=entry.js.map"));
-        let source_map =
-            std::fs::read_to_string(output_directory.join("entry.js.map")).expect("read map");
+
+        let source_map = build_source_map(&["--sources-content", "--sources-content=false"]);
         assert!(source_map.contains("\"version\": 3"));
         assert!(source_map.contains("\"sourceRoot\": \"https://cdn.example/source/\""));
         assert!(!source_map.contains("\"sourcesContent\""));
+
+        let source_map = build_source_map(&["--sources-content=false", "--sources-content"]);
+        assert!(source_map.contains("\"sourcesContent\""));
+        let javascript =
+            std::fs::read_to_string(output_directory.join("entry.js")).expect("read JavaScript");
+        assert!(javascript.contains("//# sourceMappingURL=entry.js.map"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
