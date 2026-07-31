@@ -55,6 +55,33 @@ const cases = [
     expected: "42",
   },
   {
+    name: "Production define + minify",
+    files: {
+      "entry.js":
+        'if (process.env.NODE_ENV !== "production") { console.log("development-only") } else { const longVariableName = 40 + 2; console.log(longVariableName) }\n',
+    },
+    args: (output) => [
+      "entry.js",
+      "--bundle",
+      "--platform=node",
+      "--format=cjs",
+      "--minify",
+      '--define:process.env.NODE_ENV="production"',
+      `--outfile=${join(output, "bundle.cjs")}`,
+    ],
+    run: (output) => join(output, "bundle.cjs"),
+    expected: "42",
+    verify: (output) => {
+      const code = readFileSync(join(output, "bundle.cjs"), "utf8");
+      if (
+        code.includes("development-only") ||
+        code.includes("longVariableName")
+      ) {
+        throw new Error("production minification retained dead development code");
+      }
+    },
+  },
+  {
     name: "CommonJS require",
     files: {
       "entry.cjs":
