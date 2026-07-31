@@ -187,6 +187,7 @@ fn parse_class_property(
 
     let mut kind = PropertyKind::Field;
     let mut is_type_only = false;
+    let mut async_range = None;
     let mut preconsumed_ts_key = preconsumed_static;
     while preconsumed_ts_key.is_none()
         && lexer.token == Token::Identifier
@@ -254,7 +255,10 @@ fn parse_class_property(
             match modifier.as_slice() {
                 b"get" => kind = PropertyKind::Getter,
                 b"set" => kind = PropertyKind::Setter,
-                b"async" => is_async = true,
+                b"async" => {
+                    is_async = true;
+                    async_range = Some(name_range);
+                }
                 _ => unreachable!(),
             }
         } else {
@@ -263,6 +267,7 @@ fn parse_class_property(
     }
 
     let is_generator = preconsumed_key.is_none() && lexer.token == Token::Asterisk;
+    let generator_range = is_generator.then(|| lexer.range());
     if is_generator {
         lexer.next();
     }
@@ -346,8 +351,20 @@ fn parse_class_property(
         }
     }
 
+    let is_method = lexer.token == Token::OpenParen || kind.is_method_definition();
+    if is_method {
+        let has_target_error =
+            async_range.is_some_and(|async_range| core.mark_async_fn(async_range, is_generator));
+        if is_generator && !has_target_error {
+            core.mark_syntax_feature(
+                JsFeature::GENERATOR,
+                generator_range.expect("generator token range"),
+            );
+        }
+    }
+
     if is_type_only {
-        if lexer.token == Token::OpenParen || kind.is_method_definition() {
+        if is_method {
             super::syntax_typescript::skip_type_script_method_signature(lexer);
         } else {
             super::syntax_typescript::skip_type_annotation(
@@ -383,7 +400,6 @@ fn parse_class_property(
         private.reference = core.declare_symbol(symbol_kind, key.loc, &name);
     }
 
-    let is_method = lexer.token == Token::OpenParen || kind.is_method_definition();
     let key_name = class_key_name(core, &key);
     if is_method {
         if key_name.as_deref() == Some("#constructor") {

@@ -7,6 +7,7 @@ use crate::internal::{
         Precedence,
     },
     js_lexer::{Lexer, Token},
+    logger::Range,
 };
 
 use super::{
@@ -123,7 +124,18 @@ fn parse_function_after_keyword(
 ) -> Expr {
     lexer.expect(Token::Function);
     let is_generator = lexer.token == Token::Asterisk;
+    let generator_range = is_generator.then(|| lexer.range());
+    let mut has_target_error = false;
+    if is_async {
+        has_target_error = core.mark_async_fn(Range { loc, len: 5 }, is_generator);
+    }
     if is_generator {
+        if !has_target_error {
+            core.mark_syntax_feature(
+                crate::internal::compat::JsFeature::GENERATOR,
+                generator_range.expect("generator token range"),
+            );
+        }
         lexer.next();
     }
 

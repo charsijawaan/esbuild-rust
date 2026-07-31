@@ -534,14 +534,11 @@ fn parse_declare_statement(
             }
             skip_balanced_group(lexer, Token::OpenBrace, Token::CloseBrace);
         }
-        Token::Function => {
+        Token::Function => parse_declare_function(core, lexer, None),
+        Token::Identifier if lexer.is_contextual_keyword(b"async") => {
+            let async_range = lexer.range();
             lexer.next();
-            if lexer.token == Token::Asterisk {
-                lexer.next();
-            }
-            lexer.expect(Token::Identifier);
-            skip_type_parameters(lexer);
-            skip_type_script_method_signature(lexer);
+            parse_declare_function(core, lexer, Some(async_range));
         }
         Token::Var => {
             lexer.next();
@@ -615,6 +612,26 @@ fn parse_declare_statement(
         lexer.next();
     }
     Stmt::new(loc, StmtData::TypeScript(TypeScriptStmt::default()))
+}
+
+fn parse_declare_function(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    async_range: Option<crate::internal::logger::Range>,
+) {
+    lexer.expect(Token::Function);
+    let is_generator = lexer.token == Token::Asterisk;
+    let has_target_error =
+        async_range.is_some_and(|async_range| core.mark_async_fn(async_range, is_generator));
+    if is_generator {
+        if !has_target_error {
+            core.mark_syntax_feature(JsFeature::GENERATOR, lexer.range());
+        }
+        lexer.next();
+    }
+    lexer.expect(Token::Identifier);
+    skip_type_parameters(lexer);
+    skip_type_script_method_signature(lexer);
 }
 
 pub(crate) fn parse_enum_statement(

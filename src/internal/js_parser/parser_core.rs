@@ -1287,6 +1287,28 @@ impl ParserCore {
         }
     }
 
+    pub(crate) fn mark_async_fn(&mut self, async_range: Range, is_generator: bool) -> bool {
+        // Lowered async functions are implemented in terms of generators. If
+        // generators are supported then async functions can still be lowered,
+        // even when the async syntax itself isn't supported by the target.
+        if !self
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::GENERATOR)
+        {
+            return false;
+        }
+
+        self.mark_syntax_feature(
+            if is_generator {
+                JsFeature::ASYNC_GENERATOR
+            } else {
+                JsFeature::ASYNC_AWAIT
+            },
+            async_range,
+        )
+    }
+
     pub(crate) fn mark_syntax_feature(&mut self, feature: JsFeature, range: Range) -> bool {
         if !self.options.unsupported_js_features.contains(feature) {
             if feature == JsFeature::TOP_LEVEL_AWAIT
@@ -1320,6 +1342,12 @@ impl ParserCore {
             "class syntax".to_owned()
         } else if feature == JsFeature::CONST_AND_LET {
             String::from_utf8_lossy(self.source.text_for_range(range)).into_owned()
+        } else if feature == JsFeature::GENERATOR {
+            "generator functions".to_owned()
+        } else if feature == JsFeature::ASYNC_AWAIT {
+            "async functions".to_owned()
+        } else if feature == JsFeature::ASYNC_GENERATOR {
+            "async generator functions".to_owned()
         } else {
             self.add_error_range(
                 range,

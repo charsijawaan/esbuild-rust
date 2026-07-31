@@ -2057,6 +2057,219 @@ mod tests {
     }
 
     #[test]
+    fn guards_generator_family_syntax_across_all_function_forms() {
+        let unsupported =
+            JsFeature::GENERATOR | JsFeature::ASYNC_AWAIT | JsFeature::ASYNC_GENERATOR;
+        for (source, name, column, length) in [
+            ("function* f() {}", "generator functions", 8, 1),
+            ("(function* () {})", "generator functions", 9, 1),
+            ("({ *method() {} })", "generator functions", 3, 1),
+            ("class C { *method() {} }", "generator functions", 10, 1),
+            ("async function f() {}", "async functions", 0, 5),
+            ("(async function () {})", "async functions", 1, 5),
+            ("const f = async value => value", "async functions", 10, 5),
+            ("const f = async () => 0", "async functions", 10, 5),
+            ("({ async method() {} })", "async functions", 3, 5),
+            ("class C { async method() {} }", "async functions", 10, 5),
+            ("async function* f() {}", "async generator functions", 0, 5),
+            ("(async function* () {})", "async generator functions", 1, 5),
+            (
+                "({ async *method() {} })",
+                "async generator functions",
+                3,
+                5,
+            ),
+            (
+                "class C { async *method() {} }",
+                "async generator functions",
+                10,
+                5,
+            ),
+        ] {
+            let (_, ok, log) = parse_source_with_options(
+                source,
+                Options {
+                    unsupported_js_features: unsupported,
+                    original_target_env: "\"es5\"".into(),
+                    ..Options::default()
+                },
+            );
+            assert!(ok, "{source:?}");
+            let messages = log.done();
+            assert_eq!(messages.len(), 1, "{source:?}");
+            assert_syntax_guard_message(
+                &messages[0],
+                &format!(
+                    "Transforming {name} to the configured target environment (\"es5\") is not \
+                     supported yet"
+                ),
+                1,
+                column,
+                length,
+            );
+        }
+    }
+
+    #[test]
+    fn follows_generator_dependent_async_guard_rules() {
+        for feature in [JsFeature::ASYNC_AWAIT, JsFeature::ASYNC_GENERATOR] {
+            let (_, ok, log) = parse_source_with_options(
+                "async function f() {}; async function* g() {}",
+                Options {
+                    unsupported_js_features: feature,
+                    ..Options::default()
+                },
+            );
+            assert!(ok);
+            assert!(log.done().is_empty());
+        }
+
+        let (_, ok, log) = parse_source_with_options(
+            "async function f() {}; async function* g() {}",
+            Options {
+                unsupported_js_features: JsFeature::GENERATOR,
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_syntax_guard_message(
+            &messages[0],
+            "Transforming generator functions to the configured target environment is not \
+             supported yet",
+            1,
+            37,
+            1,
+        );
+
+        let (_, ok, log) = parse_source_with_options(
+            "async function* f() {}",
+            Options {
+                unsupported_js_features: JsFeature::GENERATOR
+                    | JsFeature::ASYNC_AWAIT
+                    | JsFeature::ASYNC_GENERATOR,
+                original_target_env: "\"es5\"".into(),
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_syntax_guard_message(
+            &messages[0],
+            "Transforming async generator functions to the configured target environment \
+             (\"es5\") is not supported yet",
+            1,
+            0,
+            5,
+        );
+    }
+
+    #[test]
+    fn guards_every_generator_occurrence() {
+        let source = "function* a() {}; function* b() {}; ({ *c() {}, *d() {} })";
+        let (_, ok, log) = parse_source_with_options(
+            source,
+            Options {
+                unsupported_js_features: JsFeature::GENERATOR,
+                original_target_env: "\"es5\"".into(),
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        let messages = log.done();
+        let columns = source
+            .match_indices('*')
+            .map(|(column, _)| column)
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), columns.len());
+        for (message, column) in messages.iter().zip(columns) {
+            assert_syntax_guard_message(
+                message,
+                "Transforming generator functions to the configured target environment \
+                 (\"es5\") is not supported yet",
+                1,
+                column,
+                1,
+            );
+        }
+    }
+
+    #[test]
+    fn guards_typescript_generator_family_declarations_and_signatures() {
+        let unsupported =
+            JsFeature::GENERATOR | JsFeature::ASYNC_AWAIT | JsFeature::ASYNC_GENERATOR;
+        for (source, name, column, length) in [
+            ("declare function* f(): void;", "generator functions", 16, 1),
+            (
+                "export declare function* f(): void;",
+                "generator functions",
+                23,
+                1,
+            ),
+            ("declare async function f(): void;", "async functions", 8, 5),
+            (
+                "export declare async function f(): void;",
+                "async functions",
+                15,
+                5,
+            ),
+            (
+                "declare async function* f(): void;",
+                "async generator functions",
+                8,
+                5,
+            ),
+            (
+                "export declare async function* f(): void;",
+                "async generator functions",
+                15,
+                5,
+            ),
+            (
+                "abstract class C { abstract *f(): void; }",
+                "generator functions",
+                28,
+                1,
+            ),
+            (
+                "abstract class C { abstract async f(): void; }",
+                "async functions",
+                28,
+                5,
+            ),
+            (
+                "abstract class C { abstract async *f(): void; }",
+                "async generator functions",
+                28,
+                5,
+            ),
+        ] {
+            let mut options = Options {
+                unsupported_js_features: unsupported,
+                original_target_env: "\"es5\"".into(),
+                ..Options::default()
+            };
+            options.ts.parse = true;
+            let (_, ok, log) = parse_source_with_options(source, options);
+            assert!(ok, "{source:?}");
+            let messages = log.done();
+            assert_eq!(messages.len(), 1, "{source:?}");
+            assert_syntax_guard_message(
+                &messages[0],
+                &format!(
+                    "Transforming {name} to the configured target environment (\"es5\") is not \
+                     supported yet"
+                ),
+                1,
+                column,
+                length,
+            );
+        }
+    }
+
+    #[test]
     fn guards_typescript_declare_class_const_and_let_syntax() {
         let mut options = Options {
             unsupported_js_features: JsFeature::CLASS | JsFeature::CONST_AND_LET,

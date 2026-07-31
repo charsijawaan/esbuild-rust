@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
+    compat::JsFeature,
     helpers::string_to_utf16,
     js_ast::{
         Expr, ExprData, FunctionExpr, IdentifierExpr, NameOfSymbolExpr, ObjectExpr, Precedence,
@@ -89,6 +90,7 @@ fn parse_property(
     let start_loc = lexer.loc();
     let mut kind = PropertyKind::Field;
     let mut is_async = false;
+    let mut async_range = None;
     let mut preconsumed_identifier = None;
 
     if lexer.token == Token::Identifier && matches!(lexer.raw(), b"get" | b"set" | b"async") {
@@ -110,7 +112,10 @@ fn parse_property(
             match modifier.as_slice() {
                 b"get" => kind = PropertyKind::Getter,
                 b"set" => kind = PropertyKind::Setter,
-                b"async" => is_async = true,
+                b"async" => {
+                    is_async = true;
+                    async_range = Some(name_range);
+                }
                 _ => unreachable!(),
             }
         } else {
@@ -119,6 +124,7 @@ fn parse_property(
     }
 
     let is_generator = preconsumed_identifier.is_none() && lexer.token == Token::Asterisk;
+    let generator_range = is_generator.then(|| lexer.range());
     if is_generator {
         lexer.next();
     }
@@ -188,6 +194,14 @@ fn parse_property(
     };
 
     if lexer.token == Token::OpenParen || kind.is_method_definition() {
+        let has_target_error =
+            async_range.is_some_and(|async_range| core.mark_async_fn(async_range, is_generator));
+        if is_generator && !has_target_error {
+            core.mark_syntax_feature(
+                JsFeature::GENERATOR,
+                generator_range.expect("generator token range"),
+            );
+        }
         let mut function = parse_function_tail(
             core,
             lexer,

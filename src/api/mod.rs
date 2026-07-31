@@ -8465,6 +8465,169 @@ mod tests {
     }
 
     #[test]
+    fn reports_generator_family_target_errors_with_exact_ranges() {
+        for (source, text, column, length) in [
+            (
+                "function* f() {}",
+                "Transforming generator functions to the configured target environment \
+                 (\"es5\") is not supported yet",
+                8,
+                1,
+            ),
+            (
+                "(function* () {})",
+                "Transforming generator functions to the configured target environment \
+                 (\"es5\") is not supported yet",
+                9,
+                1,
+            ),
+            (
+                "var f = async value => value",
+                "Transforming async functions to the configured target environment (\"es5\") is \
+                 not supported yet",
+                8,
+                5,
+            ),
+            (
+                "({ async method() {} })",
+                "Transforming async functions to the configured target environment (\"es5\") is \
+                 not supported yet",
+                3,
+                5,
+            ),
+            (
+                "async function* f() {}",
+                "Transforming async generator functions to the configured target environment \
+                 (\"es5\") is not supported yet",
+                0,
+                5,
+            ),
+        ] {
+            assert_transform_error(
+                &transform(
+                    source,
+                    TransformOptions {
+                        target: Target::Es5,
+                        ..TransformOptions::default()
+                    },
+                ),
+                text,
+                column,
+                length,
+            );
+        }
+
+        for (source, text, column, length) in [
+            (
+                "declare function* f(): void;",
+                "Transforming generator functions to the configured target environment \
+                 (\"es5\") is not supported yet",
+                16,
+                1,
+            ),
+            (
+                "export declare async function f(): void;",
+                "Transforming async functions to the configured target environment (\"es5\") is \
+                 not supported yet",
+                15,
+                5,
+            ),
+            (
+                "declare async function* f(): void;",
+                "Transforming async generator functions to the configured target environment \
+                 (\"es5\") is not supported yet",
+                8,
+                5,
+            ),
+        ] {
+            assert_transform_error(
+                &transform(
+                    source,
+                    TransformOptions {
+                        loader: Loader::Ts,
+                        target: Target::Es5,
+                        ..TransformOptions::default()
+                    },
+                ),
+                text,
+                column,
+                length,
+            );
+        }
+    }
+
+    #[test]
+    fn respects_generator_family_boundaries_and_overrides() {
+        let all_forms = "function* g() {};\n\
+                         async function f() {};\n\
+                         async function* h() {};\n\
+                         var arrow = async value => value;\n\
+                         ({ *g() {}, async f() {}, async *h() {} });\n\
+                         class C { *g() {} async f() {} async *h() {} }";
+        let result = transform(
+            all_forms,
+            TransformOptions {
+                target: Target::Es2015,
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let result = transform(
+            all_forms,
+            TransformOptions {
+                target: Target::Es5,
+                supported: HashMap::from([("generator".into(), true), ("class".into(), true)]),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        assert_transform_error(
+            &transform(
+                "function* f() {}",
+                TransformOptions {
+                    target: Target::EsNext,
+                    supported: HashMap::from([("generator".into(), false)]),
+                    ..TransformOptions::default()
+                },
+            ),
+            "Transforming generator functions to the configured target environment (\"esnext\" \
+             + 2 overrides) is not supported yet",
+            8,
+            1,
+        );
+
+        let result = transform(
+            "async function f() {}",
+            TransformOptions {
+                target: Target::EsNext,
+                supported: HashMap::from([("generator".into(), false)]),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        assert_transform_error(
+            &transform(
+                "async function* f() {}",
+                TransformOptions {
+                    target: Target::EsNext,
+                    supported: HashMap::from([
+                        ("generator".into(), false),
+                        ("async-generator".into(), false),
+                    ]),
+                    ..TransformOptions::default()
+                },
+            ),
+            "Transforming async generator functions to the configured target environment \
+             (\"esnext\" + 2 overrides) is not supported yet",
+            0,
+            5,
+        );
+    }
+
+    #[test]
     fn respects_syntax_guard_boundaries_and_supported_overrides() {
         for (source, target) in [
             ("class C {}", Target::Es2015),
@@ -8615,6 +8778,48 @@ mod tests {
             0,
             5,
         );
+    }
+
+    #[test]
+    fn reports_generator_family_errors_through_build_api() {
+        let built = build_api(BuildOptions {
+            stdin: Some(BuildStdin {
+                contents:
+                    "function* first() {}\nasync function second() {}\nasync function* third() {}"
+                        .into(),
+                ..BuildStdin::default()
+            }),
+            target: Target::Es5,
+            ..BuildOptions::default()
+        });
+        assert!(built.output_files.is_empty());
+        assert!(built.warnings.is_empty());
+        assert_eq!(built.errors.len(), 3, "{:?}", built.errors);
+        for (message, (text, line, column, length)) in built.errors.iter().zip([
+            (
+                "Transforming generator functions to the configured target environment \
+                 (\"es5\") is not supported yet",
+                1,
+                8,
+                1,
+            ),
+            (
+                "Transforming async functions to the configured target environment (\"es5\") is \
+                 not supported yet",
+                2,
+                0,
+                5,
+            ),
+            (
+                "Transforming async generator functions to the configured target environment \
+                 (\"es5\") is not supported yet",
+                3,
+                0,
+                5,
+            ),
+        ]) {
+            assert_api_error(message, text, line, column, length);
+        }
     }
 
     #[test]

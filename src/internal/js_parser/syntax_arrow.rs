@@ -7,6 +7,7 @@ use crate::internal::{
         PropertyFlags, PropertyKind, ReturnStmt, Stmt, StmtData,
     },
     js_lexer::{Lexer, Token},
+    logger::Range,
 };
 
 use super::{
@@ -272,6 +273,9 @@ pub(crate) fn parse_arrow_body(
     is_parenthesized: bool,
     has_rest_arg: bool,
 ) -> Expr {
+    if is_async {
+        core.mark_async_fn(Range { loc, len: 5 }, false);
+    }
     if lexer.has_newline_before {
         core.add_error_range(lexer.range(), "Unexpected newline before \"=>\"");
     }
