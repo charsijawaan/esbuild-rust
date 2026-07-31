@@ -542,9 +542,8 @@ pub fn enforce_no_cyclic_chunk_imports(log: &Log, chunks: &[ChunkInfo]) {
 ///
 /// # Panics
 ///
-/// Panics if a resolved CSS URL does not point to a JavaScript representation,
-/// or a copy index does not point to a copy representation. Both are linker
-/// graph invariants established by the scanner.
+/// Panics if a copy index does not point to a copy representation. This is a
+/// linker graph invariant established by the scanner.
 pub fn inline_linked_assets(graph: &mut LinkerGraph, unique_key_prefix: &str) {
     for source_index in graph.reachable_files.clone() {
         let source_index = source_index as usize;
@@ -562,12 +561,11 @@ pub fn inline_linked_assets(graph: &mut LinkerGraph, unique_key_prefix: &str) {
                     if record.source_index.is_valid() {
                         let other_source_index = record.source_index.get_index() as usize;
                         let other_file = &graph.files[other_source_index].input_file;
-                        let InputFileRepr::Js(other) = other_file
-                            .repr
-                            .as_ref()
-                            .expect("resolved CSS URL target must have a representation")
-                        else {
-                            panic!("resolved CSS URL target must be JavaScript");
+                        let Some(InputFileRepr::Js(other)) = other_file.repr.as_ref() else {
+                            // Internal CSS imports remain linked so the later CSS import-order
+                            // traversal can inline them. Only non-CSS assets represented by a
+                            // JavaScript stub have their final URL substituted here.
+                            continue;
                         };
                         record.path.text.clone_from(&other.ast.url_for_css);
                         record.path.namespace.clear();

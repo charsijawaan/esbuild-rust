@@ -4104,6 +4104,62 @@ mod tests {
     }
 
     #[test]
+    fn bundles_nested_css_imported_by_a_javascript_entry() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/entry.js".into(),
+                    "import './style.css'; console.log('entry')".into(),
+                ),
+                (
+                    "/project/style.css".into(),
+                    "@import './theme.css'; .style { color: blue }".into(),
+                ),
+                (
+                    "/project/theme.css".into(),
+                    ":root { --accent: orange }".into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/project",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            output_format: Format::EsModule,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..Options::default()
+        };
+        let compiled = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "TEST",
+        );
+
+        assert!(log.done().is_empty());
+        assert_eq!(compiled.output_files.len(), 2);
+        let css = compiled
+            .output_files
+            .iter()
+            .find(|output| output.abs_path.ends_with("/entry.css"))
+            .expect("CSS output");
+        let output = String::from_utf8_lossy(&css.contents);
+        let theme_offset = output.find(":root").expect("nested theme CSS");
+        let style_offset = output.find(".style").expect("importing stylesheet CSS");
+        assert!(theme_offset < style_offset, "{output}");
+        assert!(output.contains("--accent: orange"), "{output}");
+        assert!(output.contains("color: blue"), "{output}");
+        assert!(!output.contains("@import"), "{output}");
+    }
+
+    #[test]
     fn bundles_named_imports_across_javascript_modules() {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let file_system = mock_fs(
