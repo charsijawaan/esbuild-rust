@@ -256,9 +256,15 @@ impl Parser {
                 _ => rules.push(self.parse_qualified_rule()),
             }
         }
+        let lower_inset = self
+            .unsupported_css_features
+            .contains(CssFeature::INSET_PROPERTY);
+        if lower_inset {
+            lower_inset_declarations(&mut rules, self.minify_whitespace);
+        }
         if self.minify_syntax {
             mangle_border_radius_declarations(&mut rules, self.minify_whitespace);
-            mangle_box_declarations(&mut rules);
+            mangle_box_declarations(&mut rules, !lower_inset);
             mangle_empty_and_nested_rules(&mut rules);
             merge_adjacent_selector_rules(&mut rules);
         }
@@ -3531,6 +3537,9 @@ impl BoxTracker {
     }
 
     fn compact_rules(&self, rules: &mut [Rule], removed: &mut [bool], key_range: Range) {
+        if self.key == Declaration::Unknown {
+            return;
+        }
         let Some(sides) = self
             .sides
             .iter()
@@ -3599,10 +3608,57 @@ fn expand_box_quad(tokens: &[Token], allow_auto: bool) -> Option<Vec<Token>> {
     ])
 }
 
-fn mangle_box_declarations(rules: &mut Vec<Rule>) {
+fn lower_inset_declarations(rules: &mut Vec<Rule>, minify_whitespace: bool) {
+    let mut rewritten = Vec::with_capacity(rules.len());
+    for rule in rules.drain(..) {
+        let RuleData::Declaration(declaration) = &rule.data else {
+            rewritten.push(rule);
+            continue;
+        };
+        if declaration.key != Declaration::Inset {
+            rewritten.push(rule);
+            continue;
+        }
+        let Some(mut quad) = expand_box_quad(&declaration.value, false) else {
+            rewritten.push(rule);
+            continue;
+        };
+        for token in &mut quad {
+            if minify_whitespace {
+                token.whitespace = WhitespaceFlags::default();
+            } else {
+                token.whitespace.remove(WhitespaceFlags::AFTER);
+            }
+        }
+        for (token, (key_text, key)) in quad.into_iter().zip([
+            ("top", Declaration::Top),
+            ("right", Declaration::Right),
+            ("bottom", Declaration::Bottom),
+            ("left", Declaration::Left),
+        ]) {
+            rewritten.push(Rule {
+                loc: rule.loc,
+                data: RuleData::Declaration(DeclarationRule {
+                    key_text: key_text.into(),
+                    value: vec![token],
+                    key_range: declaration.key_range,
+                    key,
+                    important: declaration.important,
+                }),
+            });
+        }
+    }
+    *rules = rewritten;
+}
+
+fn mangle_box_declarations(rules: &mut Vec<Rule>, allow_inset_shorthand: bool) {
     let mut margin = BoxTracker::new(Declaration::Margin, "margin", true);
     let mut padding = BoxTracker::new(Declaration::Padding, "padding", false);
-    let mut inset = BoxTracker::new(Declaration::Inset, "inset", true);
+    let mut inset = if allow_inset_shorthand {
+        BoxTracker::new(Declaration::Inset, "inset", true)
+    } else {
+        BoxTracker::new(Declaration::Unknown, "", true)
+    };
     let mut removed = vec![false; rules.len()];
     for rule_index in 0..rules.len() {
         let RuleData::Declaration(declaration) = &rules[rule_index].data else {
@@ -5109,7 +5165,93 @@ mod tests {
                 },
             ),
             "a{color:rgba(255,0,0,.5)}b{color:rgba(0,128,0,.25)}\
-             c{color:rgba(0,0,255,.75)}"
+            c{color:rgba(0,0,255,.75)}"
+        );
+    }
+
+    #[test]
+    fn lowers_unsupported_inset_property() {
+        let options = Options {
+            unsupported_css_features: CssFeature::INSET_PROPERTY,
+            ..Options::default()
+        };
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a{inset:1px}b{inset:1px 2%}c{inset:1px 2% 3em}\
+                 d{inset:1px 2% 3em 4}e{inset:5px!important}",
+                options,
+            ),
+            "a {\n\
+             \x20\x20top: 1px;\n\
+             \x20\x20right: 1px;\n\
+             \x20\x20bottom: 1px;\n\
+             \x20\x20left: 1px;\n\
+             }\n\
+             b {\n\
+             \x20\x20top: 1px;\n\
+             \x20\x20right: 2%;\n\
+             \x20\x20bottom: 1px;\n\
+             \x20\x20left: 2%;\n\
+             }\n\
+             c {\n\
+             \x20\x20top: 1px;\n\
+             \x20\x20right: 2%;\n\
+             \x20\x20bottom: 3em;\n\
+             \x20\x20left: 2%;\n\
+             }\n\
+             d {\n\
+             \x20\x20top: 1px;\n\
+             \x20\x20right: 2%;\n\
+             \x20\x20bottom: 3em;\n\
+             \x20\x20left: 4;\n\
+             }\n\
+             e {\n\
+             \x20\x20top: 5px !important;\n\
+             \x20\x20right: 5px !important;\n\
+             \x20\x20bottom: 5px !important;\n\
+             \x20\x20left: 5px !important;\n\
+             }\n"
+        );
+
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a{inset:auto}b{inset:var(--x)}c{inset:calc(1px + 2px)}\
+                 d{inset:1px 2px 3px 4px 5px}",
+                options,
+            ),
+            "a {\n\
+             \x20\x20inset: auto;\n\
+             }\n\
+             b {\n\
+             \x20\x20inset: var(--x);\n\
+             }\n\
+             c {\n\
+             \x20\x20inset: calc(1px + 2px);\n\
+             }\n\
+             d {\n\
+             \x20\x20inset: 1px 2px 3px 4px 5px;\n\
+             }\n"
+        );
+
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "a{inset:0px 1px 2px 3px}\
+                 b{top:1px;right:2px;bottom:3px;left:4px}\
+                 c{inset:auto}d{inset:calc(1px + 2px)}",
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..options
+                },
+            ),
+            "a{top:0;right:1px;bottom:2px;left:3px}\
+             b{top:1px;right:2px;bottom:3px;left:4px}\
+             c{inset:auto}d{top:3px;right:3px;bottom:3px;left:3px}"
+        );
+
+        assert_eq!(
+            parse_and_print_with_parser_options("a{inset:1px 2px}", Options::default()),
+            "a {\n  inset: 1px 2px;\n}\n"
         );
     }
 

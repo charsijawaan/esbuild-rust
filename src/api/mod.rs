@@ -11182,6 +11182,43 @@ mod tests {
     }
 
     #[test]
+    fn lowers_inset_for_unsupported_browser_targets() {
+        let explicit = code(transform(
+            "a { inset: 1px 2px }",
+            TransformOptions {
+                loader: Loader::Css,
+                supported: HashMap::from([("inset-property".into(), false)]),
+                ..TransformOptions::default()
+            },
+        ));
+        assert_eq!(
+            explicit,
+            "a {\n\
+             \x20\x20top: 1px;\n\
+             \x20\x20right: 2px;\n\
+             \x20\x20bottom: 1px;\n\
+             \x20\x20left: 2px;\n\
+             }\n"
+        );
+
+        let transform_for_chrome = |version: &str| {
+            code(transform(
+                "a { inset: 1px 2px }",
+                TransformOptions {
+                    loader: Loader::Css,
+                    engines: vec![Engine {
+                        name: EngineName::Chrome,
+                        version: version.into(),
+                    }],
+                    ..TransformOptions::default()
+                },
+            ))
+        };
+        assert_eq!(transform_for_chrome("86"), explicit);
+        assert_eq!(transform_for_chrome("87"), "a {\n  inset: 1px 2px;\n}\n");
+    }
+
+    #[test]
     fn minifies_css_gradient_syntax() {
         assert_eq!(
             code(transform(
