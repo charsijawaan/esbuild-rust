@@ -139,6 +139,40 @@ const cases = [
     expected: "result.txt",
   },
   {
+    name: "Node package exports",
+    files: {
+      "entry.js":
+        "import { answer } from 'demo-package'; console.log(answer);\n",
+      "node_modules/demo-package/package.json":
+        '{"name":"demo-package","exports":{".":{"node":"./node.js","default":"./default.js"}}}\n',
+      "node_modules/demo-package/node.js":
+        'export const answer = "node-export-42";\n',
+      "node_modules/demo-package/default.js":
+        'export const answer = "default-export-0";\n',
+    },
+    args: (output) => [
+      "entry.js",
+      "--bundle",
+      "--platform=node",
+      "--format=cjs",
+      `--outfile=${join(output, "bundle.cjs")}`,
+    ],
+    run: (output) => join(output, "bundle.cjs"),
+    expected: "node-export-42",
+    verify: (output) => {
+      const code = readFileSync(join(output, "bundle.cjs"), "utf8");
+      if (!code.includes("node-export-42")) {
+        throw new Error("the node package export was not bundled");
+      }
+      if (
+        code.includes("default-export-0") ||
+        code.includes('require("demo-package")')
+      ) {
+        throw new Error("the wrong package export survived bundling");
+      }
+    },
+  },
+  {
     name: "CSS extraction",
     files: {
       "entry.js": "import './style.css'; console.log('css-ok');\n",
