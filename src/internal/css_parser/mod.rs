@@ -1,5 +1,7 @@
 //! Port of upstream `internal/css_parser`.
 
+mod media;
+
 use std::collections::HashMap;
 
 use crate::internal::{
@@ -10,10 +12,9 @@ use crate::internal::{
         BadDeclarationRule, ClassSelector, Combinator, CommentRule, ComplexSelector, Composes,
         CompoundSelector, CrossFileEqualityCheck, Declaration, DeclarationRule, HashSelector,
         ImportConditions, ImportedComposesName, KNOWN_DECLARATIONS, KeyframeBlock, KnownAtRule,
-        MediaArbitraryTokensQuery, MediaQuery, MediaQueryData, NameToken, NamespacedName,
-        PseudoClassKind, PseudoClassSelector, QualifiedRule, Rule, RuleData, SelectorRule,
-        SubclassData, SubclassSelector, Token, UnknownAtRule, WhitespaceFlags, media_queries_equal,
-        rules_equal, tokens_are_comma_separated,
+        MediaQuery, NameToken, NamespacedName, PseudoClassKind, PseudoClassSelector, QualifiedRule,
+        Rule, RuleData, SelectorRule, SubclassData, SubclassSelector, Token, UnknownAtRule,
+        WhitespaceFlags, media_queries_equal, rules_equal, tokens_are_comma_separated,
     },
     css_lexer::{self, TokenKind, is_name_continue, would_start_identifier_without_escapes},
     logger::{Loc, Log, Path, Range, Source},
@@ -290,6 +291,22 @@ impl Parser {
         }
     }
 
+    fn convert_at_rule_prelude(&mut self, name: &str, start: usize, end: usize) -> Vec<Token> {
+        let preserve_whitespace = name.eq_ignore_ascii_case("container")
+            || name.eq_ignore_ascii_case("supports")
+            || name.eq_ignore_ascii_case("media");
+        let mut prelude = if preserve_whitespace {
+            self.convert_tokens_preserving_whitespace(start, end)
+        } else {
+            self.convert_tokens(start, end)
+        };
+        trim_token_boundary_whitespace(&mut prelude);
+        if name.eq_ignore_ascii_case("media") && self.minify_whitespace {
+            minify_group_commas(&mut prelude);
+        }
+        prelude
+    }
+
     fn parse_at_rule(&mut self, preserve_legal_comments: bool) -> Rule {
         let token = self.current();
         let loc = token.range.loc;
@@ -319,13 +336,7 @@ impl Parser {
 
         let prelude_start = self.index;
         let end = self.scan_to_rule_delimiter();
-        let mut prelude =
-            if name.eq_ignore_ascii_case("container") || name.eq_ignore_ascii_case("supports") {
-                self.convert_tokens_preserving_whitespace(prelude_start, end)
-            } else {
-                self.convert_tokens(prelude_start, end)
-            };
-        trim_token_boundary_whitespace(&mut prelude);
+        let mut prelude = self.convert_at_rule_prelude(&name, prelude_start, end);
         self.index = end;
         if self.current_kind() == TokenKind::OpenBrace {
             if matches!(
@@ -393,10 +404,18 @@ impl Parser {
     fn parse_media_at_rule(
         &mut self,
         loc: Loc,
-        prelude: Vec<Token>,
+        mut prelude: Vec<Token>,
         preserve_legal_comments: bool,
     ) -> Rule {
-        let queries = split_media_queries(prelude, loc);
+        if self.minify_syntax {
+            reduce_calc_expressions(&mut prelude, false);
+        }
+        let queries = media::parse_media_query_list(
+            prelude,
+            loc,
+            self.unsupported_css_features,
+            self.minify_syntax,
+        );
         self.index += 1;
         let mut rules = self.parse_rule_list(true, preserve_legal_comments);
         if self.minify_syntax {
@@ -526,6 +545,79 @@ impl Parser {
         }
     }
 
+    fn skip_whitespace_at(&self, mut index: usize) -> usize {
+        while self.kind_at(index) == TokenKind::Whitespace {
+            index += 1;
+        }
+        index
+    }
+
+    fn convert_import_condition_component(&mut self, start: usize, end: usize) -> Vec<Token> {
+        let mut tokens = self.convert_tokens_preserving_whitespace(start, end);
+        trim_token_boundary_whitespace(&mut tokens);
+        if self.minify_whitespace {
+            minify_group_commas(&mut tokens);
+        }
+        tokens
+    }
+
+    fn parse_import_conditions(
+        &mut self,
+        start: usize,
+        end: usize,
+        loc: Loc,
+    ) -> Option<ImportConditions> {
+        let mut layers = Vec::new();
+        let mut supports = Vec::new();
+        let mut index = self.skip_whitespace_at(start);
+
+        let layer_token = self.tokens.get(index).copied().filter(|token| {
+            matches!(token.kind, TokenKind::Ident | TokenKind::Function)
+                && self.decoded(*token).eq_ignore_ascii_case("layer")
+        });
+        if let Some(token) = layer_token {
+            let component_end = if token.kind == TokenKind::Function {
+                self.scan_balanced_block(index)
+            } else {
+                index + 1
+            };
+            layers = self.convert_import_condition_component(index, component_end);
+            index = self.skip_whitespace_at(component_end);
+        }
+
+        let has_supports = self.tokens.get(index).copied().is_some_and(|token| {
+            token.kind == TokenKind::Function
+                && self.decoded(token).eq_ignore_ascii_case("supports")
+        });
+        if has_supports {
+            let component_end = self.scan_balanced_block(index);
+            supports = self.convert_import_condition_component(index, component_end);
+            index = self.skip_whitespace_at(component_end);
+        }
+
+        let queries = if index < end {
+            let mut tokens = self.convert_import_condition_component(index, end);
+            if self.minify_syntax {
+                reduce_calc_expressions(&mut tokens, false);
+            }
+            media::parse_media_query_list(
+                tokens,
+                loc,
+                self.unsupported_css_features,
+                self.minify_syntax,
+            )
+        } else {
+            Vec::new()
+        };
+        (!layers.is_empty() || !supports.is_empty() || !queries.is_empty()).then_some(
+            ImportConditions {
+                queries,
+                layers,
+                supports,
+            },
+        )
+    }
+
     fn parse_at_import(&mut self, loc: Loc) -> Rule {
         let path_token = self.current();
         let path = if matches!(path_token.kind, TokenKind::String | TokenKind::Url) {
@@ -552,24 +644,16 @@ impl Parser {
         ) {
             self.index += 1;
         }
-        let mut conditions = self.convert_tokens(conditions_start, self.index);
-        trim_token_boundary_whitespace(&mut conditions);
+        let conditions_end = self.index;
         if self.current_kind() == TokenKind::Semicolon {
             self.index += 1;
         }
+        let import_conditions = self.parse_import_conditions(conditions_start, conditions_end, loc);
         Rule {
             loc,
             data: RuleData::AtImport(AtImportRule {
+                import_conditions,
                 import_record_index,
-                import_conditions: if conditions.is_empty() {
-                    None
-                } else {
-                    Some(ImportConditions {
-                        queries: Vec::new(),
-                        layers: conditions,
-                        supports: Vec::new(),
-                    })
-                },
             }),
         }
     }
@@ -1413,6 +1497,28 @@ fn normalize_converted_token_whitespace(tokens: &mut [Token], minify_whitespace:
     }
 }
 
+fn minify_group_commas(tokens: &mut [Token]) {
+    for token in tokens.iter_mut() {
+        if let Some(children) = &mut token.children {
+            minify_group_commas(children);
+        }
+    }
+    for index in 0..tokens.len() {
+        if tokens[index].kind != TokenKind::Comma {
+            continue;
+        }
+        tokens[index]
+            .whitespace
+            .remove(WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER);
+        if index > 0 {
+            tokens[index - 1].whitespace.remove(WhitespaceFlags::AFTER);
+        }
+        if index + 1 < tokens.len() {
+            tokens[index + 1].whitespace.remove(WhitespaceFlags::BEFORE);
+        }
+    }
+}
+
 fn compound_is_empty(compound: &CompoundSelector) -> bool {
     compound.type_selector.is_none()
         && compound.subclass_selectors.is_empty()
@@ -1750,32 +1856,6 @@ fn take_important(tokens: &mut Vec<Token>) -> bool {
     }
     tokens.truncate(tokens.len() - 2);
     true
-}
-
-fn split_media_queries(tokens: Vec<Token>, loc: Loc) -> Vec<MediaQuery> {
-    let mut queries = Vec::new();
-    let mut current = Vec::new();
-    for token in tokens {
-        if token.kind == TokenKind::Comma {
-            trim_token_boundary_whitespace(&mut current);
-            queries.push(MediaQuery {
-                loc,
-                data: MediaQueryData::ArbitraryTokens(MediaArbitraryTokensQuery {
-                    tokens: std::mem::take(&mut current),
-                }),
-            });
-        } else {
-            current.push(token);
-        }
-    }
-    if !current.is_empty() {
-        trim_token_boundary_whitespace(&mut current);
-        queries.push(MediaQuery {
-            loc,
-            data: MediaQueryData::ArbitraryTokens(MediaArbitraryTokensQuery { tokens: current }),
-        });
-    }
-    queries
 }
 
 fn trim_token_boundary_whitespace(tokens: &mut [Token]) {
@@ -5700,5 +5780,135 @@ mod tests {
         let mut remover = make_dead_rule_mangler(SymbolMap::default());
         let rules = remover.remove_dead_rules_in_place(1, tree.rules, &tree.import_records);
         assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn lowers_media_range_queries_for_old_targets() {
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "@media (width >= 100px), (height <= 200px), (width > 3px),\
+                 (4px < width), (5px >= width), (width = 6px),\
+                 (1/1 < aspect-ratio <= 16/9) {a{color:red}}",
+                Options {
+                    unsupported_css_features: CssFeature::MEDIA_RANGE,
+                    ..Options::default()
+                },
+            ),
+            "@media (min-width: 100px), (max-height: 200px), not (max-width: 3px), \
+             not (max-width: 4px), (max-width: 5px), (width: 6px), \
+             (not (max-aspect-ratio: 1/1)) and (max-aspect-ratio: 16/9) {\n\
+             \x20\x20a {\n\
+             \x20\x20\x20\x20color: red;\n\
+             \x20\x20}\n\
+             }\n"
+        );
+    }
+
+    #[test]
+    fn parses_nested_media_conditions_and_minifies_like_upstream() {
+        let options = Options {
+            minify_syntax: true,
+            minify_whitespace: true,
+            unsupported_css_features: CssFeature::MEDIA_RANGE,
+            ..Options::default()
+        };
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "@media not (width > 10px),\
+                 ((width > 1px) and (height < 2px)),\
+                 screen and ((width >= 3px) or (height <= 4px)) {a{color:red}}",
+                options,
+            ),
+            "@media(max-width:10px),(not (max-width:1px))and (not (min-height:2px)),\
+             screen and ((min-width:3px)or (max-height:4px)){a{color:red}}"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "@media (width >= calc(1px + 2px)),\
+                 (width >= calc(2px * 3)) {a{color:red}}",
+                Options {
+                    minify_syntax: true,
+                    unsupported_css_features: CssFeature::MEDIA_RANGE,
+                    ..Options::default()
+                },
+            ),
+            "@media (min-width: 3px), (min-width: 6px) {\n\
+             \x20\x20a {\n\
+             \x20\x20\x20\x20color: red;\n\
+             \x20\x20}\n\
+             }\n"
+        );
+    }
+
+    #[test]
+    fn preserves_supported_and_malformed_media_ranges() {
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "@media (width >= 100px), (1px < width <= 2px),\
+                 not (height > 3px) {a{color:red}}",
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..Options::default()
+                },
+            ),
+            "@media(width>=100px),(1px<width<=2px),(height<=3px){a{color:red}}"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "@media (width < = 1px), (width >= 50%),\
+                 (1px < width > 2px), (foo bar) {a{color:red}}",
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    unsupported_css_features: CssFeature::MEDIA_RANGE,
+                    ..Options::default()
+                },
+            ),
+            "@media (width < = 1px),(width >= 50%),\
+             (1px < width > 2px),(foo bar){a{color:red}}"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                "@media junk(a, b), (width >= 1px) {a{color:red}}",
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    unsupported_css_features: CssFeature::MEDIA_RANGE,
+                    ..Options::default()
+                },
+            ),
+            "@media junk(a,b),(min-width:1px){a{color:red}}"
+        );
+    }
+
+    #[test]
+    fn parses_import_layers_supports_and_media_ranges() {
+        let input = "@import \"a.css\" (width >= 1px);\
+                     @import \"b.css\" layer (height < 2px);\
+                     @import \"c.css\" layer(foo, bar) supports(display: grid) (3px <= width);";
+        let options = Options {
+            unsupported_css_features: CssFeature::MEDIA_RANGE,
+            ..Options::default()
+        };
+        assert_eq!(
+            parse_and_print_with_parser_options(input, options),
+            "@import \"a.css\" (min-width: 1px);\n\
+             @import \"b.css\" layer not (min-height: 2px);\n\
+             @import \"c.css\" layer(foo, bar) supports(display: grid) (min-width: 3px);\n"
+        );
+        assert_eq!(
+            parse_and_print_with_parser_options(
+                input,
+                Options {
+                    minify_syntax: true,
+                    minify_whitespace: true,
+                    ..options
+                },
+            ),
+            "@import\"a.css\"(min-width:1px);\
+             @import\"b.css\"layer not (min-height:2px);\
+             @import\"c.css\"layer(foo,bar) supports(display: grid) (min-width:3px);"
+        );
     }
 }

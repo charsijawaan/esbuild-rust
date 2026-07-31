@@ -19,6 +19,10 @@ use crate::internal::{
     },
 };
 
+type MediaQueryFlags = u8;
+const MEDIA_QUERY_NEEDS_PARENTHESES: MediaQueryFlags = 1 << 0;
+const MEDIA_QUERY_AFTER_IDENTIFIER: MediaQueryFlags = 1 << 1;
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default)]
 pub struct Options {
@@ -276,10 +280,25 @@ impl Printer<'_> {
                 self.print_quoted(&record.path.text, None);
                 self.record_import_path_for_metafile(rule.import_record_index);
                 if let Some(conditions) = &rule.import_conditions {
-                    self.print_token_group(&conditions.layers, true);
-                    self.print_token_group(&conditions.supports, true);
+                    let mut space = !self.options.minify_whitespace;
+                    if !conditions.layers.is_empty() {
+                        if space {
+                            self.css.push(b' ');
+                        }
+                        self.print_tokens(&conditions.layers);
+                        space = true;
+                    }
+                    if !conditions.supports.is_empty() {
+                        if space {
+                            self.css.push(b' ');
+                        }
+                        self.print_tokens(&conditions.supports);
+                        space = true;
+                    }
                     if !conditions.queries.is_empty() {
-                        self.print_space();
+                        if space {
+                            self.css.push(b' ');
+                        }
                         self.print_media_queries(&conditions.queries);
                     }
                 }
@@ -424,16 +443,13 @@ impl Printer<'_> {
             RuleData::AtMedia(rule) => {
                 self.css.extend_from_slice(b"@media");
                 if !rule.queries.is_empty() {
-                    if !self.options.minify_whitespace {
+                    let flags = if self.options.minify_whitespace {
+                        MEDIA_QUERY_AFTER_IDENTIFIER
+                    } else {
                         self.css.push(b' ');
-                    }
-                    let query_start = self.css.len();
-                    self.print_media_queries(&rule.queries);
-                    if self.options.minify_whitespace
-                        && self.css.get(query_start).is_some_and(|byte| *byte != b'(')
-                    {
-                        self.css.insert(query_start, b' ');
-                    }
+                        0
+                    };
+                    self.print_media_queries_with_flags(&rule.queries, flags);
                     self.print_space();
                 }
                 self.print_rule_block(&rule.rules, rule.close_brace_loc);
@@ -654,6 +670,14 @@ impl Printer<'_> {
     }
 
     fn print_media_queries(&mut self, queries: &[MediaQuery]) {
+        self.print_media_queries_with_flags(queries, 0);
+    }
+
+    fn print_media_queries_with_flags(
+        &mut self,
+        queries: &[MediaQuery],
+        first_flags: MediaQueryFlags,
+    ) {
         for (index, query) in queries.iter().enumerate() {
             if index > 0 {
                 self.css
@@ -663,14 +687,25 @@ impl Printer<'_> {
                         b", "
                     });
             }
-            self.print_media_query(query, false);
+            self.print_media_query(query, if index == 0 { first_flags } else { 0 });
         }
     }
 
-    fn print_media_query(&mut self, query: &MediaQuery, needs_parentheses: bool) {
+    fn print_media_query(&mut self, query: &MediaQuery, flags: MediaQueryFlags) {
+        if let MediaQueryData::ArbitraryTokens(query) = &query.data {
+            if flags & MEDIA_QUERY_AFTER_IDENTIFIER != 0 {
+                self.css.push(b' ');
+            }
+            self.print_tokens(&query.tokens);
+            return;
+        }
+
         self.add_source_mapping(query.loc, "");
         match &query.data {
             MediaQueryData::Type(query) => {
+                if flags & MEDIA_QUERY_AFTER_IDENTIFIER != 0 {
+                    self.css.push(b' ');
+                }
                 match query.op {
                     MediaTypeOp::None => {}
                     MediaTypeOp::Not => self.css.extend_from_slice(b"not "),
@@ -679,33 +714,52 @@ impl Printer<'_> {
                 self.print_ident(&query.media_type);
                 if let Some(inner) = &query.and_or_null {
                     self.css.extend_from_slice(b" and ");
-                    self.print_media_query(inner, false);
+                    let inner_flags = if matches!(
+                        inner.data,
+                        MediaQueryData::Binary(ref binary) if binary.op == MediaBinaryOp::Or
+                    ) {
+                        MEDIA_QUERY_NEEDS_PARENTHESES
+                    } else {
+                        0
+                    };
+                    self.print_media_query(inner, inner_flags);
                 }
             }
             MediaQueryData::Not(query) => {
+                let needs_parentheses = flags & MEDIA_QUERY_NEEDS_PARENTHESES != 0;
+                if needs_parentheses {
+                    self.css.push(b'(');
+                } else if flags & MEDIA_QUERY_AFTER_IDENTIFIER != 0 {
+                    self.css.push(b' ');
+                }
                 self.css.extend_from_slice(b"not ");
-                self.print_media_query(&query.inner, true);
+                self.print_media_query(&query.inner, MEDIA_QUERY_NEEDS_PARENTHESES);
+                if needs_parentheses {
+                    self.css.push(b')');
+                }
             }
             MediaQueryData::Binary(query) => {
+                let needs_parentheses = flags & MEDIA_QUERY_NEEDS_PARENTHESES != 0;
                 if needs_parentheses {
                     self.css.push(b'(');
                 }
                 for (index, term) in query.terms.iter().enumerate() {
                     if index > 0 {
+                        if !self.options.minify_whitespace {
+                            self.css.push(b' ');
+                        }
                         self.css.extend_from_slice(match query.op {
-                            MediaBinaryOp::And => b" and ",
-                            MediaBinaryOp::Or => b" or ",
+                            MediaBinaryOp::And => b"and ",
+                            MediaBinaryOp::Or => b"or ",
                         });
                     }
-                    self.print_media_query(term, true);
+                    self.print_media_query(term, MEDIA_QUERY_NEEDS_PARENTHESES);
                 }
                 if needs_parentheses {
                     self.css.push(b')');
                 }
             }
-            MediaQueryData::ArbitraryTokens(query) => {
-                self.print_tokens(&query.tokens);
-            }
+            MediaQueryData::ArbitraryTokens(_) => unreachable!(),
             MediaQueryData::PlainOrBoolean(query) => {
                 self.css.push(b'(');
                 self.print_ident(&query.name);
@@ -726,6 +780,7 @@ impl Printer<'_> {
                     self.print_tokens(&query.before);
                     self.print_comparison(query.before_cmp);
                 }
+                self.add_source_mapping(query.name_loc, "");
                 self.print_ident(&query.name);
                 if query.after_cmp != MediaCmp::None {
                     self.print_comparison(query.after_cmp);

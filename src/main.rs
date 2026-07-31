@@ -1185,6 +1185,40 @@ mod tests {
     }
 
     #[test]
+    fn applies_media_range_target_boundaries_and_overrides() {
+        let source = b"@media (width >= 100px) { a { color: red } }";
+        let lowered = "@media (min-width: 100px)";
+        let preserved = "@media (width >= 100px)";
+
+        assert!(transform_code(&["--loader=css", "--target=chrome103"], source).contains(lowered));
+        assert!(
+            transform_code(&["--loader=css", "--target=chrome104"], source).contains(preserved)
+        );
+        assert!(
+            transform_code(
+                &[
+                    "--loader=css",
+                    "--target=chrome103",
+                    "--supported:media-range=true",
+                ],
+                source,
+            )
+            .contains(preserved)
+        );
+        assert!(
+            transform_code(
+                &[
+                    "--loader=css",
+                    "--target=chrome104",
+                    "--supported:media-range=false",
+                ],
+                source,
+            )
+            .contains(lowered)
+        );
+    }
+
+    #[test]
     fn prints_help_and_version_without_input() {
         let Output::Text(help) = run(&["--help".into()]).expect("help succeeds") else {
             panic!("expected help text");
