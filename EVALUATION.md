@@ -7,14 +7,19 @@ suite, a security audit, or a production-readiness claim.
 
 ## Snapshot
 
-- Rust feature checkpoint: `1d0ff0440d4ef65b699aa6e64563841cb4ae3077`
+- Rust compiler feature checkpoint:
+  `d7e50f984b288a3a506485b5e2829c5345ac12aa`
+- Evaluation harness checkpoint:
+  `5c5541c4151e87e3fdfd6b1f29db8e8099a96e03`
 - Upstream esbuild: `6ff1d8b0d8c134e867a397eef39702a223ebef9e`
   (version 0.28.1)
 - Evaluation date: 2026-07-31
 - Toolchain: Rust 1.96.0, Node.js 24.15.0
 - Build: `cargo build --release --locked`
-- Rust source: 110,224 physical lines across tracked `*.rs` files
-- Repository tests: 859 passing
+- Rust source: 114,040 physical lines across tracked `*.rs` files
+- Repository tests: 905 passing
+- Release evaluator: 20 of 20 scenarios passing
+- Runtime parity: 20 of 20 scenarios
 - Approximate whole-product surface: 55%
 - Approximate selected native compiler/bundler/API core: 75%
 
@@ -27,14 +32,15 @@ differential probes, and known gaps; neither is an official coverage metric.
 
 ## Result
 
-The release-mode Rust CLI passed 17 of 17 representative scenarios. The pinned
+The release-mode Rust CLI passed 20 of 20 representative scenarios. The pinned
 upstream executable also passed all scenarios, and the generated programs had
-the same standard output in all 17 cases.
+the same standard output in all 20 cases.
 
 | Scenario | Rust | Upstream | Runtime parity | Rust output | Upstream output |
 | --- | --- | --- | --- | ---: | ---: |
 | ESM graph and tree shaking | pass | pass | yes | 81 B | 79 B |
 | Production define and minify | pass | pass | yes | 17 B | 17 B |
+| JavaScript target lowering | pass | pass | yes | 113 B | 100 B |
 | CommonJS `require` | pass | pass | yes | 489 B | 480 B |
 | TypeScript modules | pass | pass | yes | 126 B | 122 B |
 | JSON loader | pass | pass | yes | 133 B | 133 B |
@@ -43,6 +49,8 @@ the same standard output in all 17 cases.
 | Node package exports | pass | pass | yes | 104 B | 102 B |
 | CSS extraction | pass | pass | yes | 92 B | 92 B |
 | CSS gradient compatibility | pass | pass | yes | 144 B | 144 B |
+| CSS media range compatibility | pass | pass | yes | 113 B | 113 B |
+| CSS modern color compatibility | pass | pass | yes | 127 B | 127 B |
 | Source map and metafile | pass | pass | yes | 1,075 B | 1,081 B |
 | ESM code splitting | pass | pass | yes | 233 B | 233 B |
 | stdin CommonJS transform | pass | pass | yes | 955 B | 963 B |
@@ -55,6 +63,10 @@ Output sizes are the total bytes emitted for each scenario, so the source-map
 row includes its map and metafile. Textual output is not expected to be
 byte-for-byte identical to upstream; this matrix checks build success,
 required artifacts, executable behavior, and selected feature invariants.
+Runtime parity means matching standard output for the executed fixture.
+Artifact checks are scenario-specific; the evaluator does not claim
+byte-identical generated code, exhaustive diagnostic parity, or full upstream
+conformance.
 
 ## Reproduce
 
@@ -90,16 +102,24 @@ includes:
   protocol;
 - JavaScript and Go API wrappers, WebAssembly, npm/platform packages, and
   distribution tooling;
-- injection, property mangling and mangle caches, plus portions of public
-  logging control;
-- broad target-aware JavaScript lowering, including known gaps for optional
-  chaining, nullish/logical assignment, exponentiation, async syntax, object
-  rest/spread, class features, BigInt, and unsupported-target diagnostics;
-- explicit resource-management lowering, standard decorators, import-glob
-  bundling, and eight still-unwired CSS compatibility features;
+- injection; property mangling, property reservation, and mangle caches; and
+  build/transform color, log-level, log-limit, and log-override controls;
+- target-compatibility gaps including optional chaining, nullish and logical
+  assignment, array/object spread and object rest,
+  default/rest/destructuring downleveling, async/await and for-await lowering,
+  generator lowering, class fields and private syntax, compound exponentiation
+  assignment lowering, and additional ES5 transforms. BigInt literals and
+  plain exponentiation are lowered; unsupported
+  generator/default/rest/destructuring and compound-exponentiation-assignment
+  forms are rejected instead of emitted unchanged;
+- explicit resource-management lowering, standard decorators, and import-glob
+  bundling;
+- five table-only, unwired CSS compatibility features: `color-functions`,
+  `gradient-interpolation`, `gradient-midpoints`, `is-pseudo-class`, and
+  `nesting`;
 - exhaustive package-manager, resolver, syntax, diagnostic, source-map,
   minifier, and cross-platform filesystem parity;
 - the full upstream test corpus, security review, and performance benchmarking.
 
-The 859 local tests and this 17-case matrix make the snapshot inspectable and
+The 905 local tests and this 20-case matrix make the snapshot inspectable and
 useful, but upstream esbuild should remain the production choice.

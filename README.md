@@ -7,16 +7,15 @@
 > incomplete, unaudited, not production-ready, and is not an official esbuild
 > project.
 
-This repository is a source-faithful Rust port of
-[evanw/esbuild](https://github.com/evanw/esbuild).
-
-The port follows esbuild's package and source-file boundaries wherever Rust's
-type and ownership systems allow it. Behavioral compatibility with the pinned
-upstream revision is the acceptance criterion. Upstream tests are translated
-or exercised as differential tests as each subsystem lands.
+This repository is an experimental, partial Rust translation of
+[evanw/esbuild](https://github.com/evanw/esbuild). It aims to preserve upstream
+package and source-file boundaries where practical, but it is not a complete
+line-for-line or behaviorally equivalent port. Behavioral compatibility with
+the pinned upstream revision is the acceptance criterion for each bounded
+feature tranche.
 
 This repository is a bounded experimental snapshot. Its release binary passes
-all 17 scenarios in the bounded compiler/CLI evaluation, with the same runtime
+all 20 scenarios in the bounded compiler/CLI evaluation, with the same runtime
 results as the pinned upstream executable. That is encouraging, but it is not
 evidence of complete compatibility and this project is not a drop-in or
 production-ready esbuild replacement.
@@ -30,6 +29,18 @@ the bounded smoke matrix does not exercise.
 See [EVALUATION.md](EVALUATION.md) for the reproducible compiler/CLI evaluation,
 [PORTING.md](PORTING.md) for the package matrix, and
 [UPSTREAM.md](UPSTREAM.md) for the exact upstream revision.
+
+## Try the experimental bundler
+
+The checked-in snapshot was verified with Rust 1.96:
+
+```sh
+cargo build --release --locked
+./target/release/esbuild src/index.js --bundle --outfile=dist/bundle.js
+```
+
+The CLI deliberately resembles upstream esbuild, but only the behavior
+documented in the evaluation and local tests should be treated as exercised.
 
 ## Development
 
