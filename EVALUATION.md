@@ -7,15 +7,15 @@ suite, a security audit, or a production-readiness claim.
 
 ## Snapshot
 
-- Rust feature checkpoint: `485ba6d438caa0ebe85ad932b3760c66e203bdb2`
+- Rust feature checkpoint: `0d9a9d56bb0cc5827e5336b93ae919e82890ffe0`
 - Upstream esbuild: `6ff1d8b0d8c134e867a397eef39702a223ebef9e`
   (version 0.28.1)
 - Evaluation date: 2026-07-31
 - Toolchain: Rust 1.96.0, Node.js 24.15.0
 - Build: `cargo build --release --locked`
-- Rust source: 109,458 physical lines across tracked `*.rs` files
-- Repository tests: 849 passing
-- Approximate whole-product surface: 71.7%
+- Rust source: 109,642 physical lines across tracked `*.rs` files
+- Repository tests: 851 passing
+- Approximate whole-product surface: 71.8%
 - Approximate selected native compiler/bundler/API core: 99.0%
 
 The two percentages have different denominators. Whole-product surface includes
@@ -90,12 +90,12 @@ includes:
 - JavaScript and Go API wrappers, WebAssembly, npm/platform packages, and
   distribution tooling;
 - injection, property mangling and mangle caches, plus portions of public
-  logging and absolute-path controls;
+  logging control;
 - explicit resource-management lowering, standard decorators, import-glob
   bundling, and advanced CSS color/interpolation behavior;
 - exhaustive package-manager, resolver, syntax, diagnostic, source-map,
   minifier, and cross-platform filesystem parity;
 - the full upstream test corpus, security review, and performance benchmarking.
 
-The 849 local tests and this 16-case matrix make the snapshot inspectable and
+The 851 local tests and this 16-case matrix make the snapshot inspectable and
 useful, but upstream esbuild should remain the production choice.
