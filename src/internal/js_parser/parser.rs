@@ -1313,12 +1313,18 @@ fn keep_inferred_declaration_name(core: &mut ParserCore, value: &mut Expr, refer
 type NameToKeep = (Ref, String, bool);
 
 fn existing_name_to_keep(core: &ParserCore, name: Option<LocRef>) -> Option<NameToKeep> {
-    name.map(|name| {
+    name.and_then(|name| {
+        if core.symbols[usize::try_from(name.reference.inner_index).expect("symbol index")]
+            .flags
+            .contains(crate::internal::ast::SymbolFlags::DID_KEEP_NAME)
+        {
+            return None;
+        }
         let original_name = core.symbols
             [usize::try_from(name.reference.inner_index).expect("symbol index")]
         .original_name
         .clone();
-        (name.reference, original_name, false)
+        Some((name.reference, original_name, false))
     })
 }
 
@@ -1353,7 +1359,7 @@ fn default_export_name_to_keep(
     }
 }
 
-fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>) {
+pub(super) fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>) {
     let mut result = Vec::with_capacity(statements.len());
     let mut input = std::mem::take(statements).into_iter().peekable();
     while let Some(mut statement) = input.next() {
@@ -1475,7 +1481,10 @@ fn is_decorator_assignment_to_reference(
         == "__decorateClass"
 }
 
-fn apply_keep_names_to_type_script_namespaces(core: &mut ParserCore, statements: &mut [Stmt]) {
+pub(super) fn apply_keep_names_to_type_script_namespaces(
+    core: &mut ParserCore,
+    statements: &mut [Stmt],
+) {
     for statement in statements {
         if let Some(StmtData::Namespace(namespace)) = statement.data.as_deref_mut() {
             apply_keep_names_to_statements(core, &mut namespace.statements);

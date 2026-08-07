@@ -35,7 +35,7 @@ try {
   let source = fs.readFileSync(testPath, "utf8");
   source = source.replace(
     'import (\n',
-    'import (\n\t"encoding/json"\n\t"reflect"\n\t"runtime"\n',
+    'import (\n\t"encoding/json"\n\t"reflect"\n\t"runtime"\n\t"strconv"\n',
   );
 
   source = replaceFunctionBody(
@@ -105,6 +105,9 @@ func captureBundledCase(t *testing.T, s *suite, args bundled, fileSystem string)
 		field := value.Field(i)
 		if field.IsZero() { continue }
 		data, err := json.Marshal(field.Interface())
+		if typeOfValue.Field(i).Name == "UnsupportedJSFeatures" || typeOfValue.Field(i).Name == "UnsupportedCSSFeatures" {
+			data, err = json.Marshal(strconv.FormatUint(field.Uint(), 10))
+		}
 		if err != nil {
 			unsupported = append(unsupported, typeOfValue.Field(i).Name)
 			continue

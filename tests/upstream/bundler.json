@@ -352,7 +352,7 @@
         ".js": 10
       },
       "Mode": 2,
-      "UnsupportedCSSFeatures": 2048
+      "UnsupportedCSSFeatures": "2048"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\n// styles.css\nvar styles_default = {\n  before: \"styles_before\",\n  button: \"styles_button\",\n  after: \"styles_after\"\n};\n\n// entry.js\nconsole.log(styles_default);\n\n---------- /out/entry.css ----------\n/* styles.css */\n.styles_before {\n  color: #000;\n}\n:scope .styles_button {\n  color: #000;\n}\n.styles_after {\n  color: #000;\n}\n.styles_before {\n  color: #001;\n}\n:scope .button {\n  color: #001;\n}\n.styles_after {\n  color: #001;\n}\ndiv .styles_button {\n  color: #002;\n}\ndiv .button {\n  color: #003;\n}\n:scope {\n  color: #004;\n}\n:scope {\n  color: #005;\n}\n:scope .styles_button {\n  color: #006;\n}\n:scope .styles_button {\n  color: #007;\n}\n"
   },
@@ -380,7 +380,7 @@
         ".js": 10
       },
       "Mode": 2,
-      "UnsupportedCSSFeatures": 2048
+      "UnsupportedCSSFeatures": "2048"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\n// styles.css\nvar styles_default = {\n  local_name: \"styles_local_name\",\n  local_name1: \"styles_local_name1\",\n  local_name2: \"styles_local_name2\",\n  none: \"styles_none\"\n};\n\n// entry.js\nconsole.log(styles_default);\n\n---------- /out/entry.css ----------\n/* styles.css */\n@keyframes styles_local_name {\n  to {\n    color: red;\n  }\n}\ndiv {\n  animation-name: none;\n}\ndiv {\n  animation-name: none;\n}\ndiv {\n  animation-name: global_name;\n}\ndiv {\n  animation-name: styles_local_name;\n}\ndiv {\n  animation-name:\n    global_name1,\n    none,\n    global_name2,\n    Inherit,\n    INITIAL,\n    revert,\n    revert-layer,\n    unset;\n}\ndiv {\n  animation-name:\n    styles_local_name1,\n    none,\n    styles_local_name2,\n    Inherit,\n    INITIAL,\n    revert,\n    revert-layer,\n    unset;\n}\ndiv {\n  animation: 2s infinite global_name;\n}\ndiv {\n  animation: 2s infinite styles_local_name;\n}\n@keyframes styles_none {\n  to {\n    color: red;\n  }\n}\ndiv {\n  animation-name: \"none\";\n}\ndiv {\n  animation-name: styles_none;\n}\n"
   },
@@ -409,7 +409,7 @@
         ".js": 10
       },
       "Mode": 2,
-      "UnsupportedCSSFeatures": 2048
+      "UnsupportedCSSFeatures": "2048"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\n// list_style_type.css\nvar list_style_type_default = {\n  local: \"list_style_type_local\"\n};\n\n// list_style.css\nvar list_style_default = {\n  local: \"list_style_local\",\n  inside: \"list_style_inside\",\n  outside: \"list_style_outside\"\n};\n\n// entry.js\nconsole.log(list_style_type_default, list_style_default);\n\n---------- /out/entry.css ----------\n/* list_style_type.css */\n@counter-style list_style_type_local {\n  symbols: A B C;\n}\ndiv {\n  list-style-type: GLOBAL;\n}\ndiv {\n  list-style-type: list_style_type_local;\n}\ndiv {\n  list-style-type: none;\n}\ndiv {\n  list-style-type: INITIAL;\n}\ndiv {\n  list-style-type: decimal;\n}\ndiv {\n  list-style-type: disc;\n}\ndiv {\n  list-style-type: SQUARE;\n}\ndiv {\n  list-style-type: circle;\n}\ndiv {\n  list-style-type: disclosure-OPEN;\n}\ndiv {\n  list-style-type: DISCLOSURE-closed;\n}\ndiv {\n  list-style-type: LAO;\n}\ndiv {\n  list-style-type: \"👍\";\n}\n\n/* list_style.css */\n@counter-style list_style_local {\n  symbols: A B C;\n}\ndiv {\n  list-style: GLOBAL;\n}\ndiv {\n  list-style: list_style_local;\n}\ndiv {\n  list-style: list_style_local none;\n}\ndiv {\n  list-style: list_style_local url(http://);\n}\ndiv {\n  list-style: list_style_local linear-gradient(red, green);\n}\ndiv {\n  list-style: list_style_local inside;\n}\ndiv {\n  list-style: list_style_local outside;\n}\ndiv {\n  list-style: none list_style_local;\n}\ndiv {\n  list-style: url(http://) list_style_local;\n}\ndiv {\n  list-style: linear-gradient(red, green) list_style_local;\n}\ndiv {\n  list-style: list_style_local inside;\n}\ndiv {\n  list-style: list_style_local outside;\n}\ndiv {\n  list-style: inside list_style_inside;\n}\ndiv {\n  list-style: inside list_style_outside;\n}\ndiv {\n  list-style: outside list_style_inside;\n}\ndiv {\n  list-style: outside list_style_outside;\n}\ndiv {\n  list-style: url(http://) none invalid;\n}\ndiv {\n  list-style: linear-gradient(red, green) none invalid;\n}\ndiv {\n  list-style: INITIAL;\n}\ndiv {\n  list-style: decimal;\n}\ndiv {\n  list-style: disc;\n}\ndiv {\n  list-style: SQUARE;\n}\ndiv {\n  list-style: circle;\n}\ndiv {\n  list-style: disclosure-OPEN;\n}\ndiv {\n  list-style: DISCLOSURE-closed;\n}\ndiv {\n  list-style: LAO;\n}\n"
   },
@@ -437,7 +437,7 @@
         ".js": 10
       },
       "Mode": 2,
-      "UnsupportedCSSFeatures": 2048
+      "UnsupportedCSSFeatures": "2048"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\n// styles.css\nvar styles_default = {\n  local: \"styles_local\",\n  local1: \"styles_local1\",\n  local2: \"styles_local2\"\n};\n\n// entry.js\nconsole.log(styles_default);\n\n---------- /out/entry.css ----------\n/* styles.css */\n@container not (max-width: 100px) {\n  div {\n    color: red;\n  }\n}\n@container styles_local (max-width: 100px) {\n  div {\n    color: red;\n  }\n}\n@container styles_local not (max-width: 100px) {\n  div {\n    color: red;\n  }\n}\n@container styles_local (max-width: 100px) or (min-height: 100px) {\n  div {\n    color: red;\n  }\n}\n@container styles_local (max-width: 100px) and (min-height: 100px) {\n  div {\n    color: red;\n  }\n}\n@container general_enclosed(max-width: 100px) {\n  div {\n    color: red;\n  }\n}\n@container styles_local general_enclosed(max-width: 100px) {\n  div {\n    color: red;\n  }\n}\ndiv {\n  container-name: NONE initial;\n}\ndiv {\n  container-name: none INITIAL;\n}\ndiv {\n  container-name: GLOBAL1 GLOBAL2;\n}\ndiv {\n  container-name: styles_local1 styles_local2;\n}\ndiv {\n  container: none;\n}\ndiv {\n  container: NONE;\n}\ndiv {\n  container: NONE / size;\n}\ndiv {\n  container: none / size;\n}\ndiv {\n  container: GLOBAL1 GLOBAL2;\n}\ndiv {\n  container: styles_local1 styles_local2;\n}\ndiv {\n  container: GLOBAL1 GLOBAL2 / size;\n}\ndiv {\n  container: styles_local1 styles_local2 / size;\n}\n"
   },
@@ -465,7 +465,7 @@
         ".js": 10
       },
       "Mode": 2,
-      "UnsupportedCSSFeatures": 2048
+      "UnsupportedCSSFeatures": "2048"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\n// styles.css\nvar styles_default = {\n  local: \"styles_local\",\n  local1: \"styles_local1\",\n  local2: \"styles_local2\"\n};\n\n// entry.js\nconsole.log(styles_default);\n\n---------- /out/entry.css ----------\n/* styles.css */\n:nth-child(2n of .styles_local) {\n  color: #000;\n}\n:nth-child(2n of #styles_local, .GLOBAL) {\n  color: #001;\n}\n:nth-child(2n of .styles_local1 .GLOBAL1, .GLOBAL2 .styles_local2) {\n  color: #002;\n}\n.styles_local1,\n:nth-child(2n of .GLOBAL),\n.styles_local2 {\n  color: #003;\n}\n:nth-last-child(2n of .styles_local) {\n  color: #000;\n}\n:nth-last-child(2n of #styles_local, .GLOBAL) {\n  color: #001;\n}\n:nth-last-child(2n of .styles_local1 .GLOBAL1, .GLOBAL2 .styles_local2) {\n  color: #002;\n}\n.styles_local1,\n:nth-last-child(2n of .GLOBAL),\n.styles_local2 {\n  color: #003;\n}\n"
   },
@@ -1729,7 +1729,7 @@
       "AbsOutputDir": "/out",
       "Mode": 2,
       "OriginalTargetEnv": "chrome10",
-      "UnsupportedCSSFeatures": 2304
+      "UnsupportedCSSFeatures": "2304"
     },
     "expected_snapshot": "---------- /out/two-type-selectors.css ----------\n/* two-type-selectors.css */\n.c a:is(b) {\n  color: red;\n}\n\n---------- /out/two-parent-selectors.css ----------\n/* two-parent-selectors.css */\n.c :is(a b) {\n  color: red;\n}\n\n---------- /out/only-one-warning.css ----------\n/* only-one-warning.css */\n.a > .a,\n.a > :is(.b .c),\n.a > .d,\n.b .c > .a,\n.b .c > :is(.b .c),\n.b .c > .d,\n.d > .a,\n.d > :is(.b .c),\n.d > .d {\n  color: red;\n}\n\n---------- /out/nested-@layer.css ----------\n/* nested-@layer.css */\n@layer base {\n  a {\n    color: red;\n  }\n}\n\n---------- /out/nested-@media.css ----------\n/* nested-@media.css */\n@media screen {\n  a {\n    color: red;\n  }\n}\n\n---------- /out/nested-ampersand-twice.css ----------\n/* nested-ampersand-twice.css */\na,\na {\n  color: red;\n}\n\n---------- /out/nested-ampersand-first.css ----------\n/* nested-ampersand-first.css */\na,\na b {\n  color: red;\n}\n\n---------- /out/nested-attribute.css ----------\n/* nested-attribute.css */\na [href] {\n  color: red;\n}\n\n---------- /out/nested-colon.css ----------\n/* nested-colon.css */\na :hover {\n  color: red;\n}\n\n---------- /out/nested-dot.css ----------\n/* nested-dot.css */\na .cls {\n  color: red;\n}\n\n---------- /out/nested-greaterthan.css ----------\n/* nested-greaterthan.css */\na > b {\n  color: red;\n}\n\n---------- /out/nested-hash.css ----------\n/* nested-hash.css */\na #id {\n  color: red;\n}\n\n---------- /out/nested-plus.css ----------\n/* nested-plus.css */\na + b {\n  color: red;\n}\n\n---------- /out/nested-tilde.css ----------\n/* nested-tilde.css */\na ~ b {\n  color: red;\n}\n\n---------- /out/toplevel-ampersand-twice.css ----------\n/* toplevel-ampersand-twice.css */\n:scope,\n:scope {\n  color: red;\n}\n\n---------- /out/toplevel-ampersand-first.css ----------\n/* toplevel-ampersand-first.css */\n:scope,\na {\n  color: red;\n}\n\n---------- /out/toplevel-ampersand-second.css ----------\n/* toplevel-ampersand-second.css */\na,\n:scope {\n  color: red;\n}\n\n---------- /out/toplevel-attribute.css ----------\n/* toplevel-attribute.css */\n[href] {\n  color: red;\n}\n\n---------- /out/toplevel-colon.css ----------\n/* toplevel-colon.css */\n:hover {\n  color: red;\n}\n\n---------- /out/toplevel-dot.css ----------\n/* toplevel-dot.css */\n.cls {\n  color: red;\n}\n\n---------- /out/toplevel-greaterthan.css ----------\n/* toplevel-greaterthan.css */\n> b {\n  color: red;\n}\n\n---------- /out/toplevel-hash.css ----------\n/* toplevel-hash.css */\n#id {\n  color: red;\n}\n\n---------- /out/toplevel-plus.css ----------\n/* toplevel-plus.css */\n+ b {\n  color: red;\n}\n\n---------- /out/toplevel-tilde.css ----------\n/* toplevel-tilde.css */\n~ b {\n  color: red;\n}\n\n---------- /out/media-ampersand-twice.css ----------\n/* media-ampersand-twice.css */\n@media screen {\n  :scope,\n  :scope {\n    color: red;\n  }\n}\n\n---------- /out/media-ampersand-first.css ----------\n/* media-ampersand-first.css */\n@media screen {\n  :scope,\n  a {\n    color: red;\n  }\n}\n\n---------- /out/media-ampersand-second.css ----------\n/* media-ampersand-second.css */\n@media screen {\n  a,\n  :scope {\n    color: red;\n  }\n}\n\n---------- /out/media-attribute.css ----------\n/* media-attribute.css */\n@media screen {\n  [href] {\n    color: red;\n  }\n}\n\n---------- /out/media-colon.css ----------\n/* media-colon.css */\n@media screen {\n  :hover {\n    color: red;\n  }\n}\n\n---------- /out/media-dot.css ----------\n/* media-dot.css */\n@media screen {\n  .cls {\n    color: red;\n  }\n}\n\n---------- /out/media-greaterthan.css ----------\n/* media-greaterthan.css */\n@media screen {\n  > b {\n    color: red;\n  }\n}\n\n---------- /out/media-hash.css ----------\n/* media-hash.css */\n@media screen {\n  #id {\n    color: red;\n  }\n}\n\n---------- /out/media-plus.css ----------\n/* media-plus.css */\n@media screen {\n  + b {\n    color: red;\n  }\n}\n\n---------- /out/media-tilde.css ----------\n/* media-tilde.css */\n@media screen {\n  ~ b {\n    color: red;\n  }\n}\n\n---------- /out/page-no-warning.css ----------\n/* page-no-warning.css */\n@page {\n  @top-left {\n    background: red;\n  }\n}\n"
   },
@@ -3827,7 +3827,7 @@
     "options": {
       "AbsOutputDir": "/out",
       "Mode": 2,
-      "UnsupportedJSFeatures": 65536
+      "UnsupportedJSFeatures": "65536"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\n// entry.js\nvar KeepMe1 = class {\n};\n__publicField(KeepMe1, \"x\", \"x\");\n__publicField(KeepMe1, \"y\", sideEffects());\n__publicField(KeepMe1, \"z\", \"z\");\nvar KeepMe2 = class {\n};\n__publicField(KeepMe2, \"x\", \"x\");\n__publicField(KeepMe2, \"y\", \"y\");\n__publicField(KeepMe2, \"z\", \"z\");\nnew KeepMe2();\n"
   },
@@ -3851,7 +3851,7 @@
       "AbsOutputDir": "/out",
       "MinifySyntax": true,
       "Mode": 2,
-      "UnsupportedJSFeatures": 65536
+      "UnsupportedJSFeatures": "65536"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\n// entry.js\nvar KeepMe1 = class {\n};\n__publicField(KeepMe1, \"x\", \"x\"), __publicField(KeepMe1, \"y\", sideEffects()), __publicField(KeepMe1, \"z\", \"z\");\nvar KeepMe2 = class {\n};\n__publicField(KeepMe2, \"x\", \"x\"), __publicField(KeepMe2, \"y\", \"y\"), __publicField(KeepMe2, \"z\", \"z\");\nnew KeepMe2();\n"
   },
@@ -3886,7 +3886,7 @@
         "Parse": false,
         "NoAmbiguousLessThan": false
       },
-      "UnsupportedJSFeatures": 65536
+      "UnsupportedJSFeatures": "65536"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\n// entry.ts\nvar KeepMe1 = class {\n};\nKeepMe1.x = \"x\";\nKeepMe1.y = \"y\";\nKeepMe1.z = \"z\";\nvar KeepMe2 = class {\n};\nKeepMe2.x = \"x\";\nKeepMe2.y = sideEffects();\nKeepMe2.z = \"z\";\nvar KeepMe3 = class {\n};\nKeepMe3.x = \"x\";\nKeepMe3.y = \"y\";\nKeepMe3.z = \"z\";\nnew KeepMe3();\n"
   },
@@ -9369,7 +9369,7 @@
       "LegalComments": 2,
       "MinifyWhitespace": true,
       "Mode": 2,
-      "UnsupportedJSFeatures": 68719476736
+      "UnsupportedJSFeatures": "68719476736"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\nx;a;\n/*! </script> */\n/*! Bundled license information:\n\njs-pkg/index.js:\n  (*! </script> *)\n*/\n\n---------- /out/entry.css ----------\nx{y:z}a{b:c}\n/*! <\\/style> */\n/*! Bundled license information:\n\ncss-pkg/index.css:\n  (*! <\\/style> *)\n*/\n"
   },
@@ -9398,7 +9398,7 @@
       "LegalComments": 2,
       "MinifyWhitespace": true,
       "Mode": 2,
-      "UnsupportedCSSFeatures": 64
+      "UnsupportedCSSFeatures": "64"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\nx;a;\n/*! <\\/script> */\n/*! Bundled license information:\n\njs-pkg/index.js:\n  (*! <\\/script> *)\n*/\n\n---------- /out/entry.css ----------\nx{y:z}a{b:c}\n/*! </style> */\n/*! Bundled license information:\n\ncss-pkg/index.css:\n  (*! </style> *)\n*/\n"
   },
@@ -9485,7 +9485,7 @@
       "AbsOutputFile": "/out.js",
       "Mode": 2,
       "OutputFormat": 1,
-      "UnsupportedJSFeatures": 2305830845597876200
+      "UnsupportedJSFeatures": "2305830845597876223"
     },
     "expected_snapshot": "---------- /out.js ----------\n(function() {\n  // entry.js\n  console.log(\"test\");\n})();\n"
   },
@@ -10733,7 +10733,7 @@
     "options": {
       "AbsOutputDir": "/out",
       "Mode": 2,
-      "UnsupportedJSFeatures": 17179869184
+      "UnsupportedJSFeatures": "17179869184"
     },
     "unsupported_options": [
       "Defines"
@@ -10835,7 +10835,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 140737488355328
+      "UnsupportedJSFeatures": "140737488355328"
     },
     "unsupported_options": [
       "Defines"
@@ -11077,7 +11077,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1152921504606847000
+      "UnsupportedJSFeatures": "1152921504606846976"
     }
   },
   {
@@ -11478,7 +11478,7 @@
         "SideEffects": false
       },
       "Mode": 2,
-      "UnsupportedJSFeatures": 17179869184
+      "UnsupportedJSFeatures": "17179869184"
     },
     "expected_snapshot": "---------- /out/factory.js ----------\n// factory.jsx\nvar import_meta = {};\nconsole.log([\n  /* @__PURE__ */ import_meta(\"x\", null),\n  /* @__PURE__ */ import_meta(\"x\", null)\n]);\nf = function() {\n  console.log([\n    /* @__PURE__ */ import_meta(\"y\", null),\n    /* @__PURE__ */ import_meta(\"y\", null)\n  ]);\n};\n\n---------- /out/fragment.js ----------\n// fragment.jsx\nvar import_meta = {};\nconsole.log([\n  /* @__PURE__ */ import_meta(import_meta, null, \"x\"),\n  /* @__PURE__ */ import_meta(import_meta, null, \"x\")\n]), f = function() {\n  console.log([\n    /* @__PURE__ */ import_meta(import_meta, null, \"y\"),\n    /* @__PURE__ */ import_meta(import_meta, null, \"y\")\n  ]);\n};\n"
   },
@@ -11529,7 +11529,7 @@
         "SideEffects": false
       },
       "Mode": 2,
-      "UnsupportedJSFeatures": 17179869184
+      "UnsupportedJSFeatures": "17179869184"
     },
     "expected_snapshot": "---------- /out/factory.js ----------\n// factory.jsx\nvar import_meta = {};\nconsole.log([\n  /* @__PURE__ */ import_meta.factory(\"x\", null),\n  /* @__PURE__ */ import_meta.factory(\"x\", null)\n]);\nf = function() {\n  console.log([\n    /* @__PURE__ */ import_meta.factory(\"y\", null),\n    /* @__PURE__ */ import_meta.factory(\"y\", null)\n  ]);\n};\n\n---------- /out/fragment.js ----------\n// fragment.jsx\nvar import_meta = {};\nconsole.log([\n  /* @__PURE__ */ import_meta.factory(import_meta.fragment, null, \"x\"),\n  /* @__PURE__ */ import_meta.factory(import_meta.fragment, null, \"x\")\n]), f = function() {\n  console.log([\n    /* @__PURE__ */ import_meta.factory(import_meta.fragment, null, \"y\"),\n    /* @__PURE__ */ import_meta.factory(import_meta.fragment, null, \"y\")\n  ]);\n};\n"
   },
@@ -11812,7 +11812,7 @@
         }
       },
       "Mode": 2,
-      "UnsupportedJSFeatures": 2097152
+      "UnsupportedJSFeatures": "2097152"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\n// example.json\nvar require_example = __commonJS({\n  \"example.json\"(exports, module) {\n    module.exports = { works: true };\n  }\n});\n\n// entry.js\nconsole.log([\n  __require,\n  typeof __require,\n  require_example(),\n  __require(\"./example.json\", { type: \"json\" }),\n  __require(window.SOME_PATH),\n  require_example(),\n  __require(\"./example.json\", { type: \"json\" }),\n  __require(window.SOME_PATH),\n  __require.resolve(\"some-path\"),\n  __require.resolve(window.SOME_PATH),\n  Promise.resolve().then(() => __toESM(__require(\"some-path\"))),\n  Promise.resolve().then(() => __toESM(__require(window.SOME_PATH)))\n]);\n"
   },
@@ -12049,7 +12049,7 @@
       "AbsOutputDir": "/out",
       "Mode": 1,
       "OutputFormat": 2,
-      "UnsupportedJSFeatures": 2097152
+      "UnsupportedJSFeatures": "2097152"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\nvar entry_exports = {};\nmodule.exports = __toCommonJS(entry_exports);\nvar import_a_nowrap = require(\"a_nowrap\");\nvar import_b_nowrap = require(\"b_nowrap\");\n__reExport(entry_exports, require(\"c_nowrap\"), module.exports);\nvar d = __toESM(require(\"d_WRAP\"));\nvar import_e_WRAP = __toESM(require(\"e_WRAP\"));\nvar import_f_WRAP = __toESM(require(\"f_WRAP\"));\nvar import_g_WRAP = __toESM(require(\"g_WRAP\"));\nvar h = __toESM(require(\"h_WRAP\"));\nvar i = __toESM(require(\"i_WRAP\"));\nvar j = __toESM(require(\"j_WRAP\"));\n(0, import_b_nowrap.b)();\nx = d.x;\n(0, import_e_WRAP.default)();\n(0, import_f_WRAP.default)();\n(0, import_g_WRAP.__esModule)();\nx = h;\ni.x();\nj.x``;\nx = Promise.resolve().then(() => __toESM(require(\"k_WRAP\")));\n"
   },
@@ -12284,7 +12284,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "MangleProps": "_$",
-      "UnsupportedJSFeatures": 140737488355328
+      "UnsupportedJSFeatures": "140737488355328"
     },
     "expected_snapshot": "---------- /out.js ----------\nexport default function(x) {\n  var _a;\n  x.a;\n  (_a = x.a) == null ? void 0 : _a.call(x);\n  x == null ? void 0 : x.a;\n  x == null ? void 0 : x.a();\n  x == null ? void 0 : x.a.b;\n  x == null ? void 0 : x.a.b();\n  x == null ? void 0 : x[\"foo_\"].b;\n  x == null ? void 0 : x.a[\"bar_\"];\n}\n"
   },
@@ -12561,7 +12561,7 @@
       "AbsOutputFile": "/out.js",
       "MangleProps": "x",
       "MinifyIdentifiers": true,
-      "UnsupportedJSFeatures": 17592186044416
+      "UnsupportedJSFeatures": "17592186044416"
     },
     "expected_snapshot": "---------- /out.js ----------\nexport let yyyyy = ({ y }) => ({ y: y });\n"
   },
@@ -12584,7 +12584,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "MangleProps": "_$",
-      "UnsupportedJSFeatures": 65664
+      "UnsupportedJSFeatures": "65664"
     },
     "expected_snapshot": "---------- /out.js ----------\nclass Foo {\n  constructor() {\n    __publicField(this, /* @__KEY__ */ \"a\", 123);\n  }\n}\n__publicField(Foo, /* @__KEY__ */ \"b\", 234);\nFoo.b = new Foo().a;\n"
   },
@@ -13572,7 +13572,7 @@
         "SideEffects": false
       },
       "Mode": 2,
-      "UnsupportedJSFeatures": 65536
+      "UnsupportedJSFeatures": "65536"
     },
     "expected_snapshot": "---------- /out/class-this.js ----------\n// class-this.jsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar Foo = class {\n  foo() {\n    return /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n      fileName: \"class-this.jsx\",\n      lineNumber: 1,\n      columnNumber: 35\n    }, this);\n  }\n};\nexport {\n  Foo\n};\n\n---------- /out/derived-constructor-arg.js ----------\n// derived-constructor-arg.jsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar Foo = class extends Object {\n  constructor(foo = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n    fileName: \"derived-constructor-arg.jsx\",\n    lineNumber: 1,\n    columnNumber: 53\n  })) {\n    super();\n  }\n};\nexport {\n  Foo\n};\n\n---------- /out/derived-constructor-field.js ----------\n// derived-constructor-field.tsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar Foo = class extends Object {\n  constructor() {\n    super(...arguments);\n    this.foo = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n      fileName: \"derived-constructor-field.tsx\",\n      lineNumber: 1,\n      columnNumber: 41\n    }, this);\n  }\n};\nexport {\n  Foo\n};\n\n---------- /out/derived-constructor.js ----------\n// derived-constructor.jsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar Foo = class extends Object {\n  constructor() {\n    super(/* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n      fileName: \"derived-constructor.jsx\",\n      lineNumber: 1,\n      columnNumber: 57\n    }));\n    this.foo = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n      fileName: \"derived-constructor.jsx\",\n      lineNumber: 1,\n      columnNumber: 77\n    });\n  }\n};\nexport {\n  Foo\n};\n\n---------- /out/function-this.js ----------\n// function-this.jsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nfunction Foo() {\n  return /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n    fileName: \"function-this.jsx\",\n    lineNumber: 1,\n    columnNumber: 32\n  }, this);\n}\nexport {\n  Foo\n};\n\n---------- /out/normal-constructor-arg.js ----------\n// normal-constructor-arg.jsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar Foo = class {\n  constructor(foo = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n    fileName: \"normal-constructor-arg.jsx\",\n    lineNumber: 1,\n    columnNumber: 38\n  }, this)) {\n  }\n};\nexport {\n  Foo\n};\n\n---------- /out/normal-constructor-field.js ----------\n// normal-constructor-field.tsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar Foo = class {\n  constructor() {\n    this.foo = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n      fileName: \"normal-constructor-field.tsx\",\n      lineNumber: 1,\n      columnNumber: 26\n    }, this);\n  }\n};\nexport {\n  Foo\n};\n\n---------- /out/normal-constructor.js ----------\n// normal-constructor.jsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar Foo = class {\n  constructor() {\n    this.foo = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n      fileName: \"normal-constructor.jsx\",\n      lineNumber: 1,\n      columnNumber: 47\n    }, this);\n  }\n};\nexport {\n  Foo\n};\n\n---------- /out/static-field.js ----------\n// static-field.jsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar _Foo = class _Foo {\n};\n__publicField(_Foo, \"foo\", /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n  fileName: \"static-field.jsx\",\n  lineNumber: 1,\n  columnNumber: 33\n}, _Foo));\nvar Foo = _Foo;\nexport {\n  Foo\n};\n\n---------- /out/top-level-this-cjs.js ----------\n// top-level-this-cjs.jsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar require_top_level_this_cjs = __commonJS({\n  \"top-level-this-cjs.jsx\"(exports) {\n    exports.foo = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n      fileName: \"top-level-this-cjs.jsx\",\n      lineNumber: 1,\n      columnNumber: 15\n    });\n  }\n});\nexport default require_top_level_this_cjs();\n\n---------- /out/top-level-this-esm.js ----------\n// top-level-this-esm.jsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar foo = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n  fileName: \"top-level-this-esm.jsx\",\n  lineNumber: 1,\n  columnNumber: 18\n});\nif (Foo) {\n  foo = /* @__PURE__ */ jsxDEV(Foo, { children: \"nested top-level this\" }, void 0, false, {\n    fileName: \"top-level-this-esm.jsx\",\n    lineNumber: 1,\n    columnNumber: 43\n  });\n}\nexport {\n  foo\n};\n\n---------- /out/tsconfig.js ----------\n// tsconfig.json\nvar compilerOptions = { useDefineForClassFields: false };\nvar tsconfig_default = { compilerOptions };\nexport {\n  compilerOptions,\n  tsconfig_default as default\n};\n\n---------- /out/typescript-enum.js ----------\n// typescript-enum.tsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar Foo = /* @__PURE__ */ ((Foo2) => {\n  Foo2[Foo2[\"foo\"] = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n    fileName: \"typescript-enum.tsx\",\n    lineNumber: 1,\n    columnNumber: 25\n  })] = \"foo\";\n  return Foo2;\n})(Foo || {});\nexport {\n  Foo\n};\n\n---------- /out/typescript-namespace.js ----------\n// typescript-namespace.tsx\nimport { jsxDEV } from \"react/jsx-dev-runtime\";\nvar Foo;\n((Foo2) => {\n  Foo2.foo = /* @__PURE__ */ jsxDEV(\"div\", {}, void 0, false, {\n    fileName: \"typescript-namespace.tsx\",\n    lineNumber: 1,\n    columnNumber: 41\n  });\n})(Foo || (Foo = {}));\nexport {\n  Foo\n};\n"
   },
@@ -13643,7 +13643,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     }
   },
   {
@@ -13664,7 +13664,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     }
   },
   {
@@ -13699,7 +13699,7 @@
         }
       },
       "Mode": 2,
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     }
   },
   {
@@ -13724,7 +13724,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     }
   },
   {
@@ -13749,7 +13749,7 @@
       "InjectPaths": [
         "/inject.js"
       ],
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar old = console.log;\nvar fn = (...args) => old.apply(console, [\"log:\"].concat(args));\nfn(test);\n"
   },
@@ -13776,7 +13776,7 @@
         "/inject.js"
       ],
       "Mode": 2,
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     },
     "expected_snapshot": "---------- /out.js ----------\n// inject.js\nvar old = console.log;\nvar fn = (...args) => old.apply(console, [\"log:\"].concat(args));\n\n// entry.js\nfn(test);\nfn(test);\nfn(test);\n"
   },
@@ -13802,7 +13802,7 @@
       "InjectPaths": [
         "/inject.js"
       ],
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     },
     "expected_snapshot": "---------- /out.js ----------\nimport { fn } from \"pkg\";\nfn(test);\n"
   },
@@ -13826,7 +13826,7 @@
       "AbsOutputFile": "/out.js",
       "Mode": 1,
       "OutputFormat": 2,
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar entry_exports = {};\n__export(entry_exports, {\n  \"all the stuff\": () => all_the_stuff,\n  \"some export\": () => import_foo[\"some import\"]\n});\nmodule.exports = __toCommonJS(entry_exports);\nvar import_foo = require(\"./foo\");\nvar all_the_stuff = __toESM(require(\"./foo\"));\n"
   },
@@ -13854,7 +13854,7 @@
       ],
       "Mode": 1,
       "OutputFormat": 1,
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar global;\n(global ||= {}).name = (() => {\n  var entry_exports = {};\n  __export(entry_exports, {\n    \"all the stuff\": () => all_the_stuff,\n    \"some export\": () => import_foo[\"some import\"]\n  });\n  var import_foo = require(\"./foo\");\n  var all_the_stuff = __toESM(require(\"./foo\"));\n  return __toCommonJS(entry_exports);\n})();\n"
   },
@@ -18110,7 +18110,7 @@
       "AbsOutputFile": "/out.js",
       "Mode": 1,
       "OutputFormat": 3,
-      "UnsupportedJSFeatures": 1
+      "UnsupportedJSFeatures": "1"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar test = 123;\nvar test_default = { test, \"invalid-identifier\": true };\nexport {\n  test_default as default,\n  test\n};\n"
   },
@@ -19426,7 +19426,7 @@
       "AbsOutputFile": "/out.js",
       "MinifySyntax": true,
       "Mode": 2,
-      "UnsupportedJSFeatures": 2305830845597876200
+      "UnsupportedJSFeatures": "2305830845597876223"
     },
     "expected_snapshot": "---------- /out.js ----------\n// data.json\nvar data_default = {\n  \"\": \"The property below should NOT be converted to a computed property for ES5:\",\n  __proto__: { foo: \"bar\" }\n};\n\n// entry.js\nconsole.log(data_default);\n"
   },
@@ -19571,7 +19571,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1591112277808251000
+      "UnsupportedJSFeatures": "1591112277808250785"
     },
     "expected_snapshot": "---------- /out.js ----------\ntry {\n} catch (e4) {\n  var e, e2;\n}\nvar e3;\n"
   },
@@ -19593,7 +19593,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416049"
     },
     "expected_snapshot": "---------- /out.js ----------\nlet tests = [\n  __spreadValues(__spreadValues({}, a), b),\n  __spreadValues({ a, b }, c),\n  __spreadProps(__spreadValues({}, a), { b, c }),\n  __spreadProps(__spreadValues({ a }, b), { c }),\n  __spreadProps(__spreadValues(__spreadValues(__spreadProps(__spreadValues(__spreadValues({ a, b }, c), d), { e, f }), g), h), { i, j })\n];\nlet jsx = [\n  /* @__PURE__ */ React.createElement(\"div\", __spreadValues(__spreadValues({}, a), b)),\n  /* @__PURE__ */ React.createElement(\"div\", __spreadValues({ a: true, b: true }, c)),\n  /* @__PURE__ */ React.createElement(\"div\", __spreadProps(__spreadValues({}, a), { b: true, c: true })),\n  /* @__PURE__ */ React.createElement(\"div\", __spreadProps(__spreadValues({ a: true }, b), { c: true })),\n  /* @__PURE__ */ React.createElement(\"div\", __spreadProps(__spreadValues(__spreadValues(__spreadProps(__spreadValues(__spreadValues({ a: true, b: true }, c), d), { e: true, f: true }), g), h), { i: true, j: true }))\n];\n"
   },
@@ -19615,7 +19615,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258360332517400
+      "UnsupportedJSFeatures": "1612258360332517305"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;\nlet tests = {\n  // Exponentiation operator\n  0: __pow(a, __pow(b, c)),\n  1: __pow(__pow(a, b), c),\n  // Exponentiation assignment operator\n  2: a = __pow(a, b),\n  3: a.b = __pow(a.b, c),\n  4: a[b] = __pow(a[b], c),\n  5: (_a = a()).b = __pow(_a.b, c),\n  6: (_b = a())[b] = __pow(_b[b], c),\n  7: a[_c = b()] = __pow(a[_c], c),\n  8: (_d = a())[_e = b()] = __pow(_d[_e], c),\n  // These all should not need capturing (no object identity)\n  9: a[0] = __pow(a[0], b),\n  10: a[false] = __pow(a[false], b),\n  11: a[null] = __pow(a[null], b),\n  12: a[void 0] = __pow(a[void 0], b),\n  13: a[/* @__PURE__ */ BigInt(\"123\")] = __pow(a[/* @__PURE__ */ BigInt(\"123\")], b),\n  14: a[this] = __pow(a[this], b),\n  // These should need capturing (have object identity)\n  15: a[_f = /x/] = __pow(a[_f], b),\n  16: a[_g = {}] = __pow(a[_g], b),\n  17: a[_h = []] = __pow(a[_h], b),\n  18: a[_i = () => {\n  }] = __pow(a[_i], b),\n  19: a[_j = function() {\n  }] = __pow(a[_j], b)\n};\n"
   },
@@ -19637,7 +19637,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258360332517400
+      "UnsupportedJSFeatures": "1612258360332517305"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _x;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _x);\n  }\n  unary() {\n    __privateWrapper(this, _x)._++;\n    __privateWrapper(this, _x)._--;\n    ++__privateWrapper(this, _x)._;\n    --__privateWrapper(this, _x)._;\n  }\n  binary() {\n    var _a;\n    __privateSet(this, _x, 1);\n    __privateSet(this, _x, __privateGet(this, _x) + 1);\n    __privateSet(this, _x, __privateGet(this, _x) - 1);\n    __privateSet(this, _x, __privateGet(this, _x) * 1);\n    __privateSet(this, _x, __privateGet(this, _x) / 1);\n    __privateSet(this, _x, __privateGet(this, _x) % 1);\n    __privateSet(this, _x, __pow(__privateGet(this, _x), 1));\n    __privateSet(this, _x, __privateGet(this, _x) << 1);\n    __privateSet(this, _x, __privateGet(this, _x) >> 1);\n    __privateSet(this, _x, __privateGet(this, _x) >>> 1);\n    __privateSet(this, _x, __privateGet(this, _x) & 1);\n    __privateSet(this, _x, __privateGet(this, _x) | 1);\n    __privateSet(this, _x, __privateGet(this, _x) ^ 1);\n    __privateGet(this, _x) && __privateSet(this, _x, 1);\n    __privateGet(this, _x) || __privateSet(this, _x, 1);\n    (_a = __privateGet(this, _x)) != null ? _a : __privateSet(this, _x, 1);\n  }\n}\n_x = new WeakMap();\n"
   },
@@ -19659,7 +19659,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1591041909064073200
+      "UnsupportedJSFeatures": "1591041909064073121"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _x;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _x);\n  }\n  unary() {\n    __privateWrapper(this, _x)._++;\n    __privateWrapper(this, _x)._--;\n    ++__privateWrapper(this, _x)._;\n    --__privateWrapper(this, _x)._;\n  }\n  binary() {\n    var _a;\n    __privateSet(this, _x, 1);\n    __privateSet(this, _x, __privateGet(this, _x) + 1);\n    __privateSet(this, _x, __privateGet(this, _x) - 1);\n    __privateSet(this, _x, __privateGet(this, _x) * 1);\n    __privateSet(this, _x, __privateGet(this, _x) / 1);\n    __privateSet(this, _x, __privateGet(this, _x) % 1);\n    __privateSet(this, _x, __privateGet(this, _x) ** 1);\n    __privateSet(this, _x, __privateGet(this, _x) << 1);\n    __privateSet(this, _x, __privateGet(this, _x) >> 1);\n    __privateSet(this, _x, __privateGet(this, _x) >>> 1);\n    __privateSet(this, _x, __privateGet(this, _x) & 1);\n    __privateSet(this, _x, __privateGet(this, _x) | 1);\n    __privateSet(this, _x, __privateGet(this, _x) ^ 1);\n    __privateGet(this, _x) && __privateSet(this, _x, 1);\n    __privateGet(this, _x) || __privateSet(this, _x, 1);\n    (_a = __privateGet(this, _x)) != null ? _a : __privateSet(this, _x, 1);\n  }\n}\n_x = new WeakMap();\n"
   },
@@ -19681,7 +19681,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _x;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _x);\n  }\n  unary() {\n    __privateWrapper(this, _x)._++;\n    __privateWrapper(this, _x)._--;\n    ++__privateWrapper(this, _x)._;\n    --__privateWrapper(this, _x)._;\n  }\n  binary() {\n    __privateSet(this, _x, 1);\n    __privateSet(this, _x, __privateGet(this, _x) + 1);\n    __privateSet(this, _x, __privateGet(this, _x) - 1);\n    __privateSet(this, _x, __privateGet(this, _x) * 1);\n    __privateSet(this, _x, __privateGet(this, _x) / 1);\n    __privateSet(this, _x, __privateGet(this, _x) % 1);\n    __privateSet(this, _x, __privateGet(this, _x) ** 1);\n    __privateSet(this, _x, __privateGet(this, _x) << 1);\n    __privateSet(this, _x, __privateGet(this, _x) >> 1);\n    __privateSet(this, _x, __privateGet(this, _x) >>> 1);\n    __privateSet(this, _x, __privateGet(this, _x) & 1);\n    __privateSet(this, _x, __privateGet(this, _x) | 1);\n    __privateSet(this, _x, __privateGet(this, _x) ^ 1);\n    __privateGet(this, _x) && __privateSet(this, _x, 1);\n    __privateGet(this, _x) || __privateSet(this, _x, 1);\n    __privateGet(this, _x) ?? __privateSet(this, _x, 1);\n  }\n}\n_x = new WeakMap();\n"
   },
@@ -19724,7 +19724,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1591041909064073200
+      "UnsupportedJSFeatures": "1591041909064073121"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _x;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _x);\n  }\n  foo() {\n    var _a;\n    this == null ? void 0 : __privateGet(this, _x).y;\n    this == null ? void 0 : __privateGet(this.y, _x);\n    (_a = __privateGet(this, _x)) == null ? void 0 : _a.y;\n  }\n}\n_x = new WeakMap();\n"
   },
@@ -19746,7 +19746,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _x;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _x);\n  }\n  foo() {\n    this == null ? void 0 : __privateGet(this, _x).y;\n    this == null ? void 0 : __privateGet(this.y, _x);\n    __privateGet(this, _x)?.y;\n  }\n}\n_x = new WeakMap();\n"
   },
@@ -19789,7 +19789,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258360332517400
+      "UnsupportedJSFeatures": "1612258360332517305"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _x;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _x);\n  }\n  foo() {\n    var _a;\n    this == null ? void 0 : __privateGet(this, _x).y;\n    this == null ? void 0 : __privateGet(this.y, _x);\n    (_a = __privateGet(this, _x)) == null ? void 0 : _a.y;\n  }\n}\n_x = new WeakMap();\n"
   },
@@ -19811,7 +19811,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258360332517400
+      "UnsupportedJSFeatures": "1612258360332517305"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _x, _Foo_static, y_get, y_set, z_fn;\nconst _Foo = class _Foo {\n  foo() {\n    var _a;\n    __privateSet(_Foo, _x, __privateGet(_Foo, _x) + 1);\n    __privateSet(_Foo, _Foo_static, __privateGet(_Foo, _Foo_static, y_get) + 1, y_set);\n    __privateMethod(_a = _Foo, _Foo_static, z_fn).call(_a);\n  }\n};\n_x = new WeakMap();\n_Foo_static = new WeakSet();\ny_get = function() {\n};\ny_set = function(x) {\n};\nz_fn = function() {\n};\n__privateAdd(_Foo, _Foo_static);\n__privateAdd(_Foo, _x);\nlet Foo = _Foo;\n"
   },
@@ -19834,7 +19834,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1612258360332517400
+      "UnsupportedJSFeatures": "1612258360332517305"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.ts\nvar _x;\nvar WeakMap2 = class {\n  constructor() {\n    __privateAdd(this, _x);\n  }\n};\n_x = new WeakMap();\nvar _WeakSet_instances, y_fn;\nvar WeakSet2 = class {\n  constructor() {\n    __privateAdd(this, _WeakSet_instances);\n  }\n};\n_WeakSet_instances = new WeakSet();\ny_fn = function() {\n};\nexport {\n  WeakMap2 as WeakMap,\n  WeakSet2 as WeakSet\n};\n"
   },
@@ -19857,7 +19857,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1612258360332517400
+      "UnsupportedJSFeatures": "1612258360332517305"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar _Foo_instances, foo_get, bar_set, prop_get, prop_set;\nvar Foo = class {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n  }\n  foo(fn) {\n    __privateGet(fn(), _Foo_instances, foo_get);\n    __privateSet(fn(), _Foo_instances, 1, bar_set);\n    __privateGet(fn(), _Foo_instances, prop_get);\n    __privateSet(fn(), _Foo_instances, 2, prop_set);\n  }\n  unary(fn) {\n    __privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._++;\n    __privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._--;\n    ++__privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._;\n    --__privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._;\n  }\n  binary(fn) {\n    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p;\n    __privateSet(fn(), _Foo_instances, 1, prop_set);\n    __privateSet(_a = fn(), _Foo_instances, __privateGet(_a, _Foo_instances, prop_get) + 1, prop_set);\n    __privateSet(_b = fn(), _Foo_instances, __privateGet(_b, _Foo_instances, prop_get) - 1, prop_set);\n    __privateSet(_c = fn(), _Foo_instances, __privateGet(_c, _Foo_instances, prop_get) * 1, prop_set);\n    __privateSet(_d = fn(), _Foo_instances, __privateGet(_d, _Foo_instances, prop_get) / 1, prop_set);\n    __privateSet(_e = fn(), _Foo_instances, __privateGet(_e, _Foo_instances, prop_get) % 1, prop_set);\n    __privateSet(_f = fn(), _Foo_instances, __pow(__privateGet(_f, _Foo_instances, prop_get), 1), prop_set);\n    __privateSet(_g = fn(), _Foo_instances, __privateGet(_g, _Foo_instances, prop_get) << 1, prop_set);\n    __privateSet(_h = fn(), _Foo_instances, __privateGet(_h, _Foo_instances, prop_get) >> 1, prop_set);\n    __privateSet(_i = fn(), _Foo_instances, __privateGet(_i, _Foo_instances, prop_get) >>> 1, prop_set);\n    __privateSet(_j = fn(), _Foo_instances, __privateGet(_j, _Foo_instances, prop_get) & 1, prop_set);\n    __privateSet(_k = fn(), _Foo_instances, __privateGet(_k, _Foo_instances, prop_get) | 1, prop_set);\n    __privateSet(_l = fn(), _Foo_instances, __privateGet(_l, _Foo_instances, prop_get) ^ 1, prop_set);\n    __privateGet(_m = fn(), _Foo_instances, prop_get) && __privateSet(_m, _Foo_instances, 1, prop_set);\n    __privateGet(_n = fn(), _Foo_instances, prop_get) || __privateSet(_n, _Foo_instances, 1, prop_set);\n    (_p = __privateGet(_o = fn(), _Foo_instances, prop_get)) != null ? _p : __privateSet(_o, _Foo_instances, 1, prop_set);\n  }\n};\n_Foo_instances = new WeakSet();\nfoo_get = function() {\n  return this.foo;\n};\nbar_set = function(val) {\n  this.bar = val;\n};\nprop_get = function() {\n  return this.prop;\n};\nprop_set = function(val) {\n  this.prop = val;\n};\nexport {\n  Foo\n};\n"
   },
@@ -19880,7 +19880,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1591041909064073200
+      "UnsupportedJSFeatures": "1591041909064073121"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar _Foo_instances, foo_get, bar_set, prop_get, prop_set;\nvar Foo = class {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n  }\n  foo(fn) {\n    __privateGet(fn(), _Foo_instances, foo_get);\n    __privateSet(fn(), _Foo_instances, 1, bar_set);\n    __privateGet(fn(), _Foo_instances, prop_get);\n    __privateSet(fn(), _Foo_instances, 2, prop_set);\n  }\n  unary(fn) {\n    __privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._++;\n    __privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._--;\n    ++__privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._;\n    --__privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._;\n  }\n  binary(fn) {\n    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p;\n    __privateSet(fn(), _Foo_instances, 1, prop_set);\n    __privateSet(_a = fn(), _Foo_instances, __privateGet(_a, _Foo_instances, prop_get) + 1, prop_set);\n    __privateSet(_b = fn(), _Foo_instances, __privateGet(_b, _Foo_instances, prop_get) - 1, prop_set);\n    __privateSet(_c = fn(), _Foo_instances, __privateGet(_c, _Foo_instances, prop_get) * 1, prop_set);\n    __privateSet(_d = fn(), _Foo_instances, __privateGet(_d, _Foo_instances, prop_get) / 1, prop_set);\n    __privateSet(_e = fn(), _Foo_instances, __privateGet(_e, _Foo_instances, prop_get) % 1, prop_set);\n    __privateSet(_f = fn(), _Foo_instances, __privateGet(_f, _Foo_instances, prop_get) ** 1, prop_set);\n    __privateSet(_g = fn(), _Foo_instances, __privateGet(_g, _Foo_instances, prop_get) << 1, prop_set);\n    __privateSet(_h = fn(), _Foo_instances, __privateGet(_h, _Foo_instances, prop_get) >> 1, prop_set);\n    __privateSet(_i = fn(), _Foo_instances, __privateGet(_i, _Foo_instances, prop_get) >>> 1, prop_set);\n    __privateSet(_j = fn(), _Foo_instances, __privateGet(_j, _Foo_instances, prop_get) & 1, prop_set);\n    __privateSet(_k = fn(), _Foo_instances, __privateGet(_k, _Foo_instances, prop_get) | 1, prop_set);\n    __privateSet(_l = fn(), _Foo_instances, __privateGet(_l, _Foo_instances, prop_get) ^ 1, prop_set);\n    __privateGet(_m = fn(), _Foo_instances, prop_get) && __privateSet(_m, _Foo_instances, 1, prop_set);\n    __privateGet(_n = fn(), _Foo_instances, prop_get) || __privateSet(_n, _Foo_instances, 1, prop_set);\n    (_p = __privateGet(_o = fn(), _Foo_instances, prop_get)) != null ? _p : __privateSet(_o, _Foo_instances, 1, prop_set);\n  }\n};\n_Foo_instances = new WeakSet();\nfoo_get = function() {\n  return this.foo;\n};\nbar_set = function(val) {\n  this.bar = val;\n};\nprop_get = function() {\n  return this.prop;\n};\nprop_set = function(val) {\n  this.prop = val;\n};\nexport {\n  Foo\n};\n"
   },
@@ -19903,7 +19903,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar _Foo_instances, foo_get, bar_set, prop_get, prop_set;\nvar Foo = class {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n  }\n  foo(fn) {\n    __privateGet(fn(), _Foo_instances, foo_get);\n    __privateSet(fn(), _Foo_instances, 1, bar_set);\n    __privateGet(fn(), _Foo_instances, prop_get);\n    __privateSet(fn(), _Foo_instances, 2, prop_set);\n  }\n  unary(fn) {\n    __privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._++;\n    __privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._--;\n    ++__privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._;\n    --__privateWrapper(fn(), _Foo_instances, prop_set, prop_get)._;\n  }\n  binary(fn) {\n    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o;\n    __privateSet(fn(), _Foo_instances, 1, prop_set);\n    __privateSet(_a = fn(), _Foo_instances, __privateGet(_a, _Foo_instances, prop_get) + 1, prop_set);\n    __privateSet(_b = fn(), _Foo_instances, __privateGet(_b, _Foo_instances, prop_get) - 1, prop_set);\n    __privateSet(_c = fn(), _Foo_instances, __privateGet(_c, _Foo_instances, prop_get) * 1, prop_set);\n    __privateSet(_d = fn(), _Foo_instances, __privateGet(_d, _Foo_instances, prop_get) / 1, prop_set);\n    __privateSet(_e = fn(), _Foo_instances, __privateGet(_e, _Foo_instances, prop_get) % 1, prop_set);\n    __privateSet(_f = fn(), _Foo_instances, __privateGet(_f, _Foo_instances, prop_get) ** 1, prop_set);\n    __privateSet(_g = fn(), _Foo_instances, __privateGet(_g, _Foo_instances, prop_get) << 1, prop_set);\n    __privateSet(_h = fn(), _Foo_instances, __privateGet(_h, _Foo_instances, prop_get) >> 1, prop_set);\n    __privateSet(_i = fn(), _Foo_instances, __privateGet(_i, _Foo_instances, prop_get) >>> 1, prop_set);\n    __privateSet(_j = fn(), _Foo_instances, __privateGet(_j, _Foo_instances, prop_get) & 1, prop_set);\n    __privateSet(_k = fn(), _Foo_instances, __privateGet(_k, _Foo_instances, prop_get) | 1, prop_set);\n    __privateSet(_l = fn(), _Foo_instances, __privateGet(_l, _Foo_instances, prop_get) ^ 1, prop_set);\n    __privateGet(_m = fn(), _Foo_instances, prop_get) && __privateSet(_m, _Foo_instances, 1, prop_set);\n    __privateGet(_n = fn(), _Foo_instances, prop_get) || __privateSet(_n, _Foo_instances, 1, prop_set);\n    __privateGet(_o = fn(), _Foo_instances, prop_get) ?? __privateSet(_o, _Foo_instances, 1, prop_set);\n  }\n};\n_Foo_instances = new WeakSet();\nfoo_get = function() {\n  return this.foo;\n};\nbar_set = function(val) {\n  this.bar = val;\n};\nprop_get = function() {\n  return this.prop;\n};\nprop_set = function(val) {\n  this.prop = val;\n};\nexport {\n  Foo\n};\n"
   },
@@ -19948,7 +19948,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1591041909064073200
+      "UnsupportedJSFeatures": "1591041909064073121"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar _field, _Foo_instances, method_fn;\nvar Foo = class {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n    __privateAdd(this, _field);\n  }\n  baseline() {\n    var _a, _b, _c, _d, _e;\n    a().foo;\n    b().foo(x);\n    (_a = c()) == null ? void 0 : _a.foo(x);\n    (_c = (_b = d()).foo) == null ? void 0 : _c.call(_b, x);\n    (_e = (_d = e()) == null ? void 0 : _d.foo) == null ? void 0 : _e.call(_d, x);\n  }\n  privateField() {\n    var _a, _b, _c, _d, _e, _f, _g, _h;\n    __privateGet(a(), _field);\n    __privateGet(_a = b(), _field).call(_a, x);\n    (_b = c()) == null ? void 0 : __privateGet(_b, _field).call(_b, x);\n    (_d = __privateGet(_c = d(), _field)) == null ? void 0 : _d.call(_c, x);\n    (_f = (_e = e()) == null ? void 0 : __privateGet(_e, _field)) == null ? void 0 : _f.call(_e, x);\n    (_g = f()) == null ? void 0 : __privateGet(_h = _g.foo, _field).call(_h, x).bar();\n  }\n  privateMethod() {\n    var _a, _b, _c, _d, _e, _f, _g, _h;\n    __privateMethod(a(), _Foo_instances, method_fn);\n    __privateMethod(_a = b(), _Foo_instances, method_fn).call(_a, x);\n    (_b = c()) == null ? void 0 : __privateMethod(_b, _Foo_instances, method_fn).call(_b, x);\n    (_d = __privateMethod(_c = d(), _Foo_instances, method_fn)) == null ? void 0 : _d.call(_c, x);\n    (_f = (_e = e()) == null ? void 0 : __privateMethod(_e, _Foo_instances, method_fn)) == null ? void 0 : _f.call(_e, x);\n    (_g = f()) == null ? void 0 : __privateMethod(_h = _g.foo, _Foo_instances, method_fn).call(_h, x).bar();\n  }\n};\n_field = new WeakMap();\n_Foo_instances = new WeakSet();\nmethod_fn = function() {\n};\nexport {\n  Foo\n};\n"
   },
@@ -19971,7 +19971,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar _field, _Foo_instances, method_fn;\nvar Foo = class {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n    __privateAdd(this, _field);\n  }\n  baseline() {\n    a().foo;\n    b().foo(x);\n    c()?.foo(x);\n    d().foo?.(x);\n    e()?.foo?.(x);\n  }\n  privateField() {\n    var _a, _b, _c, _d, _e, _f, _g;\n    __privateGet(a(), _field);\n    __privateGet(_a = b(), _field).call(_a, x);\n    (_b = c()) == null ? void 0 : __privateGet(_b, _field).call(_b, x);\n    (_d = __privateGet(_c = d(), _field)) == null ? void 0 : _d.call(_c, x);\n    ((_e = e()) == null ? void 0 : __privateGet(_e, _field))?.(x);\n    (_f = f()) == null ? void 0 : __privateGet(_g = _f.foo, _field).call(_g, x).bar();\n  }\n  privateMethod() {\n    var _a, _b, _c, _d, _e, _f, _g;\n    __privateMethod(a(), _Foo_instances, method_fn);\n    __privateMethod(_a = b(), _Foo_instances, method_fn).call(_a, x);\n    (_b = c()) == null ? void 0 : __privateMethod(_b, _Foo_instances, method_fn).call(_b, x);\n    (_d = __privateMethod(_c = d(), _Foo_instances, method_fn)) == null ? void 0 : _d.call(_c, x);\n    ((_e = e()) == null ? void 0 : __privateMethod(_e, _Foo_instances, method_fn))?.(x);\n    (_f = f()) == null ? void 0 : __privateMethod(_g = _f.foo, _Foo_instances, method_fn).call(_g, x).bar();\n  }\n};\n_field = new WeakMap();\n_Foo_instances = new WeakSet();\nmethod_fn = function() {\n};\nexport {\n  Foo\n};\n"
   },
@@ -20015,7 +20015,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _field, _Foo_instances, method_fn, _a, _staticField, _Foo_static, staticMethod_fn;\nexport let Foo = (_a = class {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n    __privateAdd(this, _field);\n  }\n  foo() {\n    var _a2;\n    __privateSet(this, _field, __privateMethod(this, _Foo_instances, method_fn).call(this));\n    __privateSet(Foo, _staticField, __privateMethod(_a2 = Foo, _Foo_static, staticMethod_fn).call(_a2));\n  }\n}, _field = new WeakMap(), _Foo_instances = new WeakSet(), method_fn = function() {\n}, _staticField = new WeakMap(), _Foo_static = new WeakSet(), staticMethod_fn = function() {\n}, __privateAdd(_a, _Foo_static), __privateAdd(_a, _staticField), _a);\n"
   },
@@ -20038,7 +20038,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar _Foo_instances, g_fn, a_fn, ag_fn, _Foo_static, sg_fn, sa_fn, sag_fn;\nvar Foo = class {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n  }\n};\n_Foo_instances = new WeakSet();\ng_fn = function* () {\n};\na_fn = async function() {\n};\nag_fn = async function* () {\n};\n_Foo_static = new WeakSet();\nsg_fn = function* () {\n};\nsa_fn = async function() {\n};\nsag_fn = async function* () {\n};\n__privateAdd(Foo, _Foo_static);\nexport {\n  Foo\n};\n"
   },
@@ -20060,7 +20060,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\nfunction foo(_0) {\n  return __async(this, arguments, function* (bar) {\n    yield bar;\n    return [this, arguments];\n  });\n}\nclass Foo {\n  foo() {\n    return __async(this, null, function* () {\n    });\n  }\n}\nnew class Bar extends class {\n} {\n  constructor() {\n    let x = 1;\n    (() => __async(null, null, function* () {\n      console.log(\"before super\", x);\n      yield 1;\n      console.log(\"after super\", x);\n    }))();\n    super();\n    x = 2;\n  }\n}();\nexport default [\n  foo,\n  Foo,\n  function() {\n    return __async(this, null, function* () {\n    });\n  },\n  () => __async(null, null, function* () {\n  }),\n  { foo() {\n    return __async(this, null, function* () {\n    });\n  } },\n  class {\n    foo() {\n      return __async(this, null, function* () {\n      });\n    }\n  },\n  function() {\n    var _arguments = arguments;\n    return (bar) => __async(this, null, function* () {\n      yield bar;\n      return [this, _arguments];\n    });\n  }\n];\n"
   },
@@ -20082,7 +20082,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416049"
     },
     "expected_snapshot": "---------- /out.js ----------\nasync function foo(bar) {\n  await bar;\n  return arguments;\n}\nclass Foo {\n  async foo() {\n  }\n}\nexport default [\n  foo,\n  Foo,\n  async function() {\n  },\n  async () => {\n  },\n  { async foo() {\n  } },\n  class {\n    async foo() {\n    }\n  },\n  function() {\n    return async (bar) => {\n      await bar;\n      return [this, arguments];\n    };\n  }\n];\n"
   },
@@ -20105,7 +20105,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar require_entry = __commonJS({\n  \"entry.js\"(exports) {\n    exports.foo = () => __async(exports, null, function* () {\n      return exports;\n    });\n  }\n});\nexport default require_entry();\n"
   },
@@ -20129,7 +20129,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\n// other.js\nvar bar = () => __async(null, null, function* () {\n});\n\n// entry.js\nvar foo = () => __async(void 0, null, function* () {\n  return void 0;\n});\nexport {\n  bar,\n  foo\n};\n"
   },
@@ -20159,7 +20159,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 2305830845597876200
+      "UnsupportedJSFeatures": "2305830845597876223"
     }
   },
   {
@@ -20180,7 +20180,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416049"
     },
     "expected_snapshot": "---------- /out.js ----------\nclass Derived extends Base {\n  async test(key) {\n    var _a, _b, _c, _d;\n    return [\n      await super.foo,\n      await super[key],\n      await ([super.foo] = [0]),\n      await ([super[key]] = [0]),\n      await (super.foo = 1),\n      await (super[key] = 1),\n      await (super.foo += 2),\n      await (super[key] += 2),\n      await ++super.foo,\n      await ++super[key],\n      await super.foo++,\n      await super[key]++,\n      await super.foo.name,\n      await super[key].name,\n      await ((_a = super.foo) == null ? void 0 : _a.name),\n      await ((_b = super[key]) == null ? void 0 : _b.name),\n      await super.foo(1, 2),\n      await super[key](1, 2),\n      await ((_c = super.foo) == null ? void 0 : _c.call(this, 1, 2)),\n      await ((_d = super[key]) == null ? void 0 : _d.call(this, 1, 2)),\n      await (() => super.foo)(),\n      await (() => super[key])(),\n      await (() => super.foo())(),\n      await (() => super[key]())(),\n      await super.foo``,\n      await super[key]``\n    ];\n  }\n}\nlet fn = async () => class extends Base {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"a\", super.a);\n    __publicField(this, \"b\", () => super.b);\n  }\n  c() {\n    return super.c;\n  }\n  d() {\n    return () => super.d;\n  }\n};\nclass Derived2 extends Base {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"b\", async () => {\n      var _a;\n      return _a = super.foo, class {\n        constructor() {\n          __publicField(this, _a, 123);\n        }\n      };\n    });\n  }\n  async a() {\n    var _a;\n    return _a = super.foo, class {\n      constructor() {\n        __publicField(this, _a, 123);\n      }\n    };\n  }\n}\nfor (let i = 0; i < 3; i++) {\n  objs.push({\n    __proto__: {\n      foo() {\n        return i;\n      }\n    },\n    async bar() {\n      return super.foo();\n    }\n  });\n}\n"
   },
@@ -20202,7 +20202,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\nclass Derived extends Base {\n  test(key) {\n    return __async(this, null, function* () {\n      var _a, _b, _c, _d;\n      return [\n        yield __superGet(Derived.prototype, this, \"foo\"),\n        yield __superGet(Derived.prototype, this, key),\n        yield [__superWrapper(Derived.prototype, this, \"foo\")._] = [0],\n        yield [__superWrapper(Derived.prototype, this, key)._] = [0],\n        yield __superSet(Derived.prototype, this, \"foo\", 1),\n        yield __superSet(Derived.prototype, this, key, 1),\n        yield __superSet(Derived.prototype, this, \"foo\", __superGet(Derived.prototype, this, \"foo\") + 2),\n        yield __superSet(Derived.prototype, this, key, __superGet(Derived.prototype, this, key) + 2),\n        yield ++__superWrapper(Derived.prototype, this, \"foo\")._,\n        yield ++__superWrapper(Derived.prototype, this, key)._,\n        yield __superWrapper(Derived.prototype, this, \"foo\")._++,\n        yield __superWrapper(Derived.prototype, this, key)._++,\n        yield __superGet(Derived.prototype, this, \"foo\").name,\n        yield __superGet(Derived.prototype, this, key).name,\n        yield (_a = __superGet(Derived.prototype, this, \"foo\")) == null ? void 0 : _a.name,\n        yield (_b = __superGet(Derived.prototype, this, key)) == null ? void 0 : _b.name,\n        yield __superGet(Derived.prototype, this, \"foo\").call(this, 1, 2),\n        yield __superGet(Derived.prototype, this, key).call(this, 1, 2),\n        yield (_c = __superGet(Derived.prototype, this, \"foo\")) == null ? void 0 : _c.call(this, 1, 2),\n        yield (_d = __superGet(Derived.prototype, this, key)) == null ? void 0 : _d.call(this, 1, 2),\n        yield (() => __superGet(Derived.prototype, this, \"foo\"))(),\n        yield (() => __superGet(Derived.prototype, this, key))(),\n        yield (() => __superGet(Derived.prototype, this, \"foo\").call(this))(),\n        yield (() => __superGet(Derived.prototype, this, key).call(this))(),\n        yield __superGet(Derived.prototype, this, \"foo\").bind(this)``,\n        yield __superGet(Derived.prototype, this, key).bind(this)``\n      ];\n    });\n  }\n}\nlet fn = () => __async(null, null, function* () {\n  return class extends Base {\n    constructor() {\n      super(...arguments);\n      __publicField(this, \"a\", super.a);\n      __publicField(this, \"b\", () => super.b);\n    }\n    c() {\n      return super.c;\n    }\n    d() {\n      return () => super.d;\n    }\n  };\n});\nclass Derived2 extends Base {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"b\", () => __async(null, null, function* () {\n      var _a;\n      return _a = __superGet(Derived2.prototype, this, \"foo\"), class {\n        constructor() {\n          __publicField(this, _a, 123);\n        }\n      };\n    }));\n  }\n  a() {\n    return __async(this, null, function* () {\n      var _a;\n      return _a = __superGet(Derived2.prototype, this, \"foo\"), class {\n        constructor() {\n          __publicField(this, _a, 123);\n        }\n      };\n    });\n  }\n}\nfor (let i = 0; i < 3; i++) {\n  let _a;\n  objs.push(_a = {\n    __proto__: {\n      foo() {\n        return i;\n      }\n    },\n    bar() {\n      return __async(this, null, function* () {\n        return __superGet(_a, this, \"foo\").call(this);\n      });\n    }\n  });\n}\n"
   },
@@ -20224,7 +20224,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1302666242750283800
+      "UnsupportedJSFeatures": "1302666242750283649"
     },
     "expected_snapshot": "---------- /out.js ----------\nconst _Derived = class _Derived extends Base {\n};\n__publicField(_Derived, \"test\", async (key) => {\n  return [\n    await __superGet(_Derived, _Derived, \"foo\"),\n    await __superGet(_Derived, _Derived, key),\n    await ([__superWrapper(_Derived, _Derived, \"foo\")._] = [0]),\n    await ([__superWrapper(_Derived, _Derived, key)._] = [0]),\n    await __superSet(_Derived, _Derived, \"foo\", 1),\n    await __superSet(_Derived, _Derived, key, 1),\n    await __superSet(_Derived, _Derived, \"foo\", __superGet(_Derived, _Derived, \"foo\") + 2),\n    await __superSet(_Derived, _Derived, key, __superGet(_Derived, _Derived, key) + 2),\n    await ++__superWrapper(_Derived, _Derived, \"foo\")._,\n    await ++__superWrapper(_Derived, _Derived, key)._,\n    await __superWrapper(_Derived, _Derived, \"foo\")._++,\n    await __superWrapper(_Derived, _Derived, key)._++,\n    await __superGet(_Derived, _Derived, \"foo\").name,\n    await __superGet(_Derived, _Derived, key).name,\n    await __superGet(_Derived, _Derived, \"foo\")?.name,\n    await __superGet(_Derived, _Derived, key)?.name,\n    await __superGet(_Derived, _Derived, \"foo\").call(this, 1, 2),\n    await __superGet(_Derived, _Derived, key).call(this, 1, 2),\n    await super.foo?.(1, 2),\n    await super[key]?.(1, 2),\n    await (() => __superGet(_Derived, _Derived, \"foo\"))(),\n    await (() => __superGet(_Derived, _Derived, key))(),\n    await (() => __superGet(_Derived, _Derived, \"foo\").call(this))(),\n    await (() => __superGet(_Derived, _Derived, key).call(this))(),\n    await __superGet(_Derived, _Derived, \"foo\").bind(this)``,\n    await __superGet(_Derived, _Derived, key).bind(this)``\n  ];\n});\nlet Derived = _Derived;\nlet fn = async () => {\n  var _a;\n  return _a = class extends Base {\n    static c() {\n      return super.c;\n    }\n    static d() {\n      return () => super.d;\n    }\n  }, __publicField(_a, \"a\", __superGet(_a, _a, \"a\")), __publicField(_a, \"b\", () => __superGet(_a, _a, \"b\")), _a;\n};\nconst _Derived2 = class _Derived2 extends Base {\n  static async a() {\n    var _a;\n    return _a = super.foo, class {\n      constructor() {\n        __publicField(this, _a, 123);\n      }\n    };\n  }\n};\n__publicField(_Derived2, \"b\", async () => {\n  var _a;\n  return _a = __superGet(_Derived2, _Derived2, \"foo\"), class {\n    constructor() {\n      __publicField(this, _a, 123);\n    }\n  };\n});\nlet Derived2 = _Derived2;\n"
   },
@@ -20246,7 +20246,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\nconst _Derived = class _Derived extends Base {\n};\n__publicField(_Derived, \"test\", (key) => __async(null, null, function* () {\n  var _a, _b, _c, _d;\n  return [\n    yield __superGet(_Derived, _Derived, \"foo\"),\n    yield __superGet(_Derived, _Derived, key),\n    yield [__superWrapper(_Derived, _Derived, \"foo\")._] = [0],\n    yield [__superWrapper(_Derived, _Derived, key)._] = [0],\n    yield __superSet(_Derived, _Derived, \"foo\", 1),\n    yield __superSet(_Derived, _Derived, key, 1),\n    yield __superSet(_Derived, _Derived, \"foo\", __superGet(_Derived, _Derived, \"foo\") + 2),\n    yield __superSet(_Derived, _Derived, key, __superGet(_Derived, _Derived, key) + 2),\n    yield ++__superWrapper(_Derived, _Derived, \"foo\")._,\n    yield ++__superWrapper(_Derived, _Derived, key)._,\n    yield __superWrapper(_Derived, _Derived, \"foo\")._++,\n    yield __superWrapper(_Derived, _Derived, key)._++,\n    yield __superGet(_Derived, _Derived, \"foo\").name,\n    yield __superGet(_Derived, _Derived, key).name,\n    yield (_a = __superGet(_Derived, _Derived, \"foo\")) == null ? void 0 : _a.name,\n    yield (_b = __superGet(_Derived, _Derived, key)) == null ? void 0 : _b.name,\n    yield __superGet(_Derived, _Derived, \"foo\").call(this, 1, 2),\n    yield __superGet(_Derived, _Derived, key).call(this, 1, 2),\n    yield (_c = __superGet(_Derived, _Derived, \"foo\")) == null ? void 0 : _c.call(this, 1, 2),\n    yield (_d = __superGet(_Derived, _Derived, key)) == null ? void 0 : _d.call(this, 1, 2),\n    yield (() => __superGet(_Derived, _Derived, \"foo\"))(),\n    yield (() => __superGet(_Derived, _Derived, key))(),\n    yield (() => __superGet(_Derived, _Derived, \"foo\").call(this))(),\n    yield (() => __superGet(_Derived, _Derived, key).call(this))(),\n    yield __superGet(_Derived, _Derived, \"foo\").bind(this)``,\n    yield __superGet(_Derived, _Derived, key).bind(this)``\n  ];\n}));\nlet Derived = _Derived;\nlet fn = () => __async(null, null, function* () {\n  var _a;\n  return _a = class extends Base {\n    static c() {\n      return super.c;\n    }\n    static d() {\n      return () => super.d;\n    }\n  }, __publicField(_a, \"a\", __superGet(_a, _a, \"a\")), __publicField(_a, \"b\", () => __superGet(_a, _a, \"b\")), _a;\n});\nconst _Derived2 = class _Derived2 extends Base {\n  static a() {\n    return __async(this, null, function* () {\n      var _a;\n      return _a = __superGet(_Derived2, this, \"foo\"), class {\n        constructor() {\n          __publicField(this, _a, 123);\n        }\n      };\n    });\n  }\n};\n__publicField(_Derived2, \"b\", () => __async(null, null, function* () {\n  var _a;\n  return _a = __superGet(_Derived2, _Derived2, \"foo\"), class {\n    constructor() {\n      __publicField(this, _a, 123);\n    }\n  };\n}));\nlet Derived2 = _Derived2;\n"
   },
@@ -20268,7 +20268,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1302666242750283800
+      "UnsupportedJSFeatures": "1302666242750283649"
     },
     "expected_snapshot": "---------- /out.js ----------\nconst _Derived = class _Derived extends Base {\n};\n__publicField(_Derived, \"test\", (key) => {\n  return [\n    __superGet(_Derived, _Derived, \"foo\"),\n    __superGet(_Derived, _Derived, key),\n    [__superWrapper(_Derived, _Derived, \"foo\")._] = [0],\n    [__superWrapper(_Derived, _Derived, key)._] = [0],\n    __superSet(_Derived, _Derived, \"foo\", 1),\n    __superSet(_Derived, _Derived, key, 1),\n    __superSet(_Derived, _Derived, \"foo\", __superGet(_Derived, _Derived, \"foo\") + 2),\n    __superSet(_Derived, _Derived, key, __superGet(_Derived, _Derived, key) + 2),\n    ++__superWrapper(_Derived, _Derived, \"foo\")._,\n    ++__superWrapper(_Derived, _Derived, key)._,\n    __superWrapper(_Derived, _Derived, \"foo\")._++,\n    __superWrapper(_Derived, _Derived, key)._++,\n    __superGet(_Derived, _Derived, \"foo\").name,\n    __superGet(_Derived, _Derived, key).name,\n    __superGet(_Derived, _Derived, \"foo\")?.name,\n    __superGet(_Derived, _Derived, key)?.name,\n    __superGet(_Derived, _Derived, \"foo\").call(this, 1, 2),\n    __superGet(_Derived, _Derived, key).call(this, 1, 2),\n    super.foo?.(1, 2),\n    super[key]?.(1, 2),\n    (() => __superGet(_Derived, _Derived, \"foo\"))(),\n    (() => __superGet(_Derived, _Derived, key))(),\n    (() => __superGet(_Derived, _Derived, \"foo\").call(this))(),\n    (() => __superGet(_Derived, _Derived, key).call(this))(),\n    __superGet(_Derived, _Derived, \"foo\").bind(this)``,\n    __superGet(_Derived, _Derived, key).bind(this)``\n  ];\n});\nlet Derived = _Derived;\n"
   },
@@ -20290,7 +20290,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\nconst _Derived = class _Derived extends Base {\n};\n__publicField(_Derived, \"test\", (key) => {\n  var _a, _b, _c, _d;\n  return [\n    __superGet(_Derived, _Derived, \"foo\"),\n    __superGet(_Derived, _Derived, key),\n    [__superWrapper(_Derived, _Derived, \"foo\")._] = [0],\n    [__superWrapper(_Derived, _Derived, key)._] = [0],\n    __superSet(_Derived, _Derived, \"foo\", 1),\n    __superSet(_Derived, _Derived, key, 1),\n    __superSet(_Derived, _Derived, \"foo\", __superGet(_Derived, _Derived, \"foo\") + 2),\n    __superSet(_Derived, _Derived, key, __superGet(_Derived, _Derived, key) + 2),\n    ++__superWrapper(_Derived, _Derived, \"foo\")._,\n    ++__superWrapper(_Derived, _Derived, key)._,\n    __superWrapper(_Derived, _Derived, \"foo\")._++,\n    __superWrapper(_Derived, _Derived, key)._++,\n    __superGet(_Derived, _Derived, \"foo\").name,\n    __superGet(_Derived, _Derived, key).name,\n    (_a = __superGet(_Derived, _Derived, \"foo\")) == null ? void 0 : _a.name,\n    (_b = __superGet(_Derived, _Derived, key)) == null ? void 0 : _b.name,\n    __superGet(_Derived, _Derived, \"foo\").call(this, 1, 2),\n    __superGet(_Derived, _Derived, key).call(this, 1, 2),\n    (_c = __superGet(_Derived, _Derived, \"foo\")) == null ? void 0 : _c.call(this, 1, 2),\n    (_d = __superGet(_Derived, _Derived, key)) == null ? void 0 : _d.call(this, 1, 2),\n    (() => __superGet(_Derived, _Derived, \"foo\"))(),\n    (() => __superGet(_Derived, _Derived, key))(),\n    (() => __superGet(_Derived, _Derived, \"foo\").call(this))(),\n    (() => __superGet(_Derived, _Derived, key).call(this))(),\n    __superGet(_Derived, _Derived, \"foo\").bind(this)``,\n    __superGet(_Derived, _Derived, key).bind(this)``\n  ];\n});\nlet Derived = _Derived;\n"
   },
@@ -20324,7 +20324,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\n// foo1.js\nvar foo1_default = class _foo1_default extends x {\n  foo1() {\n    return () => __async(null, null, function* () {\n      return __superGet(_foo1_default.prototype, this, \"foo\").call(this, \"foo1\");\n    });\n  }\n};\n\n// foo2.js\nvar foo2_default = class _foo2_default extends x {\n  foo2() {\n    return () => __async(null, null, function* () {\n      return () => __superGet(_foo2_default.prototype, this, \"foo\").call(this, \"foo2\");\n    });\n  }\n};\n\n// foo3.js\nvar foo3_default = class _foo3_default extends x {\n  foo3() {\n    return () => () => __async(null, null, function* () {\n      return __superGet(_foo3_default.prototype, this, \"foo\").call(this, \"foo3\");\n    });\n  }\n};\n\n// foo4.js\nvar foo4_default = class _foo4_default extends x {\n  foo4() {\n    return () => __async(null, null, function* () {\n      return () => __async(null, null, function* () {\n        return __superGet(_foo4_default.prototype, this, \"foo\").call(this, \"foo4\");\n      });\n    });\n  }\n};\n\n// bar1.js\nvar bar1_default = class _bar1_default extends x {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"bar1\", () => __async(null, null, function* () {\n      return __superGet(_bar1_default.prototype, this, \"foo\").call(this, \"bar1\");\n    }));\n  }\n};\n\n// bar2.js\nvar bar2_default = class _bar2_default extends x {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"bar2\", () => __async(null, null, function* () {\n      return () => __superGet(_bar2_default.prototype, this, \"foo\").call(this, \"bar2\");\n    }));\n  }\n};\n\n// bar3.js\nvar bar3_default = class _bar3_default extends x {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"bar3\", () => () => __async(null, null, function* () {\n      return __superGet(_bar3_default.prototype, this, \"foo\").call(this, \"bar3\");\n    }));\n  }\n};\n\n// bar4.js\nvar bar4_default = class _bar4_default extends x {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"bar4\", () => __async(null, null, function* () {\n      return () => __async(null, null, function* () {\n        return __superGet(_bar4_default.prototype, this, \"foo\").call(this, \"bar4\");\n      });\n    }));\n  }\n};\n\n// baz1.js\nvar baz1_default = class _baz1_default extends x {\n  baz1() {\n    return __async(this, null, function* () {\n      return () => __superGet(_baz1_default.prototype, this, \"foo\").call(this, \"baz1\");\n    });\n  }\n};\n\n// baz2.js\nvar baz2_default = class _baz2_default extends x {\n  baz2() {\n    return __async(this, null, function* () {\n      return () => () => __superGet(_baz2_default.prototype, this, \"foo\").call(this, \"baz2\");\n    });\n  }\n};\n\n// outer.js\nvar outer_default = (function() {\n  return __async(this, null, function* () {\n    class y extends z {\n      constructor() {\n        super(...arguments);\n        __publicField(this, \"foo\", () => __async(null, null, function* () {\n          return __superGet(y.prototype, this, \"foo\").call(this);\n        }));\n      }\n    }\n    yield new y().foo()();\n  });\n})();\nexport {\n  bar1_default as bar1,\n  bar2_default as bar2,\n  bar3_default as bar3,\n  bar4_default as bar4,\n  baz1_default as baz1,\n  baz2_default as baz2,\n  foo1_default as foo1,\n  foo2_default as foo2,\n  foo3_default as foo3,\n  foo4_default as foo4\n};\n"
   },
@@ -20358,7 +20358,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\n// foo1.js\nvar foo1_default = class _foo1_default extends x {\n  foo1() {\n    return () => __async(null, null, function* () {\n      return __superSet(_foo1_default.prototype, this, \"foo\", \"foo1\");\n    });\n  }\n};\n\n// foo2.js\nvar foo2_default = class _foo2_default extends x {\n  foo2() {\n    return () => __async(null, null, function* () {\n      return () => __superSet(_foo2_default.prototype, this, \"foo\", \"foo2\");\n    });\n  }\n};\n\n// foo3.js\nvar foo3_default = class _foo3_default extends x {\n  foo3() {\n    return () => () => __async(null, null, function* () {\n      return __superSet(_foo3_default.prototype, this, \"foo\", \"foo3\");\n    });\n  }\n};\n\n// foo4.js\nvar foo4_default = class _foo4_default extends x {\n  foo4() {\n    return () => __async(null, null, function* () {\n      return () => __async(null, null, function* () {\n        return __superSet(_foo4_default.prototype, this, \"foo\", \"foo4\");\n      });\n    });\n  }\n};\n\n// bar1.js\nvar bar1_default = class _bar1_default extends x {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"bar1\", () => __async(null, null, function* () {\n      return __superSet(_bar1_default.prototype, this, \"foo\", \"bar1\");\n    }));\n  }\n};\n\n// bar2.js\nvar bar2_default = class _bar2_default extends x {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"bar2\", () => __async(null, null, function* () {\n      return () => __superSet(_bar2_default.prototype, this, \"foo\", \"bar2\");\n    }));\n  }\n};\n\n// bar3.js\nvar bar3_default = class _bar3_default extends x {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"bar3\", () => () => __async(null, null, function* () {\n      return __superSet(_bar3_default.prototype, this, \"foo\", \"bar3\");\n    }));\n  }\n};\n\n// bar4.js\nvar bar4_default = class _bar4_default extends x {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"bar4\", () => __async(null, null, function* () {\n      return () => __async(null, null, function* () {\n        return __superSet(_bar4_default.prototype, this, \"foo\", \"bar4\");\n      });\n    }));\n  }\n};\n\n// baz1.js\nvar baz1_default = class _baz1_default extends x {\n  baz1() {\n    return __async(this, null, function* () {\n      return () => __superSet(_baz1_default.prototype, this, \"foo\", \"baz1\");\n    });\n  }\n};\n\n// baz2.js\nvar baz2_default = class _baz2_default extends x {\n  baz2() {\n    return __async(this, null, function* () {\n      return () => () => __superSet(_baz2_default.prototype, this, \"foo\", \"baz2\");\n    });\n  }\n};\n\n// outer.js\nvar outer_default = (function() {\n  return __async(this, null, function* () {\n    class y extends z {\n      constructor() {\n        super(...arguments);\n        __publicField(this, \"foo\", () => __async(null, null, function* () {\n          return __superSet(y.prototype, this, \"foo\", \"foo\");\n        }));\n      }\n    }\n    yield new y().foo()();\n  });\n})();\nexport {\n  bar1_default as bar1,\n  bar2_default as bar2,\n  bar3_default as bar3,\n  bar4_default as bar4,\n  baz1_default as baz1,\n  baz2_default as baz2,\n  foo1_default as foo1,\n  foo2_default as foo2,\n  foo3_default as foo3,\n  foo4_default as foo4\n};\n"
   },
@@ -20392,7 +20392,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\n// foo1.js\nvar foo1_default = class _foo1_default extends x {\n  static foo1() {\n    return () => __async(null, null, function* () {\n      return __superGet(_foo1_default, this, \"foo\").call(this, \"foo1\");\n    });\n  }\n};\n\n// foo2.js\nvar foo2_default = class _foo2_default extends x {\n  static foo2() {\n    return () => __async(null, null, function* () {\n      return () => __superGet(_foo2_default, this, \"foo\").call(this, \"foo2\");\n    });\n  }\n};\n\n// foo3.js\nvar foo3_default = class _foo3_default extends x {\n  static foo3() {\n    return () => () => __async(null, null, function* () {\n      return __superGet(_foo3_default, this, \"foo\").call(this, \"foo3\");\n    });\n  }\n};\n\n// foo4.js\nvar foo4_default = class _foo4_default extends x {\n  static foo4() {\n    return () => __async(null, null, function* () {\n      return () => __async(null, null, function* () {\n        return __superGet(_foo4_default, this, \"foo\").call(this, \"foo4\");\n      });\n    });\n  }\n};\n\n// bar1.js\nvar _bar1_default = class _bar1_default extends x {\n};\n__publicField(_bar1_default, \"bar1\", () => __async(null, null, function* () {\n  return __superGet(_bar1_default, _bar1_default, \"foo\").call(this, \"bar1\");\n}));\nvar bar1_default = _bar1_default;\n\n// bar2.js\nvar _bar2_default = class _bar2_default extends x {\n};\n__publicField(_bar2_default, \"bar2\", () => __async(null, null, function* () {\n  return () => __superGet(_bar2_default, _bar2_default, \"foo\").call(this, \"bar2\");\n}));\nvar bar2_default = _bar2_default;\n\n// bar3.js\nvar _bar3_default = class _bar3_default extends x {\n};\n__publicField(_bar3_default, \"bar3\", () => () => __async(null, null, function* () {\n  return __superGet(_bar3_default, _bar3_default, \"foo\").call(this, \"bar3\");\n}));\nvar bar3_default = _bar3_default;\n\n// bar4.js\nvar _bar4_default = class _bar4_default extends x {\n};\n__publicField(_bar4_default, \"bar4\", () => __async(null, null, function* () {\n  return () => __async(null, null, function* () {\n    return __superGet(_bar4_default, _bar4_default, \"foo\").call(this, \"bar4\");\n  });\n}));\nvar bar4_default = _bar4_default;\n\n// baz1.js\nvar baz1_default = class _baz1_default extends x {\n  static baz1() {\n    return __async(this, null, function* () {\n      return () => __superGet(_baz1_default, this, \"foo\").call(this, \"baz1\");\n    });\n  }\n};\n\n// baz2.js\nvar baz2_default = class _baz2_default extends x {\n  static baz2() {\n    return __async(this, null, function* () {\n      return () => () => __superGet(_baz2_default, this, \"foo\").call(this, \"baz2\");\n    });\n  }\n};\n\n// outer.js\nvar outer_default = (function() {\n  return __async(this, null, function* () {\n    const _y = class _y extends z {\n    };\n    __publicField(_y, \"foo\", () => __async(null, null, function* () {\n      return __superGet(_y, _y, \"foo\").call(this);\n    }));\n    let y = _y;\n    yield y.foo()();\n  });\n})();\nexport {\n  bar1_default as bar1,\n  bar2_default as bar2,\n  bar3_default as bar3,\n  bar4_default as bar4,\n  baz1_default as baz1,\n  baz2_default as baz2,\n  foo1_default as foo1,\n  foo2_default as foo2,\n  foo3_default as foo3,\n  foo4_default as foo4\n};\n"
   },
@@ -20426,7 +20426,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416057"
     },
     "expected_snapshot": "---------- /out.js ----------\n// foo1.js\nvar foo1_default = class _foo1_default extends x {\n  static foo1() {\n    return () => __async(null, null, function* () {\n      return __superSet(_foo1_default, this, \"foo\", \"foo1\");\n    });\n  }\n};\n\n// foo2.js\nvar foo2_default = class _foo2_default extends x {\n  static foo2() {\n    return () => __async(null, null, function* () {\n      return () => __superSet(_foo2_default, this, \"foo\", \"foo2\");\n    });\n  }\n};\n\n// foo3.js\nvar foo3_default = class _foo3_default extends x {\n  static foo3() {\n    return () => () => __async(null, null, function* () {\n      return __superSet(_foo3_default, this, \"foo\", \"foo3\");\n    });\n  }\n};\n\n// foo4.js\nvar foo4_default = class _foo4_default extends x {\n  static foo4() {\n    return () => __async(null, null, function* () {\n      return () => __async(null, null, function* () {\n        return __superSet(_foo4_default, this, \"foo\", \"foo4\");\n      });\n    });\n  }\n};\n\n// bar1.js\nvar _bar1_default = class _bar1_default extends x {\n};\n__publicField(_bar1_default, \"bar1\", () => __async(null, null, function* () {\n  return __superSet(_bar1_default, _bar1_default, \"foo\", \"bar1\");\n}));\nvar bar1_default = _bar1_default;\n\n// bar2.js\nvar _bar2_default = class _bar2_default extends x {\n};\n__publicField(_bar2_default, \"bar2\", () => __async(null, null, function* () {\n  return () => __superSet(_bar2_default, _bar2_default, \"foo\", \"bar2\");\n}));\nvar bar2_default = _bar2_default;\n\n// bar3.js\nvar _bar3_default = class _bar3_default extends x {\n};\n__publicField(_bar3_default, \"bar3\", () => () => __async(null, null, function* () {\n  return __superSet(_bar3_default, _bar3_default, \"foo\", \"bar3\");\n}));\nvar bar3_default = _bar3_default;\n\n// bar4.js\nvar _bar4_default = class _bar4_default extends x {\n};\n__publicField(_bar4_default, \"bar4\", () => __async(null, null, function* () {\n  return () => __async(null, null, function* () {\n    return __superSet(_bar4_default, _bar4_default, \"foo\", \"bar4\");\n  });\n}));\nvar bar4_default = _bar4_default;\n\n// baz1.js\nvar baz1_default = class _baz1_default extends x {\n  static baz1() {\n    return __async(this, null, function* () {\n      return () => __superSet(_baz1_default, this, \"foo\", \"baz1\");\n    });\n  }\n};\n\n// baz2.js\nvar baz2_default = class _baz2_default extends x {\n  static baz2() {\n    return __async(this, null, function* () {\n      return () => () => __superSet(_baz2_default, this, \"foo\", \"baz2\");\n    });\n  }\n};\n\n// outer.js\nvar outer_default = (function() {\n  return __async(this, null, function* () {\n    const _y = class _y extends z {\n    };\n    __publicField(_y, \"foo\", () => __async(null, null, function* () {\n      return __superSet(_y, _y, \"foo\", \"foo\");\n    }));\n    let y = _y;\n    yield y.foo()();\n  });\n})();\nexport {\n  bar1_default as bar1,\n  bar2_default as bar2,\n  bar3_default as bar3,\n  bar4_default as bar4,\n  baz1_default as baz1,\n  baz2_default as baz2,\n  foo1_default as foo1,\n  foo2_default as foo2,\n  foo3_default as foo3,\n  foo4_default as foo4\n};\n"
   },
@@ -20457,7 +20457,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1157425154767454200
+      "UnsupportedJSFeatures": "1157425154767454208"
     },
     "expected_snapshot": "---------- /out.js ----------\n// foo1.js\nvar foo1_default = class extends x {\n  #foo() {\n    super.foo();\n  }\n};\n\n// foo2.js\nvar foo2_default = class extends x {\n  #foo() {\n    super.foo++;\n  }\n};\n\n// foo3.js\nvar foo3_default = class extends x {\n  static #foo() {\n    super.foo();\n  }\n};\n\n// foo4.js\nvar foo4_default = class extends x {\n  static #foo() {\n    super.foo++;\n  }\n};\n\n// foo5.js\nvar foo5_default = class extends x {\n  #foo = () => {\n    super.foo();\n  };\n};\n\n// foo6.js\nvar foo6_default = class extends x {\n  #foo = () => {\n    super.foo++;\n  };\n};\n\n// foo7.js\nvar foo7_default = class extends x {\n  static #foo = () => {\n    super.foo();\n  };\n};\n\n// foo8.js\nvar foo8_default = class extends x {\n  static #foo = () => {\n    super.foo++;\n  };\n};\nexport {\n  foo1_default as foo1,\n  foo2_default as foo2,\n  foo3_default as foo3,\n  foo4_default as foo4,\n  foo5_default as foo5,\n  foo6_default as foo6,\n  foo7_default as foo7,\n  foo8_default as foo8\n};\n"
   },
@@ -20488,7 +20488,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1302666242750283800
+      "UnsupportedJSFeatures": "1302666242750283649"
     },
     "expected_snapshot": "---------- /out.js ----------\n// foo1.js\nvar _default_instances, foo_fn;\nvar _foo1_default = class _foo1_default extends x {\n  constructor() {\n    super(...arguments);\n    __privateAdd(this, _default_instances);\n  }\n};\n_default_instances = new WeakSet();\nfoo_fn = function() {\n  __superGet(_foo1_default.prototype, this, \"foo\").call(this);\n};\nvar foo1_default = _foo1_default;\n\n// foo2.js\nvar _default_instances2, foo_fn2;\nvar _foo2_default = class _foo2_default extends x {\n  constructor() {\n    super(...arguments);\n    __privateAdd(this, _default_instances2);\n  }\n};\n_default_instances2 = new WeakSet();\nfoo_fn2 = function() {\n  __superWrapper(_foo2_default.prototype, this, \"foo\")._++;\n};\nvar foo2_default = _foo2_default;\n\n// foo3.js\nvar _default_static, foo_fn3;\nvar _foo3_default = class _foo3_default extends x {\n};\n_default_static = new WeakSet();\nfoo_fn3 = function() {\n  __superGet(_foo3_default, this, \"foo\").call(this);\n};\n__privateAdd(_foo3_default, _default_static);\nvar foo3_default = _foo3_default;\n\n// foo4.js\nvar _default_static2, foo_fn4;\nvar _foo4_default = class _foo4_default extends x {\n};\n_default_static2 = new WeakSet();\nfoo_fn4 = function() {\n  __superWrapper(_foo4_default, this, \"foo\")._++;\n};\n__privateAdd(_foo4_default, _default_static2);\nvar foo4_default = _foo4_default;\n\n// foo5.js\nvar _foo;\nvar foo5_default = class extends x {\n  constructor() {\n    super(...arguments);\n    __privateAdd(this, _foo, () => {\n      super.foo();\n    });\n  }\n};\n_foo = new WeakMap();\n\n// foo6.js\nvar _foo2;\nvar foo6_default = class extends x {\n  constructor() {\n    super(...arguments);\n    __privateAdd(this, _foo2, () => {\n      super.foo++;\n    });\n  }\n};\n_foo2 = new WeakMap();\n\n// foo7.js\nvar _foo3;\nvar _foo7_default = class _foo7_default extends x {\n};\n_foo3 = new WeakMap();\n__privateAdd(_foo7_default, _foo3, () => {\n  __superGet(_foo7_default, _foo7_default, \"foo\").call(this);\n});\nvar foo7_default = _foo7_default;\n\n// foo8.js\nvar _foo4;\nvar _foo8_default = class _foo8_default extends x {\n};\n_foo4 = new WeakMap();\n__privateAdd(_foo8_default, _foo4, () => {\n  __superWrapper(_foo8_default, _foo8_default, \"foo\")._++;\n});\nvar foo8_default = _foo8_default;\nexport {\n  foo1_default as foo1,\n  foo2_default as foo2,\n  foo3_default as foo3,\n  foo4_default as foo4,\n  foo5_default as foo5,\n  foo6_default as foo6,\n  foo7_default as foo7,\n  foo8_default as foo8\n};\n"
   },
@@ -20532,7 +20532,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _foo, _bar, _s_foo, _s_bar;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _foo, 123);\n    __privateAdd(this, _bar);\n    __publicField(this, \"foo\", 123);\n    __publicField(this, \"bar\");\n  }\n}\n_foo = new WeakMap();\n_bar = new WeakMap();\n_s_foo = new WeakMap();\n_s_bar = new WeakMap();\n__privateAdd(Foo, _s_foo, 123);\n__privateAdd(Foo, _s_bar);\n__publicField(Foo, \"s_foo\", 123);\n__publicField(Foo, \"s_bar\");\n"
   },
@@ -20576,7 +20576,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _foo, _bar, _s_foo, _s_bar;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _foo, 123);\n    __privateAdd(this, _bar);\n    this.foo = 123;\n  }\n}\n_foo = new WeakMap();\n_bar = new WeakMap();\n_s_foo = new WeakMap();\n_s_bar = new WeakMap();\n__privateAdd(Foo, _s_foo, 123);\n__privateAdd(Foo, _s_bar);\nFoo.s_foo = 123;\n"
   },
@@ -20625,7 +20625,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\n// loose/index.js\nvar loose_default = class {\n  constructor() {\n    __publicField(this, \"foo\");\n  }\n};\n\n// strict/index.js\nvar strict_default = class {\n  constructor() {\n    __publicField(this, \"foo\");\n  }\n};\n\n// entry.js\nconsole.log(loose_default, strict_default);\n"
   },
@@ -20652,7 +20652,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1302666380189237200
+      "UnsupportedJSFeatures": "1302666380189237121"
     },
     "expected_snapshot": "---------- /out.js ----------\n// loose/index.ts\nvar loose_default = class {\n};\n\n// strict/index.ts\nvar strict_default = class {\n  constructor() {\n    __publicField(this, \"foo\");\n  }\n};\n\n// entry.js\nconsole.log(loose_default, strict_default);\n"
   },
@@ -20674,7 +20674,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416049"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _q, _r, _t, _u, _v, _w, _x;\nconst local_const = __objRest({}, []);\nlet local_let = __objRest({}, []);\nvar local_var = __objRest({}, []);\nlet arrow_fn = (_a) => {\n  var x2 = __objRest(_a, []);\n};\nlet fn_expr = function(_b = default_value) {\n  var x2 = __objRest(_b, []);\n};\nlet class_expr = class {\n  method(x2, ..._c) {\n    var [y, _d] = _c, z = __objRest(_d, []);\n  }\n};\nfunction fn_stmt(_e, _g) {\n  var _f = _e, { a = b() } = _f, x2 = __objRest(_f, [\"a\"]);\n  var _h = _g, { c = d() } = _h, y = __objRest(_h, [\"c\"]);\n}\nclass class_stmt {\n  method(_i) {\n    var x2 = __objRest(_i, []);\n  }\n}\nvar ns;\n((ns2) => {\n  ns2.x = __objRest({}, []);\n})(ns || (ns = {}));\ntry {\n} catch (_j) {\n  let catch_clause = __objRest(_j, []);\n}\nfor (const _k in { abc }) {\n  const for_in_const = __objRest(_k, []);\n}\nfor (let _l in { abc }) {\n  let for_in_let = __objRest(_l, []);\n}\nfor (var _m in { abc }) {\n  var for_in_var = __objRest(_m, []);\n  ;\n}\nfor (const _n of [{}]) {\n  const for_of_const = __objRest(_n, []);\n  ;\n}\nfor (let _o of [{}]) {\n  let for_of_let = __objRest(_o, []);\n  x();\n}\nfor (var _p of [{}]) {\n  var for_of_var = __objRest(_p, []);\n  x();\n}\nfor (const for_const = __objRest({}, []); x; x = null) {\n}\nfor (let for_let = __objRest({}, []); x; x = null) {\n}\nfor (var for_var = __objRest({}, []); x; x = null) {\n}\nfor (_q in { abc }) {\n  x = __objRest(_q, []);\n}\nfor (_r of [{}]) {\n  x = __objRest(_r, []);\n}\nfor (x = __objRest({}, []); x; x = null) {\n}\nassign = __objRest({}, []);\n({ obj_method(_s) {\n  var x2 = __objRest(_s, []);\n} });\nx = __objRest(x, []);\nfor (x = __objRest(x, []); 0; ) ;\nconsole.log((x = __objRest(_t = x, []), _t));\nconsole.log((_v = _u = { x }, { x } = _v, xx = __objRest(_v, [\"x\"]), _u));\nconsole.log(({ x: _x } = _w = { x }, xx = __objRest(_x, []), _w));\n"
   },
@@ -20696,7 +20696,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1591112277808251000
+      "UnsupportedJSFeatures": "1591112277808250785"
     },
     "expected_snapshot": "---------- /out.js ----------\nconst { ...local_const } = {};\nlet { ...local_let } = {};\nvar { ...local_var } = {};\nlet arrow_fn = ({ ...x2 }) => {\n};\nlet fn_expr = function({ ...x2 } = default_value) {\n};\nlet class_expr = class {\n  method(x2, ...[y, { ...z }]) {\n  }\n};\nfunction fn_stmt({ a = b(), ...x2 }, { c = d(), ...y }) {\n}\nclass class_stmt {\n  method({ ...x2 }) {\n  }\n}\nvar ns;\n((ns2) => {\n  ({ ...ns2.x } = {});\n})(ns || (ns = {}));\ntry {\n} catch ({ ...catch_clause }) {\n}\nfor (const { ...for_in_const } in { abc }) {\n}\nfor (let { ...for_in_let } in { abc }) {\n}\nfor (var { ...for_in_var } in { abc }) ;\nfor (const { ...for_of_const } of [{}]) ;\nfor (let { ...for_of_let } of [{}]) x();\nfor (var { ...for_of_var } of [{}]) x();\nfor (const { ...for_const } = {}; x; x = null) {\n}\nfor (let { ...for_let } = {}; x; x = null) {\n}\nfor (var { ...for_var } = {}; x; x = null) {\n}\nfor ({ ...x } in { abc }) {\n}\nfor ({ ...x } of [{}]) {\n}\nfor ({ ...x } = {}; x; x = null) {\n}\n({ ...assign } = {});\n({ obj_method({ ...x2 }) {\n} });\n({ ...x } = x);\nfor ({ ...x } = x; 0; ) ;\nconsole.log({ ...x } = x);\nconsole.log({ x, ...xx } = { x });\nconsole.log({ x: { ...xx } } = { x });\n"
   },
@@ -20718,7 +20718,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1591041909064073200
+      "UnsupportedJSFeatures": "1591041909064073121"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _e;\nexport class A {\n}\nexport class B extends A {\n  constructor(c) {\n    var _a;\n    super();\n    __privateAdd(this, _e);\n    __privateSet(this, _e, (_a = c.d) != null ? _a : \"test\");\n  }\n  f() {\n    return __privateGet(this, _e);\n  }\n}\n_e = new WeakMap();\n"
   },
@@ -20740,7 +20740,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1591041909064073200
+      "UnsupportedJSFeatures": "1591041909064073121"
     },
     "expected_snapshot": "---------- /out.js ----------\nimport * as ns from \"path\";\nexport { ns };\nlet ns2 = 123;\nexport { ns2 as sn };\n"
   },
@@ -20777,7 +20777,7 @@
         }
       },
       "Mode": 2,
-      "UnsupportedJSFeatures": 1591041909064073200
+      "UnsupportedJSFeatures": "1591041909064073121"
     },
     "expected_snapshot": "---------- /out.js ----------\n// nested.js\nimport * as foo from \"path2\";\nvar foo2 = 123;\n\n// entry.js\nimport * as ns from \"path1\";\nconsole.log(foo, foo2);\nvar ns2 = 123;\nexport {\n  ns,\n  ns2 as sn\n};\n"
   },
@@ -20849,7 +20849,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1024
+      "UnsupportedJSFeatures": "1024"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _foo;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _foo, 123);\n    // This must be set before \"bar\" is initialized\n    __publicField(this, \"bar\", __privateGet(this, _foo));\n  }\n}\n_foo = new WeakMap();\nconsole.log(new Foo().bar === 123);\n"
   },
@@ -20871,7 +20871,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 2048
+      "UnsupportedJSFeatures": "2048"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _Foo_instances, foo_fn;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n    __publicField(this, \"bar\", __privateMethod(this, _Foo_instances, foo_fn).call(this));\n  }\n  // This must be set before \"bar\" is initialized\n}\n_Foo_instances = new WeakSet();\nfoo_fn = function() {\n  return 123;\n};\nconsole.log(new Foo().bar === 123);\n"
   },
@@ -20893,7 +20893,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 256
+      "UnsupportedJSFeatures": "256"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _Foo_instances, foo_get;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n    __publicField(this, \"bar\", __privateGet(this, _Foo_instances, foo_get));\n  }\n  // This must be set before \"bar\" is initialized\n}\n_Foo_instances = new WeakSet();\nfoo_get = function() {\n  return 123;\n};\nconsole.log(new Foo().bar === 123);\n"
   },
@@ -20915,7 +20915,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 8192
+      "UnsupportedJSFeatures": "8192"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _foo, _foo2;\nconst _Foo = class _Foo {\n};\n_foo = new WeakMap();\n__privateAdd(_Foo, _foo, 123);\n// This must be set before \"bar\" is initialized\n__publicField(_Foo, \"bar\", __privateGet(_Foo, _foo));\nlet Foo = _Foo;\nconsole.log(Foo.bar === 123);\nconst _FooThis = class _FooThis {\n};\n_foo2 = new WeakMap();\n__privateAdd(_FooThis, _foo2, 123);\n// This must be set before \"bar\" is initialized\n__publicField(_FooThis, \"bar\", __privateGet(_FooThis, _foo2));\nlet FooThis = _FooThis;\nconsole.log(FooThis.bar === 123);\n"
   },
@@ -20937,7 +20937,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 16384
+      "UnsupportedJSFeatures": "16384"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _a, _Foo_static, foo_fn, _b, _FooThis_static, foo_fn2;\nconst _Foo = class _Foo {\n  // This must be set before \"bar\" is initialized\n};\n_Foo_static = new WeakSet();\nfoo_fn = function() {\n  return 123;\n};\n__privateAdd(_Foo, _Foo_static);\n__publicField(_Foo, \"bar\", __privateMethod(_a = _Foo, _Foo_static, foo_fn).call(_a));\nlet Foo = _Foo;\nconsole.log(Foo.bar === 123);\nconst _FooThis = class _FooThis {\n  // This must be set before \"bar\" is initialized\n};\n_FooThis_static = new WeakSet();\nfoo_fn2 = function() {\n  return 123;\n};\n__privateAdd(_FooThis, _FooThis_static);\n__publicField(_FooThis, \"bar\", __privateMethod(_b = _FooThis, _FooThis_static, foo_fn2).call(_b));\nlet FooThis = _FooThis;\nconsole.log(FooThis.bar === 123);\n"
   },
@@ -20959,7 +20959,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 4096
+      "UnsupportedJSFeatures": "4096"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _Foo_static, foo_get, _FooThis_static, foo_get2;\nconst _Foo = class _Foo {\n  // This must be set before \"bar\" is initialized\n};\n_Foo_static = new WeakSet();\nfoo_get = function() {\n  return 123;\n};\n__privateAdd(_Foo, _Foo_static);\n__publicField(_Foo, \"bar\", __privateGet(_Foo, _Foo_static, foo_get));\nlet Foo = _Foo;\nconsole.log(Foo.bar === 123);\nconst _FooThis = class _FooThis {\n  // This must be set before \"bar\" is initialized\n};\n_FooThis_static = new WeakSet();\nfoo_get2 = function() {\n  return 123;\n};\n__privateAdd(_FooThis, _FooThis_static);\n__publicField(_FooThis, \"bar\", __privateGet(_FooThis, _FooThis_static, foo_get2));\nlet FooThis = _FooThis;\nconsole.log(FooThis.bar === 123);\n"
   },
@@ -20981,7 +20981,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 512
+      "UnsupportedJSFeatures": "512"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _foo;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _foo);\n    this.#bar = void 0;\n  }\n  #bar;\n  baz() {\n    return [\n      __privateGet(this, _foo),\n      this.#bar,\n      __privateIn(_foo, this)\n    ];\n  }\n}\n_foo = new WeakMap();\n"
   },
@@ -21024,7 +21024,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 72057594037927940
+      "UnsupportedJSFeatures": "72057594037927936"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _a, _b, _c, _d, _e, _f, _g, _h;\nx = () => [\n  tag(_a || (_a = __template([\"x\"]))),\n  tag(_b || (_b = __template([\"ÿ\"], [\"\\\\xFF\"]))),\n  tag(_c || (_c = __template([void 0], [\"\\\\x\"]))),\n  tag(_d || (_d = __template([void 0], [\"\\\\u\"])))\n];\ny = () => [\n  tag(_e || (_e = __template([\"x\", \"z\"])), y),\n  tag(_f || (_f = __template([\"ÿ\", \"z\"], [\"\\\\xFF\", \"z\"])), y),\n  tag(_g || (_g = __template([\"x\", \"z\"], [\"x\", \"\\\\z\"])), y),\n  tag(_h || (_h = __template([\"x\", void 0], [\"x\", \"\\\\u\"])), y)\n];\n"
   },
@@ -21047,7 +21047,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 2048
+      "UnsupportedJSFeatures": "2048"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar _T_instances, a_fn, b_fn;\nvar T = class {\n  constructor() {\n    __privateAdd(this, _T_instances);\n  }\n  d() {\n    console.log(__privateMethod(this, _T_instances, a_fn).call(this));\n  }\n};\n_T_instances = new WeakSet();\na_fn = function() {\n  return \"a\";\n};\nb_fn = function() {\n  return \"b\";\n};\n__publicField(T, \"c\");\nnew T().d();\n"
   },
@@ -21070,7 +21070,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 137438953472
+      "UnsupportedJSFeatures": "137438953472"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar A = class {\n  #a;\n  f() {\n    this.#a ?? (this.#a = 1);\n  }\n};\nexport {\n  A\n};\n"
   },
@@ -21115,7 +21115,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1302666242750283800
+      "UnsupportedJSFeatures": "1302666242750283649"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nvar _A = class _A {\n};\n_A.thisField++;\n_A.classField++;\n__superSet(_A, _A, \"superField\", __superGet(_A, _A, \"superField\") + 1);\n__superWrapper(_A, _A, \"superField\")._++;\nvar A = _A;\nvar _a;\nvar B = (_a = class {\n}, _a.thisField++, __superSet(_a, _a, \"superField\", __superGet(_a, _a, \"superField\") + 1), __superWrapper(_a, _a, \"superField\")._++, _a);\n"
   },
@@ -21138,7 +21138,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 1302666242750283800
+      "UnsupportedJSFeatures": "1302666242750283649"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.js\nfunction foo(RegExp2) {\n  return new RegExp2(new RegExp(\".\", \"d\"), \"d\");\n}\nexport {\n  foo\n};\n"
   },
@@ -21160,7 +21160,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258085450416000
+      "UnsupportedJSFeatures": "1612258085450416049"
     },
     "expected_snapshot": "---------- /out.js ----------\nexport default [\n  async () => {\n    try {\n      for (var iter = __forAwait(y), more, temp, error; more = !(temp = await iter.next()).done; more = false) {\n        x = temp.value;\n        z(x);\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && await temp.call(iter);\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  },\n  async () => {\n    try {\n      for (var iter = __forAwait(y), more, temp, error; more = !(temp = await iter.next()).done; more = false) {\n        x.y = temp.value;\n        z(x);\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && await temp.call(iter);\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  },\n  async () => {\n    try {\n      for (var iter = __forAwait(y), more, temp, error; more = !(temp = await iter.next()).done; more = false) {\n        let x2 = temp.value;\n        z(x2);\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && await temp.call(iter);\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  },\n  async () => {\n    try {\n      for (var iter = __forAwait(y), more, temp, error; more = !(temp = await iter.next()).done; more = false) {\n        const x2 = temp.value;\n        z(x2);\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && await temp.call(iter);\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  },\n  async () => {\n    try {\n      label: for (var iter = __forAwait(y), more, temp, error; more = !(temp = await iter.next()).done; more = false) {\n        const x2 = temp.value;\n        break label;\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && await temp.call(iter);\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  },\n  async () => {\n    try {\n      label: for (var iter = __forAwait(y), more, temp, error; more = !(temp = await iter.next()).done; more = false) {\n        const x2 = temp.value;\n        continue label;\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && await temp.call(iter);\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  }\n];\n"
   },
@@ -21182,7 +21182,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 1612258360332517400
+      "UnsupportedJSFeatures": "1612258360332517305"
     },
     "expected_snapshot": "---------- /out.js ----------\nexport default [\n  () => __async(null, null, function* () {\n    try {\n      for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield iter.next()).done; more = false) {\n        x = temp.value;\n        z(x);\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && (yield temp.call(iter));\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  }),\n  () => __async(null, null, function* () {\n    try {\n      for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield iter.next()).done; more = false) {\n        x.y = temp.value;\n        z(x);\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && (yield temp.call(iter));\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  }),\n  () => __async(null, null, function* () {\n    try {\n      for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield iter.next()).done; more = false) {\n        let x2 = temp.value;\n        z(x2);\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && (yield temp.call(iter));\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  }),\n  () => __async(null, null, function* () {\n    try {\n      for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield iter.next()).done; more = false) {\n        const x2 = temp.value;\n        z(x2);\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && (yield temp.call(iter));\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  }),\n  () => __async(null, null, function* () {\n    try {\n      label: for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield iter.next()).done; more = false) {\n        const x2 = temp.value;\n        break label;\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && (yield temp.call(iter));\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  }),\n  () => __async(null, null, function* () {\n    try {\n      label: for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield iter.next()).done; more = false) {\n        const x2 = temp.value;\n        continue label;\n      }\n    } catch (temp) {\n      error = [temp];\n    } finally {\n      try {\n        more && (temp = iter.return) && (yield temp.call(iter));\n      } finally {\n        if (error)\n          throw error[0];\n      }\n    }\n  })\n];\n"
   },
@@ -21293,7 +21293,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputDir": "/out",
-      "UnsupportedJSFeatures": 1157425154767454200
+      "UnsupportedJSFeatures": "1157425154767454208"
     },
     "expected_snapshot": "---------- /out/js-define.js ----------\nvar _a, _b;\nclass Foo {\n  #one = 1;\n  get one() {\n    return this.#one;\n  }\n  set one(_) {\n    this.#one = _;\n  }\n  #_two = 2;\n  get #two() {\n    return this.#_two;\n  }\n  set #two(_) {\n    this.#_two = _;\n  }\n  #a = 3;\n  get [_b = three()]() {\n    return this.#a;\n  }\n  set [_b](_) {\n    this.#a = _;\n  }\n  static #four = 4;\n  static get four() {\n    return this.#four;\n  }\n  static set four(_) {\n    this.#four = _;\n  }\n  static #_five = 5;\n  static get #five() {\n    return this.#_five;\n  }\n  static set #five(_) {\n    this.#_five = _;\n  }\n  static #b = 6;\n  static get [_a = six()]() {\n    return this.#b;\n  }\n  static set [_a](_) {\n    this.#b = _;\n  }\n}\n\n---------- /out/ts-define/ts-define.js ----------\nvar _a, _b;\nclass Foo {\n  #one = 1;\n  get one() {\n    return this.#one;\n  }\n  set one(_) {\n    this.#one = _;\n  }\n  #_two = 2;\n  get #two() {\n    return this.#_two;\n  }\n  set #two(_) {\n    this.#_two = _;\n  }\n  #a = 3;\n  get [_b = three()]() {\n    return this.#a;\n  }\n  set [_b](_) {\n    this.#a = _;\n  }\n  static #four = 4;\n  static get four() {\n    return this.#four;\n  }\n  static set four(_) {\n    this.#four = _;\n  }\n  static #_five = 5;\n  static get #five() {\n    return this.#_five;\n  }\n  static set #five(_) {\n    this.#_five = _;\n  }\n  static #b = 6;\n  static get [_a = six()]() {\n    return this.#b;\n  }\n  static set [_a](_) {\n    this.#b = _;\n  }\n}\nclass Normal {\n  #a = b;\n  get a() {\n    return this.#a;\n  }\n  set a(_) {\n    this.#a = _;\n  }\n  c = d;\n}\nclass Private {\n  #_a = b;\n  get #a() {\n    return this.#_a;\n  }\n  set #a(_) {\n    this.#_a = _;\n  }\n  c = d;\n}\nclass StaticNormal {\n  static #a = b;\n  static get a() {\n    return this.#a;\n  }\n  static set a(_) {\n    this.#a = _;\n  }\n  static c = d;\n}\nclass StaticPrivate {\n  static #_a = b;\n  static get #a() {\n    return this.#_a;\n  }\n  static set #a(_) {\n    this.#_a = _;\n  }\n  static c = d;\n}\n\n---------- /out/ts-assign/ts-assign.js ----------\nvar _a, _b, _a2, __a;\nclass Foo {\n  #one = 1;\n  get one() {\n    return this.#one;\n  }\n  set one(_) {\n    this.#one = _;\n  }\n  #_two = 2;\n  get #two() {\n    return this.#_two;\n  }\n  set #two(_) {\n    this.#_two = _;\n  }\n  #a = 3;\n  get [_b = three()]() {\n    return this.#a;\n  }\n  set [_b](_) {\n    this.#a = _;\n  }\n  static #four = 4;\n  static get four() {\n    return this.#four;\n  }\n  static set four(_) {\n    this.#four = _;\n  }\n  static #_five = 5;\n  static get #five() {\n    return this.#_five;\n  }\n  static set #five(_) {\n    this.#_five = _;\n  }\n  static #b = 6;\n  static get [_a = six()]() {\n    return this.#b;\n  }\n  static set [_a](_) {\n    this.#b = _;\n  }\n}\nclass Normal {\n  constructor() {\n    __privateAdd(this, _a2, b);\n    this.c = d;\n  }\n  get a() {\n    return __privateGet(this, _a2);\n  }\n  set a(_) {\n    __privateSet(this, _a2, _);\n  }\n}\n_a2 = new WeakMap();\nclass Private {\n  constructor() {\n    __privateAdd(this, __a, b);\n    this.c = d;\n  }\n  get #a() {\n    return __privateGet(this, __a);\n  }\n  set #a(_) {\n    __privateSet(this, __a, _);\n  }\n}\n__a = new WeakMap();\nclass StaticNormal {\n  static #a = b;\n  static get a() {\n    return this.#a;\n  }\n  static set a(_) {\n    this.#a = _;\n  }\n  static {\n    this.c = d;\n  }\n}\nclass StaticPrivate {\n  static #_a = b;\n  static get #a() {\n    return this.#_a;\n  }\n  static set #a(_) {\n    this.#_a = _;\n  }\n  static {\n    this.c = d;\n  }\n}\n"
   },
@@ -21321,7 +21321,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputDir": "/out",
-      "UnsupportedJSFeatures": 1302666242750283800
+      "UnsupportedJSFeatures": "1302666242750283649"
     },
     "expected_snapshot": "---------- /out/js-define.js ----------\nvar _a, _b, _one, __two, _Foo_instances, two_get, two_set, _a2, _four, __five, _Foo_static, five_get, five_set, _b2;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n    __privateAdd(this, _one, 1);\n    __privateAdd(this, __two, 2);\n    __privateAdd(this, _a2, 3);\n  }\n  get one() {\n    return __privateGet(this, _one);\n  }\n  set one(_) {\n    __privateSet(this, _one, _);\n  }\n  get [_b = three()]() {\n    return __privateGet(this, _a2);\n  }\n  set [_b](_) {\n    __privateSet(this, _a2, _);\n  }\n  static get four() {\n    return __privateGet(this, _four);\n  }\n  static set four(_) {\n    __privateSet(this, _four, _);\n  }\n  static get [_a = six()]() {\n    return __privateGet(this, _b2);\n  }\n  static set [_a](_) {\n    __privateSet(this, _b2, _);\n  }\n}\n_one = new WeakMap();\n__two = new WeakMap();\n_Foo_instances = new WeakSet();\ntwo_get = function() {\n  return __privateGet(this, __two);\n};\ntwo_set = function(_) {\n  __privateSet(this, __two, _);\n};\n_a2 = new WeakMap();\n_four = new WeakMap();\n__five = new WeakMap();\n_Foo_static = new WeakSet();\nfive_get = function() {\n  return __privateGet(this, __five);\n};\nfive_set = function(_) {\n  __privateSet(this, __five, _);\n};\n_b2 = new WeakMap();\n__privateAdd(Foo, _Foo_static);\n__privateAdd(Foo, _four, 4);\n__privateAdd(Foo, __five, 5);\n__privateAdd(Foo, _b2, 6);\n\n---------- /out/ts-define/ts-define.js ----------\nvar _a, _b, _one, __two, _Foo_instances, two_get, two_set, _a2, _four, __five, _Foo_static, five_get, five_set, _b2, _a3, __a, _Private_instances, a_get, a_set, _a4, __a2, _StaticPrivate_static, a_get2, a_set2;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n    __privateAdd(this, _one, 1);\n    __privateAdd(this, __two, 2);\n    __privateAdd(this, _a2, 3);\n  }\n  get one() {\n    return __privateGet(this, _one);\n  }\n  set one(_) {\n    __privateSet(this, _one, _);\n  }\n  get [_b = three()]() {\n    return __privateGet(this, _a2);\n  }\n  set [_b](_) {\n    __privateSet(this, _a2, _);\n  }\n  static get four() {\n    return __privateGet(this, _four);\n  }\n  static set four(_) {\n    __privateSet(this, _four, _);\n  }\n  static get [_a = six()]() {\n    return __privateGet(this, _b2);\n  }\n  static set [_a](_) {\n    __privateSet(this, _b2, _);\n  }\n}\n_one = new WeakMap();\n__two = new WeakMap();\n_Foo_instances = new WeakSet();\ntwo_get = function() {\n  return __privateGet(this, __two);\n};\ntwo_set = function(_) {\n  __privateSet(this, __two, _);\n};\n_a2 = new WeakMap();\n_four = new WeakMap();\n__five = new WeakMap();\n_Foo_static = new WeakSet();\nfive_get = function() {\n  return __privateGet(this, __five);\n};\nfive_set = function(_) {\n  __privateSet(this, __five, _);\n};\n_b2 = new WeakMap();\n__privateAdd(Foo, _Foo_static);\n__privateAdd(Foo, _four, 4);\n__privateAdd(Foo, __five, 5);\n__privateAdd(Foo, _b2, 6);\nclass Normal {\n  constructor() {\n    __privateAdd(this, _a3, b);\n    __publicField(this, \"c\", d);\n  }\n  get a() {\n    return __privateGet(this, _a3);\n  }\n  set a(_) {\n    __privateSet(this, _a3, _);\n  }\n}\n_a3 = new WeakMap();\nclass Private {\n  constructor() {\n    __privateAdd(this, _Private_instances);\n    __privateAdd(this, __a, b);\n    __publicField(this, \"c\", d);\n  }\n}\n__a = new WeakMap();\n_Private_instances = new WeakSet();\na_get = function() {\n  return __privateGet(this, __a);\n};\na_set = function(_) {\n  __privateSet(this, __a, _);\n};\nclass StaticNormal {\n  static get a() {\n    return __privateGet(this, _a4);\n  }\n  static set a(_) {\n    __privateSet(this, _a4, _);\n  }\n}\n_a4 = new WeakMap();\n__privateAdd(StaticNormal, _a4, b);\n__publicField(StaticNormal, \"c\", d);\nclass StaticPrivate {\n}\n__a2 = new WeakMap();\n_StaticPrivate_static = new WeakSet();\na_get2 = function() {\n  return __privateGet(this, __a2);\n};\na_set2 = function(_) {\n  __privateSet(this, __a2, _);\n};\n__privateAdd(StaticPrivate, _StaticPrivate_static);\n__privateAdd(StaticPrivate, __a2, b);\n__publicField(StaticPrivate, \"c\", d);\n\n---------- /out/ts-assign/ts-assign.js ----------\nvar _a, _b, _one, __two, _Foo_instances, two_get, two_set, _a2, _four, __five, _Foo_static, five_get, five_set, _b2, _a3, __a, _Private_instances, a_get, a_set, _a4, __a2, _StaticPrivate_static, a_get2, a_set2;\nclass Foo {\n  constructor() {\n    __privateAdd(this, _Foo_instances);\n    __privateAdd(this, _one, 1);\n    __privateAdd(this, __two, 2);\n    __privateAdd(this, _a2, 3);\n  }\n  get one() {\n    return __privateGet(this, _one);\n  }\n  set one(_) {\n    __privateSet(this, _one, _);\n  }\n  get [_b = three()]() {\n    return __privateGet(this, _a2);\n  }\n  set [_b](_) {\n    __privateSet(this, _a2, _);\n  }\n  static get four() {\n    return __privateGet(this, _four);\n  }\n  static set four(_) {\n    __privateSet(this, _four, _);\n  }\n  static get [_a = six()]() {\n    return __privateGet(this, _b2);\n  }\n  static set [_a](_) {\n    __privateSet(this, _b2, _);\n  }\n}\n_one = new WeakMap();\n__two = new WeakMap();\n_Foo_instances = new WeakSet();\ntwo_get = function() {\n  return __privateGet(this, __two);\n};\ntwo_set = function(_) {\n  __privateSet(this, __two, _);\n};\n_a2 = new WeakMap();\n_four = new WeakMap();\n__five = new WeakMap();\n_Foo_static = new WeakSet();\nfive_get = function() {\n  return __privateGet(this, __five);\n};\nfive_set = function(_) {\n  __privateSet(this, __five, _);\n};\n_b2 = new WeakMap();\n__privateAdd(Foo, _Foo_static);\n__privateAdd(Foo, _four, 4);\n__privateAdd(Foo, __five, 5);\n__privateAdd(Foo, _b2, 6);\nclass Normal {\n  constructor() {\n    __privateAdd(this, _a3, b);\n    this.c = d;\n  }\n  get a() {\n    return __privateGet(this, _a3);\n  }\n  set a(_) {\n    __privateSet(this, _a3, _);\n  }\n}\n_a3 = new WeakMap();\nclass Private {\n  constructor() {\n    __privateAdd(this, _Private_instances);\n    __privateAdd(this, __a, b);\n    this.c = d;\n  }\n}\n__a = new WeakMap();\n_Private_instances = new WeakSet();\na_get = function() {\n  return __privateGet(this, __a);\n};\na_set = function(_) {\n  __privateSet(this, __a, _);\n};\nclass StaticNormal {\n  static get a() {\n    return __privateGet(this, _a4);\n  }\n  static set a(_) {\n    __privateSet(this, _a4, _);\n  }\n}\n_a4 = new WeakMap();\n__privateAdd(StaticNormal, _a4, b);\nStaticNormal.c = d;\nclass StaticPrivate {\n}\n__a2 = new WeakMap();\n_StaticPrivate_static = new WeakSet();\na_get2 = function() {\n  return __privateGet(this, __a2);\n};\na_set2 = function(_) {\n  __privateSet(this, __a2, _);\n};\n__privateAdd(StaticPrivate, _StaticPrivate_static);\n__privateAdd(StaticPrivate, __a2, b);\nStaticPrivate.c = d;\n"
   },
@@ -21345,7 +21345,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputDir": "/out",
-      "UnsupportedJSFeatures": 1152921504606847000
+      "UnsupportedJSFeatures": "1152921504606846976"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\nfunction foo() {\n  var _stack4 = [];\n  try {\n    const a2 = __using(_stack4, b);\n    if (nested) {\n      var _stack3 = [];\n      try {\n        const x = __using(_stack3, 1);\n      } catch (_3) {\n        var _error3 = _3, _hasError3 = true;\n      } finally {\n        __callDispose(_stack3, _error3, _hasError3);\n      }\n    }\n  } catch (_4) {\n    var _error4 = _4, _hasError4 = true;\n  } finally {\n    __callDispose(_stack4, _error4, _hasError4);\n  }\n}\nasync function bar() {\n  var _stack4 = [];\n  try {\n    const a2 = __using(_stack4, b);\n    const c2 = __using(_stack4, d, true);\n    if (nested) {\n      var _stack3 = [];\n      try {\n        const x = __using(_stack3, 1);\n        const y = __using(_stack3, 2, true);\n      } catch (_3) {\n        var _error3 = _3, _hasError3 = true;\n      } finally {\n        var _promise3 = __callDispose(_stack3, _error3, _hasError3);\n        _promise3 && await _promise3;\n      }\n    }\n  } catch (_4) {\n    var _error4 = _4, _hasError4 = true;\n  } finally {\n    var _promise4 = __callDispose(_stack4, _error4, _hasError4);\n    _promise4 && await _promise4;\n  }\n}\nvar _stack2 = [];\ntry {\n  var a = __using(_stack2, b);\n  var c = __using(_stack2, d, true);\n  if (nested) {\n    var _stack = [];\n    try {\n      const x = __using(_stack, 1);\n      const y = __using(_stack, 2, true);\n    } catch (_) {\n      var _error = _, _hasError = true;\n    } finally {\n      var _promise = __callDispose(_stack, _error, _hasError);\n      _promise && await _promise;\n    }\n  }\n} catch (_2) {\n  var _error2 = _2, _hasError2 = true;\n} finally {\n  var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n  _promise2 && await _promise2;\n}\n\n---------- /out/loops.js ----------\nfor (var _a of b) {\n  var _stack = [];\n  try {\n    const a = __using(_stack, _a);\n    c(() => a);\n  } catch (_) {\n    var _error = _, _hasError = true;\n  } finally {\n    __callDispose(_stack, _error, _hasError);\n  }\n}\nfor (var _d of e) {\n  var _stack2 = [];\n  try {\n    const d = __using(_stack2, _d, true);\n    f(() => d);\n  } catch (_2) {\n    var _error2 = _2, _hasError2 = true;\n  } finally {\n    var _promise = __callDispose(_stack2, _error2, _hasError2);\n    _promise && await _promise;\n  }\n}\nfor await (var _g of h) {\n  var _stack3 = [];\n  try {\n    const g = __using(_stack3, _g);\n    i(() => g);\n  } catch (_3) {\n    var _error3 = _3, _hasError3 = true;\n  } finally {\n    __callDispose(_stack3, _error3, _hasError3);\n  }\n}\nfor await (var _j of k) {\n  var _stack4 = [];\n  try {\n    const j = __using(_stack4, _j, true);\n    l(() => j);\n  } catch (_4) {\n    var _error4 = _4, _hasError4 = true;\n  } finally {\n    var _promise2 = __callDispose(_stack4, _error4, _hasError4);\n    _promise2 && await _promise2;\n  }\n}\nif (nested) {\n  for (var _a of b) {\n    var _stack5 = [];\n    try {\n      const a = __using(_stack5, _a);\n      c(() => a);\n    } catch (_5) {\n      var _error5 = _5, _hasError5 = true;\n    } finally {\n      __callDispose(_stack5, _error5, _hasError5);\n    }\n  }\n  for (var _d of e) {\n    var _stack6 = [];\n    try {\n      const d = __using(_stack6, _d, true);\n      f(() => d);\n    } catch (_6) {\n      var _error6 = _6, _hasError6 = true;\n    } finally {\n      var _promise3 = __callDispose(_stack6, _error6, _hasError6);\n      _promise3 && await _promise3;\n    }\n  }\n  for await (var _g of h) {\n    var _stack7 = [];\n    try {\n      const g = __using(_stack7, _g);\n      i(() => g);\n    } catch (_7) {\n      var _error7 = _7, _hasError7 = true;\n    } finally {\n      __callDispose(_stack7, _error7, _hasError7);\n    }\n  }\n  for await (var _j of k) {\n    var _stack8 = [];\n    try {\n      const j = __using(_stack8, _j, true);\n      l(() => j);\n    } catch (_8) {\n      var _error8 = _8, _hasError8 = true;\n    } finally {\n      var _promise4 = __callDispose(_stack8, _error8, _hasError8);\n      _promise4 && await _promise4;\n    }\n  }\n}\nfunction foo() {\n  for (var _a of b) {\n    var _stack9 = [];\n    try {\n      const a = __using(_stack9, _a);\n      c(() => a);\n    } catch (_9) {\n      var _error9 = _9, _hasError9 = true;\n    } finally {\n      __callDispose(_stack9, _error9, _hasError9);\n    }\n  }\n}\nasync function bar() {\n  for (var _a of b) {\n    var _stack9 = [];\n    try {\n      const a = __using(_stack9, _a);\n      c(() => a);\n    } catch (_9) {\n      var _error9 = _9, _hasError9 = true;\n    } finally {\n      __callDispose(_stack9, _error9, _hasError9);\n    }\n  }\n  for (var _d of e) {\n    var _stack10 = [];\n    try {\n      const d = __using(_stack10, _d, true);\n      f(() => d);\n    } catch (_10) {\n      var _error10 = _10, _hasError10 = true;\n    } finally {\n      var _promise5 = __callDispose(_stack10, _error10, _hasError10);\n      _promise5 && await _promise5;\n    }\n  }\n  for await (var _g of h) {\n    var _stack11 = [];\n    try {\n      const g = __using(_stack11, _g);\n      i(() => g);\n    } catch (_11) {\n      var _error11 = _11, _hasError11 = true;\n    } finally {\n      __callDispose(_stack11, _error11, _hasError11);\n    }\n  }\n  for await (var _j of k) {\n    var _stack12 = [];\n    try {\n      const j = __using(_stack12, _j, true);\n      l(() => j);\n    } catch (_12) {\n      var _error12 = _12, _hasError12 = true;\n    } finally {\n      var _promise6 = __callDispose(_stack12, _error12, _hasError12);\n      _promise6 && await _promise6;\n    }\n  }\n}\n"
   },
@@ -21369,7 +21369,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputDir": "/out",
-      "UnsupportedJSFeatures": 144115188075855870
+      "UnsupportedJSFeatures": "144115188075855880"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\nfunction foo() {\n  using a = b;\n  if (nested) {\n    using x = 1;\n  }\n}\nfunction bar() {\n  return __async(this, null, function* () {\n    var _stack2 = [];\n    try {\n      const a = __using(_stack2, b);\n      const c = __using(_stack2, d, true);\n      if (nested) {\n        var _stack = [];\n        try {\n          const x = __using(_stack, 1);\n          const y = __using(_stack, 2, true);\n        } catch (_) {\n          var _error = _, _hasError = true;\n        } finally {\n          var _promise = __callDispose(_stack, _error, _hasError);\n          _promise && (yield _promise);\n        }\n      }\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n      _promise2 && (yield _promise2);\n    }\n  });\n}\n\n---------- /out/loops.js ----------\nfor (using a of b) c(() => a);\nif (nested) {\n  for (using a of b) c(() => a);\n}\nfunction foo() {\n  for (using a of b) c(() => a);\n}\nfunction bar() {\n  return __async(this, null, function* () {\n    for (using a of b) c(() => a);\n    for (var _d of e) {\n      var _stack = [];\n      try {\n        const d = __using(_stack, _d, true);\n        f(() => d);\n      } catch (_) {\n        var _error = _, _hasError = true;\n      } finally {\n        var _promise = __callDispose(_stack, _error, _hasError);\n        _promise && (yield _promise);\n      }\n    }\n  });\n}\n"
   },
@@ -21393,7 +21393,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputDir": "/out",
-      "UnsupportedJSFeatures": 1297036692682702800
+      "UnsupportedJSFeatures": "1297036692682702856"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\nfunction foo() {\n  var _stack2 = [];\n  try {\n    const a = __using(_stack2, b);\n    if (nested) {\n      var _stack = [];\n      try {\n        const x = __using(_stack, 1);\n      } catch (_) {\n        var _error = _, _hasError = true;\n      } finally {\n        __callDispose(_stack, _error, _hasError);\n      }\n    }\n  } catch (_2) {\n    var _error2 = _2, _hasError2 = true;\n  } finally {\n    __callDispose(_stack2, _error2, _hasError2);\n  }\n}\nfunction bar() {\n  return __async(this, null, function* () {\n    var _stack2 = [];\n    try {\n      const a = __using(_stack2, b);\n      const c = __using(_stack2, d, true);\n      if (nested) {\n        var _stack = [];\n        try {\n          const x = __using(_stack, 1);\n          const y = __using(_stack, 2, true);\n        } catch (_) {\n          var _error = _, _hasError = true;\n        } finally {\n          var _promise = __callDispose(_stack, _error, _hasError);\n          _promise && (yield _promise);\n        }\n      }\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n      _promise2 && (yield _promise2);\n    }\n  });\n}\n\n---------- /out/loops.js ----------\nfor (var _a of b) {\n  var _stack = [];\n  try {\n    const a = __using(_stack, _a);\n    c(() => a);\n  } catch (_) {\n    var _error = _, _hasError = true;\n  } finally {\n    __callDispose(_stack, _error, _hasError);\n  }\n}\nif (nested) {\n  for (var _a of b) {\n    var _stack2 = [];\n    try {\n      const a = __using(_stack2, _a);\n      c(() => a);\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      __callDispose(_stack2, _error2, _hasError2);\n    }\n  }\n}\nfunction foo() {\n  for (var _a of b) {\n    var _stack3 = [];\n    try {\n      const a = __using(_stack3, _a);\n      c(() => a);\n    } catch (_3) {\n      var _error3 = _3, _hasError3 = true;\n    } finally {\n      __callDispose(_stack3, _error3, _hasError3);\n    }\n  }\n}\nfunction bar() {\n  return __async(this, null, function* () {\n    for (var _a of b) {\n      var _stack3 = [];\n      try {\n        const a = __using(_stack3, _a);\n        c(() => a);\n      } catch (_3) {\n        var _error3 = _3, _hasError3 = true;\n      } finally {\n        __callDispose(_stack3, _error3, _hasError3);\n      }\n    }\n    for (var _d of e) {\n      var _stack4 = [];\n      try {\n        const d = __using(_stack4, _d, true);\n        f(() => d);\n      } catch (_4) {\n        var _error4 = _4, _hasError4 = true;\n      } finally {\n        var _promise = __callDispose(_stack4, _error4, _hasError4);\n        _promise && (yield _promise);\n      }\n    }\n  });\n}\n"
   },
@@ -21451,7 +21451,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputDir": "/out",
-      "UnsupportedJSFeatures": 1152921504606847000
+      "UnsupportedJSFeatures": "1152921504606846976"
     },
     "expected_snapshot": "---------- /out/hoist-use-strict.js ----------\n\"use strict\";\nfunction foo() {\n  \"use strict\";\n  var _stack2 = [];\n  try {\n    const a2 = __using(_stack2, b);\n  } catch (_2) {\n    var _error2 = _2, _hasError2 = true;\n  } finally {\n    __callDispose(_stack2, _error2, _hasError2);\n  }\n}\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\n\n---------- /out/hoist-directive.js ----------\n\"use wtf\";\nfunction foo() {\n  \"use wtf\";\n  var _stack2 = [];\n  try {\n    const a2 = __using(_stack2, b);\n  } catch (_2) {\n    var _error2 = _2, _hasError2 = true;\n  } finally {\n    __callDispose(_stack2, _error2, _hasError2);\n  }\n}\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\n\n---------- /out/hoist-import.js ----------\nimport \"./foo\";\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\n\n---------- /out/hoist-export-star.js ----------\nexport * from \"./foo\";\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\n\n---------- /out/hoist-export-from.js ----------\nexport { x, y } from \"./foo\";\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\n\n---------- /out/hoist-export-clause.js ----------\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  a,\n  c as \"c!\"\n};\n\n---------- /out/hoist-export-local-direct.js ----------\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var ac1 = [a, c], { x: [x1] } = foo;\n  var a1 = a, { y: [y1] } = foo;\n  var c1 = c, { z: [z1] } = foo;\n  var ac2 = [a, c], { x: [x2] } = foo;\n  var a2 = a, { y: [y2] } = foo;\n  var c2 = c, { z: [z2] } = foo;\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  ac1,\n  x1,\n  a1,\n  y1,\n  c1,\n  z1\n};\n\n---------- /out/hoist-export-local-indirect.js ----------\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var ac1 = [a, c], { x: [x1] } = foo;\n  var a1 = a, { y: [y1] } = foo;\n  var c1 = c, { z: [z1] } = foo;\n  var ac2 = [a, c], { x: [x2] } = foo;\n  var a2 = a, { y: [y2] } = foo;\n  var c2 = c, { z: [z2] } = foo;\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  x1,\n  y1,\n  z1\n};\n\n---------- /out/hoist-export-class-direct.js ----------\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var Foo1 = class {\n    ac = [a, c];\n  };\n  var Bar1 = class _Bar1 {\n    ac = [a, c, _Bar1];\n  };\n  var Foo2 = class {\n    ac = [a, c];\n  };\n  var Bar2 = class _Bar2 {\n    ac = [a, c, _Bar2];\n  };\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  Foo1,\n  Bar1\n};\n\n---------- /out/hoist-export-class-indirect.js ----------\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var Foo1 = class {\n    ac = [a, c];\n  };\n  var Bar1 = class _Bar1 {\n    ac = [a, c, _Bar1];\n  };\n  var Foo2 = class {\n    ac = [a, c];\n  };\n  var Bar2 = class _Bar2 {\n    ac = [a, c, _Bar2];\n  };\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  Foo1,\n  Bar1\n};\n\n---------- /out/hoist-export-function-direct.js ----------\nexport function foo1() {\n  return [a, c];\n}\nexport function bar1() {\n  return [a, c, bar1];\n}\nfunction foo2() {\n  return [a, c];\n}\nfunction bar2() {\n  return [a, c, bar2];\n}\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\n\n---------- /out/hoist-export-function-indirect.js ----------\nfunction foo1() {\n  return [a, c];\n}\nfunction bar1() {\n  return [a, c, bar1];\n}\nfunction foo2() {\n  return [a, c];\n}\nfunction bar2() {\n  return [a, c, bar2];\n}\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  foo1,\n  bar1\n};\n\n---------- /out/hoist-export-default-class-name-unused.js ----------\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var Foo = class {\n    ac = [a, c];\n  };\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  Foo as default\n};\n\n---------- /out/hoist-export-default-class-name-used.js ----------\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var Foo = class _Foo {\n    ac = [a, c, _Foo];\n  };\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  Foo as default\n};\n\n---------- /out/hoist-export-default-class-anonymous.js ----------\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var hoist_export_default_class_anonymous_default = class {\n    ac = [a, c];\n  };\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  hoist_export_default_class_anonymous_default as default\n};\n\n---------- /out/hoist-export-default-function-name-unused.js ----------\nexport default function foo() {\n  return [a, c];\n}\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\n\n---------- /out/hoist-export-default-function-name-used.js ----------\nexport default function foo() {\n  return [a, c, foo];\n}\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\n\n---------- /out/hoist-export-default-function-anonymous.js ----------\nexport default function() {\n  return [a, c];\n}\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\n\n---------- /out/hoist-export-default-expr.js ----------\nvar _stack = [];\ntry {\n  var a = __using(_stack, b);\n  var hoist_export_default_expr_default = [a, c];\n  var c = __using(_stack, d);\n} catch (_) {\n  var _error = _, _hasError = true;\n} finally {\n  __callDispose(_stack, _error, _hasError);\n}\nexport {\n  hoist_export_default_expr_default as default\n};\n"
   },
@@ -21473,7 +21473,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputDir": "/out",
-      "UnsupportedJSFeatures": 1152921504606847000
+      "UnsupportedJSFeatures": "1152921504606846976"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\nvar ns;\n((ns2) => {\n  var _stack = [];\n  try {\n    ns2.a = b;\n    const c = __using(_stack, d);\n    ns2.e = f;\n  } catch (_) {\n    var _error = _, _hasError = true;\n  } finally {\n    __callDispose(_stack, _error, _hasError);\n  }\n})(ns || (ns = {}));\n"
   },
@@ -21495,7 +21495,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputDir": "/out",
-      "UnsupportedJSFeatures": 16
+      "UnsupportedJSFeatures": "16"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\nfunction foo() {\n  return __asyncGenerator(this, null, function* () {\n    var _stack2 = [];\n    try {\n      yield;\n      yield x;\n      yield* __yieldStar(x);\n      const x = __using(_stack2, yield new __await(y), true);\n      try {\n        for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n          let x2 = temp.value;\n        }\n      } catch (temp) {\n        error = [temp];\n      } finally {\n        try {\n          more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n        } finally {\n          if (error)\n            throw error[0];\n        }\n      }\n      try {\n        for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n          var _x = temp2.value;\n          var _stack = [];\n          try {\n            const x2 = __using(_stack, _x, true);\n          } catch (_) {\n            var _error = _, _hasError = true;\n          } finally {\n            var _promise = __callDispose(_stack, _error, _hasError);\n            _promise && (yield new __await(_promise));\n          }\n        }\n      } catch (temp2) {\n        error2 = [temp2];\n      } finally {\n        try {\n          more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n        } finally {\n          if (error2)\n            throw error2[0];\n        }\n      }\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n      _promise2 && (yield new __await(_promise2));\n    }\n  });\n}\nfoo = function() {\n  return __asyncGenerator(this, null, function* () {\n    var _stack2 = [];\n    try {\n      yield;\n      yield x;\n      yield* __yieldStar(x);\n      const x = __using(_stack2, yield new __await(y), true);\n      try {\n        for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n          let x2 = temp.value;\n        }\n      } catch (temp) {\n        error = [temp];\n      } finally {\n        try {\n          more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n        } finally {\n          if (error)\n            throw error[0];\n        }\n      }\n      try {\n        for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n          var _x = temp2.value;\n          var _stack = [];\n          try {\n            const x2 = __using(_stack, _x, true);\n          } catch (_) {\n            var _error = _, _hasError = true;\n          } finally {\n            var _promise = __callDispose(_stack, _error, _hasError);\n            _promise && (yield new __await(_promise));\n          }\n        }\n      } catch (temp2) {\n        error2 = [temp2];\n      } finally {\n        try {\n          more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n        } finally {\n          if (error2)\n            throw error2[0];\n        }\n      }\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n      _promise2 && (yield new __await(_promise2));\n    }\n  });\n};\nfoo = { bar() {\n  return __asyncGenerator(this, null, function* () {\n    var _stack2 = [];\n    try {\n      yield;\n      yield x;\n      yield* __yieldStar(x);\n      const x = __using(_stack2, yield new __await(y), true);\n      try {\n        for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n          let x2 = temp.value;\n        }\n      } catch (temp) {\n        error = [temp];\n      } finally {\n        try {\n          more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n        } finally {\n          if (error)\n            throw error[0];\n        }\n      }\n      try {\n        for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n          var _x = temp2.value;\n          var _stack = [];\n          try {\n            const x2 = __using(_stack, _x, true);\n          } catch (_) {\n            var _error = _, _hasError = true;\n          } finally {\n            var _promise = __callDispose(_stack, _error, _hasError);\n            _promise && (yield new __await(_promise));\n          }\n        }\n      } catch (temp2) {\n        error2 = [temp2];\n      } finally {\n        try {\n          more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n        } finally {\n          if (error2)\n            throw error2[0];\n        }\n      }\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n      _promise2 && (yield new __await(_promise2));\n    }\n  });\n} };\nclass Foo {\n  bar() {\n    return __asyncGenerator(this, null, function* () {\n      var _stack2 = [];\n      try {\n        yield;\n        yield x;\n        yield* __yieldStar(x);\n        const x = __using(_stack2, yield new __await(y), true);\n        try {\n          for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n            let x2 = temp.value;\n          }\n        } catch (temp) {\n          error = [temp];\n        } finally {\n          try {\n            more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n          } finally {\n            if (error)\n              throw error[0];\n          }\n        }\n        try {\n          for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n            var _x = temp2.value;\n            var _stack = [];\n            try {\n              const x2 = __using(_stack, _x, true);\n            } catch (_) {\n              var _error = _, _hasError = true;\n            } finally {\n              var _promise = __callDispose(_stack, _error, _hasError);\n              _promise && (yield new __await(_promise));\n            }\n          }\n        } catch (temp2) {\n          error2 = [temp2];\n        } finally {\n          try {\n            more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n          } finally {\n            if (error2)\n              throw error2[0];\n          }\n        }\n      } catch (_2) {\n        var _error2 = _2, _hasError2 = true;\n      } finally {\n        var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n        _promise2 && (yield new __await(_promise2));\n      }\n    });\n  }\n}\nFoo = class {\n  bar() {\n    return __asyncGenerator(this, null, function* () {\n      var _stack2 = [];\n      try {\n        yield;\n        yield x;\n        yield* __yieldStar(x);\n        const x = __using(_stack2, yield new __await(y), true);\n        try {\n          for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n            let x2 = temp.value;\n          }\n        } catch (temp) {\n          error = [temp];\n        } finally {\n          try {\n            more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n          } finally {\n            if (error)\n              throw error[0];\n          }\n        }\n        try {\n          for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n            var _x = temp2.value;\n            var _stack = [];\n            try {\n              const x2 = __using(_stack, _x, true);\n            } catch (_) {\n              var _error = _, _hasError = true;\n            } finally {\n              var _promise = __callDispose(_stack, _error, _hasError);\n              _promise && (yield new __await(_promise));\n            }\n          }\n        } catch (temp2) {\n          error2 = [temp2];\n        } finally {\n          try {\n            more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n          } finally {\n            if (error2)\n              throw error2[0];\n          }\n        }\n      } catch (_2) {\n        var _error2 = _2, _hasError2 = true;\n      } finally {\n        var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n        _promise2 && (yield new __await(_promise2));\n      }\n    });\n  }\n};\nasync function bar() {\n  await using x = await y;\n  for await (let x2 of y) {\n  }\n  for await (await using x2 of y) {\n  }\n}\n"
   },
@@ -21517,7 +21517,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputDir": "/out",
-      "UnsupportedJSFeatures": 24
+      "UnsupportedJSFeatures": "24"
     },
     "expected_snapshot": "---------- /out/entry.js ----------\nfunction foo() {\n  return __asyncGenerator(this, null, function* () {\n    var _stack2 = [];\n    try {\n      yield;\n      yield x;\n      yield* __yieldStar(x);\n      const x = __using(_stack2, yield new __await(y), true);\n      try {\n        for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n          let x2 = temp.value;\n        }\n      } catch (temp) {\n        error = [temp];\n      } finally {\n        try {\n          more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n        } finally {\n          if (error)\n            throw error[0];\n        }\n      }\n      try {\n        for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n          var _x = temp2.value;\n          var _stack = [];\n          try {\n            const x2 = __using(_stack, _x, true);\n          } catch (_) {\n            var _error = _, _hasError = true;\n          } finally {\n            var _promise = __callDispose(_stack, _error, _hasError);\n            _promise && (yield new __await(_promise));\n          }\n        }\n      } catch (temp2) {\n        error2 = [temp2];\n      } finally {\n        try {\n          more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n        } finally {\n          if (error2)\n            throw error2[0];\n        }\n      }\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n      _promise2 && (yield new __await(_promise2));\n    }\n  });\n}\nfoo = function() {\n  return __asyncGenerator(this, null, function* () {\n    var _stack2 = [];\n    try {\n      yield;\n      yield x;\n      yield* __yieldStar(x);\n      const x = __using(_stack2, yield new __await(y), true);\n      try {\n        for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n          let x2 = temp.value;\n        }\n      } catch (temp) {\n        error = [temp];\n      } finally {\n        try {\n          more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n        } finally {\n          if (error)\n            throw error[0];\n        }\n      }\n      try {\n        for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n          var _x = temp2.value;\n          var _stack = [];\n          try {\n            const x2 = __using(_stack, _x, true);\n          } catch (_) {\n            var _error = _, _hasError = true;\n          } finally {\n            var _promise = __callDispose(_stack, _error, _hasError);\n            _promise && (yield new __await(_promise));\n          }\n        }\n      } catch (temp2) {\n        error2 = [temp2];\n      } finally {\n        try {\n          more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n        } finally {\n          if (error2)\n            throw error2[0];\n        }\n      }\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n      _promise2 && (yield new __await(_promise2));\n    }\n  });\n};\nfoo = { bar() {\n  return __asyncGenerator(this, null, function* () {\n    var _stack2 = [];\n    try {\n      yield;\n      yield x;\n      yield* __yieldStar(x);\n      const x = __using(_stack2, yield new __await(y), true);\n      try {\n        for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n          let x2 = temp.value;\n        }\n      } catch (temp) {\n        error = [temp];\n      } finally {\n        try {\n          more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n        } finally {\n          if (error)\n            throw error[0];\n        }\n      }\n      try {\n        for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n          var _x = temp2.value;\n          var _stack = [];\n          try {\n            const x2 = __using(_stack, _x, true);\n          } catch (_) {\n            var _error = _, _hasError = true;\n          } finally {\n            var _promise = __callDispose(_stack, _error, _hasError);\n            _promise && (yield new __await(_promise));\n          }\n        }\n      } catch (temp2) {\n        error2 = [temp2];\n      } finally {\n        try {\n          more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n        } finally {\n          if (error2)\n            throw error2[0];\n        }\n      }\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n      _promise2 && (yield new __await(_promise2));\n    }\n  });\n} };\nclass Foo {\n  bar() {\n    return __asyncGenerator(this, null, function* () {\n      var _stack2 = [];\n      try {\n        yield;\n        yield x;\n        yield* __yieldStar(x);\n        const x = __using(_stack2, yield new __await(y), true);\n        try {\n          for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n            let x2 = temp.value;\n          }\n        } catch (temp) {\n          error = [temp];\n        } finally {\n          try {\n            more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n          } finally {\n            if (error)\n              throw error[0];\n          }\n        }\n        try {\n          for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n            var _x = temp2.value;\n            var _stack = [];\n            try {\n              const x2 = __using(_stack, _x, true);\n            } catch (_) {\n              var _error = _, _hasError = true;\n            } finally {\n              var _promise = __callDispose(_stack, _error, _hasError);\n              _promise && (yield new __await(_promise));\n            }\n          }\n        } catch (temp2) {\n          error2 = [temp2];\n        } finally {\n          try {\n            more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n          } finally {\n            if (error2)\n              throw error2[0];\n          }\n        }\n      } catch (_2) {\n        var _error2 = _2, _hasError2 = true;\n      } finally {\n        var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n        _promise2 && (yield new __await(_promise2));\n      }\n    });\n  }\n}\nFoo = class {\n  bar() {\n    return __asyncGenerator(this, null, function* () {\n      var _stack2 = [];\n      try {\n        yield;\n        yield x;\n        yield* __yieldStar(x);\n        const x = __using(_stack2, yield new __await(y), true);\n        try {\n          for (var iter = __forAwait(y), more, temp, error; more = !(temp = yield new __await(iter.next())).done; more = false) {\n            let x2 = temp.value;\n          }\n        } catch (temp) {\n          error = [temp];\n        } finally {\n          try {\n            more && (temp = iter.return) && (yield new __await(temp.call(iter)));\n          } finally {\n            if (error)\n              throw error[0];\n          }\n        }\n        try {\n          for (var iter2 = __forAwait(y), more2, temp2, error2; more2 = !(temp2 = yield new __await(iter2.next())).done; more2 = false) {\n            var _x = temp2.value;\n            var _stack = [];\n            try {\n              const x2 = __using(_stack, _x, true);\n            } catch (_) {\n              var _error = _, _hasError = true;\n            } finally {\n              var _promise = __callDispose(_stack, _error, _hasError);\n              _promise && (yield new __await(_promise));\n            }\n          }\n        } catch (temp2) {\n          error2 = [temp2];\n        } finally {\n          try {\n            more2 && (temp2 = iter2.return) && (yield new __await(temp2.call(iter2)));\n          } finally {\n            if (error2)\n              throw error2[0];\n          }\n        }\n      } catch (_2) {\n        var _error2 = _2, _hasError2 = true;\n      } finally {\n        var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n        _promise2 && (yield new __await(_promise2));\n      }\n    });\n  }\n};\nfunction bar() {\n  return __async(this, null, function* () {\n    var _stack2 = [];\n    try {\n      const x = __using(_stack2, yield y, true);\n      for await (let x2 of y) {\n      }\n      for await (var _x of y) {\n        var _stack = [];\n        try {\n          const x2 = __using(_stack, _x, true);\n        } catch (_) {\n          var _error = _, _hasError = true;\n        } finally {\n          var _promise = __callDispose(_stack, _error, _hasError);\n          _promise && (yield _promise);\n        }\n      }\n    } catch (_2) {\n      var _error2 = _2, _hasError2 = true;\n    } finally {\n      var _promise2 = __callDispose(_stack2, _error2, _hasError2);\n      _promise2 && (yield _promise2);\n    }\n  });\n}\n"
   },
@@ -21551,7 +21551,7 @@
     "options": {
       "AbsOutputDir": "/out",
       "Mode": 2,
-      "UnsupportedJSFeatures": 262144
+      "UnsupportedJSFeatures": "262144"
     },
     "expected_snapshot": "---------- /out/base-instance-accessor.js ----------\n// base-instance-accessor.js\nvar _foo_dec, _init, _foo;\n_foo_dec = [dec];\nvar _Foo = class _Foo {\n  constructor() {\n    __privateAdd(this, _foo, __runInitializers(_init, 8, this, _Foo)), __runInitializers(_init, 11, this);\n  }\n};\n_init = __decoratorStart(null);\n_foo = new WeakMap();\n__decorateElement(_init, 4, \"foo\", _foo_dec, _Foo, _foo);\n__decoratorMetadata(_init, _Foo);\nvar Foo = _Foo;\n\n---------- /out/base-instance-field.js ----------\n// base-instance-field.js\nvar _foo_dec, _init;\n_foo_dec = [dec];\nvar _Foo = class _Foo {\n  constructor() {\n    __publicField(this, \"foo\", __runInitializers(_init, 8, this, _Foo)), __runInitializers(_init, 11, this);\n  }\n};\n_init = __decoratorStart(null);\n__decorateElement(_init, 5, \"foo\", _foo_dec, _Foo);\n__decoratorMetadata(_init, _Foo);\nvar Foo = _Foo;\n\n---------- /out/base-instance-method.js ----------\n// base-instance-method.js\nvar _foo_dec, _init;\n_foo_dec = [dec];\nvar _Foo = class _Foo {\n  constructor() {\n    __runInitializers(_init, 5, this);\n  }\n  foo() {\n    return _Foo;\n  }\n};\n_init = __decoratorStart(null);\n__decorateElement(_init, 1, \"foo\", _foo_dec, _Foo);\n__decoratorMetadata(_init, _Foo);\nvar Foo = _Foo;\n\n---------- /out/base-static-accessor.js ----------\n// base-static-accessor.js\nvar _foo_dec, _init, _foo;\n_foo_dec = [dec];\nvar _Foo = class _Foo {\n};\n_init = __decoratorStart(null);\n_foo = new WeakMap();\n__decorateElement(_init, 12, \"foo\", _foo_dec, _Foo, _foo);\n__decoratorMetadata(_init, _Foo);\n__privateAdd(_Foo, _foo, __runInitializers(_init, 8, _Foo, _Foo)), __runInitializers(_init, 11, _Foo);\nvar Foo = _Foo;\n\n---------- /out/base-static-field.js ----------\n// base-static-field.js\nvar _foo_dec, _init;\n_foo_dec = [dec];\nvar _Foo = class _Foo {\n};\n_init = __decoratorStart(null);\n__decorateElement(_init, 13, \"foo\", _foo_dec, _Foo);\n__decoratorMetadata(_init, _Foo);\n__publicField(_Foo, \"foo\", __runInitializers(_init, 8, _Foo, _Foo)), __runInitializers(_init, 11, _Foo);\nvar Foo = _Foo;\n\n---------- /out/base-static-method.js ----------\n// base-static-method.js\nvar _foo_dec, _init;\n_foo_dec = [dec];\nvar _Foo = class _Foo {\n  static foo() {\n    return _Foo;\n  }\n};\n_init = __decoratorStart(null);\n__decorateElement(_init, 9, \"foo\", _foo_dec, _Foo);\n__decoratorMetadata(_init, _Foo);\n__runInitializers(_init, 3, _Foo);\nvar Foo = _Foo;\n\n---------- /out/derived-instance-accessor.js ----------\n// derived-instance-accessor.js\nvar _foo_dec, _a, _init, _foo;\nvar _Foo = class _Foo extends (_a = Bar, _foo_dec = [dec], _a) {\n  constructor() {\n    super(...arguments);\n    __privateAdd(this, _foo, __runInitializers(_init, 8, this, _Foo)), __runInitializers(_init, 11, this);\n  }\n};\n_init = __decoratorStart(_a);\n_foo = new WeakMap();\n__decorateElement(_init, 4, \"foo\", _foo_dec, _Foo, _foo);\n__decoratorMetadata(_init, _Foo);\nvar Foo = _Foo;\n\n---------- /out/derived-instance-field.js ----------\n// derived-instance-field.js\nvar _foo_dec, _a, _init;\nvar _Foo = class _Foo extends (_a = Bar, _foo_dec = [dec], _a) {\n  constructor() {\n    super(...arguments);\n    __publicField(this, \"foo\", __runInitializers(_init, 8, this, _Foo)), __runInitializers(_init, 11, this);\n  }\n};\n_init = __decoratorStart(_a);\n__decorateElement(_init, 5, \"foo\", _foo_dec, _Foo);\n__decoratorMetadata(_init, _Foo);\nvar Foo = _Foo;\n\n---------- /out/derived-instance-method.js ----------\n// derived-instance-method.js\nvar _foo_dec, _a, _init;\nvar _Foo = class _Foo extends (_a = Bar, _foo_dec = [dec], _a) {\n  constructor() {\n    super(...arguments);\n    __runInitializers(_init, 5, this);\n  }\n  foo() {\n    return _Foo;\n  }\n};\n_init = __decoratorStart(_a);\n__decorateElement(_init, 1, \"foo\", _foo_dec, _Foo);\n__decoratorMetadata(_init, _Foo);\nvar Foo = _Foo;\n\n---------- /out/derived-static-accessor.js ----------\n// derived-static-accessor.js\nvar _foo_dec, _a, _init, _foo;\nvar _Foo = class _Foo extends (_a = Bar, _foo_dec = [dec], _a) {\n};\n_init = __decoratorStart(_a);\n_foo = new WeakMap();\n__decorateElement(_init, 12, \"foo\", _foo_dec, _Foo, _foo);\n__decoratorMetadata(_init, _Foo);\n__privateAdd(_Foo, _foo, __runInitializers(_init, 8, _Foo, _Foo)), __runInitializers(_init, 11, _Foo);\nvar Foo = _Foo;\n\n---------- /out/derived-static-field.js ----------\n// derived-static-field.js\nvar _foo_dec, _a, _init;\nvar _Foo = class _Foo extends (_a = Bar, _foo_dec = [dec], _a) {\n};\n_init = __decoratorStart(_a);\n__decorateElement(_init, 13, \"foo\", _foo_dec, _Foo);\n__decoratorMetadata(_init, _Foo);\n__publicField(_Foo, \"foo\", __runInitializers(_init, 8, _Foo, _Foo)), __runInitializers(_init, 11, _Foo);\nvar Foo = _Foo;\n\n---------- /out/derived-static-method.js ----------\n// derived-static-method.js\nvar _foo_dec, _a, _init;\nvar _Foo = class _Foo extends (_a = Bar, _foo_dec = [dec], _a) {\n  static foo() {\n    return _Foo;\n  }\n};\n_init = __decoratorStart(_a);\n__decorateElement(_init, 9, \"foo\", _foo_dec, _Foo);\n__decoratorMetadata(_init, _Foo);\n__runInitializers(_init, 3, _Foo);\nvar Foo = _Foo;\n"
   },
@@ -21574,7 +21574,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "MinifySyntax": true,
-      "UnsupportedJSFeatures": 16777216
+      "UnsupportedJSFeatures": "16777216"
     },
     "expected_snapshot": "---------- /out.js ----------\nasync function test(b) {\n  try {\n    for (var iter = __forAwait(b), more, temp, error; more = !(temp = await iter.next()).done; more = !1) {\n      const a = temp.value;\n      a();\n    }\n  } catch (temp) {\n    error = [temp];\n  } finally {\n    try {\n      more && (temp = iter.return) && await temp.call(iter);\n    } finally {\n      if (error)\n        throw error[0];\n    }\n  }\n}\n"
   },
@@ -21596,7 +21596,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 17180000256
+      "UnsupportedJSFeatures": "17180000256"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar import_meta = {};\nvar x = require(\"fs\");\nconsole.log(import_meta.foo(x));\n"
   },
@@ -24782,7 +24782,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "Mode": 2,
-      "UnsupportedJSFeatures": 128
+      "UnsupportedJSFeatures": "128"
     },
     "expected_snapshot": "---------- /out.js ----------\n// define-false/index.ts\n() => null, c, () => null, C;\nvar Foo = class {\n};\n(() => new Foo())();\n\n// define-true/index.ts\nvar _a;\nvar Bar = class {\n  constructor() {\n    __publicField(this, \"a\");\n    __publicField(this, _a);\n  }\n  static A;\n  static [(_a = (() => null, c), () => null, C)];\n};\n(() => new Bar())();\n"
   },
@@ -25121,7 +25121,7 @@
       "AbsOutputFile": "/out.js",
       "KeepNames": true,
       "Mode": 2,
-      "UnsupportedJSFeatures": 1612258360332517400
+      "UnsupportedJSFeatures": "1612258360332517305"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.ts\nvar ns;\n((ns2) => {\n  ns2.foo = /* @__PURE__ */ __name(() => {\n  }, \"foo\");\n  function bar() {\n  }\n  ns2.bar = bar;\n  __name(bar, \"bar\");\n  const _Baz = class _Baz {\n  };\n  __name(_Baz, \"Baz\");\n  let Baz = _Baz;\n  ns2.Baz = _Baz;\n})(ns || (ns = {}));\n"
   },
@@ -25200,7 +25200,7 @@
       "MinifyIdentifiers": true,
       "MinifySyntax": true,
       "MinifyWhitespace": true,
-      "UnsupportedJSFeatures": 137438953472
+      "UnsupportedJSFeatures": "137438953472"
     },
     "expected_snapshot": "---------- /a.js ----------\nfunction foo(){let u;return(n=>(n[n.A=0]=\"A\",n[n.B=1]=\"B\",n[n.C=n]=\"C\"))(u||(u={})),u}\n\n---------- /b.js ----------\nexport function foo(){let e;return(n=>(n[n.X=0]=\"X\",n[n.Y=1]=\"Y\",n[n.Z=n]=\"Z\"))(e||(e={})),e}\n"
   },
@@ -25227,7 +25227,7 @@
       "MinifyIdentifiers": true,
       "MinifySyntax": true,
       "MinifyWhitespace": true,
-      "UnsupportedJSFeatures": 4
+      "UnsupportedJSFeatures": "4"
     },
     "expected_snapshot": "---------- /a.js ----------\nfunction foo(){let u;return function(n){n[n.A=0]=\"A\",n[n.B=1]=\"B\",n[n.C=n]=\"C\"}(u||={}),u}\n\n---------- /b.js ----------\nexport function foo(){let e;return function(n){n[n.X=0]=\"X\",n[n.Y=1]=\"Y\",n[n.Z=n]=\"Z\"}(e||={}),e}\n"
   },
@@ -25280,7 +25280,7 @@
       "MinifyIdentifiers": true,
       "MinifySyntax": true,
       "MinifyWhitespace": true,
-      "UnsupportedJSFeatures": 137438953472
+      "UnsupportedJSFeatures": "137438953472"
     },
     "expected_snapshot": "---------- /a.js ----------\nvar Foo;(e=>{let a;(p=>foo(e,p))(a=e.Bar||(e.Bar={}))})(Foo||(Foo={}));\n\n---------- /b.js ----------\nexport var Foo;(e=>{let a;(p=>foo(e,p))(a=e.Bar||(e.Bar={}))})(Foo||(Foo={}));\n"
   },
@@ -25307,7 +25307,7 @@
       "MinifyIdentifiers": true,
       "MinifySyntax": true,
       "MinifyWhitespace": true,
-      "UnsupportedJSFeatures": 4
+      "UnsupportedJSFeatures": "4"
     },
     "expected_snapshot": "---------- /a.js ----------\nvar Foo;(function(e){let a;(function(p){foo(e,p)})(a=e.Bar||={})})(Foo||={});\n\n---------- /b.js ----------\nexport var Foo;(function(e){let a;(function(p){foo(e,p)})(a=e.Bar||={})})(Foo||={});\n"
   },
@@ -25331,7 +25331,7 @@
     "options": {
       "AbsOutputFile": "/out.js",
       "MinifySyntax": true,
-      "UnsupportedJSFeatures": 1612258360332517400
+      "UnsupportedJSFeatures": "1612258360332517305"
     },
     "expected_snapshot": "---------- /out.js ----------\nclass Foo extends Bar {\n  constructor() {\n    super();\n    this.foo = 1;\n    this.bar = 2;\n    foo(), bar();\n  }\n}\n"
   },
@@ -26057,7 +26057,7 @@
     "abs_working_dir": "",
     "options": {
       "AbsOutputFile": "/out.js",
-      "UnsupportedJSFeatures": 128
+      "UnsupportedJSFeatures": "128"
     },
     "expected_snapshot": "---------- /out.js ----------\nvar _a, _b, _c, _d;\n_d = q, _c = r, _b = x, _a = y;\nclass Foo {\n  constructor() {\n    __publicField(this, _d);\n    __publicField(this, _c, s);\n    __publicField(this, _b);\n    __publicField(this, _a, z);\n  }\n}\n__decorateClass([\n  dec\n], Foo.prototype, _b, 2);\n__decorateClass([\n  dec\n], Foo.prototype, _a, 2);\nnew Foo();\n"
   },
@@ -26954,7 +26954,7 @@
         "Parse": false,
         "NoAmbiguousLessThan": false
       },
-      "UnsupportedJSFeatures": 128
+      "UnsupportedJSFeatures": "128"
     },
     "expected_snapshot": "---------- /out.js ----------\n// entry.ts\nvar Foo = class {\n  constructor(b1 = 2.1, b2 = 2.2) {\n    __publicField(this, \"b1\", b1);\n    __publicField(this, \"b2\", b2);\n    __publicField(this, \"a\", 1);\n    __publicField(this, \"c\", 3);\n  }\n  static {\n    console.log(\"a\");\n  }\n  static {\n    console.log(\"b\");\n  }\n  static {\n    console.log(\"c\");\n  }\n};\n"
   },
@@ -28202,7 +28202,7 @@
       "AbsOutputFile": "/Users/user/project/out.js",
       "Mode": 2,
       "OriginalTargetEnv": "ES5",
-      "UnsupportedJSFeatures": 2305830845597876200
+      "UnsupportedJSFeatures": "2305830845597876223"
     },
     "expected_snapshot": "---------- /Users/user/project/out.js ----------\n"
   },

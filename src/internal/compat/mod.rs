@@ -225,6 +225,11 @@ impl JsFeature {
     pub const USING: Self = Self(1 << 60);
 
     #[must_use]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits & ((1 << 61) - 1))
+    }
+
+    #[must_use]
     pub const fn contains(self, feature: Self) -> bool {
         self.0 & feature.0 != 0
     }

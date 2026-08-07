@@ -3602,6 +3602,14 @@ mod tests {
         options.get(name).and_then(serde_json::Value::as_u64)
     }
 
+    fn upstream_u64_option(options: &serde_json::Value, name: &str) -> Option<u64> {
+        options.get(name).and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
+    }
+
     fn upstream_string_option(options: &serde_json::Value, name: &str) -> Option<String> {
         options
             .get(name)
@@ -3792,14 +3800,27 @@ mod tests {
                     && option_names != ["AbsOutputDir", "KeepNames"]
                     && option_names != ["AbsOutputFile", "KeepNames"]
                     && option_names != ["AbsOutputDir", "KeepNames", "MinifySyntax"]
+                    && option_names != ["AbsOutputFile", "KeepNames", "MinifySyntax"]
                     && option_names != ["AbsOutputFile", "KeepNames", "MinifySyntax", "Mode"]
                     && option_names != ["AbsOutputDir", "MinifySyntax"]
                     && option_names != ["AbsOutputFile", "MinifySyntax"]
+                    && option_names != ["AbsOutputFile", "MinifySyntax", "MinifyWhitespace"]
+                    && option_names != ["AbsOutputDir", "MinifyWhitespace"]
                     && option_names != ["AbsOutputDir", "MinifySyntax", "Mode"]
                     && option_names != ["AbsOutputFile", "MinifySyntax", "Mode"]
+                    && option_names != ["AbsOutputFile", "MinifySyntax", "Mode", "OutputFormat"]
                     && option_names
                         != ["AbsOutputFile", "MinifyWhitespace", "Mode", "OutputFormat"]
                     && option_names != ["AbsOutputFile", "KeepNames", "Mode"]
+                    && !(option_names == ["AbsOutputFile", "UnsupportedJSFeatures"]
+                        && matches!(
+                            case["upstream_test"].as_str(),
+                            Some(
+                                "TestLowerOptionalCatchNameCollisionNoBundle"
+                                    | "TestLowerObjectSpreadNoBundle"
+                                    | "TestLowerAsync2017NoBundle"
+                            )
+                        ))
                     && option_names != ["AbsOutputDir", "MinifyIdentifiers"]
                     && option_names != ["AbsOutputFile", "MinifyIdentifiers"]
                     && option_names != ["AbsOutputDir", "MinifyIdentifiers", "Mode"]
@@ -3962,6 +3983,10 @@ mod tests {
             {
                 options.minify_identifiers = minify_identifiers;
             }
+            if let Some(features) = upstream_u64_option(options_json, "UnsupportedJSFeatures") {
+                options.unsupported_js_features =
+                    crate::internal::compat::JsFeature::from_bits(features);
+            }
             if let Some(public_path) = upstream_string_option(options_json, "PublicPath") {
                 options.public_path = public_path;
             }
@@ -4075,7 +4100,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 560 },
+            if selected_test.is_some() { 1 } else { 570 },
             "upstream basic bundler corpus case count"
         );
     }

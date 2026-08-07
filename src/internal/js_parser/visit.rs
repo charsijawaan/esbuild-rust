@@ -29,6 +29,7 @@ use crate::internal::{
 use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properties};
 use super::{
     lower_typescript::lower_nested_type_script_statements,
+    parser::{apply_keep_names_to_statements, apply_keep_names_to_type_script_namespaces},
     parser_core::ParserCore,
     standalone_helpers::{is_simple_parameter_list, is_unsightly_primitive},
     symbols::select_local_kind,
@@ -1172,9 +1173,6 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     visit_block(core, catch.block_loc, &mut catch.block, resolve_identifiers);
                     core.pop_scope();
                     core.is_control_flow_dead = old_control_flow_dead;
-                    if catch_is_dead {
-                        catch.block.statements.clear();
-                    }
                 }
                 if let Some(finally) = &mut try_statement.finally {
                     core.push_next_scope_for_visit_pass(ScopeKind::Block);
@@ -1485,6 +1483,80 @@ fn expression_can_be_removed_if_unused(core: &ParserCore, expression: &Expr) -> 
             == SymbolKind::Unbound
     })
     .expr_can_be_removed_if_unused(expression)
+}
+
+fn lower_object_spread(
+    core: &mut ParserCore,
+    loc: Loc,
+    object: &mut ObjectExpr,
+) -> Option<ExprData> {
+    if !core
+        .options
+        .unsupported_js_features
+        .contains(JsFeature::OBJECT_REST_SPREAD)
+        || !object
+            .properties
+            .iter()
+            .any(|property| property.kind == PropertyKind::Spread)
+    {
+        return None;
+    }
+
+    let is_single_line = object.is_single_line;
+    let close_brace_loc = object.close_brace_loc;
+    let mut result = Expr::default();
+    let mut properties = Vec::new();
+    for mut property in std::mem::take(&mut object.properties) {
+        if property.kind != PropertyKind::Spread {
+            properties.push(property);
+            continue;
+        }
+
+        if !properties.is_empty() || result.data.is_none() {
+            let next = Expr::new(
+                loc,
+                ExprData::Object(ObjectExpr {
+                    properties: std::mem::take(&mut properties),
+                    is_single_line,
+                    ..ObjectExpr::default()
+                }),
+            );
+            result = if result.data.is_none() {
+                next
+            } else {
+                core.call_runtime(loc, "__spreadProps", vec![result, next])
+            };
+        }
+        result = core.call_runtime(
+            loc,
+            "__spreadValues",
+            vec![result, std::mem::take(&mut property.value_or_nil)],
+        );
+    }
+
+    if !properties.is_empty() {
+        let trailing = Expr::new(
+            loc,
+            ExprData::Object(ObjectExpr {
+                properties,
+                close_brace_loc,
+                is_single_line,
+                ..ObjectExpr::default()
+            }),
+        );
+        result = core.call_runtime(loc, "__spreadProps", vec![result, trailing]);
+    }
+    result.data.map(|data| *data)
+}
+
+fn lower_object_spread_expression(core: &mut ParserCore, expression: &mut Expr) {
+    let replacement = match expression.data.as_deref_mut() {
+        Some(ExprData::Object(object)) => lower_object_spread(core, expression.loc, object),
+        _ => None,
+    };
+    if let Some(replacement) = replacement {
+        expression.data = Some(Box::new(replacement));
+    }
 }
 
 fn substitute_single_use_symbol_in_statement(
@@ -3391,7 +3463,13 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         &mut function.body.block.statements,
         resolve_identifiers,
     );
+    if core.options.keep_names && core.source.key_path.text != "<runtime>" {
+        apply_keep_names_to_type_script_namespaces(core, &mut function.body.block.statements);
+    }
     lower_nested_type_script_statements(core, &mut function.body.block.statements, None);
+    if core.options.keep_names && core.source.key_path.text != "<runtime>" {
+        apply_keep_names_to_statements(core, &mut function.body.block.statements);
+    }
     if core.options.minify_syntax {
         optimize_implicit_jumps(
             core,
@@ -7891,6 +7969,11 @@ fn visit_expr_with_target_and_context(
             if core.options.minify_syntax && has_spread && assign_target == AssignTarget::None {
                 object.properties = mangle_object_spread(&object.properties);
             }
+            if assign_target == AssignTarget::None
+                && let Some(replacement) = lower_object_spread(core, expression_loc, object)
+            {
+                *data = replacement;
+            }
         }
         ExprData::Spread(spread) => visit_expr_with_target(
             core,
@@ -8179,7 +8262,13 @@ fn visit_expr_with_target_and_context(
             }
             core.push_scope_for_visit_pass(ScopeKind::FunctionBody, arrow.body.loc);
             visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
+            if core.options.keep_names && core.source.key_path.text != "<runtime>" {
+                apply_keep_names_to_type_script_namespaces(core, &mut arrow.body.block.statements);
+            }
             lower_nested_type_script_statements(core, &mut arrow.body.block.statements, None);
+            if core.options.keep_names && core.source.key_path.text != "<runtime>" {
+                apply_keep_names_to_statements(core, &mut arrow.body.block.statements);
+            }
             if core.options.minify_syntax {
                 optimize_implicit_jumps(
                     core,
@@ -8291,14 +8380,16 @@ fn visit_expr_with_target_and_context(
                     if element.properties.is_empty() {
                         args.push(Expr::new(element.tag_or_nil.loc, ExprData::Null));
                     } else {
-                        args.push(Expr::new(
+                        let mut properties = Expr::new(
                             element.tag_or_nil.loc,
                             ExprData::Object(ObjectExpr {
                                 properties: std::mem::take(&mut element.properties),
                                 is_single_line: element.is_tag_single_line,
                                 ..ObjectExpr::default()
                             }),
-                        ));
+                        );
+                        lower_object_spread_expression(core, &mut properties);
+                        args.push(properties);
                     }
                     args.extend(children);
                     let target = if core.options.jsx.automatic_runtime {
@@ -8380,17 +8471,16 @@ fn visit_expr_with_target_and_context(
                             ..crate::internal::js_ast::Property::default()
                         });
                     }
-                    let mut args = vec![
-                        element.tag_or_nil.clone(),
-                        Expr::new(
-                            element.tag_or_nil.loc,
-                            ExprData::Object(ObjectExpr {
-                                properties,
-                                is_single_line: element.is_tag_single_line,
-                                ..ObjectExpr::default()
-                            }),
-                        ),
-                    ];
+                    let mut properties = Expr::new(
+                        element.tag_or_nil.loc,
+                        ExprData::Object(ObjectExpr {
+                            properties,
+                            is_single_line: element.is_tag_single_line,
+                            ..ObjectExpr::default()
+                        }),
+                    );
+                    lower_object_spread_expression(core, &mut properties);
+                    let mut args = vec![element.tag_or_nil.clone(), properties];
                     if core.options.jsx.development {
                         args.push(
                             key_or_nil
