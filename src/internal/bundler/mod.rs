@@ -3820,6 +3820,17 @@ mod tests {
                             "Platform",
                         ]
                     && option_names != ["AbsOutputFile", "KeepNames", "Mode"]
+                    && !(option_names == ["AbsOutputFile", "Mode", "TS"]
+                        && matches!(
+                            case["upstream_test"].as_str(),
+                            Some(
+                                "TestThisInsideFunctionTS"
+                                    | "TestThisInsideFunctionTSUseDefineForClassFields"
+                            )
+                        ))
+                    && !(option_names == ["AbsOutputFile", "TS"]
+                        && case["upstream_test"]
+                            == "TestThisInsideFunctionTSNoBundleUseDefineForClassFields")
                     && !(option_names == ["AbsOutputFile", "UnsupportedJSFeatures"]
                         && matches!(
                             case["upstream_test"].as_str(),
@@ -3995,6 +4006,16 @@ mod tests {
                 options.unsupported_js_features =
                     crate::internal::compat::JsFeature::from_bits(features);
             }
+            if let Some(value) = options_json
+                .pointer("/TS/Config/UseDefineForClassFields")
+                .and_then(serde_json::Value::as_u64)
+            {
+                options.ts.config.use_define_for_class_fields = match value {
+                    1 => crate::internal::config::MaybeBool::True,
+                    2 => crate::internal::config::MaybeBool::False,
+                    _ => crate::internal::config::MaybeBool::Unspecified,
+                };
+            }
             if let Some(public_path) = upstream_string_option(options_json, "PublicPath") {
                 options.public_path = public_path;
             }
@@ -4108,7 +4129,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 571 },
+            if selected_test.is_some() { 1 } else { 574 },
             "upstream basic bundler corpus case count"
         );
     }
