@@ -383,54 +383,13 @@ fn parse_statement_without_no_side_effects_comment(
         if lexer.token == Token::Colon {
             return parse_label_statement(core, lexer, loc, name_loc, reference);
         }
-        let expression = if lexer.token == Token::EqualsGreaterThan {
-            core.push_scope_for_parse_pass(
-                crate::internal::js_ast::ScopeKind::FunctionArgs,
-                name_loc,
-            );
-            let result = parse_arrow_body(
-                core,
-                lexer,
-                name_loc,
-                vec![Arg {
-                    binding: Binding {
-                        loc: name_loc,
-                        data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
-                            reference,
-                        }))),
-                    },
-                    ..Arg::default()
-                }],
-                false,
-                false,
-                false,
-            );
-            core.pop_scope();
-            result
-        } else {
-            Expr::new(
-                name_loc,
-                ExprData::Identifier(IdentifierExpr {
-                    reference,
-                    ..IdentifierExpr::default()
-                }),
-            )
-        };
-        let value = parse_expression_suffix_with_flags(
+        return parse_identifier_statement_after_name(
             core,
             lexer,
-            expression,
-            Precedence::Lowest,
-            true,
-            comment_flags,
-        );
-        lexer.expect_or_insert_semicolon();
-        return Stmt::new(
             loc,
-            StmtData::Expr(ExprStmt {
-                value,
-                ..ExprStmt::default()
-            }),
+            name_loc,
+            reference,
+            comment_flags,
         );
     }
 
@@ -970,20 +929,111 @@ fn parse_label_statement(
     name_loc: Loc,
     reference: crate::internal::ast::Ref,
 ) -> Stmt {
-    core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Label, loc);
-    lexer.expect(Token::Colon);
-    let is_single_line_stmt = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
-    let statement = parse_statement(core, lexer);
-    core.pop_scope();
+    let mut labels = Vec::new();
+    let mut next_label = (loc, name_loc, reference);
+    let mut statement = loop {
+        let (loc, name_loc, reference) = next_label;
+        core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Label, loc);
+        lexer.expect(Token::Colon);
+        let is_single_line_stmt = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
+        labels.push((loc, name_loc, reference, is_single_line_stmt));
+
+        if lexer.token == Token::Identifier && !matches!(lexer.raw(), b"await" | b"yield") {
+            let comment_flags = lexer.has_comment_before;
+            let loc = lexer.loc();
+            let name_loc = loc;
+            let reference = core.store_name_in_ref(lexer.identifier.clone());
+            lexer.next();
+            if lexer.token == Token::Colon {
+                next_label = (loc, name_loc, reference);
+                continue;
+            }
+            let has_no_side_effects_comment =
+                comment_flags.contains(crate::internal::js_lexer::CommentBefore::NO_SIDE_EFFECTS);
+            let mut statement = parse_identifier_statement_after_name(
+                core,
+                lexer,
+                loc,
+                name_loc,
+                reference,
+                comment_flags,
+            );
+            apply_no_side_effects_comment(core, &mut statement, has_no_side_effects_comment);
+            break statement;
+        }
+
+        break parse_statement(core, lexer);
+    };
+
+    while let Some((loc, name_loc, reference, is_single_line_stmt)) = labels.pop() {
+        core.pop_scope();
+        statement = Stmt::new(
+            loc,
+            StmtData::Label(LabelStmt {
+                statement,
+                name: crate::internal::ast::LocRef {
+                    loc: name_loc,
+                    reference,
+                },
+                is_single_line_stmt,
+            }),
+        );
+    }
+    statement
+}
+
+fn parse_identifier_statement_after_name(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    loc: Loc,
+    name_loc: Loc,
+    reference: crate::internal::ast::Ref,
+    comment_flags: crate::internal::js_lexer::CommentBefore,
+) -> Stmt {
+    let expression = if lexer.token == Token::EqualsGreaterThan {
+        core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::FunctionArgs, name_loc);
+        let result = parse_arrow_body(
+            core,
+            lexer,
+            name_loc,
+            vec![Arg {
+                binding: Binding {
+                    loc: name_loc,
+                    data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                        reference,
+                    }))),
+                },
+                ..Arg::default()
+            }],
+            false,
+            false,
+            false,
+        );
+        core.pop_scope();
+        result
+    } else {
+        Expr::new(
+            name_loc,
+            ExprData::Identifier(IdentifierExpr {
+                reference,
+                ..IdentifierExpr::default()
+            }),
+        )
+    };
+    let value = parse_expression_suffix_with_flags(
+        core,
+        lexer,
+        expression,
+        Precedence::Lowest,
+        true,
+        comment_flags,
+    );
+    lexer.expect_or_insert_semicolon();
     Stmt::new(
         loc,
-        StmtData::Label(LabelStmt {
-            statement,
-            name: crate::internal::ast::LocRef {
-                loc: name_loc,
-                reference,
-            },
-            is_single_line_stmt,
+        StmtData::Expr(ExprStmt {
+            value,
+            ..ExprStmt::default()
         }),
     )
 }

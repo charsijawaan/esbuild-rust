@@ -37,12 +37,19 @@ use super::{
 const MODULE_SCOPE_LOC: Loc = Loc { start: -1 };
 
 fn compute_character_frequency(core: &ParserCore, lexer: &Lexer) -> Option<CharFreq> {
+    compute_character_frequency_with_comments(core, &lexer.all_comments)
+}
+
+fn compute_character_frequency_with_comments(
+    core: &ParserCore,
+    comments: &[crate::internal::logger::Range],
+) -> Option<CharFreq> {
     if !core.options.minify_identifiers || core.source.key_path.text == "<runtime>" {
         return None;
     }
     let mut frequency = CharFreq::default();
     frequency.scan(&core.source.contents, 1);
-    for comment in &lexer.all_comments {
+    for comment in comments {
         frequency.scan(core.source.text_for_range(*comment), -1);
     }
     for record in &core.import_records {
@@ -69,31 +76,32 @@ fn subtract_symbol_names_from_frequency(
     symbols: &[Symbol],
     frequency: &mut CharFreq,
 ) {
-    let scope = scope
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for member in scope.members.values() {
-        let symbol = &symbols
-            [usize::try_from(member.reference.inner_index).expect("symbol index fits usize")];
-        if symbol.slot_namespace() != SlotNamespace::MustNotBeRenamed {
-            frequency.scan(
-                symbol.original_name.as_bytes(),
-                -i32::try_from(symbol.use_count_estimate).unwrap_or(i32::MAX),
-            );
+    let mut scopes = vec![scope.clone()];
+    while let Some(scope) = scopes.pop() {
+        let scope = scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for member in scope.members.values() {
+            let symbol = &symbols
+                [usize::try_from(member.reference.inner_index).expect("symbol index fits usize")];
+            if symbol.slot_namespace() != SlotNamespace::MustNotBeRenamed {
+                frequency.scan(
+                    symbol.original_name.as_bytes(),
+                    -i32::try_from(symbol.use_count_estimate).unwrap_or(i32::MAX),
+                );
+            }
         }
-    }
-    if scope.label.reference != INVALID_REF {
-        let symbol = &symbols
-            [usize::try_from(scope.label.reference.inner_index).expect("symbol index fits usize")];
-        if symbol.slot_namespace() != SlotNamespace::MustNotBeRenamed {
-            let count = i32::try_from(symbol.use_count_estimate)
-                .unwrap_or(i32::MAX)
-                .saturating_add(1);
-            frequency.scan(symbol.original_name.as_bytes(), -count);
+        if scope.label.reference != INVALID_REF {
+            let symbol = &symbols[usize::try_from(scope.label.reference.inner_index)
+                .expect("symbol index fits usize")];
+            if symbol.slot_namespace() != SlotNamespace::MustNotBeRenamed {
+                let count = i32::try_from(symbol.use_count_estimate)
+                    .unwrap_or(i32::MAX)
+                    .saturating_add(1);
+                frequency.scan(symbol.original_name.as_bytes(), -count);
+            }
         }
-    }
-    for child in &scope.children {
-        subtract_symbol_names_from_frequency(child, symbols, frequency);
+        scopes.extend(scope.children.iter().rev().cloned());
     }
 }
 
@@ -259,6 +267,16 @@ pub fn lazy_export_ast(
     } else {
         ExportsKind::None
     };
+    let char_freq = compute_character_frequency_with_comments(&core, &[]);
+    let nested_scope_slot_counts = if core.options.minify_identifiers {
+        let module_scope = core
+            .module_scope
+            .clone()
+            .expect("lazy exports require a module scope");
+        crate::internal::renamer::assign_nested_scope_slots(&module_scope, &mut core.symbols)
+    } else {
+        crate::internal::ast::SlotCounts::default()
+    };
 
     Ast {
         module_type_data: core.options.module_type_data,
@@ -273,6 +291,8 @@ pub fn lazy_export_ast(
         module_ref: core.module_ref,
         wrapper_ref,
         approximate_line_count,
+        char_freq,
+        nested_scope_slot_counts,
         exports_kind,
         has_lazy_export: true,
         const_values: core.const_values,
@@ -329,9 +349,9 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         let mut statements = parse_statements_up_to(&mut core, &mut lexer, Token::EndOfFile);
         apply_jsx_pragmas(&mut core, &lexer);
 
-        let (directives, directive_legacy_octal_locs) =
+        let (directives, directive_legacy_octal_locs, has_explicit_use_strict) =
             strip_directive_prologue(&core, &mut statements);
-        if directives.iter().any(|directive| directive == "use strict") {
+        if has_explicit_use_strict {
             Scope::recursive_set_strict_mode(
                 core.current_scope
                     .as_ref()
@@ -342,36 +362,10 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         let has_import_statement = statements
             .iter()
             .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))));
-        let has_esm_exports = core.esm_import_meta.len > 0
+        let has_esm_exports = core.esm_export_keyword.len > 0
+            || core.esm_import_meta.len > 0
             || core.top_level_await_keyword.len > 0
-            || (core.options.jsx.automatic_runtime && core.has_jsx_element)
-            || core.has_type_script_export
-            || statements.iter().any(|statement| {
-                matches!(
-                    statement.data.as_deref(),
-                    Some(
-                        StmtData::ExportClause(_)
-                            | StmtData::ExportFrom(_)
-                            | StmtData::ExportDefault(_)
-                            | StmtData::ExportStar(_)
-                    )
-                ) || matches!(
-                    statement.data.as_deref(),
-                    Some(StmtData::Local(local)) if local.is_export
-                ) || matches!(
-                    statement.data.as_deref(),
-                    Some(StmtData::Function(function)) if function.is_export
-                ) || matches!(
-                    statement.data.as_deref(),
-                    Some(StmtData::Class(class)) if class.is_export
-                ) || matches!(
-                    statement.data.as_deref(),
-                    Some(StmtData::Enum(enumeration)) if enumeration.is_export
-                ) || matches!(
-                    statement.data.as_deref(),
-                    Some(StmtData::Namespace(namespace)) if namespace.is_export
-                )
-            });
+            || (core.options.jsx.automatic_runtime && core.has_jsx_element);
         if has_esm_exports
             || has_import_statement
             || core.options.module_type_data.module_type.is_esm()
@@ -395,32 +389,15 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             ));
         }
         core.declared_symbols.clear();
-        if has_esm_exports
-            || has_import_statement
-            || core.options.module_type_data.module_type.is_esm()
-        {
-            Scope::recursive_set_strict_mode(
-                core.current_scope
-                    .as_ref()
-                    .expect("parse pass requires a module scope"),
-                StrictModeKind::ImplicitStrictEsm,
-            );
-        }
-        core.hoist_symbols();
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
+        core.hoist_symbols();
         precompute_type_script_enum_constants(&mut core, &statements);
         let (mut parts, mut module_metadata, uses_exports_ref, uses_module_ref) =
             if core.options.tree_shaking {
                 build_tree_shaking_parts(&mut core, statements, declared_symbols_by_statement)
             } else {
-                core.declared_symbols = declared_symbols_by_statement.into_iter().flatten().fold(
-                    Vec::new(),
-                    |mut symbols, symbol| {
-                        record_top_level_symbol(&mut symbols, symbol.reference);
-                        symbols
-                    },
-                );
+                core.declared_symbols.clear();
                 visit_top_level_statements(&mut core, &mut statements);
                 statements = lower_type_script_statements(&mut core, statements);
                 if core.options.keep_names && core.source.key_path.text != "<runtime>" {
@@ -897,7 +874,7 @@ fn build_tree_shaking_parts(
     let mut uses_module_ref = false;
 
     core.scopes_for_current_part.clear();
-    for (statement, declared_symbols) in statements.into_iter().zip(declared_symbols_by_statement) {
+    for (statement, _) in statements.into_iter().zip(declared_symbols_by_statement) {
         let move_before = core.options.mode != crate::internal::config::Mode::PassThrough
             && matches!(
                 statement.data.as_deref(),
@@ -906,7 +883,7 @@ fn build_tree_shaking_parts(
         let move_after = matches!(statement.data.as_deref(), Some(StmtData::ExportEquals(_)));
         core.symbol_uses.clear();
         core.import_symbol_property_uses.clear();
-        core.declared_symbols = declared_symbols;
+        core.declared_symbols.clear();
         core.scopes_for_current_part.clear();
 
         let mut import_record_indices = top_level_import_record_indices(&statement);
@@ -918,10 +895,14 @@ fn build_tree_shaking_parts(
         if core.options.keep_names && core.source.key_path.text != "<runtime>" {
             apply_keep_names_to_statements(core, &mut statements);
         }
-        let defer_import_scan = move_before
-            && statements
-                .iter()
-                .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))));
+        for statement in &mut statements {
+            if let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() {
+                expression.must_not_be_merged = true;
+            }
+        }
+        let defer_import_scan = statements
+            .iter()
+            .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))));
         if !defer_import_scan {
             scan_module_metadata_into(core, &mut statements, &mut metadata);
         }
@@ -978,10 +959,10 @@ fn build_tree_shaking_parts(
         }
     }
 
-    // TypeScript import trimming needs use counts from the whole file. Import
-    // parts are hoisted ahead of the other parts, but scanning them must happen
-    // after all other parts have been visited so those counts are complete.
-    for part in &mut before_parts {
+    // TypeScript import trimming needs use counts from the whole file. Scan all
+    // import parts after every other part has been visited so those counts are
+    // complete, including pass-through builds where imports aren't relocated.
+    for part in before_parts.iter_mut().chain(parts.iter_mut()) {
         if part
             .statements
             .iter()
@@ -1200,6 +1181,7 @@ fn keep_declaration_name_statement(
                 ],
             ),
             is_from_class_or_fn_that_can_be_removed_if_unused: true,
+            must_not_be_merged: false,
         }),
     )
 }
@@ -1270,6 +1252,7 @@ fn insert_class_name_static_block(
                         StmtData::Expr(ExprStmt {
                             value: call,
                             is_from_class_or_fn_that_can_be_removed_if_unused: true,
+                            must_not_be_merged: false,
                         }),
                     )],
                     ..crate::internal::js_ast::BlockStmt::default()
@@ -1552,7 +1535,6 @@ fn scan_module_metadata_into(
         }
         match statement.data.as_deref_mut() {
             Some(StmtData::Import(import)) => {
-                core.record_declared_symbol(import.namespace_ref);
                 let record = &mut core.import_records
                     [usize::try_from(import.import_record_index).expect("import record index")];
                 if import.star_name_loc.is_some() {
@@ -2063,9 +2045,10 @@ fn apply_jsx_pragmas(core: &mut ParserCore, lexer: &Lexer) {
 fn strip_directive_prologue(
     core: &ParserCore,
     statements: &mut Vec<Stmt>,
-) -> (Vec<String>, Vec<Loc>) {
+) -> (Vec<String>, Vec<Loc>, bool) {
     let mut directives = Vec::new();
     let mut legacy_octal_locs = Vec::new();
+    let mut has_explicit_use_strict = false;
     if core
         .options
         .ts_always_strict
@@ -2093,6 +2076,7 @@ fn strip_directive_prologue(
         }
 
         let directive = String::from_utf8_lossy(&utf16_to_string(&value.value)).into_owned();
+        has_explicit_use_strict |= directive == "use strict";
         if value.legacy_octal_loc.start > 0 {
             legacy_octal_locs.push(value.legacy_octal_loc);
         }
@@ -2108,7 +2092,7 @@ fn strip_directive_prologue(
             .collect::<Vec<_>>();
         statements.splice(..0, comments);
     }
-    (directives, legacy_octal_locs)
+    (directives, legacy_octal_locs, has_explicit_use_strict)
 }
 
 #[cfg(test)]
@@ -4322,6 +4306,31 @@ mod tests {
         assert!(api.was_ts_import_equals);
         assert!(api.is_export);
         assert!(ast.named_exports.contains_key("api"));
+    }
+
+    #[test]
+    fn preserves_imports_used_by_live_type_script_import_equals_parts() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        options.tree_shaking = true;
+        let (ast, ok, log) = parse_source_with_options(
+            "import { foo } from 'pkg';\
+             import used = foo.used;\
+             import unused = foo.unused;\
+             export { used };",
+            options,
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        assert!(
+            ast.parts
+                .iter()
+                .any(|part| part.statements.iter().any(|statement| {
+                    matches!(statement.data.as_deref(), Some(StmtData::Import(_)))
+                })),
+            "live import-equals initializer must preserve its ESM import: {:#?}",
+            ast.parts
+        );
     }
 
     #[test]

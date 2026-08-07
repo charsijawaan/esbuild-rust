@@ -297,6 +297,7 @@ fn parse_type_script_import_equals(
 #[allow(clippy::too_many_lines)]
 pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
     let loc = lexer.loc();
+    let previous_export_keyword = core.esm_export_keyword;
     if core.is_current_scope_module_scope() && core.esm_export_keyword.len == 0 {
         core.esm_export_keyword = crate::internal::logger::Range { loc, len: 6 };
     }
@@ -332,6 +333,7 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
         return statement;
     }
     if core.options.ts.parse && lexer.token == Token::Equals {
+        core.esm_export_keyword = previous_export_keyword;
         lexer.next();
         let value = parse_expression(core, lexer, Precedence::Lowest, true);
         lexer.expect_or_insert_semicolon();

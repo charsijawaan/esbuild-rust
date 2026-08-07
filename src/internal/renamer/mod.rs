@@ -408,49 +408,40 @@ pub fn assign_nested_scope_slots(module_scope: &ScopeRef, symbols: &mut [Symbol]
     }
 
     let mut slot_counts = SlotCounts::default();
-    for child in children {
-        slot_counts.union_max(assign_nested_scope_slots_helper(
-            &child,
-            symbols,
-            SlotCounts::default(),
-        ));
+    let mut scopes = children
+        .into_iter()
+        .rev()
+        .map(|scope| (scope, SlotCounts::default()))
+        .collect::<Vec<_>>();
+    while let Some((scope, mut slot)) = scopes.pop() {
+        let (members, generated, children) = scope_parts(&scope);
+        for reference in members.iter().chain(&generated) {
+            let symbol = &mut symbols[reference.inner_index as usize];
+            let namespace = symbol.slot_namespace();
+            if namespace != SlotNamespace::MustNotBeRenamed && !symbol.nested_scope_slot.is_valid()
+            {
+                symbol.nested_scope_slot = Index32::new(slot.0[namespace as usize]);
+                slot.0[namespace as usize] += 1;
+            }
+        }
+
+        let label = scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .label
+            .reference;
+        if label != INVALID_REF {
+            let symbol = &mut symbols[label.inner_index as usize];
+            symbol.nested_scope_slot = Index32::new(slot.0[SlotNamespace::Label as usize]);
+            slot.0[SlotNamespace::Label as usize] += 1;
+        }
+
+        slot_counts.union_max(slot);
+        scopes.extend(children.into_iter().rev().map(|child| (child, slot)));
     }
 
     for reference in members.iter().chain(&generated) {
         symbols[reference.inner_index as usize].nested_scope_slot = Index32::default();
-    }
-    slot_counts
-}
-
-fn assign_nested_scope_slots_helper(
-    scope: &ScopeRef,
-    symbols: &mut [Symbol],
-    mut slot: SlotCounts,
-) -> SlotCounts {
-    let (members, generated, children) = scope_parts(scope);
-    for reference in members.iter().chain(&generated) {
-        let symbol = &mut symbols[reference.inner_index as usize];
-        let namespace = symbol.slot_namespace();
-        if namespace != SlotNamespace::MustNotBeRenamed && !symbol.nested_scope_slot.is_valid() {
-            symbol.nested_scope_slot = Index32::new(slot.0[namespace as usize]);
-            slot.0[namespace as usize] += 1;
-        }
-    }
-
-    let label = scope
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .label
-        .reference;
-    if label != INVALID_REF {
-        let symbol = &mut symbols[label.inner_index as usize];
-        symbol.nested_scope_slot = Index32::new(slot.0[SlotNamespace::Label as usize]);
-        slot.0[SlotNamespace::Label as usize] += 1;
-    }
-
-    let mut slot_counts = slot;
-    for child in children {
-        slot_counts.union_max(assign_nested_scope_slots_helper(&child, symbols, slot));
     }
     slot_counts
 }
@@ -510,7 +501,7 @@ impl NumberRenamer {
         sources.sort_by_key(|(source_index, _)| **source_index);
         for (&source_index, scopes) in sources {
             for scope in scopes {
-                self.assign_names_recursive(scope.clone(), source_index, 0);
+                self.assign_names_in_nested_scopes(scope.clone(), source_index);
             }
         }
     }
@@ -572,25 +563,14 @@ impl NumberRenamer {
         scope_index
     }
 
-    fn assign_names_recursive(
-        &mut self,
-        mut scope: ScopeRef,
-        source_index: u32,
-        mut parent: usize,
-    ) {
-        loop {
+    fn assign_names_in_nested_scopes(&mut self, scope: ScopeRef, source_index: u32) {
+        let mut scopes = vec![(scope, 0)];
+        while let Some((scope, mut parent)) = scopes.pop() {
             let (members, generated, children) = scope_parts(&scope);
             if !members.is_empty() || !generated.is_empty() {
                 parent = self.assign_names_in_scope(&scope, source_index, parent);
             }
-            if let [only_child] = children.as_slice() {
-                scope = only_child.clone();
-                continue;
-            }
-            for child in children {
-                self.assign_names_recursive(child, source_index, parent);
-            }
-            break;
+            scopes.extend(children.into_iter().rev().map(|child| (child, parent)));
         }
     }
 

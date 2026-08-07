@@ -611,9 +611,14 @@ fn print_internal<'a>(
     let statements = tree
         .parts
         .iter()
-        .flat_map(|part| &part.statements)
+        .enumerate()
+        .flat_map(|(part_index, part)| {
+            part.statements
+                .iter()
+                .map(move |statement| (statement, part_index))
+        })
         .collect::<Vec<_>>();
-    printer.print_statements(&statements);
+    printer.print_statements_with_parts(&statements);
     let source_map_chunk = printer
         .source_map_builder
         .take()
@@ -952,15 +957,23 @@ impl Printer<'_> {
     }
 
     fn print_statements(&mut self, statements: &[&Stmt]) {
+        let statements = statements
+            .iter()
+            .map(|statement| (*statement, 0))
+            .collect::<Vec<_>>();
+        self.print_statements_with_parts(&statements);
+    }
+
+    fn print_statements_with_parts(&mut self, statements: &[(&Stmt, usize)]) {
         let mut statement_index = 0;
         while statement_index < statements.len() {
-            let statement = statements[statement_index];
+            let (statement, part_index) = statements[statement_index];
             if self.options.minify_syntax
                 && let Some(StmtData::Local(first)) = statement.data.as_deref()
             {
                 let mut merged = first.clone();
                 let mut next_index = statement_index + 1;
-                while let Some(next) = statements.get(next_index)
+                while let Some((next, _)) = statements.get(next_index)
                     && let Some(StmtData::Local(next)) = next.data.as_deref()
                     && next.kind == merged.kind
                     && next.is_export == merged.is_export
@@ -980,17 +993,21 @@ impl Printer<'_> {
             if self.options.minify_syntax
                 && let Some(StmtData::Expr(first)) = statement.data.as_deref()
                 && !first.is_from_class_or_fn_that_can_be_removed_if_unused
+                && !first.must_not_be_merged
             {
                 let mut combined = first.value.clone();
                 let mut next_index = statement_index + 1;
-                while let Some(next) = statements.get(next_index)
+                while let Some((next, next_part_index)) = statements.get(next_index)
+                    && *next_part_index == part_index
                     && let Some(StmtData::Expr(next)) = next.data.as_deref()
                     && !next.is_from_class_or_fn_that_can_be_removed_if_unused
+                    && !next.must_not_be_merged
                 {
                     combined = join_with_comma(combined, next.value.clone());
                     next_index += 1;
                 }
-                if let Some(next) = statements.get(next_index)
+                if let Some((next, next_part_index)) = statements.get(next_index)
+                    && *next_part_index == part_index
                     && let Some(StmtData::Return(next)) = next.data.as_deref()
                     && next.value_or_nil.data.is_some()
                 {
@@ -1262,7 +1279,19 @@ impl Printer<'_> {
                 self.print_indent();
                 self.print_identifier(&self.renamer.name_for_symbol(label.name.reference));
                 self.output.push(b':');
-                self.print_loop_body(&label.statement, label.is_single_line_stmt);
+                if self.options.minify_whitespace {
+                    let mut body = &label.statement;
+                    let mut is_single_line = label.is_single_line_stmt;
+                    while let Some(StmtData::Label(nested)) = body.data.as_deref() {
+                        self.print_identifier(&self.renamer.name_for_symbol(nested.name.reference));
+                        self.output.push(b':');
+                        body = &nested.statement;
+                        is_single_line = nested.is_single_line_stmt;
+                    }
+                    self.print_loop_body(body, is_single_line);
+                } else {
+                    self.print_loop_body(&label.statement, label.is_single_line_stmt);
+                }
             }
             StmtData::Try(try_statement) => {
                 self.print_indent();

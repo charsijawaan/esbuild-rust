@@ -369,18 +369,10 @@ impl ParserCore {
             }
         }
 
-        if let Some(existing) = self
-            .declared_symbols
-            .iter_mut()
-            .find(|declared| declared.reference == reference)
-        {
-            existing.is_top_level |= is_top_level;
-        } else {
-            self.declared_symbols.push(DeclaredSymbol {
-                reference,
-                is_top_level,
-            });
-        }
+        self.declared_symbols.push(DeclaredSymbol {
+            reference,
+            is_top_level,
+        });
     }
 
     pub(crate) fn follow_symbol_link(&self, mut reference: Ref) -> Ref {
@@ -588,6 +580,10 @@ impl ParserCore {
                             target.parent.as_ref().and_then(std::sync::Weak::upgrade),
                         )
                     };
+
+                    if target_kind == ScopeKind::With {
+                        self.symbols[symbol_index].flags |= SymbolFlags::MUST_NOT_BE_RENAMED;
+                    }
 
                     if let Some(existing) = existing {
                         if existing.reference == member.reference {

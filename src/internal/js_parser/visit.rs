@@ -12,13 +12,13 @@ use crate::internal::{
     config::pretty_print_target_environment,
     helpers::{GlobPart, GlobWildcard, is_inside_node_modules, string_to_utf16, utf16_to_string},
     js_ast::{
-        Arg, AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
-        Decl, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody, FunctionExpr,
-        IdentifierBinding, IdentifierExpr, IfExpr, IfStmt, LocalKind, LocalStmt, NewExpr,
-        ObjectExpr, OpCode, OptionalChain, PrimitiveType, Property, PropertyFlags, PropertyKind,
-        ReturnStmt, ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind,
-        StringExpr, ThrowStmt, UnaryExpr, assign, convert_binding_to_expr,
-        for_each_identifier_binding, inline_primitives_into_template,
+        AnnotationExpr, AnnotationFlags, Arg, AssignTarget, BinaryExpr, Binding, BindingData,
+        BlockStmt, CallExpr, CallKind, Class, Decl, DotExpr, Expr, ExprData, ExprStmt, ForStmt,
+        Function, FunctionBody, FunctionExpr, IdentifierBinding, IdentifierExpr, IfExpr, IfStmt,
+        LabelStmt, LocalKind, LocalStmt, NewExpr, ObjectExpr, OpCode, OptionalChain, PrimitiveType,
+        Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind, Stmt, StmtData,
+        StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, ThrowStmt, UnaryExpr, assign,
+        convert_binding_to_expr, for_each_identifier_binding, inline_primitives_into_template,
         inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
         is_primitive_literal, join_with_comma, known_primitive_type, make_helper_context,
         mangle_object_spread,
@@ -236,6 +236,7 @@ fn insert_class_name_static_block(core: &mut ParserCore, class: &mut Class, name
                         StmtData::Expr(crate::internal::js_ast::ExprStmt {
                             value: call,
                             is_from_class_or_fn_that_can_be_removed_if_unused: true,
+                            must_not_be_merged: false,
                         }),
                     )],
                     ..BlockStmt::default()
@@ -404,6 +405,17 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     statement.data = None;
                 }
             }
+            Some(StmtData::Import(import)) => {
+                core.record_declared_symbol(import.namespace_ref);
+                if let Some(default_name) = import.default_name {
+                    core.record_declared_symbol(default_name.reference);
+                }
+                if let Some(items) = &import.items {
+                    for item in items {
+                        core.record_declared_symbol(item.name.reference);
+                    }
+                }
+            }
             Some(StmtData::ExportEquals(export)) => {
                 core.record_usage(core.module_ref);
                 visit_expr(core, &mut export.value, resolve_identifiers);
@@ -415,6 +427,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 statement.data = None;
             }
             Some(StmtData::Local(local)) => {
+                let is_const = local.kind == LocalKind::Const;
                 if local.kind == LocalKind::AwaitUsing && core.visit_is_outside_fn_or_arrow {
                     let range = Range {
                         loc: statement.loc,
@@ -435,6 +448,27 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 }
                 for declaration in &mut local.declarations {
                     record_binding(core, &mut declaration.binding);
+                    if is_const
+                        && !core.options.ignore_dce_annotations
+                        && matches!(
+                            declaration.value_or_nil.data.as_deref(),
+                            Some(ExprData::Arrow(arrow)) if arrow.has_no_side_effects_comment
+                        )
+                        || is_const
+                            && !core.options.ignore_dce_annotations
+                            && matches!(
+                                declaration.value_or_nil.data.as_deref(),
+                                Some(ExprData::Function(function))
+                                    if function.function.has_no_side_effects_comment
+                            )
+                    {
+                        if let Some(BindingData::Identifier(binding)) =
+                            declaration.binding.data.as_deref()
+                        {
+                            core.symbols[binding.reference.inner_index as usize].flags |=
+                                SymbolFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED;
+                        }
+                    }
                     visit_binding_initializers(core, &mut declaration.binding, resolve_identifiers);
                     visit_expr(core, &mut declaration.value_or_nil, resolve_identifiers);
                     if core.options.minify_syntax
@@ -524,6 +558,13 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 }
             }
             Some(StmtData::Function(function)) => {
+                if !core.options.ignore_dce_annotations
+                    && function.function.has_no_side_effects_comment
+                    && let Some(name) = function.function.name
+                {
+                    core.symbols[name.reference.inner_index as usize].flags |=
+                        SymbolFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED;
+                }
                 has_if_scope = function.function.has_if_scope;
                 if has_if_scope {
                     core.push_next_scope_for_visit_pass(ScopeKind::Block);
@@ -686,6 +727,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 core.pop_scope();
             }
             Some(StmtData::ExportDefault(export)) => {
+                core.record_declared_symbol(export.default_name.reference);
                 let mut remove_type_only_default = false;
                 match export.value.data.as_deref_mut() {
                     Some(StmtData::Expr(expression)) => {
@@ -703,6 +745,13 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         }
                     }
                     Some(StmtData::Function(function)) => {
+                        if !core.options.ignore_dce_annotations
+                            && function.function.has_no_side_effects_comment
+                            && let Some(name) = function.function.name
+                        {
+                            core.symbols[name.reference.inner_index as usize].flags |=
+                                SymbolFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED;
+                        }
                         visit_function(core, &mut function.function, resolve_identifiers);
                     }
                     Some(StmtData::Class(class)) => {
@@ -993,71 +1042,8 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 relocate_for_in_or_of_init(core, &mut loop_statement.init);
                 core.pop_scope();
             }
-            Some(StmtData::Label(label)) => {
-                validate_single_statement(core, &label.statement, SingleStatementContext::Label);
-                core.push_scope_for_visit_pass(ScopeKind::Label, statement.loc);
-                let name = String::from_utf8_lossy(core.load_name_from_ref(label.name.reference))
-                    .into_owned();
-                let should_drop = core.options.drop_labels.contains(&name);
-                let reference =
-                    core.new_symbol(crate::internal::ast::SymbolKind::Label, name.clone());
-                label.name.reference = reference;
-                {
-                    let mut scope = core
-                        .current_scope
-                        .as_ref()
-                        .expect("label scope")
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    scope.label = crate::internal::ast::LocRef {
-                        loc: label.name.loc,
-                        reference,
-                    };
-                    scope.label_stmt_is_loop = matches!(
-                        label.statement.data.as_deref(),
-                        Some(
-                            StmtData::For(_)
-                                | StmtData::ForIn(_)
-                                | StmtData::ForOf(_)
-                                | StmtData::While(_)
-                                | StmtData::DoWhile(_)
-                        )
-                    );
-                }
-                let old_control_flow_dead = core.is_control_flow_dead;
-                if should_drop {
-                    core.is_control_flow_dead = true;
-                }
-                visit_statement(core, &mut label.statement, resolve_identifiers);
-                core.is_control_flow_dead = old_control_flow_dead;
-                core.pop_scope();
-                if should_drop {
-                    statement.data = Some(Box::new(StmtData::Empty));
-                } else if core.options.minify_syntax
-                    && core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
-                        .use_count_estimate
-                        == 0
-                {
-                    if label.statement.data.is_none() {
-                        statement.data = None;
-                        continue;
-                    }
-                    let mut replacements =
-                        super::control_flow::append_if_or_label_body_preserving_scope(
-                            Vec::new(),
-                            std::mem::take(&mut label.statement),
-                        );
-                    if replacements.is_empty() {
-                        statement.data = None;
-                    } else if replacements.len() == 1 {
-                        *statement = replacements.pop().expect("single replacement");
-                    } else {
-                        statement.data = Some(Box::new(StmtData::Block(BlockStmt {
-                            statements: replacements,
-                            ..BlockStmt::default()
-                        })));
-                    }
-                }
+            Some(StmtData::Label(_)) => {
+                visit_label_statement_chain(core, statement, resolve_identifiers);
             }
             Some(StmtData::Switch(switch)) => {
                 visit_expr(core, &mut switch.test, resolve_identifiers);
@@ -1737,7 +1723,7 @@ fn substitute_single_use_symbol_in_expression(
                                 call.target = std::mem::take(&mut binary.right);
                             }
                         }
-                        if let Some(inlined) = maybe_inline_iife(core, expression_loc, call) {
+                        if let Some(inlined) = maybe_inline_iife(expression_loc, call) {
                             expression.data = Some(Box::new(inlined));
                         } else if let Some(ExprData::Identifier(identifier)) =
                             call.target.data.as_deref()
@@ -2038,6 +2024,8 @@ pub(crate) fn merge_adjacent_expression_statements(statements: Vec<Stmt>) -> Vec
         if let Some(StmtData::Expr(previous)) =
             result.last_mut().and_then(|item| item.data.as_deref_mut())
             && let StmtData::Expr(current) = data
+            && !previous.must_not_be_merged
+            && !current.must_not_be_merged
         {
             previous.value = join_with_comma(previous.value.clone(), current.value.clone());
             previous.is_from_class_or_fn_that_can_be_removed_if_unused &=
@@ -2735,9 +2723,17 @@ enum SingleStatementContext {
 
 fn validate_single_statement(
     core: &mut ParserCore,
-    statement: &Stmt,
-    context: SingleStatementContext,
+    mut statement: &Stmt,
+    mut context: SingleStatementContext,
 ) {
+    while let Some(StmtData::Label(label)) = statement.data.as_deref() {
+        statement = &label.statement;
+        context = if context == SingleStatementContext::Label {
+            SingleStatementContext::Label
+        } else {
+            SingleStatementContext::Other
+        };
+    }
     match statement.data.as_deref() {
         Some(StmtData::Local(local)) if local.kind != crate::internal::js_ast::LocalKind::Var => {
             report_forbidden_single_statement(core, statement.loc);
@@ -2772,19 +2768,120 @@ fn validate_single_statement(
                 report_forbidden_single_statement(core, statement.loc);
             }
         }
-        Some(StmtData::Label(label)) => {
-            validate_single_statement(
-                core,
-                &label.statement,
-                if context == SingleStatementContext::Label {
-                    SingleStatementContext::Label
-                } else {
-                    SingleStatementContext::Other
-                },
-            );
-        }
         _ => {}
     }
+}
+
+struct LabelVisitFrame {
+    loc: Loc,
+    name: crate::internal::ast::LocRef,
+    is_single_line_stmt: bool,
+    reference: crate::internal::ast::Ref,
+    should_drop: bool,
+    old_control_flow_dead: bool,
+}
+
+fn visit_label_statement_chain(
+    core: &mut ParserCore,
+    statement: &mut Stmt,
+    resolve_identifiers: bool,
+) {
+    let mut current = std::mem::take(statement);
+    let mut frames = Vec::new();
+
+    while let Some(data) = current.data.take() {
+        let StmtData::Label(mut label) = *data else {
+            current.data = Some(data);
+            visit_statement(core, &mut current, resolve_identifiers);
+            break;
+        };
+
+        validate_single_statement(core, &label.statement, SingleStatementContext::Label);
+        core.push_scope_for_visit_pass(ScopeKind::Label, current.loc);
+        let name =
+            String::from_utf8_lossy(core.load_name_from_ref(label.name.reference)).into_owned();
+        let should_drop = core.options.drop_labels.contains(&name);
+        let reference = core.new_symbol(crate::internal::ast::SymbolKind::Label, name);
+        label.name.reference = reference;
+        {
+            let mut scope = core
+                .current_scope
+                .as_ref()
+                .expect("label scope")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scope.label = crate::internal::ast::LocRef {
+                loc: label.name.loc,
+                reference,
+            };
+            scope.label_stmt_is_loop = matches!(
+                label.statement.data.as_deref(),
+                Some(
+                    StmtData::For(_)
+                        | StmtData::ForIn(_)
+                        | StmtData::ForOf(_)
+                        | StmtData::While(_)
+                        | StmtData::DoWhile(_)
+                )
+            );
+        }
+        let old_control_flow_dead = core.is_control_flow_dead;
+        if should_drop {
+            core.is_control_flow_dead = true;
+        }
+        frames.push(LabelVisitFrame {
+            loc: current.loc,
+            name: label.name,
+            is_single_line_stmt: label.is_single_line_stmt,
+            reference,
+            should_drop,
+            old_control_flow_dead,
+        });
+        current = label.statement;
+    }
+
+    while let Some(frame) = frames.pop() {
+        core.is_control_flow_dead = frame.old_control_flow_dead;
+        core.pop_scope();
+        if frame.should_drop {
+            current = Stmt::new(frame.loc, StmtData::Empty);
+        } else if core.options.minify_syntax
+            && core.symbols[usize::try_from(frame.reference.inner_index).expect("symbol index")]
+                .use_count_estimate
+                == 0
+        {
+            if current.data.is_some() {
+                let mut replacements =
+                    super::control_flow::append_if_or_label_body_preserving_scope(
+                        Vec::new(),
+                        current,
+                    );
+                current = if replacements.is_empty() {
+                    Stmt::default()
+                } else if replacements.len() == 1 {
+                    replacements.pop().expect("single replacement")
+                } else {
+                    Stmt::new(
+                        frame.loc,
+                        StmtData::Block(BlockStmt {
+                            statements: replacements,
+                            ..BlockStmt::default()
+                        }),
+                    )
+                };
+            }
+        } else {
+            current = Stmt::new(
+                frame.loc,
+                StmtData::Label(LabelStmt {
+                    statement: current,
+                    name: frame.name,
+                    is_single_line_stmt: frame.is_single_line_stmt,
+                }),
+            );
+        }
+    }
+    *statement = current;
 }
 
 fn report_forbidden_single_statement(core: &mut ParserCore, loc: Loc) {
@@ -2911,6 +3008,7 @@ fn keep_block_function_name_statement(
                 ],
             ),
             is_from_class_or_fn_that_can_be_removed_if_unused: true,
+            must_not_be_merged: false,
         }),
     )
 }
@@ -3494,7 +3592,7 @@ fn visit_class(
         || core.options.ts.config.experimental_decorators
             == crate::internal::config::MaybeBool::True
         || class.should_lower_standard_decorators;
-    if merge_inner_name && let (Some(inner), Some(outer)) = (inner_class_name, outer_class_name) {
+    if merge_inner_name && let (Some(inner), Some(outer)) = (used_inner_name, outer_class_name) {
         core.merge_symbols(inner, outer);
         None
     } else {
@@ -6235,7 +6333,7 @@ fn iife_can_be_removed_if_unused(core: &ParserCore, args: &[Arg], body: &Functio
     )
 }
 
-fn maybe_inline_iife(core: &ParserCore, loc: Loc, call: &CallExpr) -> Option<ExprData> {
+fn maybe_inline_iife(loc: Loc, call: &CallExpr) -> Option<ExprData> {
     if !call.args.is_empty() {
         return None;
     }
@@ -6267,15 +6365,17 @@ fn maybe_inline_iife(core: &ParserCore, loc: Loc, call: &CallExpr) -> Option<Exp
         },
         _ => return None,
     };
-    if call.can_be_unwrapped_if_unused {
-        let helpers = make_helper_context(|reference| {
-            core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
-                == SymbolKind::Unbound
-        });
-        if !helpers.expr_can_be_removed_if_unused(&replacement) {
-            return None;
-        }
-    }
+    let replacement = if call.can_be_unwrapped_if_unused {
+        Expr::new(
+            loc,
+            ExprData::Annotation(AnnotationExpr {
+                value: replacement,
+                flags: AnnotationFlags::CAN_BE_REMOVED_IF_UNUSED,
+            }),
+        )
+    } else {
+        replacement
+    };
     replacement.data.map(|data| *data)
 }
 
@@ -6684,6 +6784,10 @@ fn visit_expr_with_target_and_context(
             }
             if assign_target == AssignTarget::None {
                 let symbol = &core.symbols[identifier.reference.inner_index as usize];
+                identifier.call_can_be_unwrapped_if_unused |= !core.options.ignore_dce_annotations
+                    && symbol
+                        .flags
+                        .contains(SymbolFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED);
                 if symbol.kind == crate::internal::ast::SymbolKind::Unbound
                     && let Some(define) = core
                         .options
@@ -7304,7 +7408,7 @@ fn visit_expr_with_target_and_context(
                 }
             }
             if core.options.minify_syntax
-                && let Some(replacement) = maybe_inline_iife(core, expression.loc, call)
+                && let Some(replacement) = maybe_inline_iife(expression.loc, call)
             {
                 *data = replacement;
                 return;

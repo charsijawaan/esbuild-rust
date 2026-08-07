@@ -3945,6 +3945,7 @@ mod tests {
             StmtData::Expr(ExprStmt {
                 value: Expr::new(Loc::default(), ExprData::Call(CallExpr::default())),
                 is_from_class_or_fn_that_can_be_removed_if_unused: true,
+                must_not_be_merged: false,
             }),
         );
         assert!(context.stmts_can_be_removed_if_unused(

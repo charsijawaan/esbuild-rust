@@ -1003,6 +1003,7 @@ pub struct LazyExportStmt {
 pub struct ExprStmt {
     pub value: Expr,
     pub is_from_class_or_fn_that_can_be_removed_if_unused: bool,
+    pub must_not_be_merged: bool,
 }
 
 #[derive(Clone, Debug, Default)]

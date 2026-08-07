@@ -229,6 +229,7 @@ pub struct ScanImportsAndExportsResult {
 pub struct PreparedLinkerGraph {
     pub graph: LinkerGraph,
     pub chunks: Vec<ChunkInfo>,
+    pub local_css_names: HashMap<Ref, String>,
     pub scan_result: ScanImportsAndExportsResult,
     pub unbound_module_ref: Ref,
 }
@@ -2721,7 +2722,7 @@ pub fn prepare_linker_graph<S: BuildHasher>(
     entry_points: &[EntryPoint],
     options: &Options,
     unique_key_prefix: &str,
-    local_names: &HashMap<Ref, String, S>,
+    used_local_names: &mut HashSet<String, S>,
 ) -> PreparedLinkerGraph {
     let mut graph = clone_linker_graph(
         input_files,
@@ -2729,6 +2730,7 @@ pub fn prepare_linker_graph<S: BuildHasher>(
         entry_points,
         options.code_splitting,
     );
+    let local_css_names = mangle_local_css(&graph, options, used_local_names);
     let unbound_module_ref = if options.output_format == Format::CommonJs {
         graph.generate_new_symbol(
             crate::internal::runtime::SOURCE_INDEX,
@@ -2744,7 +2746,7 @@ pub fn prepare_linker_graph<S: BuildHasher>(
         &mut graph,
         options,
         unique_key_prefix,
-        local_names,
+        &local_css_names,
         runtime_refs,
     );
     tree_shaking_and_code_splitting(&mut graph, options);
@@ -2762,6 +2764,7 @@ pub fn prepare_linker_graph<S: BuildHasher>(
     PreparedLinkerGraph {
         graph,
         chunks,
+        local_css_names,
         scan_result,
         unbound_module_ref,
     }
@@ -4946,12 +4949,12 @@ pub fn prepare_css_asts(
 
 /// Print each prepared CSS AST independently before chunk concatenation.
 #[must_use]
-pub fn compile_prepared_css_asts(
+pub fn compile_prepared_css_asts<S: BuildHasher>(
     graph: &LinkerGraph,
     prepared: &[PreparedCssAst],
     options: &Options,
+    local_names: &HashMap<Ref, String, S>,
 ) -> Vec<CompiledCssAst> {
-    let local_names = mangle_local_css(graph, options, &mut HashSet::new());
     prepared
         .iter()
         .map(|item| {
@@ -4988,7 +4991,10 @@ pub fn compile_prepared_css_asts(
                 css_printer::Options {
                     input_source_map,
                     line_offset_tables: line_offset_tables.to_vec(),
-                    local_names: local_names.clone(),
+                    local_names: local_names
+                        .iter()
+                        .map(|(&reference, name)| (reference, name.clone()))
+                        .collect(),
                     line_limit: options.line_limit,
                     input_source_index,
                     minify_whitespace: options.minify_whitespace,
@@ -5019,15 +5025,16 @@ pub fn compile_prepared_css_asts(
 ///
 /// Panics if the supplied chunk is not CSS or contains invalid CSS import
 /// ordering data.
-pub fn generate_css_chunk(
+pub fn generate_css_chunk<S: BuildHasher>(
     graph: &LinkerGraph,
     chunk: &mut ChunkInfo,
     options: &Options,
     output_paths: &OutputPathContext<'_>,
+    local_names: &HashMap<Ref, String, S>,
 ) {
     assert!(chunk.is_css, "CSS generation requires a CSS chunk");
     let prepared = prepare_css_asts(graph, &chunk.imports_in_css_order, options);
-    let compiled = compile_prepared_css_asts(graph, &prepared, options);
+    let compiled = compile_prepared_css_asts(graph, &prepared, options, local_names);
     assemble_css_chunk(graph, chunk, &compiled, options, output_paths);
 }
 
@@ -6720,7 +6727,7 @@ pub fn rename_symbols_in_chunk(
                     &graph.stable_source_indices,
                 );
                 for declared in &part.declared_symbols {
-                    renamer.accumulate_symbol_declaration_count(
+                    renamer.accumulate_symbol_count(
                         &mut file_symbols,
                         declared.reference,
                         1,
@@ -11862,7 +11869,7 @@ mod tests {
             &scanned,
             &options,
             PREFIX,
-            &HashMap::new(),
+            &mut HashSet::new(),
         );
         assert!(prepared.scan_result.import_issues.is_empty());
         assert!(prepared.scan_result.ambiguous_re_exports.is_empty());
@@ -12173,6 +12180,7 @@ mod tests {
             &mut chunks[0],
             &Options::default(),
             &context(&[], &[]),
+            &HashMap::new(),
         );
         let outputs = finalize_javascript_chunk_outputs(
             &mock_fs(&HashMap::new(), MockKind::Unix, "/"),
@@ -12314,6 +12322,7 @@ mod tests {
                 ..PreparedCssAst::default()
             }],
             &Options::default(),
+            &names,
         );
         assert_eq!(compiled[0].css, b".entry_button {\n}\n");
 
@@ -13039,6 +13048,7 @@ mod tests {
                 minify_whitespace: true,
                 ..Options::default()
             },
+            &HashMap::new(),
         );
         assert_eq!(compiled[0].css, b"a{color:red}");
         assert_eq!(compiled[0].source_index.get_index(), 7);
@@ -13086,7 +13096,7 @@ mod tests {
             source_index: Index32::new(1),
             ..PreparedCssAst::default()
         }];
-        let compiled = compile_prepared_css_asts(&graph, &prepared, &options);
+        let compiled = compile_prepared_css_asts(&graph, &prepared, &options, &HashMap::new());
         assert_eq!(compiled[0].extracted_legal_comments, ["/*! license */"]);
         assert_eq!(compiled[0].json_metadata_imports.len(), 1);
 
@@ -13290,7 +13300,7 @@ mod tests {
             }],
             &options,
         );
-        let compiled = compile_prepared_css_asts(&graph, &prepared, &options);
+        let compiled = compile_prepared_css_asts(&graph, &prepared, &options, &HashMap::new());
         assert!(!compiled[0].source_map_chunk.should_ignore);
         let mut chunk = ChunkInfo {
             unique_key: "UNIQUEC00000000".into(),

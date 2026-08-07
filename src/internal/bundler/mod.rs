@@ -2,14 +2,13 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    hash::BuildHasher,
     sync::Arc,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
-    ast::{AssertOrWithKeyword, ImportKind, ImportRecordFlags, Index32, Ref},
+    ast::{AssertOrWithKeyword, ImportKind, ImportRecordFlags, Index32},
     cache::{CacheSet, SourceIndexKind},
     compat::{CssFeature, JsFeature},
     config::{
@@ -78,11 +77,11 @@ pub struct CompiledBundle {
 /// Panics when scanner output violates linker invariants or the runtime module
 /// is missing required exports.
 #[must_use]
-pub fn prepare_linker_graph<S: BuildHasher>(
+pub fn prepare_linker_graph(
     bundle: &ScannedBundle,
     options: &Options,
     unique_key_prefix: &str,
-    local_names: &HashMap<Ref, String, S>,
+    used_local_names: &mut HashSet<String>,
 ) -> linker::PreparedLinkerGraph {
     let input_files: Vec<_> = bundle
         .files
@@ -96,7 +95,7 @@ pub fn prepare_linker_graph<S: BuildHasher>(
         &bundle.entry_points,
         options,
         unique_key_prefix,
-        local_names,
+        used_local_names,
     )
 }
 
@@ -113,12 +112,28 @@ pub fn compile_javascript_bundle(
     options: &Options,
     unique_key_prefix: &str,
 ) -> CompiledBundle {
+    compile_javascript_bundle_with_css_names(
+        file_system,
+        bundle,
+        options,
+        unique_key_prefix,
+        &mut HashSet::new(),
+    )
+}
+
+fn compile_javascript_bundle_with_css_names(
+    file_system: &dyn Fs,
+    bundle: &ScannedBundle,
+    options: &Options,
+    unique_key_prefix: &str,
+    used_local_names: &mut HashSet<String>,
+) -> CompiledBundle {
     if !options.code_splitting && bundle.entry_points.len() > 1 {
         let mut compiled = CompiledBundle::default();
         let mut group_options = options.clone();
         group_options.needs_metafile = false;
         for entry_point in &bundle.entry_points {
-            let group = compile_javascript_bundle(
+            let group = compile_javascript_bundle_with_css_names(
                 file_system,
                 &ScannedBundle {
                     files: bundle.files.clone(),
@@ -126,6 +141,7 @@ pub fn compile_javascript_bundle(
                 },
                 &group_options,
                 unique_key_prefix,
+                used_local_names,
             );
             compiled.output_files.extend(group.output_files);
             compiled
@@ -160,7 +176,7 @@ pub fn compile_javascript_bundle(
     let (mut prepared, source_map_line_offset_tables) =
         if options.source_map == config::SourceMap::None {
             (
-                prepare_linker_graph(bundle, options, unique_key_prefix, &HashMap::new()),
+                prepare_linker_graph(bundle, options, unique_key_prefix, used_local_names),
                 Vec::new(),
             )
         } else {
@@ -168,7 +184,7 @@ pub fn compile_javascript_bundle(
                 let source_map_task =
                     scope.spawn(|| compute_source_map_line_offset_tables(&bundle.files));
                 let prepared =
-                    prepare_linker_graph(bundle, options, unique_key_prefix, &HashMap::new());
+                    prepare_linker_graph(bundle, options, unique_key_prefix, used_local_names);
                 let tables = source_map_task
                     .join()
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
@@ -225,6 +241,7 @@ pub fn compile_javascript_bundle(
                 &mut prepared.chunks[chunk_index],
                 options,
                 &output_paths,
+                &prepared.local_css_names,
             );
             continue;
         }
@@ -3691,9 +3708,16 @@ mod tests {
         )))
         .expect("valid generated upstream bundler corpus");
         let cases = cases.as_array().expect("bundler corpus array");
+        let selected_test = std::env::var("ESBUILD_RS_UPSTREAM_TEST").ok();
         let mut matched = 0;
 
         for case in cases {
+            if selected_test
+                .as_deref()
+                .is_some_and(|selected| case["upstream_test"] != selected)
+            {
+                continue;
+            }
             let options_json = &case["options"];
             let Some(option_names) = options_json.as_object().map(|options| {
                 let mut names: Vec<_> = options.keys().map(String::as_str).collect();
@@ -3771,6 +3795,46 @@ mod tests {
                     && option_names != ["AbsOutputFile", "KeepNames", "MinifySyntax", "Mode"]
                     && option_names != ["AbsOutputDir", "MinifySyntax"]
                     && option_names != ["AbsOutputFile", "MinifySyntax"]
+                    && option_names != ["AbsOutputDir", "MinifyIdentifiers"]
+                    && option_names != ["AbsOutputFile", "MinifyIdentifiers"]
+                    && option_names != ["AbsOutputDir", "MinifyIdentifiers", "Mode"]
+                    && option_names != ["AbsOutputFile", "MinifyIdentifiers", "Mode"]
+                    && option_names
+                        != [
+                            "AbsOutputDir",
+                            "MinifyIdentifiers",
+                            "MinifySyntax",
+                            "MinifyWhitespace",
+                        ]
+                    && option_names
+                        != [
+                            "AbsOutputFile",
+                            "MinifyIdentifiers",
+                            "MinifySyntax",
+                            "MinifyWhitespace",
+                            "Mode",
+                        ]
+                    && option_names != ["AbsOutputFile", "MinifyIdentifiers", "MinifyWhitespace"]
+                    && option_names
+                        != [
+                            "AbsOutputDir",
+                            "MinifyIdentifiers",
+                            "MinifyWhitespace",
+                            "Mode",
+                        ]
+                    && option_names
+                        != ["AbsOutputFile", "MinifyIdentifiers", "Mode", "OutputFormat"]
+                    && option_names
+                        != [
+                            "AbsOutputFile",
+                            "MinifyIdentifiers",
+                            "Mode",
+                            "OutputFormat",
+                            "Platform",
+                        ]
+                    && option_names != ["AbsOutputFile", "TreeShaking"]
+                    && option_names != ["AbsOutputDir", "MinifySyntax", "TreeShaking"]
+                    && option_names != ["AbsOutputDir", "Mode", "TreeShaking"]
                     && option_names != ["AbsOutputDir", "CodeSplitting", "Mode"]
                     && option_names != ["AbsOutputDir", "CodeSplitting", "Mode", "OutputFormat"]
                     && option_names
@@ -3881,6 +3945,9 @@ mod tests {
             }
             if let Some(minify_syntax) = upstream_bool_option(options_json, "MinifySyntax") {
                 options.minify_syntax = minify_syntax;
+            }
+            if let Some(tree_shaking) = upstream_bool_option(options_json, "TreeShaking") {
+                options.tree_shaking = tree_shaking;
             }
             if let Some(code_splitting) = upstream_bool_option(options_json, "CodeSplitting") {
                 options.code_splitting = code_splitting;
@@ -4001,7 +4068,11 @@ mod tests {
             );
         }
 
-        assert_eq!(matched, 505, "upstream basic bundler corpus case count");
+        assert_eq!(
+            matched,
+            if selected_test.is_some() { 1 } else { 537 },
+            "upstream basic bundler corpus case count"
+        );
     }
 
     #[test]
