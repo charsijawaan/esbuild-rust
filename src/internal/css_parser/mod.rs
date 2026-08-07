@@ -623,6 +623,14 @@ impl Parser {
                 unwrap_duplicate_media_rules(&mut rules, &ancestor);
             }
             merge_adjacent_selector_rules(&mut rules);
+            if stop_at_close_brace {
+                let mut remover = make_dead_rule_mangler(SymbolMap::default());
+                rules = remover.remove_dead_rules_in_place(
+                    self.source.index,
+                    rules,
+                    &self.import_records,
+                );
+            }
         }
         rules
     }

@@ -78,6 +78,10 @@ pub trait Renamer: Sync {
         SymbolFlags::default()
     }
 
+    fn kind_for_symbol(&self, _reference: Ref) -> SymbolKind {
+        SymbolKind::Other
+    }
+
     fn namespace_alias_for_symbol(&self, _reference: Ref) -> Option<NamespaceAlias> {
         None
     }
@@ -105,6 +109,11 @@ impl Renamer for NoOpRenamer {
     fn flags_for_symbol(&self, reference: Ref) -> SymbolFlags {
         let reference = self.symbols.follow_symbols_const(reference);
         self.symbols.get(reference).flags
+    }
+
+    fn kind_for_symbol(&self, reference: Ref) -> SymbolKind {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).kind
     }
 
     fn namespace_alias_for_symbol(&self, reference: Ref) -> Option<NamespaceAlias> {
@@ -367,6 +376,11 @@ impl Renamer for MinifyRenamer {
     fn flags_for_symbol(&self, reference: Ref) -> SymbolFlags {
         let reference = self.symbols.follow_symbols_const(reference);
         self.symbols.get(reference).flags
+    }
+
+    fn kind_for_symbol(&self, reference: Ref) -> SymbolKind {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).kind
     }
 
     fn original_name_for_symbol(&self, reference: Ref) -> String {
@@ -649,6 +663,11 @@ impl Renamer for NumberRenamer {
     fn flags_for_symbol(&self, reference: Ref) -> SymbolFlags {
         let reference = self.symbols.follow_symbols_const(reference);
         self.symbols.get(reference).flags
+    }
+
+    fn kind_for_symbol(&self, reference: Ref) -> SymbolKind {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).kind
     }
 
     fn original_name_for_symbol(&self, reference: Ref) -> String {

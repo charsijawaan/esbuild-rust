@@ -1183,6 +1183,65 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     lower_nested_type_script_statements(core, &mut finally.block.statements, None);
                     core.pop_scope();
                 }
+                if core.options.minify_syntax {
+                    let try_is_empty = try_statement
+                        .block
+                        .statements
+                        .iter()
+                        .all(|statement| statement.data.is_none());
+                    if try_is_empty {
+                        let keep_catch = try_statement.catch.as_mut().is_some_and(|catch| {
+                            catch.block.statements.iter_mut().any(
+                                super::dead_control_flow::should_keep_stmt_in_dead_control_flow,
+                            )
+                        });
+                        if !keep_catch {
+                            statement.data = try_statement.finally.take().map(|finally| {
+                                if super::control_flow::stmts_care_about_scope(
+                                    &finally.block.statements,
+                                ) {
+                                    Box::new(StmtData::Block(finally.block))
+                                } else {
+                                    super::standalone_helpers::stmts_to_single_stmt(
+                                        finally.loc,
+                                        finally.block.statements,
+                                        finally.block.close_brace_loc,
+                                    )
+                                    .data
+                                    .unwrap_or_else(|| Box::new(StmtData::Empty))
+                                }
+                            });
+                        }
+                    } else if try_statement.finally.as_ref().is_some_and(|finally| {
+                        finally
+                            .block
+                            .statements
+                            .iter()
+                            .all(|statement| statement.data.is_none())
+                    }) {
+                        if try_statement.catch.is_some() {
+                            try_statement.finally = None;
+                        } else if let Some(finally) = try_statement.finally.take() {
+                            statement.data = Some(
+                                if super::control_flow::stmts_care_about_scope(
+                                    &try_statement.block.statements,
+                                ) {
+                                    Box::new(StmtData::Block(std::mem::take(
+                                        &mut try_statement.block,
+                                    )))
+                                } else {
+                                    super::standalone_helpers::stmts_to_single_stmt(
+                                        finally.loc,
+                                        std::mem::take(&mut try_statement.block.statements),
+                                        try_statement.block.close_brace_loc,
+                                    )
+                                    .data
+                                    .unwrap_or_else(|| Box::new(StmtData::Empty))
+                                },
+                            );
+                        }
+                    }
+                }
             }
             Some(StmtData::Break(break_statement)) => {
                 if break_statement.label.is_none()
@@ -1289,19 +1348,6 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
             && !super::dead_control_flow::should_keep_stmt_in_dead_control_flow(statement)
         {
             statement.data = None;
-        }
-        if core.options.minify_syntax
-            && matches!(
-                statement.data.as_deref(),
-                Some(
-                    StmtData::Return(_)
-                        | StmtData::Throw(_)
-                        | StmtData::Break(_)
-                        | StmtData::Continue(_)
-                )
-            )
-        {
-            core.is_control_flow_dead = true;
         }
     }
     core.is_control_flow_dead = old_control_flow_dead;
@@ -2578,8 +2624,16 @@ fn minify_control_flow_statement(statement: &mut Stmt) {
             })));
         }
         Some(StmtData::While(value)) => {
+            let test_or_nil = if matches!(
+                crate::internal::js_ast::to_boolean_with_side_effects(value.test.data.as_deref()),
+                Some((true, crate::internal::js_ast::SideEffects::NoSideEffects))
+            ) {
+                Expr::default()
+            } else {
+                value.test.clone()
+            };
             statement.data = Some(Box::new(StmtData::For(ForStmt {
-                test_or_nil: value.test.clone(),
+                test_or_nil,
                 body: unwrap_single_statement_block(value.body.clone()),
                 is_single_line_body: value.is_single_line_body,
                 ..ForStmt::default()
@@ -2934,6 +2988,9 @@ fn visit_for_loop_init(
             }
             visit_statement(core, statement, resolve_identifiers);
             core.options.mode = old_mode;
+            if is_in_or_of && let Some(StmtData::Local(local)) = statement.data.as_deref_mut() {
+                local.kind = select_local_kind(local.kind, &core.options, false, false);
+            }
         }
         _ => panic!("Internal error: invalid for-loop initializer"),
     }
@@ -3245,9 +3302,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     let old_this_is_nested = std::mem::replace(&mut core.visit_this_is_nested, true);
     let old_is_outside_fn_or_arrow =
         std::mem::replace(&mut core.visit_is_outside_fn_or_arrow, false);
-    if let Some(name) = function.name
-        && !ParserCore::is_stored_name_ref(name.reference)
-    {
+    if let Some(name) = function.name {
         core.record_declared_symbol(name.reference);
     }
     core.push_scope_for_visit_pass(ScopeKind::FunctionArgs, function.open_paren_loc);
@@ -3395,7 +3450,12 @@ fn mark_inlinable_function_declaration(core: &mut ParserCore, function: &Functio
     };
     let symbol =
         &mut core.symbols[usize::try_from(name.reference.inner_index).expect("symbol index")];
-    if function.body.block.statements.is_empty()
+    if function
+        .body
+        .block
+        .statements
+        .iter()
+        .all(|statement| statement.data.is_none())
         && function.args.iter().all(|argument| {
             matches!(
                 argument.binding.data.as_deref(),
@@ -7335,16 +7395,23 @@ fn visit_expr_with_target_and_context(
                 Some(ExprData::Index(index)) => index.call_can_be_unwrapped_if_unused,
                 _ => false,
             };
+            let mut has_spread = false;
             for argument in &mut call.args {
+                has_spread |= matches!(argument.data.as_deref(), Some(ExprData::Spread(_)));
                 visit_expr(core, argument, resolve_identifiers);
             }
-            if core.options.minify_syntax
-                && call
-                    .args
-                    .iter()
-                    .any(|argument| matches!(argument.data.as_deref(), Some(ExprData::Spread(_))))
-            {
+            if core.options.minify_syntax && has_spread {
                 call.args = inline_spreads_of_array_literals(&call.args);
+            }
+            if core.options.minify_syntax && !core.is_control_flow_dead {
+                let reference = match call.target.data.as_deref() {
+                    Some(ExprData::Identifier(identifier)) => Some(identifier.reference),
+                    Some(ExprData::ImportIdentifier(identifier)) => Some(identifier.reference),
+                    _ => None,
+                };
+                if let Some(reference) = reference {
+                    core.convert_symbol_use_to_call(reference, call.args.len() == 1 && !has_spread);
+                }
             }
             if !call.can_be_unwrapped_if_unused {
                 call.can_be_unwrapped_if_unused = match call.target.data.as_deref() {
@@ -7854,6 +7921,11 @@ fn visit_expr_with_target_and_context(
                     ..ExprVisitContext::default()
                 },
             );
+            if let Some(ExprData::Identifier(identifier)) = template.tag_or_nil.data.as_deref()
+                && identifier.call_can_be_unwrapped_if_unused
+            {
+                template.can_be_unwrapped_if_unused = true;
+            }
             for part in &mut template.parts {
                 visit_expr(core, &mut part.value, resolve_identifiers);
             }

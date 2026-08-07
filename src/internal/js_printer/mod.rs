@@ -7,14 +7,19 @@ use std::{
 
 use crate::internal::ast::{
     INVALID_REF, ImportKind, ImportPhase, ImportRecord, ImportRecordFlags, Ref, SymbolFlags,
+    SymbolKind,
 };
 use crate::internal::compat::JsFeature;
 use crate::internal::config::{LegalComments, MetafileFormat};
 use crate::internal::helpers::{escape_closing_tag, quote_for_json, utf16_to_string};
 use crate::internal::js_ast::{
-    AssignTarget, Ast, Binding, BindingData, BlockStmt, CallKind, Expr, ExprData, ExprStmt, IfStmt,
-    LocalKind, OpCode, OptionalChain, Precedence, PropertyFlags, PropertyKind, ReturnStmt, Stmt,
-    StmtData, StringExpr, is_identifier_es5_and_es_next, is_optional_chain, join_with_comma,
+    AssignTarget, Ast, Binding, BindingData, BlockStmt, CallKind, ConstValueKind, Expr, ExprData,
+    ExprStmt, IfStmt, LocalKind, OpCode, OptionalChain, Precedence, PropertyFlags, PropertyKind,
+    ReturnStmt, SideEffects, Stmt, StmtData, StringExpr, fold_binary_operator,
+    inline_primitives_into_template, is_identifier_es5_and_es_next, is_optional_chain,
+    join_with_comma, make_helper_context, should_fold_binary_operator_when_minifying,
+    string_to_equivalent_number_value, to_boolean_with_side_effects, to_int32,
+    to_number_without_side_effects,
 };
 use crate::internal::renamer::Renamer;
 use crate::internal::sourcemap::{
@@ -714,10 +719,103 @@ impl Printer<'_> {
         }
     }
 
+    fn late_constant_fold(&self, expression: &Expr) -> (Expr, bool) {
+        match expression.data.as_deref() {
+            Some(ExprData::ImportIdentifier(identifier)) => {
+                let reference = self.renamer.canonical_ref_for_symbol(identifier.reference);
+                if let Some(value) = self
+                    .linker_options
+                    .and_then(|options| options.const_values)
+                    .and_then(|values| values.get(&reference))
+                    && value.kind != ConstValueKind::None
+                {
+                    return (
+                        crate::internal::js_ast::const_value_to_expr(expression.loc, value),
+                        true,
+                    );
+                }
+            }
+            Some(ExprData::Dot(_) | ExprData::Index(_)) => {
+                if let Some(replacement) = self.substitute_imported_enum(expression) {
+                    return (replacement, true);
+                }
+            }
+            Some(ExprData::Unary(unary)) => {
+                let (value, changed) = self.late_constant_fold(&unary.value);
+                if changed {
+                    if let Some(number) = to_number_without_side_effects(value.data.as_deref()) {
+                        let folded = match unary.op {
+                            OpCode::UnaryPositive => Some(number),
+                            OpCode::UnaryNegative => Some(-number),
+                            OpCode::UnaryComplement => Some(f64::from(!to_int32(number))),
+                            _ => None,
+                        };
+                        if let Some(folded) = folded {
+                            return (Expr::new(expression.loc, ExprData::Number(folded)), true);
+                        }
+                    }
+                    let mut replacement = unary.clone();
+                    replacement.value = value;
+                    return (
+                        Expr::new(expression.loc, ExprData::Unary(replacement)),
+                        true,
+                    );
+                }
+            }
+            Some(ExprData::Binary(binary)) => {
+                let (left, left_changed) = self.late_constant_fold(&binary.left);
+                let (right, right_changed) = self.late_constant_fold(&binary.right);
+                if left_changed || right_changed {
+                    let mut replacement = binary.clone();
+                    replacement.left = left;
+                    replacement.right = right;
+                    if should_fold_binary_operator_when_minifying(&replacement)
+                        && let Some(folded) = fold_binary_operator(expression.loc, &replacement)
+                    {
+                        return (folded, true);
+                    }
+                    return (
+                        Expr::new(expression.loc, ExprData::Binary(replacement)),
+                        true,
+                    );
+                }
+            }
+            Some(ExprData::If(conditional)) => {
+                let (test, changed) = self.late_constant_fold(&conditional.test);
+                if changed {
+                    if let Some((boolean, SideEffects::NoSideEffects)) =
+                        to_boolean_with_side_effects(test.data.as_deref())
+                    {
+                        let (replacement, _) = self.late_constant_fold(if boolean {
+                            &conditional.yes
+                        } else {
+                            &conditional.no
+                        });
+                        return (replacement, true);
+                    }
+                    let mut replacement = conditional.clone();
+                    replacement.test = test;
+                    return (Expr::new(expression.loc, ExprData::If(replacement)), true);
+                }
+            }
+            _ => {}
+        }
+        (expression.clone(), false)
+    }
+
     fn substitute_known_function_calls(
         &self,
         expression: &Expr,
         result_is_unused: bool,
+    ) -> Option<Expr> {
+        self.substitute_known_function_calls_with_empty_result(expression, result_is_unused, true)
+    }
+
+    fn substitute_known_function_calls_with_empty_result(
+        &self,
+        expression: &Expr,
+        result_is_unused: bool,
+        preserve_empty_result: bool,
     ) -> Option<Expr> {
         match expression.data.as_deref() {
             Some(ExprData::Call(call)) => {
@@ -745,17 +843,34 @@ impl Printer<'_> {
                                 } else {
                                     argument.clone()
                                 };
+                            let argument = self
+                                .substitute_known_function_calls_with_empty_result(
+                                    &argument,
+                                    true,
+                                    preserve_empty_result,
+                                )
+                                .unwrap_or(argument);
+                            let helpers = make_helper_context(|reference| {
+                                self.renamer.kind_for_symbol(reference) == SymbolKind::Unbound
+                            });
+                            let argument = helpers
+                                .simplify_unused_expr(&argument, self.options.unsupported_features);
                             replacement = join_with_comma(replacement, argument);
                         }
-                        if !result_is_unused {
+                        if replacement.data.is_none() && preserve_empty_result || !result_is_unused
+                        {
                             replacement = join_with_comma(
                                 replacement,
                                 Expr::new(expression.loc, ExprData::Undefined),
                             );
                         }
                         return Some(
-                            self.substitute_known_function_calls(&replacement, result_is_unused)
-                                .unwrap_or(replacement),
+                            self.substitute_known_function_calls_with_empty_result(
+                                &replacement,
+                                result_is_unused,
+                                preserve_empty_result,
+                            )
+                            .unwrap_or(replacement),
                         );
                     }
                     if can_inline
@@ -763,16 +878,45 @@ impl Printer<'_> {
                         && matches!(call.args.as_slice(), [argument]
                             if !matches!(argument.data.as_deref(), Some(ExprData::Spread(_))))
                     {
-                        return Some(
-                            self.substitute_known_function_calls(&call.args[0], result_is_unused)
-                                .unwrap_or_else(|| call.args[0].clone()),
-                        );
+                        let replacement = self
+                            .substitute_known_function_calls_with_empty_result(
+                                &call.args[0],
+                                result_is_unused,
+                                preserve_empty_result,
+                            )
+                            .unwrap_or_else(|| call.args[0].clone());
+                        if result_is_unused {
+                            let helpers = make_helper_context(|reference| {
+                                self.renamer.kind_for_symbol(reference) == SymbolKind::Unbound
+                            });
+                            let mut replacement = helpers.simplify_unused_expr(
+                                &replacement,
+                                self.options.unsupported_features,
+                            );
+                            if replacement.data.is_none() && preserve_empty_result {
+                                replacement = Expr::new(expression.loc, ExprData::Undefined);
+                            }
+                            return Some(replacement);
+                        }
+                        return Some(replacement);
                     }
                 }
             }
             Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryComma => {
-                let left = self.substitute_known_function_calls(&binary.left, true);
-                let right = self.substitute_known_function_calls(&binary.right, result_is_unused);
+                let left = self.substitute_known_function_calls_with_empty_result(
+                    &binary.left,
+                    true,
+                    false,
+                );
+                let right = result_is_unused
+                    .then(|| {
+                        self.substitute_known_function_calls_with_empty_result(
+                            &binary.right,
+                            true,
+                            false,
+                        )
+                    })
+                    .flatten();
                 if left.is_some() || right.is_some() {
                     return Some(join_with_comma(
                         left.unwrap_or_else(|| binary.left.clone()),
@@ -1091,10 +1235,25 @@ impl Printer<'_> {
                 self.print_newline();
             }
             StmtData::Expr(expression) => {
+                let replacement = self
+                    .options
+                    .minify_syntax
+                    .then(|| {
+                        self.substitute_known_function_calls_with_empty_result(
+                            &expression.value,
+                            true,
+                            false,
+                        )
+                    })
+                    .flatten();
+                let value = replacement.as_ref().unwrap_or(&expression.value);
+                if value.data.is_none() {
+                    return;
+                }
                 self.print_indent();
                 let old_stmt_start = self.stmt_start;
                 self.stmt_start = Some(self.output.len());
-                self.print_expr_at_with_usage(&expression.value, Precedence::Lowest, true);
+                self.print_expr_at_with_usage(value, Precedence::Lowest, true);
                 self.stmt_start = old_stmt_start;
                 self.output.push(b';');
                 self.print_newline();
@@ -1205,11 +1364,33 @@ impl Printer<'_> {
                 self.print_newline();
             }
             StmtData::For(for_statement) => {
+                let mut init = for_statement.init_or_nil.clone();
+                if self.options.minify_syntax
+                    && let Some(StmtData::Expr(expression)) = init.data.as_deref_mut()
+                    && let Some(replacement) = self
+                        .substitute_known_function_calls_with_empty_result(
+                            &expression.value,
+                            true,
+                            false,
+                        )
+                {
+                    expression.value = replacement;
+                    if expression.value.data.is_none() {
+                        init.data = None;
+                    }
+                }
+                let mut update = for_statement.update_or_nil.clone();
+                if self.options.minify_syntax
+                    && let Some(replacement) =
+                        self.substitute_known_function_calls_with_empty_result(&update, true, false)
+                {
+                    update = replacement;
+                }
                 self.print_indent();
                 self.output.extend_from_slice(b"for");
                 self.print_optional_space();
                 self.output.push(b'(');
-                self.print_for_init(&for_statement.init_or_nil);
+                self.print_for_init(&init);
                 self.output.push(b';');
                 self.print_optional_space();
                 if for_statement.test_or_nil.data.is_some() {
@@ -1217,12 +1398,8 @@ impl Printer<'_> {
                 }
                 self.output.push(b';');
                 self.print_optional_space();
-                if for_statement.update_or_nil.data.is_some() {
-                    self.print_expr_at_with_usage(
-                        &for_statement.update_or_nil,
-                        Precedence::Lowest,
-                        true,
-                    );
+                if update.data.is_some() {
+                    self.print_expr_at_with_usage(&update, Precedence::Lowest, true);
                 }
                 self.output.push(b')');
                 self.print_loop_body(&for_statement.body, for_statement.is_single_line_body);
@@ -1580,6 +1757,20 @@ impl Printer<'_> {
     }
 
     fn print_if(&mut self, if_statement: &IfStmt, print_indent: bool) {
+        let mut no_or_nil = if_statement.no_or_nil.clone();
+        if self.options.minify_syntax
+            && let Some(StmtData::Expr(expression)) = no_or_nil.data.as_deref_mut()
+            && let Some(replacement) = self.substitute_known_function_calls_with_empty_result(
+                &expression.value,
+                true,
+                false,
+            )
+        {
+            expression.value = replacement;
+            if expression.value.data.is_none() {
+                no_or_nil.data = None;
+            }
+        }
         if print_indent {
             self.print_indent();
         }
@@ -1591,9 +1782,9 @@ impl Printer<'_> {
         let yes_is_block = self.print_if_body(
             &if_statement.yes,
             if_statement.is_single_line_yes,
-            if_statement.no_or_nil.data.is_some(),
+            no_or_nil.data.is_some(),
         );
-        if if_statement.no_or_nil.data.is_none() {
+        if no_or_nil.data.is_none() {
             return;
         }
         if yes_is_block {
@@ -1602,21 +1793,17 @@ impl Printer<'_> {
             self.print_indent();
         }
         self.output.extend_from_slice(b"else");
-        if let Some(StmtData::If(nested)) = if_statement.no_or_nil.data.as_deref() {
+        if let Some(StmtData::If(nested)) = no_or_nil.data.as_deref() {
             self.output.push(b' ');
             self.print_if(nested, false);
             return;
         }
         if self.options.minify_whitespace
-            && statement_starts_with_identifier(&if_statement.no_or_nil, self.options)
+            && statement_starts_with_identifier(&no_or_nil, self.options)
         {
             self.output.push(b' ');
         }
-        self.print_if_body(
-            &if_statement.no_or_nil,
-            if_statement.is_single_line_no,
-            false,
-        );
+        self.print_if_body(&no_or_nil, if_statement.is_single_line_no, false);
     }
 
     fn print_body(&mut self, body: &Stmt) {
@@ -1636,6 +1823,21 @@ impl Printer<'_> {
     }
 
     fn print_loop_body(&mut self, body: &Stmt, is_single_line: bool) {
+        let mut simplified_body = body.clone();
+        if self.options.minify_syntax
+            && let Some(StmtData::Expr(expression)) = simplified_body.data.as_deref_mut()
+            && let Some(replacement) = self.substitute_known_function_calls_with_empty_result(
+                &expression.value,
+                true,
+                false,
+            )
+        {
+            expression.value = replacement;
+            if expression.value.data.is_none() {
+                simplified_body.data = None;
+            }
+        }
+        let body = &simplified_body;
         if body.data.is_none() {
             self.print_optional_space();
             self.output.push(b';');
@@ -2203,27 +2405,56 @@ impl Printer<'_> {
     }
 
     fn print_class_key(&mut self, property: &crate::internal::js_ast::Property) {
-        if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+        let mut key = property.key.clone();
+        let mut is_computed = property.flags.contains(PropertyFlags::IS_COMPUTED);
+        if self.options.minify_syntax && is_computed {
+            let (replacement, changed) = self.late_constant_fold(&key);
+            if changed {
+                key = replacement;
+            }
+            if let Some(ExprData::InlinedEnum(value)) = key.data.as_deref() {
+                key = value.value.clone();
+            }
+            match key.data.as_deref() {
+                Some(ExprData::Number(_)) => is_computed = false,
+                Some(ExprData::String(value)) => {
+                    let value = String::from_utf16_lossy(&value.value);
+                    if !matches!(value.as_str(), "__proto__" | "constructor" | "prototype") {
+                        is_computed = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.options.minify_syntax
+            && let Some(ExprData::String(value)) = key.data.as_deref()
+            && let Some(number) = string_to_equivalent_number_value(&value.value)
+            && number >= 0.0
+        {
+            key = Expr::new(key.loc, ExprData::Number(number));
+            is_computed = false;
+        }
+        if is_computed {
             self.output.push(b'[');
             let wrap = matches!(
-                property.key.data.as_deref(),
+                key.data.as_deref(),
                 Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryComma
             );
             if wrap {
                 self.output.push(b'(');
             }
-            self.print_expr_at(&property.key, Precedence::Lowest);
+            self.print_expr_at(&key, Precedence::Lowest);
             if wrap {
                 self.output.push(b')');
             }
             self.output.push(b']');
         } else if property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY)
-            && let Some(ExprData::String(key)) = property.key.data.as_deref()
+            && let Some(ExprData::String(key)) = key.data.as_deref()
         {
             self.output
                 .extend(quote_utf16(&key.value, self.options, false));
         } else {
-            self.print_property_key(&property.key);
+            self.print_property_key(&key);
         }
     }
 
@@ -2277,6 +2508,23 @@ impl Printer<'_> {
         result_is_unused: bool,
         is_new_target: bool,
     ) {
+        if self.options.minify_syntax
+            && matches!(
+                expr.data.as_deref(),
+                Some(ExprData::Unary(_) | ExprData::Binary(_) | ExprData::If(_))
+            )
+        {
+            let (replacement, changed) = self.late_constant_fold(expr);
+            if changed {
+                self.print_expr_at_with_usage_and_new_target(
+                    &replacement,
+                    level,
+                    result_is_unused,
+                    is_new_target,
+                );
+                return;
+            }
+        }
         if let Some(replacement) = self.substitute_imported_enum(expr) {
             self.print_expr_at_with_usage_and_new_target(
                 &replacement,
@@ -2792,6 +3040,26 @@ impl Printer<'_> {
                 }
             }
             ExprData::Index(index) => {
+                let inlined_dot_name = if self.options.minify_syntax {
+                    let inlined = match index.index.data.as_deref() {
+                        Some(ExprData::InlinedEnum(value)) => Some(value.value.clone()),
+                        _ => self
+                            .substitute_imported_enum(&index.index)
+                            .and_then(|replacement| match replacement.data.as_deref() {
+                                Some(ExprData::InlinedEnum(value)) => Some(value.value.clone()),
+                                _ => None,
+                            }),
+                    };
+                    inlined.and_then(|value| match value.data.as_deref() {
+                        Some(ExprData::String(value)) => {
+                            let name = String::from_utf16_lossy(&value.value);
+                            is_identifier_es5_and_es_next(&name).then_some(name)
+                        }
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
                 if index.optional_chain == OptionalChain::None && is_optional_chain(&index.target) {
                     self.output.push(b'(');
                     self.print_expr_at(&index.target, Precedence::Lowest);
@@ -2804,7 +3072,16 @@ impl Printer<'_> {
                         is_new_target && index.optional_chain == OptionalChain::None,
                     );
                 }
-                if matches!(
+                if let Some(name) = inlined_dot_name {
+                    self.output.extend_from_slice(
+                        if index.optional_chain == OptionalChain::Start {
+                            b"?."
+                        } else {
+                            b"."
+                        },
+                    );
+                    self.print_identifier(&name);
+                } else if matches!(
                     index.index.data.as_deref(),
                     Some(ExprData::PrivateIdentifier(_))
                 ) {
@@ -3470,6 +3747,52 @@ impl Printer<'_> {
         template: &crate::internal::js_ast::TemplateExpr,
         is_new_target: bool,
     ) {
+        let mut rewritten_template = None;
+        if template.tag_or_nil.data.is_none() && self.options.minify_syntax {
+            let mut replacement = template.clone();
+            let mut changed = false;
+            for part in &mut replacement.parts {
+                if let Some(ExprData::NameOfSymbol(name)) = part.value.data.as_deref() {
+                    part.value = Expr::new(
+                        part.value.loc,
+                        ExprData::String(StringExpr {
+                            value: self
+                                .renamer
+                                .name_for_symbol(name.reference)
+                                .encode_utf16()
+                                .collect(),
+                            has_property_key_comment: name.has_property_key_comment,
+                            ..StringExpr::default()
+                        }),
+                    );
+                    changed = true;
+                } else if let Some(value) = self.substitute_imported_enum(&part.value) {
+                    part.value = match value.data.as_deref() {
+                        Some(ExprData::InlinedEnum(value)) => value.value.clone(),
+                        _ => value,
+                    };
+                    changed = true;
+                }
+            }
+            if changed {
+                match inline_primitives_into_template(
+                    crate::internal::logger::Loc::default(),
+                    &replacement,
+                )
+                .data
+                .map(|data| *data)
+                {
+                    Some(ExprData::String(value)) => {
+                        self.output
+                            .extend(quote_utf16(&value.value, self.options, true));
+                        return;
+                    }
+                    Some(ExprData::Template(value)) => rewritten_template = Some(value),
+                    _ => {}
+                }
+            }
+        }
+        let template = rewritten_template.as_ref().unwrap_or(template);
         let is_tagged = template.tag_or_nil.data.is_some();
         if is_tagged {
             let tag_is_property_access = matches!(

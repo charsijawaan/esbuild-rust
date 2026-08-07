@@ -3795,6 +3795,11 @@ mod tests {
                     && option_names != ["AbsOutputFile", "KeepNames", "MinifySyntax", "Mode"]
                     && option_names != ["AbsOutputDir", "MinifySyntax"]
                     && option_names != ["AbsOutputFile", "MinifySyntax"]
+                    && option_names != ["AbsOutputDir", "MinifySyntax", "Mode"]
+                    && option_names != ["AbsOutputFile", "MinifySyntax", "Mode"]
+                    && option_names
+                        != ["AbsOutputFile", "MinifyWhitespace", "Mode", "OutputFormat"]
+                    && option_names != ["AbsOutputFile", "KeepNames", "Mode"]
                     && option_names != ["AbsOutputDir", "MinifyIdentifiers"]
                     && option_names != ["AbsOutputFile", "MinifyIdentifiers"]
                     && option_names != ["AbsOutputDir", "MinifyIdentifiers", "Mode"]
@@ -4070,7 +4075,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 537 },
+            if selected_test.is_some() { 1 } else { 560 },
             "upstream basic bundler corpus case count"
         );
     }

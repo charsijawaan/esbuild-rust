@@ -16,7 +16,7 @@ use crate::internal::{
     js_ast::{
         Binding, CallExpr, ConstValue, DeclaredSymbol, DotExpr, Expr, ExprData, IdentifierExpr,
         IndexExpr, NameOfSymbolExpr, NamedImport, OptionalChain, Scope, ScopeKind, ScopeMember,
-        ScopeRef, StrictModeKind, SymbolUse, for_each_identifier_binding,
+        ScopeRef, StrictModeKind, SymbolCallUse, SymbolUse, for_each_identifier_binding,
     },
     js_lexer::{Lexer, MaybeSubstring, range_of_identifier},
     logger::{LineColumnTracker, Loc, Log, MsgId, MsgKind, Path, Range, Source},
@@ -53,6 +53,7 @@ pub(crate) struct ParserCore {
     pub(crate) symbols: Vec<Symbol>,
     pub(crate) import_records: Vec<ImportRecord>,
     pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
+    pub(crate) symbol_call_uses: HashMap<Ref, SymbolCallUse>,
     pub(crate) import_symbol_property_uses: HashMap<Ref, HashMap<String, SymbolUse>>,
     pub(crate) declared_symbols: Vec<DeclaredSymbol>,
     pub(crate) runtime_imports: HashMap<String, LocRef>,
@@ -128,6 +129,7 @@ impl ParserCore {
             symbols: Vec::new(),
             import_records: Vec::new(),
             symbol_uses: HashMap::new(),
+            symbol_call_uses: HashMap::new(),
             import_symbol_property_uses: HashMap::new(),
             declared_symbols: Vec::new(),
             runtime_imports: HashMap::new(),
@@ -848,13 +850,49 @@ impl ParserCore {
 
         let symbol_index = usize::try_from(reference.inner_index).expect("symbol index fits usize");
         self.symbols[symbol_index].use_count_estimate -= 1;
+        if let Some(usage) = self.symbol_uses.get_mut(&reference) {
+            usage.count_estimate -= 1;
+            if usage.count_estimate == 0 {
+                self.symbol_uses.remove(&reference);
+            }
+        } else {
+            let call = self
+                .symbol_call_uses
+                .get_mut(&reference)
+                .expect("ignored symbol usage must have been recorded");
+            let all_calls_have_one_argument =
+                call.call_count_estimate == call.single_arg_non_spread_call_count_estimate;
+            call.call_count_estimate -= 1;
+            if all_calls_have_one_argument {
+                call.single_arg_non_spread_call_count_estimate -= 1;
+            }
+            if call.call_count_estimate == 0 {
+                self.symbol_call_uses.remove(&reference);
+            }
+        }
+    }
+
+    pub(crate) fn convert_symbol_use_to_call(
+        &mut self,
+        reference: Ref,
+        is_single_non_spread_arg_call: bool,
+    ) {
+        if self.is_control_flow_dead {
+            return;
+        }
         let usage = self
             .symbol_uses
             .get_mut(&reference)
-            .expect("ignored symbol usage must have been recorded");
+            .expect("call target usage must have been recorded");
         usage.count_estimate -= 1;
-        if usage.count_estimate == 0 {
+        let remove = usage.count_estimate == 0;
+        if remove {
             self.symbol_uses.remove(&reference);
+        }
+        let call = self.symbol_call_uses.entry(reference).or_default();
+        call.call_count_estimate += 1;
+        if is_single_non_spread_arg_call {
+            call.single_arg_non_spread_call_count_estimate += 1;
         }
     }
 
@@ -1747,6 +1785,23 @@ mod tests {
         parser.record_usage(reference);
         assert_eq!(parser.symbols[0].use_count_estimate, 0);
         assert_eq!(parser.ts_use_counts[0], 2);
+    }
+
+    #[test]
+    fn usage_accounting_moves_calls_to_the_special_bucket_and_can_ignore_them() {
+        let mut parser = parser();
+        let reference = parser.new_symbol(SymbolKind::Other, "callable");
+        parser.record_usage(reference);
+        parser.convert_symbol_use_to_call(reference, true);
+        assert!(!parser.symbol_uses.contains_key(&reference));
+        assert_eq!(parser.symbol_call_uses[&reference].call_count_estimate, 1);
+        assert_eq!(
+            parser.symbol_call_uses[&reference].single_arg_non_spread_call_count_estimate,
+            1
+        );
+        parser.ignore_usage(reference);
+        assert_eq!(parser.symbols[0].use_count_estimate, 0);
+        assert!(!parser.symbol_call_uses.contains_key(&reference));
     }
 
     #[test]

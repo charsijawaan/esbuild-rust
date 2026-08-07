@@ -181,6 +181,7 @@ pub fn lazy_export_ast(
             StmtData::LazyExport(LazyExportStmt { value: expression }),
         )],
         symbol_uses: std::mem::take(&mut core.symbol_uses),
+        symbol_call_uses: std::mem::take(&mut core.symbol_call_uses),
         ..Part::default()
     };
     let mut parts = vec![namespace_export_part];
@@ -399,6 +400,9 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             } else {
                 core.declared_symbols.clear();
                 visit_top_level_statements(&mut core, &mut statements);
+                if core.options.keep_names && core.source.key_path.text != "<runtime>" {
+                    apply_keep_names_to_type_script_namespaces(&mut core, &mut statements);
+                }
                 statements = lower_type_script_statements(&mut core, statements);
                 if core.options.keep_names && core.source.key_path.text != "<runtime>" {
                     apply_keep_names_to_statements(&mut core, &mut statements);
@@ -432,6 +436,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                         import_record_indices,
                         declared_symbols: std::mem::take(&mut core.declared_symbols),
                         symbol_uses: std::mem::take(&mut core.symbol_uses),
+                        symbol_call_uses: std::mem::take(&mut core.symbol_call_uses),
                         import_symbol_property_uses: std::mem::take(
                             &mut core.import_symbol_property_uses,
                         ),
@@ -882,6 +887,7 @@ fn build_tree_shaking_parts(
             );
         let move_after = matches!(statement.data.as_deref(), Some(StmtData::ExportEquals(_)));
         core.symbol_uses.clear();
+        core.symbol_call_uses.clear();
         core.import_symbol_property_uses.clear();
         core.declared_symbols.clear();
         core.scopes_for_current_part.clear();
@@ -890,6 +896,9 @@ fn build_tree_shaking_parts(
         let first_generated_import_record = core.import_records.len();
         let mut statements = vec![statement];
         visit_top_level_statements(core, &mut statements);
+        if core.options.keep_names && core.source.key_path.text != "<runtime>" {
+            apply_keep_names_to_type_script_namespaces(core, &mut statements);
+        }
         let mut statements = lower_context.lower_statements(core, statements);
         append_relocated_top_level_vars(core, &mut statements);
         if core.options.keep_names && core.source.key_path.text != "<runtime>" {
@@ -946,6 +955,7 @@ fn build_tree_shaking_parts(
             import_record_indices,
             declared_symbols: std::mem::take(&mut core.declared_symbols),
             symbol_uses: std::mem::take(&mut core.symbol_uses),
+            symbol_call_uses: std::mem::take(&mut core.symbol_call_uses),
             import_symbol_property_uses: std::mem::take(&mut core.import_symbol_property_uses),
             can_be_removed_if_unused,
             ..Part::default()
@@ -1345,7 +1355,8 @@ fn default_export_name_to_keep(
 
 fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>) {
     let mut result = Vec::with_capacity(statements.len());
-    for mut statement in std::mem::take(statements) {
+    let mut input = std::mem::take(statements).into_iter().peekable();
+    while let Some(mut statement) = input.next() {
         let mut name_to_keep: Option<NameToKeep> = None;
         if let Some(data) = statement.data.as_deref_mut() {
             match data {
@@ -1372,11 +1383,24 @@ fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<St
                         else {
                             continue;
                         };
-                        keep_inferred_declaration_name(
-                            core,
-                            &mut declaration.value_or_nil,
-                            binding.reference,
-                        );
+                        if matches!(
+                            declaration.value_or_nil.data.as_deref(),
+                            Some(ExprData::Class(_))
+                        ) && input.peek().is_some_and(|next| {
+                            is_decorator_assignment_to_reference(core, next, binding.reference)
+                        }) {
+                            let name = core.symbols[usize::try_from(binding.reference.inner_index)
+                                .expect("symbol index")]
+                            .original_name
+                            .clone();
+                            name_to_keep = Some((binding.reference, name, false));
+                        } else {
+                            keep_inferred_declaration_name(
+                                core,
+                                &mut declaration.value_or_nil,
+                                binding.reference,
+                            );
+                        }
                     }
                 }
                 StmtData::ExportDefault(export) => {
@@ -1417,6 +1441,46 @@ fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<St
     } else {
         result
     };
+}
+
+fn is_decorator_assignment_to_reference(
+    core: &ParserCore,
+    statement: &Stmt,
+    reference: Ref,
+) -> bool {
+    let Some(StmtData::Expr(statement)) = statement.data.as_deref() else {
+        return false;
+    };
+    let Some(ExprData::Binary(assignment)) = statement.value.data.as_deref() else {
+        return false;
+    };
+    if assignment.op != crate::internal::js_ast::OpCode::BinaryAssign
+        || !matches!(
+            assignment.left.data.as_deref(),
+            Some(ExprData::Identifier(identifier)) if identifier.reference == reference
+        )
+    {
+        return false;
+    }
+    let Some(ExprData::Call(call)) = assignment.right.data.as_deref() else {
+        return false;
+    };
+    let target = match call.target.data.as_deref() {
+        Some(ExprData::Identifier(identifier)) => identifier.reference,
+        Some(ExprData::ImportIdentifier(identifier)) => identifier.reference,
+        _ => return false,
+    };
+    let target = core.follow_symbol_link(target);
+    core.symbols[usize::try_from(target.inner_index).expect("symbol index")].original_name
+        == "__decorateClass"
+}
+
+fn apply_keep_names_to_type_script_namespaces(core: &mut ParserCore, statements: &mut [Stmt]) {
+    for statement in statements {
+        if let Some(StmtData::Namespace(namespace)) = statement.data.as_deref_mut() {
+            apply_keep_names_to_statements(core, &mut namespace.statements);
+        }
+    }
 }
 
 fn top_level_import_record_indices(statement: &Stmt) -> Vec<u32> {
