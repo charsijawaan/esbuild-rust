@@ -5,21 +5,23 @@ use std::collections::{HashMap, HashSet};
 use crate::internal::logger::{Loc, Range};
 use crate::internal::{
     ast::{
-        AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportRecordFlags, Ref,
-        SymbolFlags, SymbolKind,
+        AssertOrWithEntry, AssertOrWithKeyword, GlobPattern, ImportAssertOrWith, ImportKind,
+        ImportRecordFlags, Ref, SymbolFlags, SymbolKind,
     },
     compat::JsFeature,
     config::pretty_print_target_environment,
-    helpers::{is_inside_node_modules, string_to_utf16, utf16_to_string},
+    helpers::{GlobPart, GlobWildcard, is_inside_node_modules, string_to_utf16, utf16_to_string},
     js_ast::{
         Arg, AssignTarget, BinaryExpr, Binding, BindingData, BlockStmt, CallExpr, CallKind, Class,
-        ClassStaticBlock, Decl, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody,
-        FunctionExpr, IdentifierBinding, IdentifierExpr, IfExpr, IfStmt, LocalKind, LocalStmt,
-        ObjectExpr, OpCode, OptionalChain, Property, PropertyFlags, PropertyKind, ReturnStmt,
-        ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr,
-        ThrowStmt, UnaryExpr, for_each_identifier_binding, inline_primitives_into_template,
+        Decl, DotExpr, Expr, ExprData, ExprStmt, ForStmt, Function, FunctionBody, FunctionExpr,
+        IdentifierBinding, IdentifierExpr, IfExpr, IfStmt, LocalKind, LocalStmt, NewExpr,
+        ObjectExpr, OpCode, OptionalChain, PrimitiveType, Property, PropertyFlags, PropertyKind,
+        ReturnStmt, ScopeKind, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind,
+        StringExpr, ThrowStmt, UnaryExpr, assign, convert_binding_to_expr,
+        for_each_identifier_binding, inline_primitives_into_template,
         inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
-        is_primitive_literal, join_with_comma, make_helper_context, mangle_object_spread,
+        is_primitive_literal, join_with_comma, known_primitive_type, make_helper_context,
+        mangle_object_spread,
     },
     logger::{MsgId, MsgKind},
 };
@@ -29,12 +31,125 @@ use super::{
     lower_typescript::lower_nested_type_script_statements,
     parser_core::ParserCore,
     standalone_helpers::{is_simple_parameter_list, is_unsightly_primitive},
+    symbols::select_local_kind,
 };
 
 fn symbol_name(core: &ParserCore, reference: crate::internal::ast::Ref) -> String {
+    if ParserCore::is_stored_name_ref(reference) {
+        return String::from_utf8_lossy(core.load_name_from_ref(reference)).into_owned();
+    }
     core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
         .original_name
         .clone()
+}
+
+fn contains_closing_script_tag(text: &str) -> bool {
+    text.as_bytes()
+        .windows(8)
+        .any(|window| window.eq_ignore_ascii_case(b"</script"))
+}
+
+fn lower_tagged_template(
+    core: &mut ParserCore,
+    loc: Loc,
+    template: &mut crate::internal::js_ast::TemplateExpr,
+) -> Expr {
+    let mut cooked = vec![Expr::new(
+        template.head_loc,
+        ExprData::String(StringExpr {
+            value: template.head_cooked.clone(),
+            ..StringExpr::default()
+        }),
+    )];
+    let mut raw = vec![Expr::new(
+        template.head_loc,
+        ExprData::String(StringExpr {
+            value: template.head_raw.encode_utf16().collect(),
+            ..StringExpr::default()
+        }),
+    )];
+    let mut needs_raw = String::from_utf16_lossy(&template.head_cooked) != template.head_raw;
+    let mut args = vec![Expr::default()];
+    for part in &template.parts {
+        args.push(part.value.clone());
+        cooked.push(Expr::new(
+            part.tail_loc,
+            ExprData::String(StringExpr {
+                value: part.tail_cooked.clone(),
+                ..StringExpr::default()
+            }),
+        ));
+        raw.push(Expr::new(
+            part.tail_loc,
+            ExprData::String(StringExpr {
+                value: part.tail_raw.encode_utf16().collect(),
+                ..StringExpr::default()
+            }),
+        ));
+        needs_raw |= String::from_utf16_lossy(&part.tail_cooked) != part.tail_raw;
+    }
+
+    let cooked = Expr::new(
+        template.head_loc,
+        ExprData::Array(crate::internal::js_ast::ArrayExpr {
+            items: cooked,
+            is_single_line: true,
+            ..crate::internal::js_ast::ArrayExpr::default()
+        }),
+    );
+    let mut template_args = vec![cooked];
+    if needs_raw {
+        template_args.push(Expr::new(
+            template.head_loc,
+            ExprData::Array(crate::internal::js_ast::ArrayExpr {
+                items: raw,
+                is_single_line: true,
+                ..crate::internal::js_ast::ArrayExpr::default()
+            }),
+        ));
+    }
+    let template_object = core.call_runtime(template.head_loc, "__template", template_args);
+    let temp_ref = core.generate_top_level_temp_ref();
+    core.record_usage(temp_ref);
+    core.record_usage(temp_ref);
+    let temp = || {
+        Expr::new(
+            loc,
+            ExprData::Identifier(IdentifierExpr {
+                reference: temp_ref,
+                ..IdentifierExpr::default()
+            }),
+        )
+    };
+    args[0] = Expr::new(
+        loc,
+        ExprData::Binary(BinaryExpr {
+            left: temp(),
+            right: Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: temp(),
+                    right: template_object,
+                    op: OpCode::BinaryAssign,
+                }),
+            ),
+            op: OpCode::BinaryLogicalOr,
+        }),
+    );
+    let kind = if template.tag_was_originally_property_access {
+        CallKind::TargetWasOriginallyPropertyAccess
+    } else {
+        CallKind::Normal
+    };
+    Expr::new(
+        loc,
+        ExprData::Call(CallExpr {
+            target: std::mem::take(&mut template.tag_or_nil),
+            args,
+            kind,
+            ..CallExpr::default()
+        }),
+    )
 }
 
 fn inferred_name_from_expression(core: &ParserCore, expression: &Expr) -> Option<String> {
@@ -69,6 +184,26 @@ fn class_has_static_name(class: &Class) -> bool {
                 property.key.data.as_deref(),
                 Some(ExprData::String(value)) if utf16_to_string(&value.value) == b"name"
             )
+    })
+}
+
+fn class_has_keep_name_static_block(class: &Class) -> bool {
+    class.properties.iter().any(|property| {
+        let Some(block) = &property.class_static_block else {
+            return false;
+        };
+        let [statement] = block.block.statements.as_slice() else {
+            return false;
+        };
+        let Some(StmtData::Expr(statement)) = statement.data.as_deref() else {
+            return false;
+        };
+        let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
+            return false;
+        };
+        matches!(call.args.as_slice(), [first, second]
+            if matches!(first.data.as_deref(), Some(ExprData::This))
+                && matches!(second.data.as_deref(), Some(ExprData::String(_))))
     })
 }
 
@@ -123,7 +258,7 @@ fn keep_inferred_name(core: &mut ParserCore, expression: &mut Expr, name: Option
         return;
     }
     if let Some(ExprData::Class(class)) = expression.data.as_deref_mut() {
-        if class.class.name.is_none() {
+        if class.class.name.is_none() && !class_has_keep_name_static_block(&class.class) {
             insert_class_name_static_block(core, &mut class.class, &name);
         }
         return;
@@ -157,26 +292,117 @@ fn keep_inferred_name(core: &mut ParserCore, expression: &mut Expr, name: Option
     *expression = call;
 }
 
-pub(crate) fn visit_top_level_statements(core: &mut ParserCore, statements: &mut [Stmt]) {
+pub(crate) fn visit_top_level_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>) {
     visit_statements(core, statements, true);
     if core.options.minify_syntax {
         merge_adjacent_returns(core, statements);
     }
 }
 
+pub(crate) fn precompute_type_script_enum_constants(core: &mut ParserCore, statements: &[Stmt]) {
+    for statement in statements {
+        match statement.data.as_deref() {
+            Some(StmtData::Enum(enumeration)) => {
+                let enum_ref = core.follow_symbol_link(
+                    core.ts_namespace_owner
+                        .get(&enumeration.argument)
+                        .copied()
+                        .unwrap_or(enumeration.name.reference),
+                );
+                let mut constants = core.ts_enums.get(&enum_ref).cloned().unwrap_or_default();
+                let mut next_numeric_value = 0.0;
+                let mut has_numeric_value = true;
+                for value in &enumeration.values {
+                    let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                        &value.name,
+                    ))
+                    .into_owned();
+                    let constant = if value.value_or_nil.data.is_none() && has_numeric_value {
+                        Some(crate::internal::js_ast::TsEnumValue {
+                            number: next_numeric_value,
+                            ..crate::internal::js_ast::TsEnumValue::default()
+                        })
+                    } else {
+                        type_script_enum_constant_from_expr(&value.value_or_nil)
+                    };
+                    if let Some(constant) = constant {
+                        if constant.is_string {
+                            has_numeric_value = false;
+                        } else {
+                            next_numeric_value = constant.number + 1.0;
+                            has_numeric_value = true;
+                        }
+                        constants.insert(name, constant);
+                    } else {
+                        has_numeric_value = false;
+                    }
+                }
+                core.ts_enums.insert(enum_ref, constants);
+            }
+            Some(StmtData::Namespace(namespace)) => {
+                precompute_type_script_enum_constants(core, &namespace.statements);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
-fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_identifiers: bool) {
+fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_identifiers: bool) {
     let old_control_flow_dead = core.is_control_flow_dead;
     for statement in statements.iter_mut() {
         let was_control_flow_dead = core.is_control_flow_dead;
+        let is_top_level_scope = core.is_current_scope_module_scope();
+        let preserves_const_local_prefix = matches!(
+            statement.data.as_deref(),
+            Some(
+                StmtData::Empty
+                    | StmtData::Comment(_)
+                    | StmtData::Debugger
+                    | StmtData::Directive(_)
+                    | StmtData::TypeScript(_)
+                    | StmtData::Local(_)
+            )
+        );
+        if let Some(scope) = &core.current_scope {
+            let mut scope = scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !preserves_const_local_prefix {
+                scope.is_after_const_local_prefix = true;
+            }
+        }
         let mut has_if_scope = false;
         let mut remove_overwritten_function = false;
+        let mut prepend_to_statements = Vec::new();
+        let mut append_to_statement = Vec::new();
         match statement.data.as_deref_mut() {
             Some(StmtData::Block(block)) => {
                 visit_block(core, statement.loc, block, resolve_identifiers);
+                if core.options.minify_syntax {
+                    let close_brace_loc = block.close_brace_loc;
+                    let statements = std::mem::take(&mut block.statements)
+                        .into_iter()
+                        .filter(|statement| {
+                            !matches!(statement.data.as_deref(), None | Some(StmtData::Empty))
+                        })
+                        .collect();
+                    *statement = super::standalone_helpers::stmts_to_single_stmt(
+                        statement.loc,
+                        statements,
+                        close_brace_loc,
+                    );
+                }
             }
             Some(StmtData::Expr(expression)) => {
+                let should_trim_unsightly_primitive = !core.options.minify_syntax
+                    && !is_unsightly_primitive(expression.value.data.as_deref());
                 visit_expr(core, &mut expression.value, resolve_identifiers);
+                if should_trim_unsightly_primitive
+                    && is_unsightly_primitive(expression.value.data.as_deref())
+                {
+                    statement.data = None;
+                }
             }
             Some(StmtData::ExportEquals(export)) => {
                 core.record_usage(core.module_ref);
@@ -185,7 +411,28 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             Some(StmtData::LazyExport(export)) => {
                 visit_expr(core, &mut export.value, resolve_identifiers);
             }
+            Some(StmtData::TypeScript(_)) => {
+                statement.data = None;
+            }
             Some(StmtData::Local(local)) => {
+                if local.kind == LocalKind::AwaitUsing && core.visit_is_outside_fn_or_arrow {
+                    let range = Range {
+                        loc: statement.loc,
+                        len: 5,
+                    };
+                    if core.is_control_flow_dead
+                        && (core
+                            .options
+                            .unsupported_js_features
+                            .contains(JsFeature::TOP_LEVEL_AWAIT)
+                            || !core.options.output_format.keep_esm_import_export_syntax())
+                    {
+                        local.kind = LocalKind::Using;
+                    } else {
+                        core.live_top_level_await_keyword = range;
+                        core.mark_syntax_feature(JsFeature::TOP_LEVEL_AWAIT, range);
+                    }
+                }
                 for declaration in &mut local.declarations {
                     record_binding(core, &mut declaration.binding);
                     visit_binding_initializers(core, &mut declaration.binding, resolve_identifiers);
@@ -203,17 +450,77 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     {
                         declaration.value_or_nil.data = None;
                     }
+                    let is_in_const_local_prefix =
+                        core.current_scope.as_ref().is_some_and(|scope| {
+                            !scope
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .is_after_const_local_prefix
+                        });
+                    let mut recorded_const = false;
                     if core.options.minify_syntax
+                        && is_in_const_local_prefix
                         && local.kind == crate::internal::js_ast::LocalKind::Const
                         && let Some(BindingData::Identifier(identifier)) =
                             declaration.binding.data.as_deref()
+                        && core.symbols[usize::try_from(identifier.reference.inner_index)
+                            .expect("symbol index")]
+                        .use_count_estimate
+                            == 0
                     {
                         let value =
                             crate::internal::js_ast::expr_to_const_value(&declaration.value_or_nil);
                         if value.kind != crate::internal::js_ast::ConstValueKind::None {
                             core.const_values.insert(identifier.reference, value);
+                            recorded_const = true;
                         }
                     }
+                    if !recorded_const
+                        && declaration.value_or_nil.data.is_some()
+                        && !is_safe_for_const_local_prefix(&declaration.value_or_nil)
+                    {
+                        if let Some(scope) = &core.current_scope {
+                            scope
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .is_after_const_local_prefix = true;
+                        }
+                    }
+                }
+                local.kind =
+                    select_local_kind(local.kind, &core.options, is_top_level_scope, false);
+                if local.kind == LocalKind::Var && should_relocate_vars_to_top_level(core) {
+                    let mut value = Expr::default();
+                    for mut declaration in std::mem::take(&mut local.declarations) {
+                        for_each_identifier_binding(
+                            &mut declaration.binding,
+                            &mut |loc, identifier| {
+                                core.relocated_top_level_vars
+                                    .push(crate::internal::ast::LocRef {
+                                        loc,
+                                        reference: identifier.reference,
+                                    });
+                                core.record_usage(identifier.reference);
+                            },
+                        );
+                        if declaration.value_or_nil.data.is_some() {
+                            value = join_with_comma(
+                                value,
+                                assign(
+                                    convert_binding_to_expr(&declaration.binding, None),
+                                    declaration.value_or_nil,
+                                ),
+                            );
+                        }
+                    }
+                    statement.data = if value.data.is_some() {
+                        Some(Box::new(StmtData::Expr(ExprStmt {
+                            value,
+                            ..ExprStmt::default()
+                        })))
+                    } else {
+                        None
+                    };
                 }
             }
             Some(StmtData::Function(function)) => {
@@ -222,6 +529,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     core.push_next_scope_for_visit_pass(ScopeKind::Block);
                 }
                 visit_function(core, &mut function.function, resolve_identifiers);
+                mark_inlinable_function_declaration(core, &function.function);
                 remove_overwritten_function = !function.is_export
                     && function.function.name.is_some_and(|name| {
                         core.symbols
@@ -231,15 +539,76 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     });
             }
             Some(StmtData::Class(class)) => {
-                visit_class(core, &mut class.class, resolve_identifiers);
+                let pre_start = core.class_pre_statements.len();
+                let post_start = core.class_post_statements.len();
+                let has_experimental_class_decorators =
+                    core.options.ts.config.experimental_decorators
+                        == crate::internal::config::MaybeBool::True
+                        && !class.class.decorators.is_empty();
+                let convert_to_expression = (is_top_level_scope
+                    && core.options.mode == crate::internal::config::Mode::Bundle)
+                    || has_experimental_class_decorators
+                    || class.class.should_lower_standard_decorators;
+                let inner_name = visit_class(
+                    core,
+                    &mut class.class,
+                    resolve_identifiers,
+                    !convert_to_expression,
+                );
+                if convert_to_expression && let Some(name) = class.class.name {
+                    let mut class_expression = class.class.clone();
+                    if let Some(inner_name) = inner_name {
+                        class_expression
+                            .name
+                            .as_mut()
+                            .expect("named class expression")
+                            .reference = inner_name;
+                    } else {
+                        class_expression.name = None;
+                    }
+                    statement.data = Some(Box::new(StmtData::Local(LocalStmt {
+                        declarations: vec![Decl {
+                            binding: Binding {
+                                data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                                    reference: name.reference,
+                                }))),
+                                loc: name.loc,
+                            },
+                            value_or_nil: Expr::new(
+                                statement.loc,
+                                ExprData::Class(crate::internal::js_ast::ClassExpr {
+                                    class: class_expression,
+                                    ..crate::internal::js_ast::ClassExpr::default()
+                                }),
+                            ),
+                        }],
+                        kind: if is_top_level_scope
+                            && core.options.mode == crate::internal::config::Mode::Bundle
+                        {
+                            LocalKind::Var
+                        } else {
+                            LocalKind::Let
+                        },
+                        is_export: class.is_export,
+                        ..LocalStmt::default()
+                    })));
+                }
+                prepend_to_statements.extend(core.class_pre_statements.drain(pre_start..));
+                append_to_statement.extend(core.class_post_statements.drain(post_start..));
             }
             Some(StmtData::Enum(enumeration)) => {
                 core.record_declared_symbol(enumeration.name.reference);
+                let enum_ref = core.follow_symbol_link(
+                    core.ts_namespace_owner
+                        .get(&enumeration.argument)
+                        .copied()
+                        .unwrap_or(enumeration.name.reference),
+                );
                 core.push_scope_for_visit_pass(ScopeKind::Entry, statement.loc);
                 core.record_declared_symbol(enumeration.argument);
                 let mut next_numeric_value = 0.0;
                 let mut has_numeric_value = true;
-                let mut constants = HashMap::new();
+                let mut constants = core.ts_enums.get(&enum_ref).cloned().unwrap_or_default();
                 let old_should_fold = core.should_fold_type_script_constant_expressions;
                 core.should_fold_type_script_constant_expressions = true;
                 for value in &mut enumeration.values {
@@ -248,26 +617,17 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                         &value.name,
                     ))
                     .into_owned();
-                    match value.value_or_nil.data.as_deref() {
-                        Some(ExprData::Number(number)) => {
-                            let constant = crate::internal::js_ast::TsEnumValue {
-                                number: *number,
-                                ..crate::internal::js_ast::TsEnumValue::default()
-                            };
+                    match type_script_enum_constant_from_expr(&value.value_or_nil) {
+                        Some(constant) if !constant.is_string => {
+                            next_numeric_value = constant.number + 1.0;
                             if value.reference != crate::internal::ast::INVALID_REF {
                                 core.ts_enum_values_by_ref
                                     .insert(value.reference, constant.clone());
                             }
                             constants.insert(name, constant);
-                            next_numeric_value = *number + 1.0;
                             has_numeric_value = true;
                         }
-                        Some(ExprData::String(string)) => {
-                            let constant = crate::internal::js_ast::TsEnumValue {
-                                string: string.value.clone(),
-                                is_string: true,
-                                ..crate::internal::js_ast::TsEnumValue::default()
-                            };
+                        Some(constant) => {
                             if value.reference != crate::internal::ast::INVALID_REF {
                                 core.ts_enum_values_by_ref
                                     .insert(value.reference, constant.clone());
@@ -275,8 +635,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                             constants.insert(name, constant);
                             has_numeric_value = false;
                         }
-                        Some(_) => has_numeric_value = false,
-                        None if has_numeric_value => {
+                        None if value.value_or_nil.data.is_none() && has_numeric_value => {
                             value.value_or_nil =
                                 Expr::new(value.loc, ExprData::Number(next_numeric_value));
                             let constant = crate::internal::js_ast::TsEnumValue {
@@ -290,20 +649,35 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                             constants.insert(name, constant);
                             next_numeric_value += 1.0;
                         }
-                        None => {
+                        None if value.value_or_nil.data.is_none() => {
                             value.value_or_nil = Expr::new(value.loc, ExprData::Undefined);
                         }
+                        None => has_numeric_value = false,
                     }
+                    core.ts_enums.insert(enum_ref, constants.clone());
                 }
                 core.should_fold_type_script_constant_expressions = old_should_fold;
                 core.pop_scope();
-                core.ts_enums.insert(enumeration.name.reference, constants);
+                core.ts_enums.insert(enum_ref, constants);
             }
             Some(StmtData::Namespace(namespace)) => {
                 core.record_declared_symbol(namespace.name.reference);
                 core.push_scope_for_visit_pass(ScopeKind::Entry, statement.loc);
                 core.record_declared_symbol(namespace.argument);
                 visit_statements(core, &mut namespace.statements, resolve_identifiers);
+                for statement in &namespace.statements {
+                    if let Some(StmtData::Local(local)) = statement.data.as_deref()
+                        && local.is_export
+                    {
+                        for declaration in &local.declarations {
+                            if let Some(BindingData::Identifier(identifier)) =
+                                declaration.binding.data.as_deref()
+                            {
+                                core.const_values.remove(&identifier.reference);
+                            }
+                        }
+                    }
+                }
                 lower_nested_type_script_statements(
                     core,
                     &mut namespace.statements,
@@ -311,33 +685,92 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 );
                 core.pop_scope();
             }
-            Some(StmtData::ExportDefault(export)) => match export.value.data.as_deref_mut() {
-                Some(StmtData::Expr(expression)) => {
-                    visit_expr(core, &mut expression.value, resolve_identifiers);
-                    keep_inferred_name(core, &mut expression.value, Some("default".into()));
+            Some(StmtData::ExportDefault(export)) => {
+                let mut remove_type_only_default = false;
+                match export.value.data.as_deref_mut() {
+                    Some(StmtData::Expr(expression)) => {
+                        visit_expr(core, &mut expression.value, resolve_identifiers);
+                        keep_inferred_name(core, &mut expression.value, Some("default".into()));
+                        if core.options.ts.parse
+                            && let Some(ExprData::Identifier(identifier)) =
+                                expression.value.data.as_deref()
+                        {
+                            let symbol =
+                                &core.symbols[usize::try_from(identifier.reference.inner_index)
+                                    .expect("symbol index")];
+                            remove_type_only_default = symbol.kind == SymbolKind::Unbound
+                                && core.local_type_names.contains(&symbol.original_name);
+                        }
+                    }
+                    Some(StmtData::Function(function)) => {
+                        visit_function(core, &mut function.function, resolve_identifiers);
+                    }
+                    Some(StmtData::Class(class)) => {
+                        if class.class.name.is_none()
+                            && core.options.ts.config.experimental_decorators
+                                == crate::internal::config::MaybeBool::True
+                        {
+                            class.class.name = Some(export.default_name);
+                        }
+                        let pre_start = core.class_pre_statements.len();
+                        let post_start = core.class_post_statements.len();
+                        let convert_to_expression = is_top_level_scope
+                            && core.options.mode == crate::internal::config::Mode::Bundle;
+                        let inner_name = visit_class(
+                            core,
+                            &mut class.class,
+                            resolve_identifiers,
+                            !convert_to_expression,
+                        );
+                        if convert_to_expression {
+                            let mut class_expression = class.class.clone();
+                            if let Some(inner_name) = inner_name {
+                                if let Some(name) = &mut class_expression.name {
+                                    name.reference = inner_name;
+                                }
+                            } else {
+                                class_expression.name = None;
+                            }
+                            export.value = Stmt::new(
+                                export.value.loc,
+                                StmtData::Expr(ExprStmt {
+                                    value: Expr::new(
+                                        export.value.loc,
+                                        ExprData::Class(crate::internal::js_ast::ClassExpr {
+                                            class: class_expression,
+                                            ..crate::internal::js_ast::ClassExpr::default()
+                                        }),
+                                    ),
+                                    ..ExprStmt::default()
+                                }),
+                            );
+                        }
+                        prepend_to_statements.extend(core.class_pre_statements.drain(pre_start..));
+                        append_to_statement.extend(core.class_post_statements.drain(post_start..));
+                    }
+                    _ => {}
                 }
-                Some(StmtData::Function(function)) => {
-                    visit_function(core, &mut function.function, resolve_identifiers);
+                if remove_type_only_default {
+                    statement.data = None;
+                    continue;
                 }
-                Some(StmtData::Class(class)) => {
-                    visit_class(core, &mut class.class, resolve_identifiers);
+                let symbol_index = usize::try_from(export.default_name.reference.inner_index)
+                    .expect("symbol index");
+                if core.symbols[symbol_index].original_name == "default" {
+                    core.symbols[symbol_index].original_name =
+                        format!("{}_default", core.source.identifier_name);
                 }
-                _ => {}
-            },
+            }
             Some(StmtData::If(if_statement)) => {
                 visit_expr(core, &mut if_statement.test, resolve_identifiers);
                 let old_control_flow_dead = core.is_control_flow_dead;
-                let constant = if core.options.minify_syntax {
-                    match crate::internal::js_ast::to_boolean_with_side_effects(
-                        if_statement.test.data.as_deref(),
-                    ) {
-                        Some((value, crate::internal::js_ast::SideEffects::NoSideEffects)) => {
-                            Some(value)
-                        }
-                        _ => None,
+                let constant = match crate::internal::js_ast::to_boolean_with_side_effects(
+                    if_statement.test.data.as_deref(),
+                ) {
+                    Some((value, crate::internal::js_ast::SideEffects::NoSideEffects)) => {
+                        Some(value)
                     }
-                } else {
-                    None
+                    _ => None,
                 };
                 validate_single_statement(core, &if_statement.yes, SingleStatementContext::If);
                 core.is_control_flow_dead = old_control_flow_dead || constant == Some(false);
@@ -448,7 +881,68 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             Some(StmtData::ForIn(loop_statement)) => {
                 core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
+                let var_initializer = match loop_statement.init.data.as_deref() {
+                    Some(StmtData::Local(local))
+                        if local.kind == LocalKind::Var && local.declarations.len() == 1 =>
+                    {
+                        let declaration = &local.declarations[0];
+                        match declaration.binding.data.as_deref() {
+                            Some(BindingData::Identifier(identifier))
+                                if declaration.value_or_nil.data.is_some() =>
+                            {
+                                Some((declaration.binding.loc, identifier.reference))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
                 visit_for_loop_init(core, &mut loop_statement.init, resolve_identifiers, true);
+                if let Some((binding_loc, reference)) = var_initializer {
+                    let assignment = match loop_statement.init.data.as_deref_mut() {
+                        Some(StmtData::Expr(expression)) => {
+                            let assignment = std::mem::take(&mut expression.value);
+                            loop_statement.init = Stmt::new(
+                                binding_loc,
+                                StmtData::Expr(ExprStmt {
+                                    value: Expr::new(
+                                        binding_loc,
+                                        ExprData::Identifier(IdentifierExpr {
+                                            reference,
+                                            ..IdentifierExpr::default()
+                                        }),
+                                    ),
+                                    ..ExprStmt::default()
+                                }),
+                            );
+                            assignment
+                        }
+                        Some(StmtData::Local(local)) => {
+                            let initializer =
+                                std::mem::take(&mut local.declarations[0].value_or_nil);
+                            assign(
+                                Expr::new(
+                                    binding_loc,
+                                    ExprData::Identifier(IdentifierExpr {
+                                        reference,
+                                        ..IdentifierExpr::default()
+                                    }),
+                                ),
+                                initializer,
+                            )
+                        }
+                        _ => Expr::default(),
+                    };
+                    if assignment.data.is_some() {
+                        prepend_to_statements.push(Stmt::new(
+                            statement.loc,
+                            StmtData::Expr(ExprStmt {
+                                value: assignment,
+                                ..ExprStmt::default()
+                            }),
+                        ));
+                    }
+                }
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
                 validate_single_statement(
                     core,
@@ -461,9 +955,27 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 if core.options.minify_syntax {
                     optimize_loop_body(core, &mut loop_statement.body);
                 }
+                relocate_for_in_or_of_init(core, &mut loop_statement.init);
                 core.pop_scope();
             }
             Some(StmtData::ForOf(loop_statement)) => {
+                if loop_statement.await_range.len > 0 && core.visit_is_outside_fn_or_arrow {
+                    if core.is_control_flow_dead
+                        && (core
+                            .options
+                            .unsupported_js_features
+                            .contains(JsFeature::TOP_LEVEL_AWAIT)
+                            || !core.options.output_format.keep_esm_import_export_syntax())
+                    {
+                        loop_statement.await_range = Range::default();
+                    } else {
+                        core.live_top_level_await_keyword = loop_statement.await_range;
+                        core.mark_syntax_feature(
+                            JsFeature::TOP_LEVEL_AWAIT,
+                            loop_statement.await_range,
+                        );
+                    }
+                }
                 core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
                 visit_for_loop_init(core, &mut loop_statement.init, resolve_identifiers, true);
                 visit_expr(core, &mut loop_statement.value, resolve_identifiers);
@@ -478,6 +990,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 if core.options.minify_syntax {
                     optimize_loop_body(core, &mut loop_statement.body);
                 }
+                relocate_for_in_or_of_init(core, &mut loop_statement.init);
                 core.pop_scope();
             }
             Some(StmtData::Label(label)) => {
@@ -552,6 +1065,61 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.visit_switch_depth += 1;
                 for case in &mut switch.cases {
                     visit_expr(core, &mut case.value_or_nil, resolve_identifiers);
+                }
+
+                let mut duplicate_cases: HashMap<u32, Vec<Expr>> = HashMap::new();
+                for case in &switch.cases {
+                    if let Some(hash) = super::control_flow::duplicate_case_hash(&case.value_or_nil)
+                    {
+                        let entries = duplicate_cases.entry(hash).or_default();
+                        if let Some((earlier, could_be_incorrect)) =
+                            entries.iter().find_map(|earlier| {
+                                let (equal, could_be_incorrect) =
+                                    super::control_flow::duplicate_case_equals(
+                                        earlier,
+                                        &case.value_or_nil,
+                                    );
+                                equal.then_some((earlier, could_be_incorrect))
+                            })
+                            && let Some(log) = &core.log
+                        {
+                            let range = |expression: &Expr| {
+                                if matches!(expression.data.as_deref(), Some(ExprData::String(_))) {
+                                    core.source.range_of_string(expression.loc)
+                                } else {
+                                    core.source
+                                        .range_of_operator_before(expression.loc, b"case")
+                                }
+                            };
+                            let later_range = range(&case.value_or_nil);
+                            let earlier_range = range(earlier);
+                            let text = if could_be_incorrect {
+                                "This case clause may never be evaluated because it likely duplicates an earlier case clause"
+                            } else {
+                                "This case clause will never be evaluated because it duplicates an earlier case clause"
+                            };
+                            let note = core
+                                .tracker
+                                .msg_data(earlier_range, "The earlier case clause is here:");
+                            log.add_id_with_notes(
+                                MsgId::JsDuplicateCase,
+                                if is_inside_node_modules(&core.source.key_path.text) {
+                                    MsgKind::Debug
+                                } else {
+                                    MsgKind::Warning
+                                },
+                                Some(&mut core.tracker),
+                                later_range,
+                                text,
+                                vec![note],
+                            );
+                        }
+                        entries.push(case.value_or_nil.clone());
+                    }
+                }
+
+                let liveness = super::control_flow::analyze_switch_cases_for_liveness(switch);
+                for (case, liveness) in switch.cases.iter_mut().zip(liveness) {
                     for statement in &case.body {
                         if matches!(
                             statement.data.as_deref(),
@@ -571,7 +1139,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                             );
                         }
                     }
+                    let old_control_flow_dead = core.is_control_flow_dead;
+                    if liveness.status == super::control_flow::LivenessStatus::AlwaysDead {
+                        core.is_control_flow_dead = true;
+                    }
                     visit_statements(core, &mut case.body, resolve_identifiers);
+                    core.is_control_flow_dead = old_control_flow_dead;
                     lower_block_level_function_declarations(core, &mut case.body);
                     lower_nested_type_script_statements(core, &mut case.body, None);
                 }
@@ -579,6 +1152,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 core.pop_scope();
             }
             Some(StmtData::Try(try_statement)) => {
+                if core.visit_try_body_depth == 0 {
+                    core.visit_try_catch_loc = try_statement
+                        .catch
+                        .as_ref()
+                        .map_or(statement.loc, |catch| catch.loc);
+                }
                 core.visit_try_body_depth += 1;
                 visit_block(
                     core,
@@ -588,6 +1167,13 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                 );
                 core.visit_try_body_depth -= 1;
                 if let Some(catch) = &mut try_statement.catch {
+                    let old_control_flow_dead = core.is_control_flow_dead;
+                    let catch_is_dead = try_statement
+                        .block
+                        .statements
+                        .iter()
+                        .all(|statement| statement.data.is_none());
+                    core.is_control_flow_dead |= catch_is_dead;
                     core.push_scope_for_visit_pass(ScopeKind::CatchBinding, catch.loc);
                     if catch.binding_or_nil.data.is_some() {
                         record_binding(core, &mut catch.binding_or_nil);
@@ -599,6 +1185,10 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
                     }
                     visit_block(core, catch.block_loc, &mut catch.block, resolve_identifiers);
                     core.pop_scope();
+                    core.is_control_flow_dead = old_control_flow_dead;
+                    if catch_is_dead {
+                        catch.block.statements.clear();
+                    }
                 }
                 if let Some(finally) = &mut try_statement.finally {
                     core.push_next_scope_for_visit_pass(ScopeKind::Block);
@@ -631,6 +1221,22 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             }
             _ => {}
         }
+        if !prepend_to_statements.is_empty() || !append_to_statement.is_empty() {
+            let loc = statement.loc;
+            let original = std::mem::take(statement);
+            let mut expanded =
+                Vec::with_capacity(prepend_to_statements.len() + append_to_statement.len() + 1);
+            expanded.append(&mut prepend_to_statements);
+            expanded.push(original);
+            expanded.append(&mut append_to_statement);
+            *statement = Stmt::new(
+                loc,
+                StmtData::Block(BlockStmt {
+                    statements: expanded,
+                    close_brace_loc: Loc { start: -2 },
+                }),
+            );
+        }
         if remove_overwritten_function {
             statement.data = None;
             if has_if_scope {
@@ -645,6 +1251,24 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
             *statement =
                 super::standalone_helpers::stmts_to_single_stmt(loc, lowered, Loc::default());
             core.pop_scope();
+        }
+        if core.options.tree_shaking
+            && !core.options.minify_syntax
+            && let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut()
+            && matches!(
+                expression.value.data.as_deref(),
+                Some(ExprData::Call(call)) if call.can_be_unwrapped_if_unused
+            )
+        {
+            let helpers = make_helper_context(|reference| {
+                core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
+                    == SymbolKind::Unbound
+            });
+            expression.value = helpers
+                .simplify_unused_expr(&expression.value, core.options.unsupported_js_features);
+            if expression.value.data.is_none() {
+                statement.data = None;
+            }
         }
         if core.options.minify_syntax {
             if matches!(statement.data.as_deref(), Some(StmtData::Empty)) {
@@ -695,6 +1319,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
         }
     }
     core.is_control_flow_dead = old_control_flow_dead;
+    flatten_synthetic_statement_blocks(statements);
     if core.options.minify_syntax {
         if !old_control_flow_dead {
             inline_single_use_declarations(core, statements);
@@ -715,6 +1340,103 @@ fn visit_statements(core: &mut ParserCore, statements: &mut [Stmt], resolve_iden
         }
         absorb_expressions_into_for_initializers(statements);
         merge_adjacent_throws(core, statements);
+        flatten_blocks_without_scope(statements);
+        remove_dead_statements_after_jumps(statements);
+    }
+}
+
+fn flatten_synthetic_statement_blocks(statements: &mut Vec<Stmt>) {
+    let mut flattened = Vec::with_capacity(statements.len());
+    for statement in std::mem::take(statements) {
+        if let Some(StmtData::Block(block)) = statement.data.as_deref()
+            && block.close_brace_loc.start == -2
+        {
+            flattened.extend(block.statements.iter().cloned());
+        } else {
+            flattened.push(statement);
+        }
+    }
+    *statements = flattened;
+}
+
+fn flatten_blocks_without_scope(statements: &mut Vec<Stmt>) {
+    let mut flattened = Vec::with_capacity(statements.len());
+    for statement in std::mem::take(statements) {
+        if let Some(StmtData::Block(block)) = statement.data.as_deref()
+            && !super::control_flow::stmts_care_about_scope(&block.statements)
+            && block
+                .statements
+                .iter()
+                .rev()
+                .find(|statement| statement.data.is_some())
+                .is_some_and(|statement| {
+                    matches!(
+                        statement.data.as_deref(),
+                        Some(
+                            StmtData::Return(_)
+                                | StmtData::Throw(_)
+                                | StmtData::Break(_)
+                                | StmtData::Continue(_)
+                        )
+                    )
+                })
+        {
+            flattened.extend(
+                block
+                    .statements
+                    .iter()
+                    .filter(|statement| statement.data.is_some())
+                    .cloned(),
+            );
+        } else {
+            flattened.push(statement);
+        }
+    }
+    *statements = flattened;
+}
+
+fn is_safe_for_const_local_prefix(expression: &Expr) -> bool {
+    match expression.data.as_deref() {
+        Some(
+            ExprData::Missing
+            | ExprData::String(_)
+            | ExprData::RegExp(_)
+            | ExprData::BigInt(_)
+            | ExprData::Function(_)
+            | ExprData::Arrow(_),
+        ) => true,
+        Some(ExprData::Array(array)) => array.items.iter().all(is_safe_for_const_local_prefix),
+        Some(ExprData::Object(object)) => object.properties.is_empty(),
+        _ => false,
+    }
+}
+
+fn should_relocate_vars_to_top_level(core: &ParserCore) -> bool {
+    if core.options.mode != crate::internal::config::Mode::Bundle {
+        return false;
+    }
+    let (Some(mut scope), Some(module_scope)) =
+        (core.current_scope.clone(), core.module_scope.as_ref())
+    else {
+        return false;
+    };
+    if std::sync::Arc::ptr_eq(&scope, module_scope) && core.single_statement_depth == 0 {
+        return false;
+    }
+    loop {
+        let (kind, parent) = {
+            let scope = scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (scope.kind, scope.parent.clone())
+        };
+        if kind.stops_hoisting() {
+            return std::sync::Arc::ptr_eq(&scope, module_scope);
+        }
+        let Some(parent) = parent.and_then(|parent| parent.upgrade()) else {
+            return false;
+        };
+        scope = parent;
     }
 }
 
@@ -1307,7 +2029,7 @@ fn is_implicit_jump(statement: &Stmt, kind: ImplicitJumpKind) -> bool {
     }
 }
 
-fn merge_adjacent_expression_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
+pub(crate) fn merge_adjacent_expression_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
     let mut result: Vec<Stmt> = Vec::with_capacity(statements.len());
     for statement in statements {
         let Some(data) = statement.data.as_deref() else {
@@ -2073,7 +2795,20 @@ fn report_forbidden_single_statement(core: &mut ParserCore, loc: Loc) {
 }
 
 fn visit_statement(core: &mut ParserCore, statement: &mut Stmt, resolve_identifiers: bool) {
-    visit_statements(core, std::slice::from_mut(statement), resolve_identifiers);
+    if statement.data.is_none() {
+        return;
+    }
+    let loc = statement.loc;
+    let mut statements = vec![std::mem::take(statement)];
+    core.single_statement_depth += 1;
+    visit_statements(core, &mut statements, resolve_identifiers);
+    core.single_statement_depth -= 1;
+    statements.retain(|statement| statement.data.is_some());
+    *statement = if statements.len() == 1 {
+        statements.pop().expect("single statement")
+    } else {
+        super::standalone_helpers::stmts_to_single_stmt(loc, statements, Loc::default())
+    };
 }
 
 fn visit_for_loop_init(
@@ -2093,9 +2828,46 @@ fn visit_for_loop_init(
                 AssignTarget::None
             },
         ),
-        Some(StmtData::Local(_)) => visit_statement(core, statement, resolve_identifiers),
+        Some(StmtData::Local(_)) => {
+            let old_mode = core.options.mode;
+            if is_in_or_of {
+                // For-in/of declarations use a different relocation mode that
+                // preserves the binding as the loop assignment target.
+                core.options.mode = crate::internal::config::Mode::PassThrough;
+            }
+            visit_statement(core, statement, resolve_identifiers);
+            core.options.mode = old_mode;
+        }
         _ => panic!("Internal error: invalid for-loop initializer"),
     }
+}
+
+fn relocate_for_in_or_of_init(core: &mut ParserCore, statement: &mut Stmt) {
+    if !should_relocate_vars_to_top_level(core) {
+        return;
+    }
+    let Some(StmtData::Local(local)) = statement.data.as_deref_mut() else {
+        return;
+    };
+    if local.kind != LocalKind::Var {
+        return;
+    }
+    let mut value = Expr::default();
+    for mut declaration in std::mem::take(&mut local.declarations) {
+        for_each_identifier_binding(&mut declaration.binding, &mut |loc, identifier| {
+            core.relocated_top_level_vars
+                .push(crate::internal::ast::LocRef {
+                    loc,
+                    reference: identifier.reference,
+                });
+            core.record_usage(identifier.reference);
+        });
+        value = join_with_comma(value, convert_binding_to_expr(&declaration.binding, None));
+    }
+    statement.data = Some(Box::new(StmtData::Expr(ExprStmt {
+        value,
+        ..ExprStmt::default()
+    })));
 }
 
 fn identifier_binding(loc: Loc, reference: Ref) -> Binding {
@@ -2105,6 +2877,42 @@ fn identifier_binding(loc: Loc, reference: Ref) -> Binding {
         }))),
         loc,
     }
+}
+
+fn keep_block_function_name_statement(
+    core: &mut ParserCore,
+    loc: Loc,
+    reference: Ref,
+    name: &str,
+) -> Stmt {
+    core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].flags |=
+        SymbolFlags::DID_KEEP_NAME;
+    Stmt::new(
+        loc,
+        StmtData::Expr(ExprStmt {
+            value: core.call_runtime(
+                loc,
+                "__name",
+                vec![
+                    Expr::new(
+                        loc,
+                        ExprData::Identifier(IdentifierExpr {
+                            reference,
+                            ..IdentifierExpr::default()
+                        }),
+                    ),
+                    Expr::new(
+                        loc,
+                        ExprData::String(StringExpr {
+                            value: crate::internal::helpers::string_to_utf16(name.as_bytes()),
+                            ..StringExpr::default()
+                        }),
+                    ),
+                ],
+            ),
+            is_from_class_or_fn_that_can_be_removed_if_unused: true,
+        }),
+    )
 }
 
 fn preserve_block_functions_with_direct_eval(core: &mut ParserCore, functions: &[Stmt]) {
@@ -2133,6 +2941,7 @@ fn lower_block_functions_to_declarations(
 ) -> Vec<Stmt> {
     let mut declaration_index_by_reference: HashMap<Ref, usize> = HashMap::new();
     let mut lexical_declarations: Vec<Decl> = Vec::new();
+    let mut keep_name_statements = Vec::new();
     let mut hoisted_declarations = Vec::new();
     for statement in functions {
         let loc = statement.loc;
@@ -2157,6 +2966,18 @@ fn lower_block_functions_to_declarations(
         }
 
         declaration_index_by_reference.insert(name.reference, lexical_declarations.len());
+        if core.options.keep_names {
+            let original_name = core.symbols
+                [usize::try_from(name.reference.inner_index).expect("symbol index")]
+            .original_name
+            .clone();
+            keep_name_statements.push(keep_block_function_name_statement(
+                core,
+                name.loc,
+                name.reference,
+                &original_name,
+            ));
+        }
         lexical_declarations.push(Decl {
             binding: identifier_binding(name.loc, name.reference),
             value_or_nil: value,
@@ -2202,17 +3023,48 @@ fn lower_block_functions_to_declarations(
                 ..LocalStmt::default()
             }),
         ));
+        lowered.append(&mut keep_name_statements);
     }
     if !hoisted_declarations.is_empty() {
         let hoisted_loc = hoisted_declarations[0].value_or_nil.loc;
-        lowered.push(Stmt::new(
-            hoisted_loc,
-            StmtData::Local(LocalStmt {
-                declarations: hoisted_declarations,
-                kind: LocalKind::Var,
-                ..LocalStmt::default()
-            }),
-        ));
+        if should_relocate_vars_to_top_level(core) {
+            let mut value = Expr::default();
+            for declaration in hoisted_declarations {
+                let Some(BindingData::Identifier(identifier)) = declaration.binding.data.as_deref()
+                else {
+                    unreachable!("hoisted block function binding must be an identifier");
+                };
+                core.relocated_top_level_vars
+                    .push(crate::internal::ast::LocRef {
+                        loc: declaration.binding.loc,
+                        reference: identifier.reference,
+                    });
+                core.record_usage(identifier.reference);
+                value = join_with_comma(
+                    value,
+                    assign(
+                        convert_binding_to_expr(&declaration.binding, None),
+                        declaration.value_or_nil,
+                    ),
+                );
+            }
+            lowered.push(Stmt::new(
+                hoisted_loc,
+                StmtData::Expr(ExprStmt {
+                    value,
+                    ..ExprStmt::default()
+                }),
+            ));
+        } else {
+            lowered.push(Stmt::new(
+                hoisted_loc,
+                StmtData::Local(LocalStmt {
+                    declarations: hoisted_declarations,
+                    kind: LocalKind::Var,
+                    ..LocalStmt::default()
+                }),
+            ));
+        }
     }
     lowered.extend(visited);
     lowered
@@ -2286,11 +3138,15 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
     let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
     let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);
+    let old_try_catch_loc = core.visit_try_catch_loc;
     let old_new_target_allowed = std::mem::replace(&mut core.visit_new_target_allowed, true);
     let old_is_async_generator = std::mem::replace(
         &mut core.visit_is_async_generator,
         function.is_async && function.is_generator,
     );
+    let old_this_is_nested = std::mem::replace(&mut core.visit_this_is_nested, true);
+    let old_is_outside_fn_or_arrow =
+        std::mem::replace(&mut core.visit_is_outside_fn_or_arrow, false);
     if let Some(name) = function.name
         && !ParserCore::is_stored_name_ref(name.reference)
     {
@@ -2321,9 +3177,51 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     let check_duplicates =
         function.is_unique_formal_parameters || !has_simple_args || core.is_strict_mode();
     let mut duplicate_args = HashMap::new();
+    let experimental_decorators =
+        core.options.ts.config.experimental_decorators == crate::internal::config::MaybeBool::True;
+    let argument_scope = core
+        .current_scope
+        .as_ref()
+        .expect("function arguments scope")
+        .clone();
+    let mut hidden_argument_members = Vec::new();
+    if experimental_decorators {
+        let mut names = HashSet::new();
+        let mut references = Vec::new();
+        for argument in &function.args {
+            collect_bindings(core, &argument.binding, &mut names, &mut references);
+        }
+        let references = references.into_iter().collect::<HashSet<_>>();
+        let mut scope = argument_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for name in names {
+            if scope
+                .members
+                .get(&name)
+                .is_some_and(|member| references.contains(&member.reference))
+                && let Some(member) = scope.members.remove(&name)
+            {
+                hidden_argument_members.push((name, member));
+            }
+        }
+        drop(scope);
+        for argument in &mut function.args {
+            for decorator in &mut argument.decorators {
+                visit_expr(core, &mut decorator.value, resolve_identifiers);
+            }
+        }
+        argument_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .extend(hidden_argument_members);
+    }
     for argument in &mut function.args {
-        for decorator in &mut argument.decorators {
-            visit_expr(core, &mut decorator.value, resolve_identifiers);
+        if !experimental_decorators {
+            for decorator in &mut argument.decorators {
+                visit_expr(core, &mut decorator.value, resolve_identifiers);
+            }
         }
         record_binding_with_duplicates(
             core,
@@ -2332,10 +3230,9 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         );
         visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
         visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
-        let name = inferred_name_from_binding(core, &argument.binding);
-        keep_inferred_name(core, &mut argument.default_or_nil, name);
     }
     core.push_scope_for_visit_pass(ScopeKind::FunctionBody, function.body.loc);
+    preserve_directive_prologue(core, &mut function.body.block.statements);
     visit_statements(
         core,
         &mut function.body.block.statements,
@@ -2356,12 +3253,81 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     core.visit_loop_depth = old_loop_depth;
     core.visit_switch_depth = old_switch_depth;
     core.visit_try_body_depth = old_try_body_depth;
+    core.visit_try_catch_loc = old_try_catch_loc;
     core.visit_new_target_allowed = old_new_target_allowed;
     core.visit_is_async_generator = old_is_async_generator;
+    core.visit_this_is_nested = old_this_is_nested;
+    core.visit_is_outside_fn_or_arrow = old_is_outside_fn_or_arrow;
+}
+
+fn preserve_directive_prologue(core: &ParserCore, statements: &mut [Stmt]) {
+    for statement in statements {
+        if matches!(statement.data.as_deref(), Some(StmtData::Comment(_))) {
+            continue;
+        }
+        let Some(StmtData::Expr(expression)) = statement.data.as_deref() else {
+            break;
+        };
+        let Some(ExprData::String(value)) = expression.value.data.as_deref() else {
+            break;
+        };
+        let start = usize::try_from(statement.loc.start).unwrap_or(usize::MAX);
+        if !matches!(core.source.contents.get(start), Some(b'\'' | b'"')) {
+            break;
+        }
+        statement.data = Some(Box::new(StmtData::Directive(
+            crate::internal::js_ast::DirectiveStmt {
+                value: value.value.clone(),
+                legacy_octal_loc: value.legacy_octal_loc,
+            },
+        )));
+    }
+}
+
+fn mark_inlinable_function_declaration(core: &mut ParserCore, function: &Function) {
+    if !core.options.minify_syntax
+        || function.is_generator
+        || function.is_async
+        || function.has_rest_arg
+    {
+        return;
+    }
+    let Some(name) = function.name else {
+        return;
+    };
+    let symbol =
+        &mut core.symbols[usize::try_from(name.reference.inner_index).expect("symbol index")];
+    if function.body.block.statements.is_empty()
+        && function.args.iter().all(|argument| {
+            matches!(
+                argument.binding.data.as_deref(),
+                Some(BindingData::Identifier(_))
+            )
+        })
+    {
+        symbol.flags |= SymbolFlags::IS_EMPTY_FUNCTION;
+        return;
+    }
+    if let [argument] = function.args.as_slice()
+        && argument.default_or_nil.data.is_none()
+        && let Some(BindingData::Identifier(argument)) = argument.binding.data.as_deref()
+        && let [statement] = function.body.block.statements.as_slice()
+        && let Some(StmtData::Return(return_statement)) = statement.data.as_deref()
+        && let Some(ExprData::Identifier(returned)) = return_statement.value_or_nil.data.as_deref()
+        && argument.reference == returned.reference
+    {
+        symbol.flags |= SymbolFlags::IS_IDENTITY_FUNCTION;
+    }
 }
 
 #[allow(clippy::too_many_lines)]
-fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bool) {
+fn visit_class(
+    core: &mut ParserCore,
+    class: &mut Class,
+    resolve_identifiers: bool,
+    merge_inner_name: bool,
+) -> Option<Ref> {
+    let class_post_start = core.class_post_statements.len();
     lower_type_script_constructor_parameter_fields(core, class);
     let outer_class_name = class.name.and_then(|name| {
         (!ParserCore::is_stored_name_ref(name.reference)).then_some(name.reference)
@@ -2375,15 +3341,22 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
     core.push_scope_for_visit_pass(ScopeKind::ClassName, class.class_keyword.loc);
     let mut inner_class_name = None;
     if let Some(name) = &mut class.name {
-        let text = if ParserCore::is_stored_name_ref(name.reference) {
+        let name_was_stored = ParserCore::is_stored_name_ref(name.reference);
+        let text = if name_was_stored {
             String::from_utf8_lossy(core.load_name_from_ref(name.reference)).into_owned()
         } else {
             core.symbols[usize::try_from(name.reference.inner_index).expect("symbol index")]
                 .original_name
                 .clone()
         };
-        let inner_reference =
-            core.new_symbol(crate::internal::ast::SymbolKind::Const, text.clone());
+        let inner_reference = core.new_symbol(
+            crate::internal::ast::SymbolKind::Const,
+            if name_was_stored {
+                text.clone()
+            } else {
+                format!("_{text}")
+            },
+        );
         inner_class_name = Some(inner_reference);
         core.record_declared_symbol(inner_reference);
         core.current_scope
@@ -2399,7 +3372,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
                     loc: name.loc,
                 },
             );
-        if ParserCore::is_stored_name_ref(name.reference) {
+        if name_was_stored {
             name.reference = inner_reference;
         }
     }
@@ -2455,6 +3428,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .forbid_arguments = true;
         let old_new_target_allowed = std::mem::replace(&mut core.visit_new_target_allowed, true);
+        let old_this_is_nested = std::mem::replace(&mut core.visit_this_is_nested, true);
         visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
         visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
         if matches!(
@@ -2465,6 +3439,7 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
             keep_inferred_name(core, &mut property.initializer_or_nil, name);
         }
         core.visit_new_target_allowed = old_new_target_allowed;
+        core.visit_this_is_nested = old_this_is_nested;
         core.current_scope
             .as_ref()
             .expect("class body scope")
@@ -2475,8 +3450,10 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
             let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);
+            let old_try_catch_loc = core.visit_try_catch_loc;
             let old_new_target_allowed =
                 std::mem::replace(&mut core.visit_new_target_allowed, true);
+            let old_this_is_nested = std::mem::replace(&mut core.visit_this_is_nested, true);
             core.push_scope_for_visit_pass(ScopeKind::ClassStaticInit, static_block.loc);
             core.current_scope
                 .as_ref()
@@ -2494,15 +3471,680 @@ fn visit_class(core: &mut ParserCore, class: &mut Class, resolve_identifiers: bo
             core.visit_loop_depth = old_loop_depth;
             core.visit_switch_depth = old_switch_depth;
             core.visit_try_body_depth = old_try_body_depth;
+            core.visit_try_catch_loc = old_try_catch_loc;
             core.visit_new_target_allowed = old_new_target_allowed;
+            core.visit_this_is_nested = old_this_is_nested;
         }
     }
-    lower_type_script_static_field_assignments(class);
+    lower_standard_decorators(core, class, outer_class_name);
+    let decorator_keys = prepare_type_script_computed_property_keys(core, class);
+    lower_type_script_experimental_decorators(core, class, outer_class_name, &decorator_keys);
+    lower_type_script_static_field_assignments(core, class, outer_class_name, class_post_start);
     lower_type_script_class_field_assignments(core, class);
     core.pop_scope();
     core.pop_scope();
-    if let (Some(inner), Some(outer)) = (inner_class_name, outer_class_name) {
+    let used_inner_name = inner_class_name.filter(|inner| {
+        core.symbols[usize::try_from(inner.inner_index).expect("symbol index")].use_count_estimate
+            != 0
+    });
+    if core.options.minify_syntax && outer_class_name.is_none() && used_inner_name.is_none() {
+        class.name = None;
+    }
+    let merge_inner_name = merge_inner_name
+        || core.options.ts.config.experimental_decorators
+            == crate::internal::config::MaybeBool::True
+        || class.should_lower_standard_decorators;
+    if merge_inner_name && let (Some(inner), Some(outer)) = (inner_class_name, outer_class_name) {
         core.merge_symbols(inner, outer);
+        None
+    } else {
+        used_inner_name
+    }
+}
+
+fn decorator_target(loc: Loc, reference: Ref) -> Expr {
+    Expr::new(
+        loc,
+        ExprData::Identifier(IdentifierExpr {
+            reference,
+            ..IdentifierExpr::default()
+        }),
+    )
+}
+
+fn decorator_array(loc: Loc, decorators: Vec<crate::internal::js_ast::Decorator>) -> Expr {
+    Expr::new(
+        loc,
+        ExprData::Array(crate::internal::js_ast::ArrayExpr {
+            items: decorators
+                .into_iter()
+                .map(|decorator| decorator.value)
+                .collect(),
+            ..crate::internal::js_ast::ArrayExpr::default()
+        }),
+    )
+}
+
+fn decorator_statement(loc: Loc, value: Expr) -> Stmt {
+    Stmt::new(
+        loc,
+        StmtData::Expr(ExprStmt {
+            value,
+            ..ExprStmt::default()
+        }),
+    )
+}
+
+fn standard_decorator_temp(core: &mut ParserCore, name: String) -> Ref {
+    core.generate_named_top_level_temp_ref(name)
+}
+
+fn standard_decorator_ref(core: &mut ParserCore, loc: Loc, reference: Ref) -> Expr {
+    core.record_usage(reference);
+    decorator_target(loc, reference)
+}
+
+fn standard_decorator_string(loc: Loc, value: &str) -> Expr {
+    Expr::new(
+        loc,
+        ExprData::String(StringExpr {
+            value: string_to_utf16(value.as_bytes()),
+            ..StringExpr::default()
+        }),
+    )
+}
+
+fn standard_decorator_array(loc: Loc, decorators: Vec<crate::internal::js_ast::Decorator>) -> Expr {
+    Expr::new(
+        loc,
+        ExprData::Array(crate::internal::js_ast::ArrayExpr {
+            items: decorators
+                .into_iter()
+                .map(|decorator| decorator.value)
+                .collect(),
+            is_single_line: true,
+            ..crate::internal::js_ast::ArrayExpr::default()
+        }),
+    )
+}
+
+fn standard_decorator_this(loc: Loc) -> Expr {
+    Expr::new(loc, ExprData::This)
+}
+
+fn insert_standard_decorator_initializers(
+    core: &mut ParserCore,
+    class: &mut Class,
+    statements: Vec<Stmt>,
+) {
+    if statements.is_empty() {
+        return;
+    }
+    if let Some(index) = class_constructor_index(class) {
+        if let Some(ExprData::Function(function)) =
+            class.properties[index].value_or_nil.data.as_deref_mut()
+        {
+            if class.extends_or_nil.data.is_some() {
+                insert_parameter_fields_after_super(
+                    &mut function.function.body.block.statements,
+                    &statements,
+                );
+            } else {
+                function
+                    .function
+                    .body
+                    .block
+                    .statements
+                    .splice(0..0, statements);
+            }
+        }
+    } else {
+        append_class_field_constructor(
+            core,
+            class,
+            statements,
+            class.extends_or_nil.data.is_some(),
+        );
+    }
+}
+
+fn lower_standard_decorators(
+    core: &mut ParserCore,
+    class: &mut Class,
+    outer_class_name: Option<Ref>,
+) {
+    if !class.should_lower_standard_decorators {
+        return;
+    }
+    let Some(class_ref) = outer_class_name else {
+        return;
+    };
+    let loc = class.class_keyword.loc;
+    let class_name = symbol_name(core, class_ref);
+    let context_ref = standard_decorator_temp(core, "_init".into());
+    let mut pre = Expr::default();
+    let mut post_storage = Vec::new();
+    let mut post_decorators = Vec::new();
+    let mut instance_initializers = Vec::new();
+    let mut retained = Vec::with_capacity(class.properties.len());
+    let mut property_decorator_refs = Vec::new();
+    let mut storage_refs = Vec::new();
+    let mut decorated_field_index = 0_u32;
+    let mut has_instance_method_decorators = false;
+
+    let class_decorator_ref = if class.decorators.is_empty() {
+        None
+    } else {
+        let at_loc = class.decorators[0].at_loc;
+        let reference = standard_decorator_temp(core, format!("_{class_name}_decorators"));
+        let decorators = standard_decorator_array(at_loc, std::mem::take(&mut class.decorators));
+        pre = join_with_comma(
+            pre,
+            assign(standard_decorator_ref(core, at_loc, reference), decorators),
+        );
+        Some(reference)
+    };
+
+    for mut property in std::mem::take(&mut class.properties) {
+        if property.decorators.is_empty() {
+            retained.push(property);
+            continue;
+        }
+        let property_loc = property.loc;
+        let property_name = match property.key.data.as_deref() {
+            Some(ExprData::String(value)) => String::from_utf16_lossy(&value.value),
+            _ => {
+                retained.push(property);
+                continue;
+            }
+        };
+        let decorator_ref = standard_decorator_temp(core, format!("_{property_name}_dec"));
+        property_decorator_refs.push(decorator_ref);
+        let decorators = standard_decorator_array(
+            property.decorators[0].at_loc,
+            std::mem::take(&mut property.decorators),
+        );
+        pre = join_with_comma(
+            pre,
+            assign(
+                standard_decorator_ref(core, property_loc, decorator_ref),
+                decorators,
+            ),
+        );
+
+        let mut decorate_args = vec![
+            standard_decorator_ref(core, property_loc, context_ref),
+            Expr::new(
+                property_loc,
+                ExprData::Number(match property.kind {
+                    PropertyKind::Field => 5.0,
+                    PropertyKind::AutoAccessor => 4.0,
+                    _ => 1.0,
+                }),
+            ),
+            standard_decorator_string(property_loc, &property_name),
+            standard_decorator_ref(core, property_loc, decorator_ref),
+            standard_decorator_ref(core, property_loc, class_ref),
+        ];
+
+        match property.kind {
+            PropertyKind::Method | PropertyKind::Getter | PropertyKind::Setter => {
+                if !property.flags.contains(PropertyFlags::IS_STATIC) {
+                    has_instance_method_decorators = true;
+                }
+                retained.push(property);
+            }
+            PropertyKind::Field | PropertyKind::AutoAccessor
+                if !property.flags.contains(PropertyFlags::IS_STATIC) =>
+            {
+                let initializer_flags = 8.0 + f64::from(decorated_field_index * 4);
+                decorated_field_index += 1;
+                let mut initializer_args = vec![
+                    standard_decorator_ref(core, property_loc, context_ref),
+                    Expr::new(property_loc, ExprData::Number(initializer_flags)),
+                    standard_decorator_this(property_loc),
+                ];
+                let initializer = if property.initializer_or_nil.data.is_some() {
+                    std::mem::take(&mut property.initializer_or_nil)
+                } else if property.value_or_nil.data.is_some() {
+                    std::mem::take(&mut property.value_or_nil)
+                } else {
+                    Expr::default()
+                };
+                if initializer.data.is_some() {
+                    initializer_args.push(initializer);
+                }
+                let initialized =
+                    core.call_runtime(property_loc, "__runInitializers", initializer_args);
+                let first = if property.kind == PropertyKind::AutoAccessor {
+                    let storage_ref = standard_decorator_temp(core, format!("_{property_name}"));
+                    storage_refs.push(storage_ref);
+                    decorate_args.push(standard_decorator_ref(core, property_loc, storage_ref));
+                    let weak_map = core.find_symbol(property_loc, "WeakMap").reference;
+                    core.record_usage(weak_map);
+                    post_storage.push(decorator_statement(
+                        property_loc,
+                        assign(
+                            standard_decorator_ref(core, property_loc, storage_ref),
+                            Expr::new(
+                                property_loc,
+                                ExprData::New(NewExpr {
+                                    target: decorator_target(property_loc, weak_map),
+                                    ..NewExpr::default()
+                                }),
+                            ),
+                        ),
+                    ));
+                    let storage = standard_decorator_ref(core, property_loc, storage_ref);
+                    core.call_runtime(
+                        property_loc,
+                        "__privateAdd",
+                        vec![standard_decorator_this(property_loc), storage, initialized],
+                    )
+                } else {
+                    let target = class_field_assignment_target(&property)
+                        .expect("decorated public field has an assignment target");
+                    assign(target, initialized)
+                };
+                let context = standard_decorator_ref(core, property_loc, context_ref);
+                let extra = core.call_runtime(
+                    property_loc,
+                    "__runInitializers",
+                    vec![
+                        context,
+                        Expr::new(property_loc, ExprData::Number(initializer_flags + 3.0)),
+                        standard_decorator_this(property_loc),
+                    ],
+                );
+                instance_initializers.push(decorator_statement(
+                    property_loc,
+                    join_with_comma(first, extra),
+                ));
+            }
+            _ => retained.push(property),
+        }
+        post_decorators.push(decorator_statement(
+            property_loc,
+            core.call_runtime(property_loc, "__decorateElement", decorate_args),
+        ));
+    }
+    class.properties = retained;
+
+    if has_instance_method_decorators {
+        let context = standard_decorator_ref(core, loc, context_ref);
+        let initializer = core.call_runtime(
+            loc,
+            "__runInitializers",
+            vec![
+                context,
+                Expr::new(loc, ExprData::Number(5.0)),
+                standard_decorator_this(loc),
+            ],
+        );
+        instance_initializers.insert(0, decorator_statement(loc, initializer));
+    }
+    insert_standard_decorator_initializers(core, class, instance_initializers);
+
+    let mut declarations = Vec::new();
+    if let Some(reference) = class_decorator_ref {
+        declarations.push(reference);
+    }
+    declarations.extend(property_decorator_refs.into_iter().rev());
+    declarations.push(context_ref);
+    declarations.extend(storage_refs);
+    core.class_pre_statements.push(Stmt::new(
+        loc,
+        StmtData::Local(LocalStmt {
+            declarations: declarations
+                .into_iter()
+                .map(|reference| Decl {
+                    binding: identifier_binding(loc, reference),
+                    ..Decl::default()
+                })
+                .collect(),
+            kind: LocalKind::Var,
+            ..LocalStmt::default()
+        }),
+    ));
+    if pre.data.is_some() {
+        core.class_pre_statements
+            .push(decorator_statement(loc, pre));
+    }
+    let context = standard_decorator_ref(core, loc, context_ref);
+    let start = core.call_runtime(
+        loc,
+        "__decoratorStart",
+        vec![Expr::new(loc, ExprData::Null)],
+    );
+    let start = decorator_statement(loc, assign(context, start));
+    core.class_post_statements.push(start);
+    core.class_post_statements.extend(post_storage);
+    core.class_post_statements.extend(post_decorators);
+    if let Some(decorator_ref) = class_decorator_ref {
+        let context = standard_decorator_ref(core, loc, context_ref);
+        let decorators = standard_decorator_ref(core, loc, decorator_ref);
+        let target = standard_decorator_ref(core, loc, class_ref);
+        let decorated = core.call_runtime(
+            loc,
+            "__decorateElement",
+            vec![
+                context,
+                Expr::new(loc, ExprData::Number(0.0)),
+                standard_decorator_string(loc, &class_name),
+                decorators,
+                target,
+            ],
+        );
+        let target = standard_decorator_ref(core, loc, class_ref);
+        let statement = decorator_statement(loc, assign(target, decorated));
+        core.class_post_statements.push(statement);
+        let initialized_class = standard_decorator_ref(core, loc, class_ref);
+        let context = standard_decorator_ref(core, loc, context_ref);
+        let initialized = core.call_runtime(
+            loc,
+            "__runInitializers",
+            vec![
+                context,
+                Expr::new(loc, ExprData::Number(1.0)),
+                initialized_class,
+            ],
+        );
+        core.class_post_statements
+            .push(decorator_statement(loc, initialized));
+    } else {
+        let metadata_target = standard_decorator_ref(core, loc, class_ref);
+        let context = standard_decorator_ref(core, loc, context_ref);
+        let metadata =
+            core.call_runtime(loc, "__decoratorMetadata", vec![context, metadata_target]);
+        core.class_post_statements
+            .push(decorator_statement(loc, metadata));
+    }
+}
+
+fn computed_key_temp(core: &mut ParserCore, loc: Loc, reference: Ref) -> Expr {
+    core.record_usage(reference);
+    Expr::new(
+        loc,
+        ExprData::Identifier(IdentifierExpr {
+            reference,
+            ..IdentifierExpr::default()
+        }),
+    )
+}
+
+fn prepare_type_script_computed_property_keys(
+    core: &mut ParserCore,
+    class: &mut Class,
+) -> Vec<Option<Expr>> {
+    if core.options.ts.config.experimental_decorators != crate::internal::config::MaybeBool::True {
+        return vec![None; class.properties.len()];
+    }
+
+    let needs_temp = class
+        .properties
+        .iter()
+        .map(|property| {
+            property.flags.contains(PropertyFlags::IS_COMPUTED)
+                && if class.use_define_for_class_fields {
+                    !property.decorators.is_empty()
+                } else {
+                    !property.decorators.is_empty()
+                        || property.initializer_or_nil.data.is_some()
+                        || property.value_or_nil.data.is_some()
+                        || property.kind.is_method_definition()
+                        || property.kind == PropertyKind::DeclareOrAbstract
+                }
+        })
+        .collect::<Vec<_>>();
+    let temp_count = needs_temp.iter().filter(|&&value| value).count();
+    if temp_count == 0 {
+        return vec![None; class.properties.len()];
+    }
+    let mut enclosing_scope = core.current_scope.clone();
+    while let Some(scope) = enclosing_scope.clone() {
+        let (kind, parent) = {
+            let scope = scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                scope.kind,
+                scope.parent.as_ref().and_then(std::sync::Weak::upgrade),
+            )
+        };
+        if !matches!(kind, ScopeKind::ClassBody | ScopeKind::ClassName) {
+            break;
+        }
+        enclosing_scope = parent;
+    }
+    let is_top_level = enclosing_scope.as_ref().is_some_and(|scope| {
+        core.module_scope
+            .as_ref()
+            .is_some_and(|module| std::sync::Arc::ptr_eq(scope, module))
+    });
+    let mut temp_refs = if is_top_level {
+        (0..temp_count)
+            .map(|_| core.generate_top_level_temp_ref())
+            .collect::<Vec<_>>()
+    } else {
+        let references = (0..temp_count)
+            .map(|index| {
+                let suffix =
+                    char::from_u32(u32::from(b'a') + u32::try_from(index).unwrap_or(25).min(25))
+                        .unwrap_or('z');
+                core.new_symbol(SymbolKind::Other, format!("_{suffix}"))
+            })
+            .collect::<Vec<_>>();
+        if let Some(scope) = enclosing_scope {
+            scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generated
+                .extend(references.iter().copied());
+        }
+        let loc = class.body_loc;
+        for &reference in &references {
+            core.record_declared_symbol(reference);
+        }
+        core.class_pre_statements.push(Stmt::new(
+            loc,
+            StmtData::Local(LocalStmt {
+                declarations: references
+                    .iter()
+                    .map(|&reference| Decl {
+                        binding: identifier_binding(loc, reference),
+                        ..Decl::default()
+                    })
+                    .collect(),
+                kind: LocalKind::Var,
+                ..LocalStmt::default()
+            }),
+        ));
+        references
+    };
+    temp_refs.reverse();
+    let mut next_temp = 0usize;
+    let mut decorator_keys = vec![None; class.properties.len()];
+    if class.use_define_for_class_fields {
+        for (index, property) in class.properties.iter_mut().enumerate() {
+            if !needs_temp[index] {
+                continue;
+            }
+            let reference = temp_refs[next_temp];
+            next_temp += 1;
+            let loc = property.key.loc;
+            property.key = assign(
+                computed_key_temp(core, loc, reference),
+                std::mem::take(&mut property.key),
+            );
+            decorator_keys[index] = Some(computed_key_temp(core, loc, reference));
+        }
+        return decorator_keys;
+    }
+    let mut pending = Expr::default();
+    let mut last_computed_method: Option<(usize, Ref)> = None;
+
+    for (index, property) in class.properties.iter_mut().enumerate() {
+        if !property.flags.contains(PropertyFlags::IS_COMPUTED) {
+            continue;
+        }
+        let loc = property.key.loc;
+        let original_key = std::mem::take(&mut property.key);
+        let evaluation = if needs_temp[index] {
+            let reference = temp_refs[next_temp];
+            next_temp += 1;
+            let assignment = assign(computed_key_temp(core, loc, reference), original_key);
+            property.key = computed_key_temp(core, loc, reference);
+            decorator_keys[index] = Some(computed_key_temp(core, loc, reference));
+            if property.kind.is_method_definition() {
+                last_computed_method = Some((index, reference));
+            }
+            assignment
+        } else {
+            property.key = original_key.clone();
+            original_key
+        };
+        pending = join_with_comma(pending, evaluation);
+
+        if property.kind.is_method_definition() {
+            property.key = std::mem::take(&mut pending);
+        }
+    }
+
+    if pending.data.is_some()
+        && let Some((method_index, method_ref)) = last_computed_method
+    {
+        let method = &mut class.properties[method_index];
+        let before = std::mem::take(&mut method.key);
+        method.key = join_with_comma(
+            join_with_comma(before, pending),
+            computed_key_temp(core, method.loc, method_ref),
+        );
+    } else if pending.data.is_some() {
+        core.class_pre_statements.push(Stmt::new(
+            class.body_loc,
+            StmtData::Expr(ExprStmt {
+                value: pending,
+                ..ExprStmt::default()
+            }),
+        ));
+    }
+
+    decorator_keys
+}
+
+fn lower_type_script_experimental_decorators(
+    core: &mut ParserCore,
+    class: &mut Class,
+    outer_class_name: Option<Ref>,
+    decorator_keys: &[Option<Expr>],
+) {
+    if core.options.ts.config.experimental_decorators != crate::internal::config::MaybeBool::True {
+        return;
+    }
+    let Some(class_ref) = outer_class_name else {
+        return;
+    };
+    let mut instance_decorators = Vec::new();
+    let mut static_decorators = Vec::new();
+    for (property_index, property) in class.properties.iter_mut().enumerate() {
+        if property.kind.is_method_definition()
+            && let Some(ExprData::Function(function)) = property.value_or_nil.data.as_deref_mut()
+        {
+            let is_constructor = matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::String(key))
+                    if String::from_utf16_lossy(&key.value) == "constructor"
+            );
+            for (index, argument) in function.function.args.iter_mut().enumerate() {
+                for decorator in std::mem::take(&mut argument.decorators) {
+                    let loc = decorator.value.loc;
+                    let value = core.call_runtime(
+                        loc,
+                        "__decorateParam",
+                        vec![
+                            Expr::new(loc, ExprData::Number(index as f64)),
+                            decorator.value,
+                        ],
+                    );
+                    let decorator = crate::internal::js_ast::Decorator {
+                        value,
+                        at_loc: decorator.at_loc,
+                        omit_newline_after: decorator.omit_newline_after,
+                    };
+                    if is_constructor {
+                        class.decorators.push(decorator);
+                    } else {
+                        property.decorators.push(decorator);
+                    }
+                }
+            }
+        }
+        if property.decorators.is_empty() {
+            continue;
+        }
+        let loc = property.key.loc;
+        let decorators = decorator_array(loc, std::mem::take(&mut property.decorators));
+        core.record_usage(class_ref);
+        let class_target = decorator_target(loc, class_ref);
+        let target = if property.flags.contains(PropertyFlags::IS_STATIC) {
+            class_target
+        } else {
+            Expr::new(
+                loc,
+                ExprData::Dot(DotExpr {
+                    target: class_target,
+                    name: "prototype".into(),
+                    name_loc: loc,
+                    ..DotExpr::default()
+                }),
+            )
+        };
+        let descriptor_kind = if matches!(
+            property.kind,
+            PropertyKind::Field | PropertyKind::DeclareOrAbstract
+        ) {
+            2.0
+        } else {
+            1.0
+        };
+        let key = decorator_keys
+            .get(property_index)
+            .and_then(Option::as_ref)
+            .unwrap_or(&property.key)
+            .clone();
+        let call = core.call_runtime(
+            loc,
+            "__decorateClass",
+            vec![
+                decorators,
+                target,
+                key,
+                Expr::new(loc, ExprData::Number(descriptor_kind)),
+            ],
+        );
+        let statement = decorator_statement(loc, call);
+        if property.flags.contains(PropertyFlags::IS_STATIC) {
+            static_decorators.push(statement);
+        } else {
+            instance_decorators.push(statement);
+        }
+    }
+    core.class_post_statements.extend(instance_decorators);
+    core.class_post_statements.extend(static_decorators);
+    if !class.decorators.is_empty() {
+        let loc = class.decorators[0].at_loc;
+        let decorators = decorator_array(loc, std::mem::take(&mut class.decorators));
+        core.record_usage(class_ref);
+        core.record_usage(class_ref);
+        let call = core.call_runtime(
+            loc,
+            "__decorateClass",
+            vec![decorators, decorator_target(loc, class_ref)],
+        );
+        core.class_post_statements.push(decorator_statement(
+            loc,
+            assign(decorator_target(loc, class_ref), call),
+        ));
     }
 }
 
@@ -2536,8 +4178,11 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
         )
     });
 
-    let mut assignments = Vec::new();
-    let mut private_declarations = Vec::new();
+    let mut assignments = if lower_private_fields {
+        rewrite_type_script_auto_accessors(core, class)
+    } else {
+        Vec::new()
+    };
     class.properties.retain_mut(|property| {
         let Some((assignment, keep_private_declaration)) = take_class_field_assignment(
             core,
@@ -2550,7 +4195,7 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
         };
         assignments.push(assignment);
         if keep_private_declaration {
-            private_declarations.push(std::mem::take(property));
+            return true;
         }
         false
     });
@@ -2577,10 +4222,179 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
                 .statements
                 .splice(0..0, assignments);
         }
+        if core.options.ts.config.experimental_decorators
+            == crate::internal::config::MaybeBool::True
+            && constructor_index != 0
+        {
+            let constructor = class.properties.remove(constructor_index);
+            class.properties.insert(0, constructor);
+        }
     } else {
         append_class_field_constructor(core, class, assignments, is_derived);
     }
-    class.properties.extend(private_declarations);
+}
+
+fn rewrite_type_script_auto_accessors(core: &mut ParserCore, class: &mut Class) -> Vec<Stmt> {
+    let mut assignments = Vec::new();
+    let mut properties = Vec::with_capacity(class.properties.len());
+    for mut property in std::mem::take(&mut class.properties) {
+        if property.kind != PropertyKind::AutoAccessor
+            || property.flags.contains(PropertyFlags::IS_STATIC)
+            || !property.decorators.is_empty()
+        {
+            properties.push(property);
+            continue;
+        }
+
+        let storage_name = match property.key.data.as_deref() {
+            Some(ExprData::String(name)) => String::from_utf16_lossy(&name.value),
+            Some(ExprData::PrivateIdentifier(private)) => symbol_name(core, private.reference),
+            _ => {
+                properties.push(property);
+                continue;
+            }
+        };
+        let loc = property.loc;
+        let storage_ref = core.generate_auto_accessor_storage_ref(&storage_name);
+        let storage = || {
+            Expr::new(
+                loc,
+                ExprData::Identifier(IdentifierExpr {
+                    reference: storage_ref,
+                    ..IdentifierExpr::default()
+                }),
+            )
+        };
+        let this = || Expr::new(loc, ExprData::This);
+        let initializer = if property.initializer_or_nil.data.is_some() {
+            std::mem::take(&mut property.initializer_or_nil)
+        } else if property.value_or_nil.data.is_some() {
+            std::mem::take(&mut property.value_or_nil)
+        } else {
+            Expr::new(loc, ExprData::Undefined)
+        };
+
+        core.record_usage(storage_ref);
+        assignments.push(Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value: core.call_runtime(loc, "__privateAdd", vec![this(), storage(), initializer]),
+                ..ExprStmt::default()
+            }),
+        ));
+
+        core.record_usage(storage_ref);
+        let getter = Property {
+            key: property.key.clone(),
+            value_or_nil: Expr::new(
+                loc,
+                ExprData::Function(FunctionExpr {
+                    function: Function {
+                        body: FunctionBody {
+                            loc,
+                            block: BlockStmt {
+                                statements: vec![Stmt::new(
+                                    loc,
+                                    StmtData::Return(ReturnStmt {
+                                        value_or_nil: core.call_runtime(
+                                            loc,
+                                            "__privateGet",
+                                            vec![this(), storage()],
+                                        ),
+                                    }),
+                                )],
+                                ..BlockStmt::default()
+                            },
+                        },
+                        ..Function::default()
+                    },
+                    ..FunctionExpr::default()
+                }),
+            ),
+            loc,
+            kind: PropertyKind::Getter,
+            flags: property.flags,
+            ..Property::default()
+        };
+
+        let argument_ref = core.new_symbol(SymbolKind::Other, "_");
+        core.record_usage(argument_ref);
+        core.record_usage(storage_ref);
+        let argument = Expr::new(
+            loc,
+            ExprData::Identifier(IdentifierExpr {
+                reference: argument_ref,
+                ..IdentifierExpr::default()
+            }),
+        );
+        let setter = Property {
+            key: property.key,
+            value_or_nil: Expr::new(
+                loc,
+                ExprData::Function(FunctionExpr {
+                    function: Function {
+                        args: vec![Arg {
+                            binding: identifier_binding(loc, argument_ref),
+                            ..Arg::default()
+                        }],
+                        body: FunctionBody {
+                            loc,
+                            block: BlockStmt {
+                                statements: vec![Stmt::new(
+                                    loc,
+                                    StmtData::Expr(ExprStmt {
+                                        value: core.call_runtime(
+                                            loc,
+                                            "__privateSet",
+                                            vec![this(), storage(), argument],
+                                        ),
+                                        ..ExprStmt::default()
+                                    }),
+                                )],
+                                ..BlockStmt::default()
+                            },
+                        },
+                        ..Function::default()
+                    },
+                    ..FunctionExpr::default()
+                }),
+            ),
+            loc,
+            kind: PropertyKind::Setter,
+            flags: property.flags,
+            ..Property::default()
+        };
+        properties.push(getter);
+        properties.push(setter);
+
+        let weak_map_ref = core.find_symbol(loc, "WeakMap").reference;
+        core.record_usage(weak_map_ref);
+        core.record_usage(storage_ref);
+        core.class_post_statements.push(Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value: assign(
+                    storage(),
+                    Expr::new(
+                        loc,
+                        ExprData::New(NewExpr {
+                            target: Expr::new(
+                                loc,
+                                ExprData::Identifier(IdentifierExpr {
+                                    reference: weak_map_ref,
+                                    ..IdentifierExpr::default()
+                                }),
+                            ),
+                            ..NewExpr::default()
+                        }),
+                    ),
+                ),
+                ..ExprStmt::default()
+            }),
+        ));
+    }
+    class.properties = properties;
+    assignments
 }
 
 fn append_class_field_constructor(
@@ -2625,25 +4439,28 @@ fn append_class_field_constructor(
             ),
         );
     }
-    class.properties.push(Property {
-        key: Expr::new(
+    class.properties.insert(
+        0,
+        Property {
+            key: Expr::new(
+                loc,
+                ExprData::String(StringExpr {
+                    value: string_to_utf16(b"constructor"),
+                    ..StringExpr::default()
+                }),
+            ),
+            value_or_nil: Expr::new(
+                loc,
+                ExprData::Function(FunctionExpr {
+                    function,
+                    ..FunctionExpr::default()
+                }),
+            ),
             loc,
-            ExprData::String(StringExpr {
-                value: string_to_utf16(b"constructor"),
-                ..StringExpr::default()
-            }),
-        ),
-        value_or_nil: Expr::new(
-            loc,
-            ExprData::Function(FunctionExpr {
-                function,
-                ..FunctionExpr::default()
-            }),
-        ),
-        loc,
-        kind: PropertyKind::Method,
-        ..Property::default()
-    });
+            kind: PropertyKind::Method,
+            ..Property::default()
+        },
+    );
 }
 
 fn class_constructor_index(class: &Class) -> Option<usize> {
@@ -2958,6 +4775,16 @@ fn take_class_field_assignment(
 }
 
 fn class_field_assignment_target(property: &Property) -> Option<Expr> {
+    if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+        return Some(Expr::new(
+            property.loc,
+            ExprData::Index(crate::internal::js_ast::IndexExpr {
+                target: Expr::new(property.loc, ExprData::This),
+                index: property.key.clone(),
+                ..crate::internal::js_ast::IndexExpr::default()
+            }),
+        ));
+    }
     match property.key.data.as_deref()? {
         ExprData::String(key)
             if !property.flags.contains(PropertyFlags::IS_COMPUTED)
@@ -3004,44 +4831,144 @@ fn class_field_assignment(loc: Loc, target: Expr, initializer: Expr) -> Stmt {
     )
 }
 
-fn lower_type_script_static_field_assignments(class: &mut Class) {
+fn lower_type_script_static_field_assignments(
+    core: &mut ParserCore,
+    class: &mut Class,
+    class_ref: Option<Ref>,
+    insert_at: usize,
+) {
     if class.use_define_for_class_fields {
         return;
     }
-    for property in &mut class.properties {
+    class.properties.retain(|property| {
+        if property.kind == PropertyKind::DeclareOrAbstract {
+            return false;
+        }
         if property.kind != PropertyKind::Field
-            || !property.flags.contains(PropertyFlags::IS_STATIC)
-            || !property.decorators.is_empty()
+            || property.initializer_or_nil.data.is_some()
+            || property.value_or_nil.data.is_some()
+        {
+            return true;
+        }
+        (property.flags.contains(PropertyFlags::IS_COMPUTED)
+            && core.options.ts.config.experimental_decorators
+                != crate::internal::config::MaybeBool::True)
             || matches!(
                 property.key.data.as_deref(),
                 Some(ExprData::PrivateIdentifier(_))
             )
-        {
-            continue;
+    });
+    if core.options.mode != crate::internal::config::Mode::Bundle
+        || core.options.ts.config.experimental_decorators
+            != crate::internal::config::MaybeBool::True
+    {
+        for property in &mut class.properties {
+            if property.kind != PropertyKind::Field
+                || !property.flags.contains(PropertyFlags::IS_STATIC)
+                || !property.decorators.is_empty()
+                || matches!(
+                    property.key.data.as_deref(),
+                    Some(ExprData::PrivateIdentifier(_))
+                )
+            {
+                continue;
+            }
+            let Some(target) = class_field_assignment_target(property) else {
+                continue;
+            };
+            let initializer = if property.initializer_or_nil.data.is_some() {
+                std::mem::take(&mut property.initializer_or_nil)
+            } else if property.value_or_nil.data.is_some() {
+                std::mem::take(&mut property.value_or_nil)
+            } else {
+                continue;
+            };
+            let loc = property.loc;
+            *property = Property {
+                class_static_block: Some(Box::new(crate::internal::js_ast::ClassStaticBlock {
+                    block: BlockStmt {
+                        statements: vec![class_field_assignment(loc, target, initializer)],
+                        ..BlockStmt::default()
+                    },
+                    loc,
+                })),
+                loc,
+                kind: PropertyKind::ClassStaticBlock,
+                ..Property::default()
+            };
         }
-        let Some(target) = class_field_assignment_target(property) else {
-            continue;
-        };
+        return;
+    }
+    let mut assignments = Vec::new();
+    class.properties.retain_mut(|property| {
+        if property.kind == PropertyKind::DeclareOrAbstract {
+            return false;
+        }
+        if property.kind != PropertyKind::Field {
+            return true;
+        }
+        if !property.flags.contains(PropertyFlags::IS_STATIC) {
+            let initializer_is_missing =
+                property.initializer_or_nil.data.is_none() && property.value_or_nil.data.is_none();
+            let is_private = matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::PrivateIdentifier(_))
+            );
+            return !initializer_is_missing || is_private;
+        }
+        if matches!(
+            property.key.data.as_deref(),
+            Some(ExprData::PrivateIdentifier(_))
+        ) {
+            return true;
+        }
+
         let initializer = if property.initializer_or_nil.data.is_some() {
             std::mem::take(&mut property.initializer_or_nil)
         } else if property.value_or_nil.data.is_some() {
             std::mem::take(&mut property.value_or_nil)
         } else {
-            continue;
+            return false;
         };
-        let loc = property.loc;
-        *property = Property {
-            class_static_block: Some(Box::new(ClassStaticBlock {
-                block: BlockStmt {
-                    statements: vec![class_field_assignment(loc, target, initializer)],
-                    ..BlockStmt::default()
-                },
-                loc,
-            })),
-            loc,
-            kind: PropertyKind::ClassStaticBlock,
-            ..Property::default()
+        let Some(class_ref) = class_ref else {
+            return true;
         };
+        let class_target = computed_key_temp(core, property.loc, class_ref);
+        let target = if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+            Expr::new(
+                property.loc,
+                ExprData::Index(crate::internal::js_ast::IndexExpr {
+                    target: class_target,
+                    index: property.key.clone(),
+                    ..crate::internal::js_ast::IndexExpr::default()
+                }),
+            )
+        } else if let Some(ExprData::String(key)) = property.key.data.as_deref() {
+            Expr::new(
+                property.loc,
+                ExprData::Dot(DotExpr {
+                    target: class_target,
+                    name: String::from_utf16_lossy(&key.value),
+                    name_loc: property.key.loc,
+                    ..DotExpr::default()
+                }),
+            )
+        } else {
+            Expr::new(
+                property.loc,
+                ExprData::Index(crate::internal::js_ast::IndexExpr {
+                    target: class_target,
+                    index: property.key.clone(),
+                    ..crate::internal::js_ast::IndexExpr::default()
+                }),
+            )
+        };
+        assignments.push(class_field_assignment(property.loc, target, initializer));
+        false
+    });
+    if !assignments.is_empty() {
+        core.class_post_statements
+            .splice(insert_at..insert_at, assignments);
     }
 }
 
@@ -4215,7 +6142,73 @@ fn function_body_use_strict(core: &ParserCore, statements: &[Stmt]) -> Option<Lo
 
 #[allow(clippy::too_many_lines)]
 fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers: bool) {
-    visit_expr_with_target(core, expression, resolve_identifiers, AssignTarget::None);
+    stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || {
+        visit_expr_with_target(core, expression, resolve_identifiers, AssignTarget::None);
+    });
+}
+
+fn maybe_rewrite_import_namespace_property(
+    core: &mut ParserCore,
+    target: &Expr,
+    name: &str,
+    name_loc: Loc,
+    prefer_quoted_key: bool,
+) -> Option<ExprData> {
+    if core.options.mode != crate::internal::config::Mode::Bundle {
+        return None;
+    }
+    let Some(ExprData::Identifier(identifier)) = target.data.as_deref() else {
+        return None;
+    };
+    let namespace_ref = identifier.reference;
+    let (existing, import_record_index) = {
+        let items = core.import_items_for_namespace.get(&namespace_ref)?;
+        (items.entries.get(name).copied(), items.import_record_index)
+    };
+    let item = if let Some(item) = existing {
+        item
+    } else {
+        let reference = core.new_symbol(SymbolKind::Import, name);
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+            .import_item_status = crate::internal::ast::ImportItemStatus::Generated;
+        core.module_scope
+            .as_ref()
+            .expect("generated namespace import item requires a module scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(reference);
+        let item = crate::internal::ast::LocRef {
+            loc: name_loc,
+            reference,
+        };
+        core.import_items_for_namespace
+            .get_mut(&namespace_ref)
+            .expect("namespace import items must still exist")
+            .entries
+            .insert(name.into(), item);
+        core.is_import_item.insert(reference);
+        core.generated_named_imports.insert(
+            reference,
+            crate::internal::js_ast::NamedImport {
+                alias: name.into(),
+                alias_loc: name_loc,
+                namespace_ref,
+                import_record_index,
+                ..crate::internal::js_ast::NamedImport::default()
+            },
+        );
+        item
+    };
+    core.ignore_usage(namespace_ref);
+    core.record_usage(item.reference);
+    Some(ExprData::ImportIdentifier(
+        crate::internal::js_ast::ImportIdentifierExpr {
+            reference: item.reference,
+            prefer_quoted_key,
+            was_originally_identifier: false,
+        },
+    ))
 }
 
 fn iife_can_be_removed_if_unused(core: &ParserCore, args: &[Arg], body: &FunctionBody) -> bool {
@@ -4434,7 +6427,155 @@ fn maybe_fold_object_property_access(
 #[derive(Clone, Copy, Debug, Default)]
 struct ExprVisitContext {
     is_call_target: bool,
+    is_property_access_target: bool,
     is_template_tag: bool,
+}
+
+fn value_to_substitute_for_require(core: &mut ParserCore, loc: Loc) -> Expr {
+    if core.source.index != crate::internal::runtime::SOURCE_INDEX
+        && crate::internal::config::should_call_runtime_require(
+            core.options.mode,
+            core.options.output_format,
+        )
+    {
+        core.import_from_runtime(loc, "__require")
+    } else {
+        core.record_usage(core.require_ref);
+        Expr::new(
+            loc,
+            ExprData::Identifier(IdentifierExpr {
+                reference: core.require_ref,
+                ..IdentifierExpr::default()
+            }),
+        )
+    }
+}
+
+fn ignore_usage_if_recorded(core: &mut ParserCore, reference: Ref) {
+    if core
+        .symbol_uses
+        .get(&reference)
+        .is_some_and(|usage| usage.count_estimate > 0)
+    {
+        core.ignore_usage(reference);
+    }
+}
+
+fn type_script_enum_constant_from_expr(
+    expression: &Expr,
+) -> Option<crate::internal::js_ast::TsEnumValue> {
+    match expression.data.as_deref()? {
+        ExprData::Number(number) => Some(crate::internal::js_ast::TsEnumValue {
+            number: *number,
+            ..crate::internal::js_ast::TsEnumValue::default()
+        }),
+        ExprData::String(string) => Some(crate::internal::js_ast::TsEnumValue {
+            string: string.value.clone(),
+            is_string: true,
+            ..crate::internal::js_ast::TsEnumValue::default()
+        }),
+        ExprData::InlinedEnum(inlined) => type_script_enum_constant_from_expr(&inlined.value),
+        _ => None,
+    }
+}
+
+fn type_script_enum_value_for_property(
+    core: &ParserCore,
+    reference: Ref,
+    name: &str,
+) -> Option<crate::internal::js_ast::TsEnumValue> {
+    let reference = type_script_namespace_reference(core, reference)?;
+    core.ts_enums
+        .get(&reference)
+        .and_then(|values| values.get(name))
+        .cloned()
+}
+
+fn type_script_namespace_reference(core: &ParserCore, reference: Ref) -> Option<Ref> {
+    let linked = core.follow_symbol_link(reference);
+    if let Some(owner) = core
+        .ts_namespace_owner
+        .get(&reference)
+        .or_else(|| core.ts_namespace_owner.get(&linked))
+        .copied()
+    {
+        return Some(core.follow_symbol_link(owner));
+    }
+    let alias = core.symbols[usize::try_from(linked.inner_index).expect("symbol index")]
+        .namespace_alias
+        .as_ref()?;
+    let parent = type_script_namespace_reference(core, alias.namespace_ref)?;
+    let member = core.ts_namespace_members.get(&parent)?.get(&alias.alias)?;
+    let crate::internal::js_ast::TsNamespaceMemberData::Namespace(namespace) = &member.data else {
+        return None;
+    };
+    type_script_namespace_reference(core, namespace.reference)
+}
+
+fn type_script_namespace_path(expression: &Expr, path: &mut Vec<String>) -> Option<Ref> {
+    match expression.data.as_deref()? {
+        ExprData::Identifier(identifier) => Some(identifier.reference),
+        ExprData::Dot(dot) => {
+            let reference = type_script_namespace_path(&dot.target, path)?;
+            path.push(dot.name.clone());
+            Some(reference)
+        }
+        ExprData::Index(index) => {
+            let reference = type_script_namespace_path(&index.target, path)?;
+            let ExprData::String(string) = index.index.data.as_deref()? else {
+                return None;
+            };
+            path.push(
+                String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(&string.value))
+                    .into_owned(),
+            );
+            Some(reference)
+        }
+        _ => None,
+    }
+}
+
+fn type_script_enum_value_for_access(
+    core: &ParserCore,
+    target: &Expr,
+    name: &str,
+) -> Option<crate::internal::js_ast::TsEnumValue> {
+    let mut path = Vec::new();
+    let mut reference = type_script_namespace_path(target, &mut path)?;
+    reference = type_script_namespace_reference(core, reference)?;
+    for segment in path {
+        let member = core.ts_namespace_members.get(&reference)?.get(&segment)?;
+        let crate::internal::js_ast::TsNamespaceMemberData::Namespace(namespace) = &member.data
+        else {
+            return None;
+        };
+        reference = type_script_namespace_reference(core, namespace.reference)?;
+    }
+    type_script_enum_value_for_property(core, reference, name)
+}
+
+fn type_script_enum_value_for_identifier(
+    core: &ParserCore,
+    reference: Ref,
+) -> Option<(crate::internal::js_ast::TsEnumValue, String)> {
+    let linked = core.follow_symbol_link(reference);
+    if let Some(value) = core
+        .ts_enum_values_by_ref
+        .get(&reference)
+        .or_else(|| core.ts_enum_values_by_ref.get(&linked))
+        .cloned()
+    {
+        let comment = core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+            .original_name
+            .clone();
+        return Some((value, comment));
+    }
+
+    let alias = core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+        .namespace_alias
+        .as_ref()?;
+    type_script_enum_value_for_property(core, alias.namespace_ref, &alias.alias)
+        .map(|value| (value, alias.alias.clone()))
 }
 
 fn visit_expr_with_target(
@@ -4443,13 +6584,15 @@ fn visit_expr_with_target(
     resolve_identifiers: bool,
     assign_target: AssignTarget,
 ) {
-    visit_expr_with_target_and_context(
-        core,
-        expression,
-        resolve_identifiers,
-        assign_target,
-        ExprVisitContext::default(),
-    );
+    stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || {
+        visit_expr_with_target_and_context(
+            core,
+            expression,
+            resolve_identifiers,
+            assign_target,
+            ExprVisitContext::default(),
+        );
+    });
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4508,8 +6651,28 @@ fn visit_expr_with_target_and_context(
             } else {
                 core.record_usage(identifier.reference);
             }
+            if identifier.reference == core.require_ref
+                && !context.is_call_target
+                && !context.is_property_access_target
+            {
+                ignore_usage_if_recorded(core, identifier.reference);
+                if let Some(replacement) =
+                    value_to_substitute_for_require(core, expression.loc).data
+                {
+                    *data = *replacement;
+                }
+                return;
+            }
+            let current_scope_contains_direct_eval =
+                core.current_scope.as_ref().is_some_and(|scope| {
+                    scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .contains_direct_eval
+                });
             if assign_target == AssignTarget::None
                 && core.options.minify_syntax
+                && !current_scope_contains_direct_eval
                 && !identifier.must_keep_due_to_with_stmt
                 && let Some(value) = core.const_values.get(&identifier.reference)
                 && let Some(replacement) =
@@ -4575,15 +6738,9 @@ fn visit_expr_with_target_and_context(
                 core.const_values.remove(&identifier.reference);
                 core.symbols[symbol_index].flags |=
                     crate::internal::ast::SymbolFlags::COULD_POTENTIALLY_BE_MUTATED;
-            } else if let Some(value) = core
-                .ts_enum_values_by_ref
-                .get(&identifier.reference)
-                .cloned()
+            } else if let Some((value, comment)) =
+                type_script_enum_value_for_identifier(core, identifier.reference)
             {
-                let comment = core.symbols
-                    [usize::try_from(identifier.reference.inner_index).expect("symbol index")]
-                .original_name
-                .clone();
                 let value = if value.is_string {
                     Expr::new(
                         expression.loc,
@@ -4598,6 +6755,14 @@ fn visit_expr_with_target_and_context(
                 *data = ExprData::InlinedEnum(crate::internal::js_ast::InlinedEnumExpr {
                     value,
                     comment,
+                });
+            } else if assign_target == AssignTarget::None
+                && core.is_import_item.contains(&identifier.reference)
+            {
+                *data = ExprData::ImportIdentifier(crate::internal::js_ast::ImportIdentifierExpr {
+                    reference: identifier.reference,
+                    was_originally_identifier: true,
+                    ..crate::internal::js_ast::ImportIdentifierExpr::default()
                 });
             }
         }
@@ -4864,6 +7029,32 @@ fn visit_expr_with_target_and_context(
                 }
                 return;
             }
+            if binary.op == OpCode::BinaryAdd {
+                if let Some(folded) = crate::internal::js_ast::fold_string_addition(
+                    binary.left.clone(),
+                    binary.right.clone(),
+                    crate::internal::js_ast::StringAdditionKind::Normal,
+                ) && let Some(folded) = folded.data
+                {
+                    *data = *folded;
+                    return;
+                }
+                if let Some(ExprData::Binary(left)) = binary.left.data.as_deref()
+                    && left.op == OpCode::BinaryAdd
+                    && let Some(folded) = crate::internal::js_ast::fold_string_addition(
+                        left.right.clone(),
+                        binary.right.clone(),
+                        crate::internal::js_ast::StringAdditionKind::WithNestedLeft,
+                    )
+                {
+                    *data = ExprData::Binary(BinaryExpr {
+                        left: left.left.clone(),
+                        right: folded,
+                        op: left.op,
+                    });
+                    return;
+                }
+            }
             if core.options.minify_syntax && binary.op == OpCode::BinaryComma {
                 let helpers = make_helper_context(|reference| {
                     core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
@@ -4874,6 +7065,7 @@ fn visit_expr_with_target_and_context(
                 if binary.left.data.is_none()
                     && let Some(right) = binary.right.data.as_deref().cloned()
                 {
+                    expression.loc = binary.right.loc;
                     *data = right;
                     return;
                 }
@@ -5068,6 +7260,23 @@ fn visit_expr_with_target_and_context(
                     _ => false,
                 };
             }
+            if !call.can_be_unwrapped_if_unused {
+                call.can_be_unwrapped_if_unused = if call.args.len() <= 1
+                    && is_unbound_identifier_named(core, &call.target, "Symbol")
+                {
+                    call.args.first().is_none_or(|argument| {
+                        known_primitive_type(argument.data.as_deref()) != PrimitiveType::Unknown
+                    })
+                } else if call.args.len() == 1
+                    && let Some(ExprData::Dot(dot)) = call.target.data.as_deref()
+                    && dot.name == "for"
+                    && is_unbound_identifier_named(core, &dot.target, "Symbol")
+                {
+                    known_primitive_type(call.args[0].data.as_deref()) != PrimitiveType::Unknown
+                } else {
+                    false
+                };
+            }
             if core.options.drop_console {
                 let mut parts = Vec::new();
                 if append_console_method_chain(core, &call.target, &mut parts) {
@@ -5110,37 +7319,98 @@ fn visit_expr_with_target_and_context(
             } else {
                 None
             };
-            if let Some(kind) = kind
-                && call.args.len() == 1
-                && let Some(ExprData::String(path)) = call.args[0].data.as_deref()
-            {
-                let import_record_index = core.add_import_record(
-                    kind,
-                    crate::internal::ast::ImportPhase::Evaluation,
-                    core.source.range_of_string(call.args[0].loc),
-                    String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
-                        &path.value,
-                    ))
-                    .into_owned(),
-                    crate::internal::ast::ImportRecordFlags::default(),
-                );
-                *data = if kind == crate::internal::ast::ImportKind::Require {
-                    ExprData::RequireString(crate::internal::js_ast::RequireStringExpr {
-                        import_record_index,
-                        close_paren_loc: call.close_paren_loc,
-                    })
-                } else {
-                    ExprData::RequireResolveString(
-                        crate::internal::js_ast::RequireResolveStringExpr {
+            if let Some(kind) = kind {
+                if kind == crate::internal::ast::ImportKind::Require {
+                    ignore_usage_if_recorded(core, core.require_ref);
+                }
+                if call.args.len() == 1
+                    && let Some(ExprData::String(path)) = call.args[0].data.as_deref()
+                {
+                    if kind == crate::internal::ast::ImportKind::Require
+                        && core.is_control_flow_dead
+                    {
+                        *data = ExprData::Null;
+                        return;
+                    }
+                    let import_record_index = core.add_import_record(
+                        kind,
+                        crate::internal::ast::ImportPhase::Evaluation,
+                        core.source.range_of_string(call.args[0].loc),
+                        String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                            &path.value,
+                        ))
+                        .into_owned(),
+                        crate::internal::ast::ImportRecordFlags::default(),
+                    );
+                    if kind == crate::internal::ast::ImportKind::Require
+                        && core.visit_try_body_depth > 0
+                    {
+                        let record = &mut core.import_records[import_record_index as usize];
+                        record.flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
+                        record.error_handler_loc = core.visit_try_catch_loc;
+                    }
+                    *data = if kind == crate::internal::ast::ImportKind::Require {
+                        ExprData::RequireString(crate::internal::js_ast::RequireStringExpr {
                             import_record_index,
                             close_paren_loc: call.close_paren_loc,
-                        },
-                    )
-                };
+                        })
+                    } else {
+                        ExprData::RequireResolveString(
+                            crate::internal::js_ast::RequireResolveStringExpr {
+                                import_record_index,
+                                close_paren_loc: call.close_paren_loc,
+                            },
+                        )
+                    };
+                } else if kind == crate::internal::ast::ImportKind::Require {
+                    if call.args.len() == 1
+                        && let Some(replacement) = handle_glob_pattern(
+                            core,
+                            call.args[0].clone(),
+                            ImportKind::Require,
+                            crate::internal::ast::ImportPhase::Evaluation,
+                            None,
+                            ImportRecordFlags::default(),
+                        )
+                        && let Some(replacement) = replacement.data
+                    {
+                        *data = *replacement;
+                    } else {
+                        call.target = value_to_substitute_for_require(core, call.target.loc);
+                    }
+                }
             }
         }
         ExprData::Dot(dot) => {
-            visit_expr(core, &mut dot.target, resolve_identifiers);
+            visit_expr_with_target_and_context(
+                core,
+                &mut dot.target,
+                resolve_identifiers,
+                AssignTarget::None,
+                ExprVisitContext {
+                    is_property_access_target: true,
+                    ..ExprVisitContext::default()
+                },
+            );
+            if assign_target == AssignTarget::None
+                && dot.optional_chain == OptionalChain::None
+                && let Some(ExprData::ImportIdentifier(identifier)) = dot.target.data.as_deref()
+                && core.is_import_item.contains(&identifier.reference)
+            {
+                core.record_import_symbol_property_use(identifier.reference, dot.name.clone());
+            }
+            if assign_target == AssignTarget::None
+                && let Some(replacement) = maybe_rewrite_import_namespace_property(
+                    core,
+                    &dot.target,
+                    &dot.name,
+                    dot.name_loc,
+                    false,
+                )
+            {
+                *data = replacement;
+                return;
+            }
             if assign_target == AssignTarget::None
                 && let Some(parts) = dot_chain_parts(core, &dot.target, &dot.name)
                 && let Some(define) = core
@@ -5169,32 +7439,26 @@ fn visit_expr_with_target_and_context(
                     return;
                 }
             }
-            let replacement = if assign_target == AssignTarget::None {
-                let reference = match dot.target.data.as_deref() {
-                    Some(ExprData::Identifier(identifier)) => Some(identifier.reference),
-                    _ => None,
-                };
-                reference
-                    .and_then(|reference| core.ts_enums.get(&reference))
-                    .and_then(|values| values.get(&dot.name))
-                    .cloned()
-                    .map(|value| {
-                        let value = if value.is_string {
-                            Expr::new(
-                                expression.loc,
-                                ExprData::String(crate::internal::js_ast::StringExpr {
-                                    value: value.string,
-                                    ..crate::internal::js_ast::StringExpr::default()
-                                }),
-                            )
-                        } else {
-                            Expr::new(expression.loc, ExprData::Number(value.number))
-                        };
-                        ExprData::InlinedEnum(crate::internal::js_ast::InlinedEnumExpr {
-                            value,
-                            comment: dot.name.clone(),
-                        })
+            let replacement = if assign_target == AssignTarget::None
+                && dot.optional_chain == OptionalChain::None
+            {
+                type_script_enum_value_for_access(core, &dot.target, &dot.name).map(|value| {
+                    let value = if value.is_string {
+                        Expr::new(
+                            expression.loc,
+                            ExprData::String(crate::internal::js_ast::StringExpr {
+                                value: value.string,
+                                ..crate::internal::js_ast::StringExpr::default()
+                            }),
+                        )
+                    } else {
+                        Expr::new(expression.loc, ExprData::Number(value.number))
+                    };
+                    ExprData::InlinedEnum(crate::internal::js_ast::InlinedEnumExpr {
+                        value,
+                        comment: dot.name.clone(),
                     })
+                })
             } else {
                 None
             };
@@ -5218,8 +7482,47 @@ fn visit_expr_with_target_and_context(
             }
         }
         ExprData::Index(index) => {
-            visit_expr(core, &mut index.target, resolve_identifiers);
+            visit_expr_with_target_and_context(
+                core,
+                &mut index.target,
+                resolve_identifiers,
+                AssignTarget::None,
+                ExprVisitContext {
+                    is_property_access_target: true,
+                    ..ExprVisitContext::default()
+                },
+            );
             visit_expr(core, &mut index.index, resolve_identifiers);
+            if assign_target == AssignTarget::None
+                && index.optional_chain == OptionalChain::None
+                && let Some(ExprData::ImportIdentifier(identifier)) = index.target.data.as_deref()
+                && core.is_import_item.contains(&identifier.reference)
+                && let Some(ExprData::String(string)) = index.index.data.as_deref()
+            {
+                let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                    &string.value,
+                ))
+                .into_owned();
+                core.record_import_symbol_property_use(identifier.reference, name);
+            }
+            if assign_target == AssignTarget::None
+                && let Some(ExprData::String(string)) = index.index.data.as_deref()
+            {
+                let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                    &string.value,
+                ))
+                .into_owned();
+                if let Some(replacement) = maybe_rewrite_import_namespace_property(
+                    core,
+                    &index.target,
+                    &name,
+                    index.index.loc,
+                    true,
+                ) {
+                    *data = replacement;
+                    return;
+                }
+            }
             if assign_target == AssignTarget::None
                 && let Some(ExprData::String(string)) = index.index.data.as_deref()
             {
@@ -5255,11 +7558,9 @@ fn visit_expr_with_target_and_context(
                     }
                 }
             }
-            let replacement = if assign_target == AssignTarget::None {
-                let reference = match index.target.data.as_deref() {
-                    Some(ExprData::Identifier(identifier)) => Some(identifier.reference),
-                    _ => None,
-                };
+            let replacement = if assign_target == AssignTarget::None
+                && index.optional_chain == OptionalChain::None
+            {
                 let name = match index.index.data.as_deref() {
                     Some(ExprData::String(string)) => Some(
                         String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
@@ -5269,32 +7570,27 @@ fn visit_expr_with_target_and_context(
                     ),
                     _ => None,
                 };
-                reference
-                    .zip(name)
-                    .and_then(|(reference, name)| {
-                        core.ts_enums
-                            .get(&reference)
-                            .and_then(|values| values.get(&name))
-                            .cloned()
-                            .map(|value| (name, value))
+                name.and_then(|name| {
+                    type_script_enum_value_for_access(core, &index.target, &name)
+                        .map(|value| (name, value))
+                })
+                .map(|(name, value)| {
+                    let value = if value.is_string {
+                        Expr::new(
+                            expression.loc,
+                            ExprData::String(crate::internal::js_ast::StringExpr {
+                                value: value.string,
+                                ..crate::internal::js_ast::StringExpr::default()
+                            }),
+                        )
+                    } else {
+                        Expr::new(expression.loc, ExprData::Number(value.number))
+                    };
+                    ExprData::InlinedEnum(crate::internal::js_ast::InlinedEnumExpr {
+                        value,
+                        comment: name,
                     })
-                    .map(|(name, value)| {
-                        let value = if value.is_string {
-                            Expr::new(
-                                expression.loc,
-                                ExprData::String(crate::internal::js_ast::StringExpr {
-                                    value: value.string,
-                                    ..crate::internal::js_ast::StringExpr::default()
-                                }),
-                            )
-                        } else {
-                            Expr::new(expression.loc, ExprData::Number(value.number))
-                        };
-                        ExprData::InlinedEnum(crate::internal::js_ast::InlinedEnumExpr {
-                            value,
-                            comment: name,
-                        })
-                    })
+                })
             } else {
                 None
             };
@@ -5464,6 +7760,23 @@ fn visit_expr_with_target_and_context(
                     return;
                 }
             }
+            if template.tag_or_nil.data.is_some()
+                && !core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::INLINE_SCRIPT)
+                && (contains_closing_script_tag(&template.head_raw)
+                    || template
+                        .parts
+                        .iter()
+                        .any(|part| contains_closing_script_tag(&part.tail_raw)))
+            {
+                let replacement = lower_tagged_template(core, expression.loc, template);
+                if let Some(replacement) = replacement.data {
+                    *data = *replacement;
+                    return;
+                }
+            }
         }
         ExprData::InlinedEnum(inlined) => {
             visit_expr(core, &mut inlined.value, resolve_identifiers);
@@ -5472,7 +7785,35 @@ fn visit_expr_with_target_and_context(
             visit_expr(core, &mut annotation.value, resolve_identifiers);
         }
         ExprData::Await(await_expression) => {
+            let strip_dead_top_level_await = core.visit_is_outside_fn_or_arrow
+                && core.is_control_flow_dead
+                && (core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::TOP_LEVEL_AWAIT)
+                    || !core.options.output_format.keep_esm_import_export_syntax());
+            if core.visit_is_outside_fn_or_arrow && !strip_dead_top_level_await {
+                let range = Range {
+                    loc: expression.loc,
+                    len: 5,
+                };
+                core.live_top_level_await_keyword = range;
+                core.mark_syntax_feature(JsFeature::TOP_LEVEL_AWAIT, range);
+            }
             visit_expr(core, &mut await_expression.value, resolve_identifiers);
+            if strip_dead_top_level_await {
+                if let Some(value) = await_expression.value.data.take() {
+                    *data = *value;
+                }
+                return;
+            }
+            if core.visit_try_body_depth > 0
+                && let Some(ExprData::ImportString(import)) = await_expression.value.data.as_deref()
+            {
+                let record = &mut core.import_records[import.import_record_index as usize];
+                record.flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
+                record.error_handler_loc = core.visit_try_catch_loc;
+            }
         }
         ExprData::Yield(yield_expression) => {
             visit_expr(
@@ -5561,7 +7902,7 @@ fn visit_expr_with_target_and_context(
             if (import.options_or_nil.data.is_none() || options.is_some())
                 && let Some(ExprData::String(path)) = import.expr.data.as_deref()
             {
-                let (assert_or_with, flags) = options.unwrap_or_default();
+                let (assert_or_with, flags) = options.clone().unwrap_or_default();
                 let import_record_index = core.add_import_record(
                     crate::internal::ast::ImportKind::Dynamic,
                     import.phase,
@@ -5577,27 +7918,51 @@ fn visit_expr_with_target_and_context(
                     import_record_index,
                     close_paren_loc: import.close_paren_loc,
                 });
+            } else if import.options_or_nil.data.is_none() || options.is_some() {
+                let (assert_or_with, flags) = options.unwrap_or_default();
+                if let Some(replacement) = handle_glob_pattern(
+                    core,
+                    import.expr.clone(),
+                    ImportKind::Dynamic,
+                    import.phase,
+                    assert_or_with,
+                    flags,
+                ) && let Some(replacement) = replacement.data
+                {
+                    *data = *replacement;
+                }
             }
         }
         ExprData::Function(function) => {
+            let name = function.function.name;
+            let name_to_keep = if core.options.keep_names {
+                name.map(|name| symbol_name(core, name.reference))
+            } else {
+                None
+            };
             visit_function(core, &mut function.function, resolve_identifiers);
-            if core.options.keep_names
-                && let Some(name) = function.function.name
+            if core.options.minify_syntax
+                && name.is_some_and(|name| {
+                    core.symbols[usize::try_from(name.reference.inner_index).expect("symbol index")]
+                        .use_count_estimate
+                        == 0
+                })
             {
-                keep_name = Some(
-                    core.symbols
-                        [usize::try_from(name.reference.inner_index).expect("symbol index")]
-                    .original_name
-                    .clone(),
-                );
+                function.function.name = None;
             }
+            keep_name = name_to_keep;
         }
         ExprData::Class(class) => {
-            visit_class(core, &mut class.class, resolve_identifiers);
-            if core.options.keep_names
-                && let Some(name) = class.class.name
-            {
-                let name = symbol_name(core, name.reference);
+            let name_to_keep = if core.options.keep_names {
+                class
+                    .class
+                    .name
+                    .map(|name| symbol_name(core, name.reference))
+            } else {
+                None
+            };
+            visit_class(core, &mut class.class, resolve_identifiers, true);
+            if let Some(name) = name_to_keep {
                 insert_class_name_static_block(core, &mut class.class, &name);
             }
         }
@@ -5605,8 +7970,11 @@ fn visit_expr_with_target_and_context(
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
             let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);
+            let old_try_catch_loc = core.visit_try_catch_loc;
             let old_is_async_generator =
                 std::mem::replace(&mut core.visit_is_async_generator, false);
+            let old_is_outside_fn_or_arrow =
+                std::mem::replace(&mut core.visit_is_outside_fn_or_arrow, false);
             core.push_next_scope_for_visit_pass(ScopeKind::FunctionArgs);
             let use_strict_loc = function_body_use_strict(core, &arrow.body.block.statements);
             if use_strict_loc.is_some() {
@@ -5632,8 +8000,6 @@ fn visit_expr_with_target_and_context(
                 );
                 visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
                 visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
-                let name = inferred_name_from_binding(core, &argument.binding);
-                keep_inferred_name(core, &mut argument.default_or_nil, name);
             }
             core.push_scope_for_visit_pass(ScopeKind::FunctionBody, arrow.body.loc);
             visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
@@ -5657,11 +8023,34 @@ fn visit_expr_with_target_and_context(
             core.visit_loop_depth = old_loop_depth;
             core.visit_switch_depth = old_switch_depth;
             core.visit_try_body_depth = old_try_body_depth;
+            core.visit_try_catch_loc = old_try_catch_loc;
             core.visit_is_async_generator = old_is_async_generator;
+            core.visit_is_outside_fn_or_arrow = old_is_outside_fn_or_arrow;
             if core.options.minify_syntax
                 && collapse_expression_statements_into_return(&mut arrow.body.block.statements)
             {
                 arrow.prefer_expr = true;
+            }
+            if core
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::ARROW)
+            {
+                *data = ExprData::Function(crate::internal::js_ast::FunctionExpr {
+                    function: crate::internal::js_ast::Function {
+                        args: std::mem::take(&mut arrow.args),
+                        body: std::mem::take(&mut arrow.body),
+                        arguments_ref: crate::internal::ast::INVALID_REF,
+                        open_paren_loc: expression.loc,
+                        is_async: arrow.is_async,
+                        has_rest_arg: arrow.has_rest_arg,
+                        has_body: true,
+                        has_no_side_effects_comment: arrow.has_no_side_effects_comment,
+                        is_unique_formal_parameters: true,
+                        ..crate::internal::js_ast::Function::default()
+                    },
+                    is_parenthesized: false,
+                });
             }
         }
         ExprData::JsxElement(element) => {
@@ -5915,7 +8304,6 @@ fn visit_expr_with_target_and_context(
         | ExprData::Super
         | ExprData::Null
         | ExprData::Undefined
-        | ExprData::This
         | ExprData::ImportMeta(_)
         | ExprData::NameOfSymbol(_)
         | ExprData::JsxText(_)
@@ -5924,6 +8312,21 @@ fn visit_expr_with_target_and_context(
         | ExprData::RequireString(_)
         | ExprData::RequireResolveString(_)
         | ExprData::ImportString(_) => {}
+        ExprData::This => {
+            if !core.visit_this_is_nested
+                && core.options.mode != crate::internal::config::Mode::PassThrough
+            {
+                if core.is_file_considered_esm {
+                    *data = ExprData::Undefined;
+                } else {
+                    core.record_usage(core.exports_ref);
+                    *data = ExprData::Identifier(IdentifierExpr {
+                        reference: core.exports_ref,
+                        ..IdentifierExpr::default()
+                    });
+                }
+            }
+        }
         ExprData::BigInt(_) => {
             if core
                 .options
@@ -6077,6 +8480,179 @@ fn import_options(expression: &Expr) -> Option<(Option<ImportAssertOrWith>, Impo
     ))
 }
 
+#[derive(Default)]
+struct RawGlobPart {
+    text: String,
+    is_wildcard: bool,
+}
+
+fn raw_glob_pattern_from_expr(expression: &Expr) -> Option<Vec<RawGlobPart>> {
+    match expression.data.as_deref()? {
+        ExprData::String(string) => Some(vec![RawGlobPart {
+            text: String::from_utf8_lossy(&utf16_to_string(&string.value)).into_owned(),
+            ..RawGlobPart::default()
+        }]),
+        ExprData::Template(template) if template.tag_or_nil.data.is_none() => {
+            let mut result = vec![RawGlobPart {
+                text: String::from_utf8_lossy(&utf16_to_string(&template.head_cooked)).into_owned(),
+                ..RawGlobPart::default()
+            }];
+            for part in &template.parts {
+                if let Some(parts) = raw_glob_pattern_from_expr(&part.value) {
+                    result.extend(parts);
+                } else {
+                    result.push(RawGlobPart {
+                        is_wildcard: true,
+                        ..RawGlobPart::default()
+                    });
+                }
+                result.push(RawGlobPart {
+                    text: String::from_utf8_lossy(&utf16_to_string(&part.tail_cooked)).into_owned(),
+                    ..RawGlobPart::default()
+                });
+            }
+            Some(result)
+        }
+        ExprData::Binary(binary) if binary.op == OpCode::BinaryAdd => {
+            let mut result = raw_glob_pattern_from_expr(&binary.left)?;
+            if let Some(parts) = raw_glob_pattern_from_expr(&binary.right) {
+                result.extend(parts);
+            } else {
+                result.push(RawGlobPart {
+                    is_wildcard: true,
+                    ..RawGlobPart::default()
+                });
+            }
+            Some(result)
+        }
+        _ => None,
+    }
+}
+
+fn handle_glob_pattern(
+    core: &mut ParserCore,
+    expression: Expr,
+    kind: ImportKind,
+    phase: crate::internal::ast::ImportPhase,
+    assert_or_with: Option<crate::internal::ast::ImportAssertOrWith>,
+    flags: ImportRecordFlags,
+) -> Option<Expr> {
+    if core.options.mode != crate::internal::config::Mode::Bundle {
+        return None;
+    }
+    let raw = raw_glob_pattern_from_expr(&expression)?;
+    let mut parts = Vec::new();
+    let mut last = GlobPart::default();
+    for part in raw {
+        if part.is_wildcard {
+            if last.wildcard == GlobWildcard::None {
+                if last.prefix.ends_with('/') {
+                    last.wildcard = GlobWildcard::AllIncludingSlash;
+                    parts.push(last);
+                    last = GlobPart {
+                        prefix: "/".into(),
+                        wildcard: GlobWildcard::AllExceptSlash,
+                    };
+                } else {
+                    last.wildcard = GlobWildcard::AllExceptSlash;
+                }
+            }
+        } else if !part.text.is_empty() {
+            if last.wildcard != GlobWildcard::None {
+                parts.push(last);
+                last = GlobPart::default();
+            }
+            last.prefix.push_str(&part.text);
+        }
+    }
+    parts.push(last);
+    if parts.len() == 1 && parts[0].wildcard == GlobWildcard::None {
+        return None;
+    }
+    if !parts[0].prefix.starts_with("./") && !parts[0].prefix.starts_with("../") {
+        return None;
+    }
+
+    let pattern = crate::internal::helpers::glob_pattern_to_string(&parts);
+    let key = (
+        kind,
+        format!("{}:{assert_or_with:?}:{pattern}", phase as u8),
+    );
+    let reference = if let Some(reference) = core.glob_imports.get(&key).copied() {
+        reference
+    } else {
+        let prefix = if kind == ImportKind::Require {
+            "globRequire"
+        } else {
+            "globImport"
+        };
+        let mut name = prefix.to_string();
+        let mut gap = true;
+        for character in pattern.chars() {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '$') {
+                if gap {
+                    name.push('_');
+                    gap = false;
+                }
+                name.push(character);
+            } else {
+                gap = true;
+            }
+        }
+        let import_record_index = core.add_import_record(
+            ImportKind::Stmt,
+            phase,
+            Range {
+                loc: expression.loc,
+                len: 0,
+            },
+            pattern.clone(),
+            flags,
+        );
+        let record = &mut core.import_records[import_record_index as usize];
+        record.assert_or_with = assert_or_with;
+        record.glob_pattern = Some(GlobPattern {
+            parts,
+            export_alias: name.clone(),
+            kind,
+        });
+        let namespace_ref = core.new_symbol(SymbolKind::Other, format!("import_{name}"));
+        let reference = core.new_symbol(SymbolKind::Import, name.clone());
+        core.generated_named_imports.insert(
+            reference,
+            crate::internal::js_ast::NamedImport {
+                alias: name.clone(),
+                alias_loc: expression.loc,
+                namespace_ref,
+                import_record_index,
+                ..crate::internal::js_ast::NamedImport::default()
+            },
+        );
+        core.glob_import_records.insert(
+            format!("{}:{pattern}", kind as u8),
+            (import_record_index, namespace_ref),
+        );
+        core.glob_imports.insert(key, reference);
+        reference
+    };
+    core.record_usage(reference);
+    Some(Expr::new(
+        expression.loc,
+        ExprData::Call(CallExpr {
+            target: Expr::new(
+                expression.loc,
+                ExprData::ImportIdentifier(crate::internal::js_ast::ImportIdentifierExpr {
+                    reference,
+                    was_originally_identifier: true,
+                    ..crate::internal::js_ast::ImportIdentifierExpr::default()
+                }),
+            ),
+            args: vec![expression],
+            ..CallExpr::default()
+        }),
+    ))
+}
+
 fn property_name(property: &crate::internal::js_ast::Property) -> Option<String> {
     let ExprData::String(string) = property.key.data.as_deref()? else {
         return None;
@@ -6213,6 +8789,7 @@ fn instantiate_jsx_define(
         loc,
         ExprData::Identifier(IdentifierExpr {
             reference,
+            can_be_removed_if_unused: true,
             ..IdentifierExpr::default()
         }),
     );
@@ -6223,6 +8800,7 @@ fn instantiate_jsx_define(
                 target: value,
                 name: part.clone(),
                 name_loc: loc,
+                can_be_removed_if_unused: true,
                 ..DotExpr::default()
             }),
         );
@@ -6251,13 +8829,30 @@ fn report_duplicate_properties(
             DuplicatePropertiesIn::Object => "object literal",
             DuplicatePropertiesIn::Class => "class body",
         };
-        core.add_warning_range(
-            Range {
-                loc: duplicate.duplicate_loc,
+        if let Some(log) = &core.log {
+            let earlier_range = Range {
+                loc: duplicate.original_loc,
                 len: 0,
-            },
-            format!("Duplicate key {key:?} in {context}"),
-        );
+            };
+            let note = core
+                .tracker
+                .msg_data(earlier_range, format!("The original key {key:?} is here:"));
+            log.add_id_with_notes(
+                MsgId::JsDuplicateObjectKey,
+                if is_inside_node_modules(&core.source.key_path.text) {
+                    MsgKind::Debug
+                } else {
+                    MsgKind::Warning
+                },
+                Some(&mut core.tracker),
+                Range {
+                    loc: duplicate.duplicate_loc,
+                    len: 0,
+                },
+                format!("Duplicate key {key:?} in {context}"),
+                vec![note],
+            );
+        }
     }
 }
 

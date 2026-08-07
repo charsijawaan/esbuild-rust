@@ -341,7 +341,11 @@ pub(crate) fn parse_function_tail(
             lexer,
             crate::internal::js_ast::ScopeKind::FunctionBody,
         );
-        core.pop_scope();
+        if body_context.is_type_script_declare {
+            core.pop_and_discard_scope(scope_index);
+        } else {
+            core.pop_scope();
+        }
         (body_loc, block, true)
     };
     core.fn_or_arrow_data_parse = old_context;

@@ -1513,7 +1513,7 @@ mod tests {
             panic!("expected bundled code");
         };
         let output = String::from_utf8(output).expect("bundle output is UTF-8");
-        assert!(output.contains("const value = 42;"));
+        assert!(output.contains("var value = 42;"));
         assert!(output.contains("console.log(value);"));
         assert!(!output.contains(": number"));
     }

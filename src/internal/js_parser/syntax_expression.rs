@@ -43,6 +43,7 @@ pub(crate) fn parse_expression(
     allow_in: bool,
 ) -> Expr {
     let comment_flags = lexer.has_comment_before;
+    core.save_expr_comments_here(lexer);
     let left = parse_prefix(core, lexer, minimum_precedence, allow_in);
     parse_expression_suffix_with_flags(
         core,
@@ -51,6 +52,18 @@ pub(crate) fn parse_expression(
         minimum_precedence,
         allow_in,
         comment_flags,
+    )
+}
+
+pub(crate) fn parse_experimental_decorator(core: &mut ParserCore, lexer: &mut Lexer) -> Expr {
+    core.save_expr_comments_here(lexer);
+    let left = parse_prefix(core, lexer, Precedence::New, true);
+    super::syntax_suffix::parse_high_precedence_suffix_chain_for_experimental_decorator(
+        core,
+        lexer,
+        left,
+        Precedence::New,
+        |core, lexer, precedence| parse_expression(core, lexer, precedence, true),
     )
 }
 
@@ -88,7 +101,19 @@ pub(crate) fn parse_expression_suffix_with_flags(
             }
         }
     }
-    parse_expression_suffix(core, lexer, left, minimum_precedence, allow_in)
+    let mut result = parse_expression_suffix(core, lexer, left, minimum_precedence, allow_in);
+    if !core.options.ignore_dce_annotations
+        && comment_flags.contains(CommentBefore::NO_SIDE_EFFECTS)
+    {
+        match result.data.as_deref_mut() {
+            Some(ExprData::Arrow(arrow)) => arrow.has_no_side_effects_comment = true,
+            Some(ExprData::Function(function)) => {
+                function.function.has_no_side_effects_comment = true;
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 pub(crate) fn parse_expression_suffix(
@@ -343,6 +368,12 @@ fn parse_prefix(
                 // It was an ordinary parenthesized expression. Remove the
                 // speculative argument scope but retain any nested child scopes.
                 core.pop_and_flatten_scope(scope_index);
+                if let Some(comments) = core.expr_comments.remove(&paren_loc) {
+                    core.expr_comments
+                        .entry(expr.loc)
+                        .or_default()
+                        .splice(0..0, comments);
+                }
                 if has_trailing_comma || has_rest {
                     lexer.unexpected();
                 }
@@ -351,6 +382,7 @@ fn parse_prefix(
                     Some(ExprData::Object(object)) => object.is_parenthesized = true,
                     Some(ExprData::Function(function)) => function.is_parenthesized = true,
                     Some(ExprData::Arrow(arrow)) => arrow.is_parenthesized = true,
+                    Some(ExprData::Class(class)) => class.is_parenthesized = true,
                     _ => {}
                 }
                 expr

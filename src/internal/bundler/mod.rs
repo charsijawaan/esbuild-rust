@@ -23,7 +23,7 @@ use crate::internal::{
         SideEffects, SideEffectsKind,
     },
     helpers::{
-        encode_string_as_shortest_data_url, mime_type_by_extension, quote_for_json,
+        encode_string_as_shortest_data_url, mime_type_by_extension, quote_for_json, quote_single,
         string_to_utf16, utf16_to_string,
     },
     js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
@@ -89,14 +89,7 @@ pub fn prepare_linker_graph<S: BuildHasher>(
         .iter()
         .map(|file| file.input_file.clone())
         .collect();
-    let reachable_files: Vec<_> = input_files
-        .iter()
-        .enumerate()
-        .filter_map(|(source_index, file)| {
-            file.repr.as_ref()?;
-            Some(u32::try_from(source_index).expect("source index fits in u32"))
-        })
-        .collect();
+    let reachable_files = find_reachable_files(&input_files, &bundle.entry_points);
     linker::prepare_linker_graph(
         &input_files,
         &reachable_files,
@@ -120,6 +113,50 @@ pub fn compile_javascript_bundle(
     options: &Options,
     unique_key_prefix: &str,
 ) -> CompiledBundle {
+    if !options.code_splitting && bundle.entry_points.len() > 1 {
+        let mut compiled = CompiledBundle::default();
+        let mut group_options = options.clone();
+        group_options.needs_metafile = false;
+        for entry_point in &bundle.entry_points {
+            let group = compile_javascript_bundle(
+                file_system,
+                &ScannedBundle {
+                    files: bundle.files.clone(),
+                    entry_points: vec![entry_point.clone()],
+                },
+                &group_options,
+                unique_key_prefix,
+            );
+            compiled.output_files.extend(group.output_files);
+            compiled
+                .scan_result
+                .import_issues
+                .extend(group.scan_result.import_issues);
+            compiled
+                .scan_result
+                .ambiguous_re_exports
+                .extend(group.scan_result.ambiguous_re_exports);
+            compiled
+                .scan_result
+                .arbitrary_namespace_issues
+                .extend(group.scan_result.arbitrary_namespace_issues);
+        }
+        let mut outputs_by_path = HashMap::<String, Vec<u8>>::new();
+        compiled.output_files.retain(|output| {
+            if outputs_by_path
+                .get(&output.abs_path)
+                .is_some_and(|contents| contents == &output.contents)
+            {
+                return false;
+            }
+            outputs_by_path.insert(output.abs_path.clone(), output.contents.clone());
+            true
+        });
+        compiled.metafile =
+            generate_metadata_json(file_system, bundle, &compiled.output_files, options);
+        return compiled;
+    }
+
     let (mut prepared, source_map_line_offset_tables) =
         if options.source_map == config::SourceMap::None {
             (
@@ -395,6 +432,136 @@ fn entry_point_is_file(file_system: &dyn Fs, entry_point: &EntryPoint) -> bool {
             .is_some_and(|entry| entry.kind(file_system) == EntryKind::File)
 }
 
+fn glob_traversal_root(file_system: &dyn Fs, absolute_pattern: &str) -> Option<String> {
+    let wildcard = absolute_pattern.find(['*', '?'])?;
+    let prefix = &absolute_pattern[..wildcard];
+    let trimmed = prefix.trim_end_matches(['/', '\\']);
+    Some(if trimmed.is_empty() && prefix.starts_with(['/', '\\']) {
+        prefix[..1].to_string()
+    } else if trimmed.len() < prefix.len() {
+        trimmed.to_string()
+    } else {
+        file_system.dir(trimmed)
+    })
+}
+
+fn expand_entry_point_glob(file_system: &dyn Fs, pattern: &str) -> Option<Vec<String>> {
+    let absolute_pattern = if file_system.is_abs(pattern) {
+        pattern.to_string()
+    } else {
+        file_system.join(&[file_system.cwd(), pattern])
+    };
+    let (regexp, had_wildcard) = resolver::globstar_to_escaped_regexp(&absolute_pattern);
+    if !had_wildcard {
+        return None;
+    }
+    let regexp = regex::Regex::new(&regexp).ok()?;
+    let root = glob_traversal_root(file_system, &absolute_pattern)?;
+
+    fn visit(
+        file_system: &dyn Fs,
+        directory: &str,
+        regexp: &regex::Regex,
+        matches: &mut Vec<String>,
+    ) {
+        let (entries, error, _) = file_system.read_directory(directory);
+        if error.is_some() {
+            return;
+        }
+        for name in entries.sorted_keys() {
+            let Some(entry) = entries.get(&name).0 else {
+                continue;
+            };
+            let path = file_system.join(&[directory, &name]);
+            match entry.kind(file_system) {
+                EntryKind::File if regexp.is_match(&path.replace('\\', "/")) => {
+                    matches.push(path);
+                }
+                EntryKind::Dir if entry.symlink(file_system).is_empty() => {
+                    visit(file_system, &path, regexp, matches);
+                }
+                EntryKind::None | EntryKind::Dir | EntryKind::File => {}
+            }
+        }
+    }
+
+    let mut matches = Vec::new();
+    visit(file_system, &root, &regexp, &mut matches);
+    Some(matches)
+}
+
+fn quoted_js_string(text: &str, ascii_only: bool) -> String {
+    String::from_utf8(quote_for_json(text.as_bytes(), ascii_only))
+        .expect("JSON quoting always produces UTF-8")
+}
+
+fn glob_module_path(
+    file_system: &dyn Fs,
+    options: &Options,
+    source: &Source,
+    source_directory: &str,
+    pattern: &crate::internal::ast::GlobPattern,
+    assert_or_with: Option<&crate::internal::ast::ImportAssertOrWith>,
+    matches: Vec<String>,
+) -> Path {
+    let pattern_text = crate::internal::helpers::glob_pattern_to_string(&pattern.parts);
+    let call = match pattern.kind {
+        ImportKind::Require => "require",
+        ImportKind::Dynamic => "import",
+        _ => unreachable!("glob imports must be require() or import()"),
+    };
+    let pretty_call = format!(
+        "{call}({})",
+        quoted_js_string(&pattern_text, options.ascii_only)
+    );
+    let mut contents = format!(
+        "import {{ __glob }} from \"<runtime>\"; export var {} = __glob({{\n",
+        pattern.export_alias
+    );
+    for absolute_path in matches {
+        let Some(mut relative_path) = file_system.rel(source_directory, &absolute_path) else {
+            continue;
+        };
+        relative_path = relative_path.replace('\\', "/");
+        if resolver::is_package_path(&relative_path) {
+            relative_path = format!("./{relative_path}");
+        }
+        let quoted = quoted_js_string(&relative_path, options.ascii_only);
+        let operation = match pattern.kind {
+            ImportKind::Require => "require",
+            ImportKind::Dynamic => "import",
+            _ => unreachable!(),
+        };
+        let mut options_suffix = String::new();
+        if pattern.kind == ImportKind::Dynamic
+            && let Some(assert_or_with) = assert_or_with
+        {
+            options_suffix.push_str(&format!(",{{{}:{{", assert_or_with.keyword.as_str()));
+            for entry in &assert_or_with.entries {
+                let key = String::from_utf8_lossy(&utf16_to_string(&entry.key)).into_owned();
+                let value = String::from_utf8_lossy(&utf16_to_string(&entry.value)).into_owned();
+                options_suffix.push_str(&quoted_js_string(&key, options.ascii_only));
+                options_suffix.push(':');
+                options_suffix.push_str(&quoted_js_string(&value, options.ascii_only));
+                options_suffix.push(',');
+            }
+            options_suffix.push_str("}}");
+        }
+        contents.push_str(&format!(
+            "{quoted}:()=>{operation}({quoted}{options_suffix}),\n"
+        ));
+    }
+    contents.push_str("});");
+
+    let absolute_pretty = format!("{pretty_call} in {}", source.pretty_paths.abs);
+    let relative_pretty = format!("{pretty_call} in {}", source.pretty_paths.rel);
+    Path {
+        text: format!("{absolute_pretty}\0{relative_pretty}\0{source_directory}\0{contents}"),
+        namespace: "glob".into(),
+        ..Path::default()
+    }
+}
+
 #[must_use]
 pub fn default_extension_to_loader_map() -> HashMap<String, Loader> {
     [
@@ -480,7 +647,7 @@ fn parse_file_with_cache(
             };
         }
     }
-    if source.identifier_name.is_empty() {
+    if source.identifier_name.is_empty() && source.key_path.namespace != "glob" {
         source.identifier_name = js_ast::generate_non_unique_name_from_path(&source.key_path.text);
     }
     if loader == Loader::Empty {
@@ -519,7 +686,13 @@ fn parse_file_with_cache(
             } else {
                 js_parser::parse(log.clone(), source.clone(), parser_options)
             };
-            if ast.parts.len() <= 1 {
+            if ast.parts.len() <= 1
+                || ast.parts.iter().all(|part| {
+                    part.statements
+                        .iter()
+                        .all(|statement| statement.data.is_none())
+                })
+            {
                 result.file.input_file.side_effects.kind = SideEffectsKind::NoSideEffectsEmptyAst;
             }
             result.file.input_file.repr = Some(InputFileRepr::Js(Box::new(JsRepr {
@@ -534,6 +707,7 @@ fn parse_file_with_cache(
                 minify_whitespace: options.minify_whitespace,
                 minify_identifiers: options.minify_identifiers,
                 unsupported_css_features: options.unsupported_css_features,
+                css_prefix_data: options.css_prefix_data.clone(),
                 symbol_mode: match loader {
                     Loader::LocalCss => css_parser::SymbolMode::Local,
                     Loader::GlobalCss => css_parser::SymbolMode::Global,
@@ -691,6 +865,68 @@ fn parse_file_with_cache(
         result.file.input_file.side_effects.kind = SideEffectsKind::NoSideEffectsPureDataFromPlugin;
     }
     result
+}
+
+fn identifier_name_from_path(
+    file_system: &dyn Fs,
+    options: &Options,
+    absolute_path: &str,
+) -> String {
+    if let Some(mut relative) = file_system.rel(&options.abs_output_base, absolute_path) {
+        loop {
+            let next = relative
+                .strip_prefix("../")
+                .or_else(|| relative.strip_prefix("..\\"));
+            let Some(next) = next else {
+                break;
+            };
+            relative = next.to_string();
+        }
+        return js_ast::generate_non_unique_name_from_path(&relative);
+    }
+    js_ast::generate_non_unique_name_from_path(absolute_path)
+}
+
+fn lowest_common_ancestor_directory(file_system: &dyn Fs, absolute_paths: &[String]) -> String {
+    let Some(first) = absolute_paths.first() else {
+        return String::new();
+    };
+    let mut lowest_abs_dir = file_system.dir(first);
+
+    for absolute_path in &absolute_paths[1..] {
+        let abs_dir = file_system.dir(absolute_path);
+        let mut last_slash = 0;
+        let mut a = 0;
+        let mut b = 0;
+
+        loop {
+            let rune_a = abs_dir[a..].chars().next();
+            let rune_b = lowest_abs_dir[b..].chars().next();
+            let boundary_a = rune_a.is_none_or(|c| matches!(c, '/' | '\\'));
+            let boundary_b = rune_b.is_none_or(|c| matches!(c, '/' | '\\'));
+
+            if boundary_a && boundary_b {
+                if rune_a.is_none() || rune_b.is_none() {
+                    lowest_abs_dir.truncate(a);
+                    break;
+                }
+                last_slash = a;
+            } else if boundary_a != boundary_b
+                || matches!((rune_a, rune_b), (Some(a), Some(b)) if !a.to_lowercase().eq(b.to_lowercase()))
+            {
+                if last_slash < abs_dir.len() && !abs_dir[..last_slash].contains(['/', '\\']) {
+                    last_slash += 1;
+                }
+                lowest_abs_dir = abs_dir[..last_slash].to_string();
+                break;
+            }
+
+            a += rune_a.map_or(0, char::len_utf8);
+            b += rune_b.map_or(0, char::len_utf8);
+        }
+    }
+
+    lowest_abs_dir
 }
 
 fn sanitize_plugin_location(file_system: &dyn Fs, location: &mut logger::MsgLocation) {
@@ -963,6 +1199,7 @@ fn resolve_with_plugins(
         (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
         is_require,
         ResolverContext {
+            import_kind: kind,
             tsconfig,
             external_settings: Some(&options.external_settings),
             external_packages: options.external_packages,
@@ -1082,6 +1319,78 @@ fn enqueue_dependencies(
     }
 }
 
+fn warn_about_ignored_bare_imports(log: &Log, options: &Options, files: &[ScannerFile]) {
+    if options.ignore_dce_annotations {
+        return;
+    }
+    for file in files {
+        let importer = &file.input_file.source;
+        if importer.key_path.text.is_empty()
+            || crate::internal::helpers::is_inside_node_modules(&importer.key_path.text)
+        {
+            continue;
+        }
+        let Some(records) = file
+            .input_file
+            .repr
+            .as_ref()
+            .and_then(InputFileRepr::import_records)
+        else {
+            continue;
+        };
+        let mut tracker = LineColumnTracker::new(Some(importer));
+        for record in records {
+            if !record
+                .flags
+                .contains(ImportRecordFlags::WAS_ORIGINALLY_BARE_IMPORT)
+                || !record.source_index.is_valid()
+            {
+                continue;
+            }
+            let Some(target) = files.get(record.source_index.get_index() as usize) else {
+                continue;
+            };
+            if matches!(
+                target.input_file.side_effects.kind,
+                SideEffectsKind::HasSideEffects
+                    | SideEffectsKind::NoSideEffectsPureDataFromPlugin
+                    | SideEffectsKind::NoSideEffectsEmptyAst
+            ) {
+                continue;
+            }
+            let mut notes = Vec::new();
+            let mut by = String::new();
+            if let Some(data) = &target.input_file.side_effects.data {
+                if !data.plugin_name.is_empty() {
+                    by = format!(" by plugin {:?}", data.plugin_name);
+                } else if let Some(source) = &data.source {
+                    let text = if data.is_side_effects_array_in_json {
+                        "It was excluded from the \"sideEffects\" array in the enclosing \"package.json\" file:"
+                    } else {
+                        "\"sideEffects\" is false in the enclosing \"package.json\" file:"
+                    };
+                    notes.push(LineColumnTracker::new(Some(source)).msg_data(data.range, text));
+                }
+            }
+            log.add_id_with_notes(
+                logger::MsgId::BundlerIgnoredBareImport,
+                MsgKind::Warning,
+                Some(&mut tracker),
+                record.range,
+                format!(
+                    "Ignoring this import because {:?} was marked as having no side effects{by}",
+                    target
+                        .input_file
+                        .source
+                        .pretty_paths
+                        .select(options.log_path_style)
+                ),
+                notes,
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn load_file_with_plugins(
     log: &Log,
@@ -1168,6 +1477,20 @@ fn load_file_with_plugins(
         }
     }
 
+    if source.key_path.namespace == "glob" {
+        let mut parts = source.key_path.text.splitn(4, '\0');
+        let _absolute_pretty = parts.next()?;
+        let _relative_pretty = parts.next()?;
+        let abs_resolve_dir = parts.next()?.to_string();
+        source.contents = Arc::from(parts.next()?.as_bytes());
+        return Some(LoadedFile {
+            loader: Loader::Js,
+            abs_resolve_dir,
+            plugin_name: String::new(),
+            plugin_data: None,
+        });
+    }
+
     if source.key_path.is_disabled() {
         return Some(LoadedFile {
             loader: Loader::Empty,
@@ -1196,6 +1519,34 @@ fn load_file_with_plugins(
         return Some(LoadedFile {
             loader: Loader::Default,
             abs_resolve_dir: file_system.dir(&source.key_path.text),
+            plugin_name: String::new(),
+            plugin_data: None,
+        });
+    }
+    if source.key_path.namespace == "dataurl"
+        && let Some(data_url) = resolver::DataUrl::parse(&source.key_path.text)
+    {
+        match data_url.decode_data() {
+            Ok(contents) => source.contents = Arc::from(contents),
+            Err(error) => {
+                let mut tracker = LineColumnTracker::new(import_source);
+                log.add_error(
+                    Some(&mut tracker),
+                    import_path_range,
+                    format!("Could not load data URL: {error}"),
+                );
+                return None;
+            }
+        }
+        let loader = match data_url.decode_mime_type() {
+            resolver::MimeType::TextCss => Loader::Css,
+            resolver::MimeType::TextJavaScript => Loader::Js,
+            resolver::MimeType::ApplicationJson => Loader::Json,
+            resolver::MimeType::Unsupported => Loader::None,
+        };
+        return Some(LoadedFile {
+            loader,
+            abs_resolve_dir: String::new(),
             plugin_name: String::new(),
             plugin_data: None,
         });
@@ -1274,10 +1625,69 @@ fn resolve_import_records_from_directory(
     > = HashMap::new();
 
     for (record_index, record) in records.iter_mut().enumerate() {
-        if record.source_index.is_valid()
-            || record.flags.contains(ImportRecordFlags::IS_UNUSED)
-            || record.glob_pattern.is_some()
-        {
+        if record.source_index.is_valid() || record.flags.contains(ImportRecordFlags::IS_UNUSED) {
+            continue;
+        }
+        if source.key_path.namespace == "glob" && record.path.text == "<runtime>" {
+            record.source_index = Index32::new(runtime::SOURCE_INDEX);
+            continue;
+        }
+        if let Some(pattern) = &record.glob_pattern {
+            let pattern_text = crate::internal::helpers::glob_pattern_to_string(&pattern.parts);
+            let call = match pattern.kind {
+                ImportKind::Require => "require",
+                ImportKind::Dynamic => "import",
+                _ => unreachable!("glob imports must be require() or import()"),
+            };
+            let pretty_call = format!(
+                "{call}({})",
+                quoted_js_string(&pattern_text, options.ascii_only)
+            );
+            let absolute_pattern = file_system.join(&[&source_directory, &pattern_text]);
+            let Some(root) = glob_traversal_root(file_system, &absolute_pattern) else {
+                continue;
+            };
+            let (_, root_error, _) = file_system.read_directory(&root);
+            if root_error.is_some() {
+                log.add_error(
+                    Some(&mut tracker),
+                    record.range,
+                    format!("Could not resolve {pretty_call}"),
+                );
+                continue;
+            }
+            let matches =
+                expand_entry_point_glob(file_system, &absolute_pattern).unwrap_or_default();
+            if matches.is_empty() {
+                log.add_id(
+                    logger::MsgId::BundlerEmptyGlob,
+                    MsgKind::Warning,
+                    Some(&mut tracker),
+                    record.range,
+                    format!("The glob pattern {pretty_call} did not match any files"),
+                );
+            }
+            let path = glob_module_path(
+                file_system,
+                options,
+                &source,
+                &source_directory,
+                pattern,
+                record.assert_or_with.as_ref(),
+                matches,
+            );
+            record.source_index = Index32::new(
+                caches
+                    .source_index_cache
+                    .get(path.clone(), SourceIndexKind::Normal),
+            );
+            result.resolve_results[record_index] = Some(ResolveResult {
+                path_pair: resolver::PathPair {
+                    primary: path,
+                    ..resolver::PathPair::default()
+                },
+                ..ResolveResult::default()
+            });
             continue;
         }
         let is_require = matches!(
@@ -1349,7 +1759,6 @@ fn resolve_import_records_from_directory(
             }
             continue;
         };
-
         if record.kind == ImportKind::RequireResolve {
             if resolve_result.path_pair.is_external {
                 record.path = rewrite_external_path(
@@ -1389,11 +1798,47 @@ fn find_nearest_tsconfig(
     start_directory: &str,
     override_path: Option<&str>,
 ) -> Option<resolver::TsConfigJson> {
+    fn discover_pnp(
+        log: &Log,
+        file_system: &dyn Fs,
+        start_directory: &str,
+    ) -> Option<resolver::PnpData> {
+        let mut directory = start_directory.to_string();
+        loop {
+            let path = file_system.join(&[&directory, ".pnp.data.json"]);
+            let (contents, error, _) = file_system.read_file(&path);
+            if error.is_none() {
+                let source = Source {
+                    key_path: Path {
+                        text: path.clone(),
+                        namespace: "file".into(),
+                        ..Path::default()
+                    },
+                    contents: Arc::from(contents),
+                    ..Source::default()
+                };
+                let (json, ok) =
+                    js_parser::parse_json(log.clone(), source, js_parser::JsonOptions::default());
+                if ok {
+                    return Some(resolver::compile_yarn_pnp_data(&path, &directory, &json));
+                }
+                return None;
+            }
+            let parent = file_system.dir(&directory);
+            if parent.is_empty() || parent == directory {
+                return None;
+            }
+            directory = parent;
+        }
+    }
+
     fn load(
         log: &Log,
         file_system: &dyn Fs,
         path: &str,
         visited: &mut HashSet<String>,
+        config_dir: &str,
+        pnp: Option<&resolver::PnpData>,
     ) -> Option<resolver::TsConfigJson> {
         if !visited.insert(path.to_string()) {
             return None;
@@ -1409,48 +1854,169 @@ fn find_nearest_tsconfig(
                 namespace: "file".into(),
                 ..Path::default()
             },
+            pretty_paths: logger::PrettyPaths {
+                abs: path.to_string(),
+                rel: file_system
+                    .rel(file_system.cwd(), path)
+                    .unwrap_or_else(|| path.to_string()),
+            },
             contents: Arc::from(contents),
             ..Source::default()
         };
-        let mut extends = |text: &str, _range: Range| {
-            let mut extended = if file_system.is_abs(text) {
-                text.to_string()
-            } else if text.starts_with('.') {
-                file_system.join(&[&directory, text])
-            } else {
-                resolver::resolve_file_or_package(
+        let mut tracker = LineColumnTracker::new(Some(&source));
+        let mut extends = |text: &str, range: Range| {
+            let mut did_find_candidate = false;
+            let mut try_file = |path: &str, visited: &mut HashSet<String>| {
+                let (_, error, _) = file_system.read_file(path);
+                if error.is_none() {
+                    did_find_candidate = true;
+                    if visited.contains(path) {
+                        log.add_id(
+                            logger::MsgId::TsConfigJsonCycle,
+                            MsgKind::Warning,
+                            Some(&mut tracker),
+                            range,
+                            format!("Base config file {text:?} forms cycle"),
+                        );
+                        None
+                    } else {
+                        load(log, file_system, path, visited, config_dir, pnp)
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if !file_system.is_abs(text) && !text.starts_with('.') {
+                if let Some(resolved) = resolver::resolve_file_or_package_with_context(
                     log,
                     file_system,
                     &directory,
                     text,
-                    &[".json".into()],
+                    &[],
                     Platform::Neutral,
                     None,
                     false,
-                )?
-                .paths
-                .primary
-                .text
-            };
-            if !std::path::Path::new(&extended)
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
-            {
-                extended.push_str(".json");
+                    ResolverContext {
+                        pnp,
+                        ..ResolverContext::default()
+                    },
+                ) && let Some(config) = try_file(&resolved.paths.primary.text, visited)
+                {
+                    return Some(config);
+                }
+                let (package_name, _) = resolver::parse_esm_package_name(text)?;
+                let mut current = directory.clone();
+                loop {
+                    if file_system.base(&current) != "node_modules" {
+                        let package_dir =
+                            file_system.join(&[&current, "node_modules", package_name]);
+                        let mut joined = file_system.join(&[&current, "node_modules", text]);
+                        let package_path = file_system.join(&[&package_dir, "package.json"]);
+                        let (package_contents, package_error, _) =
+                            file_system.read_file(&package_path);
+                        if package_error.is_none() {
+                            let package_source = Source {
+                                key_path: Path {
+                                    text: package_path,
+                                    namespace: "file".into(),
+                                    ..Path::default()
+                                },
+                                contents: Arc::from(package_contents),
+                                ..Source::default()
+                            };
+                            if let Some(package) = resolver::parse_package_json(
+                                log,
+                                &package_source,
+                                &package_dir,
+                                file_system,
+                                Platform::Neutral,
+                                None,
+                            ) && !package.tsconfig.is_empty()
+                            {
+                                joined = if file_system.is_abs(&package.tsconfig) {
+                                    package.tsconfig
+                                } else {
+                                    file_system.join(&[&package_dir, &package.tsconfig])
+                                };
+                            }
+                        }
+
+                        for candidate in [
+                            file_system.join(&[&joined, "tsconfig.json"]),
+                            joined.clone(),
+                            format!("{joined}.json"),
+                        ] {
+                            if let Some(config) = try_file(&candidate, visited) {
+                                return Some(config);
+                            }
+                        }
+                    }
+                    let parent = file_system.dir(&current);
+                    if parent.is_empty() || parent == current {
+                        break;
+                    }
+                    current = parent;
+                }
+                drop(try_file);
+                if !did_find_candidate
+                    && !crate::internal::helpers::is_inside_node_modules(&source.key_path.text)
+                {
+                    log.add_id(
+                        logger::MsgId::TsConfigJsonMissing,
+                        MsgKind::Warning,
+                        Some(&mut tracker),
+                        range,
+                        format!("Cannot find base config file {text:?}"),
+                    );
+                }
+                return None;
             }
-            load(log, file_system, &extended, visited)
+
+            let mut extended = if file_system.is_abs(text) {
+                text.to_string()
+            } else {
+                file_system.join(&[&directory, text])
+            };
+            if matches!(text, "." | "..") {
+                extended = file_system.join(&[&extended, "tsconfig.json"]);
+            }
+            if let Some(config) = try_file(&extended, visited) {
+                return Some(config);
+            }
+            if !extended.ends_with(".json") {
+                if let Some(config) = try_file(&format!("{extended}.json"), visited) {
+                    return Some(config);
+                }
+            }
+            drop(try_file);
+            if !did_find_candidate
+                && !crate::internal::helpers::is_inside_node_modules(&source.key_path.text)
+            {
+                log.add_id(
+                    logger::MsgId::TsConfigJsonMissing,
+                    MsgKind::Warning,
+                    Some(&mut tracker),
+                    range,
+                    format!("Cannot find base config file {text:?}"),
+                );
+            }
+            None
         };
-        resolver::parse_tsconfig_json(
+        let result = resolver::parse_tsconfig_json(
             log,
             &source,
             file_system,
             &directory,
-            &directory,
+            config_dir,
             Some(&mut extends),
-        )
+        );
+        visited.remove(path);
+        result
     }
 
     let mut visited = HashSet::new();
+    let pnp = discover_pnp(log, file_system, start_directory);
     if let Some(path) = override_path {
         let (_, error, _) = file_system.read_file(path);
         if error.is_some() {
@@ -1461,14 +2027,34 @@ fn find_nearest_tsconfig(
             );
             return None;
         }
-        return load(log, file_system, path, &mut visited);
+        let config_dir = file_system.dir(path);
+        return load(
+            log,
+            file_system,
+            path,
+            &mut visited,
+            &config_dir,
+            pnp.as_ref(),
+        );
+    }
+    if crate::internal::helpers::is_inside_node_modules(start_directory) {
+        return None;
     }
     let mut directory = start_directory.to_string();
     loop {
-        let path = file_system.join(&[&directory, "tsconfig.json"]);
-        let (_, error, _) = file_system.read_file(&path);
-        if error.is_none() {
-            return load(log, file_system, &path, &mut visited);
+        for config_name in ["tsconfig.json", "jsconfig.json"] {
+            let path = file_system.join(&[&directory, config_name]);
+            let (_, error, _) = file_system.read_file(&path);
+            if error.is_none() {
+                return load(
+                    log,
+                    file_system,
+                    &path,
+                    &mut visited,
+                    &directory,
+                    pnp.as_ref(),
+                );
+            }
         }
         let parent = file_system.dir(&directory);
         if parent.is_empty() || parent == directory {
@@ -1531,6 +2117,9 @@ pub fn scan_bundle(
     let mut pending = Vec::new();
     let mut queued = HashSet::from([runtime::SOURCE_INDEX]);
     let mut resolution_slots: HashMap<u32, Vec<Option<ResolveResult>>> = HashMap::new();
+    if options.abs_output_base.is_empty() && entry_points.is_empty() {
+        options.abs_output_base = file_system.cwd().to_string();
+    }
     if let Some(stdin) = options.stdin.clone() {
         let key_path = if stdin.source_file.is_empty() {
             Path {
@@ -1631,7 +2220,28 @@ pub fn scan_bundle(
             });
         }
     }
+    let mut automatically_generated_entry_paths = Vec::new();
+    let mut expanded_entry_points = Vec::new();
     for entry_point in entry_points {
+        if let Some(matches) = expand_entry_point_glob(file_system, &entry_point.input_path) {
+            if matches.is_empty() {
+                log.add_error(
+                    None,
+                    Range::default(),
+                    format!("Could not resolve {:?}", entry_point.input_path),
+                );
+            } else {
+                expanded_entry_points.extend(matches.into_iter().map(|input_path| EntryPoint {
+                    input_path,
+                    output_path: entry_point.output_path.clone(),
+                    input_path_in_file_namespace: true,
+                }));
+            }
+        } else {
+            expanded_entry_points.push(entry_point.clone());
+        }
+    }
+    for entry_point in &expanded_entry_points {
         let input_path_in_file_namespace = entry_point_is_file(file_system, entry_point);
         let input_path = if input_path_in_file_namespace
             && !file_system.is_abs(&entry_point.input_path)
@@ -1692,6 +2302,9 @@ pub fn scan_bundle(
             .source_index_cache
             .get(path.clone(), SourceIndexKind::Normal);
         let output_path_was_auto_generated = entry_point.output_path.is_empty();
+        if output_path_was_auto_generated {
+            automatically_generated_entry_paths.push(path.text.clone());
+        }
         let output_path = if output_path_was_auto_generated && path.namespace != "file" {
             let mut output_path =
                 sanitize_file_path_for_virtual_module_path(&entry_point.input_path);
@@ -1717,6 +2330,14 @@ pub fn scan_bundle(
         }
     }
 
+    if options.abs_output_base.is_empty() {
+        options.abs_output_base =
+            lowest_common_ancestor_directory(file_system, &automatically_generated_entry_paths);
+        if options.abs_output_base.is_empty() {
+            options.abs_output_base = file_system.cwd().to_string();
+        }
+    }
+
     let mut cursor = 0;
     while cursor < pending.len() {
         let PendingFile {
@@ -1733,15 +2354,48 @@ pub fn scan_bundle(
                 .files
                 .resize_with(needed_length, ScannerFile::default);
         }
-        let relative_path = if path.namespace == "file" {
+        let is_disabled = path.is_disabled();
+        let mut relative_path = if path.namespace == "file" {
             file_system
                 .rel(file_system.cwd(), &path.text)
                 .unwrap_or_else(|| path.text.clone())
+        } else if path.namespace == "glob" {
+            path.text
+                .splitn(4, '\0')
+                .nth(1)
+                .unwrap_or(&path.text)
+                .to_string()
+        } else if path.namespace == "dataurl" {
+            let mut end = path.text.len().min(65);
+            while !path.text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut pretty = path.text[..end].replace('\n', "\\n");
+            if pretty.len() > 64 {
+                let mut end = 64;
+                while !pretty.is_char_boundary(end) {
+                    end -= 1;
+                }
+                pretty.truncate(end);
+                pretty.push_str("...");
+            }
+            format!("<{pretty}>")
         } else {
             format!("{}:{}", path.namespace, path.text)
-        };
-        let absolute_path = if path.namespace == "file" {
-            path.text.clone()
+        } + &path.ignored_suffix;
+        if is_disabled {
+            relative_path = format!("(disabled):{relative_path}");
+        }
+        let absolute_path = if is_disabled {
+            relative_path.clone()
+        } else if path.namespace == "file" {
+            format!("{}{}", path.text, path.ignored_suffix)
+        } else if path.namespace == "glob" {
+            path.text
+                .splitn(4, '\0')
+                .next()
+                .unwrap_or(&relative_path)
+                .to_string()
         } else {
             relative_path.clone()
         };
@@ -1753,6 +2407,11 @@ pub fn scan_bundle(
                 rel: relative_path,
             },
             ..Source::default()
+        };
+        source.identifier_name = if source.key_path.namespace == "glob" {
+            String::new()
+        } else {
+            identifier_name_from_path(file_system, options, &source.key_path.text)
         };
         let Some(loaded) = load_file_with_plugins(
             log,
@@ -1813,6 +2472,7 @@ pub fn scan_bundle(
         } else {
             ModuleType::Unknown
         };
+        let is_glob_module = source.key_path.namespace == "glob";
         let mut result = parse_file_with_cache(
             log,
             source,
@@ -1822,6 +2482,9 @@ pub fn scan_bundle(
             &loaded.plugin_name,
             Some(caches),
         );
+        if is_glob_module {
+            result.file.input_file.omit_from_source_maps_and_metafile = true;
+        }
         result.file.plugin_data = loaded.plugin_data;
         if result.file.input_file.side_effects.kind == SideEffectsKind::HasSideEffects
             && let Some(side_effects_data) = &resolve_metadata.primary_side_effects_data
@@ -1849,6 +2512,64 @@ pub fn scan_bundle(
                 result.file;
         }
     }
+    let mut import_attribute_collisions = HashMap::<(String, String, String), usize>::new();
+    for file in &bundle.files {
+        let path = &file.input_file.source.key_path;
+        if path.text.is_empty() {
+            continue;
+        }
+        *import_attribute_collisions
+            .entry((
+                path.namespace.clone(),
+                path.text.clone(),
+                path.ignored_suffix.clone(),
+            ))
+            .or_default() += 1;
+    }
+    for file in &mut bundle.files {
+        let source = &mut file.input_file.source;
+        let path = &source.key_path;
+        if import_attribute_collisions
+            .get(&(
+                path.namespace.clone(),
+                path.text.clone(),
+                path.ignored_suffix.clone(),
+            ))
+            .copied()
+            .unwrap_or_default()
+            < 2
+        {
+            continue;
+        }
+        let attributes = path.import_attributes.decode_into_array();
+        if attributes.is_empty() {
+            continue;
+        }
+        let mut suffix = String::from(" with {");
+        for (index, attribute) in attributes.iter().enumerate() {
+            if index > 0 {
+                suffix.push(',');
+            }
+            suffix.push(' ');
+            if js_ast::is_identifier(&attribute.key) {
+                suffix.push_str(&attribute.key);
+            } else {
+                suffix.push_str(&String::from_utf8_lossy(&quote_single(
+                    attribute.key.as_bytes(),
+                    false,
+                )));
+            }
+            suffix.push_str(": ");
+            suffix.push_str(&String::from_utf8_lossy(&quote_single(
+                attribute.value.as_bytes(),
+                false,
+            )));
+        }
+        suffix.push_str(" }");
+        source.pretty_paths.abs.push_str(&suffix);
+        source.pretty_paths.rel.push_str(&suffix);
+    }
+    warn_about_ignored_bare_imports(log, options, &bundle.files);
     finalize_scan_import_records(log, caches, options, &mut bundle.files, &resolution_slots);
     generate_scan_metadata_chunks(options, &resolution_slots, &mut bundle.files);
     validate_top_level_await(log, options, &mut bundle.files);
@@ -2859,6 +3580,429 @@ mod tests {
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
+
+    fn upstream_numeric_option(options: &serde_json::Value, name: &str) -> Option<u64> {
+        options.get(name).and_then(serde_json::Value::as_u64)
+    }
+
+    fn upstream_string_option(options: &serde_json::Value, name: &str) -> Option<String> {
+        options
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }
+
+    fn upstream_bool_option(options: &serde_json::Value, name: &str) -> Option<bool> {
+        options.get(name).and_then(serde_json::Value::as_bool)
+    }
+
+    fn upstream_mode(value: u64) -> Mode {
+        match value {
+            0 => Mode::PassThrough,
+            1 => Mode::ConvertFormat,
+            2 => Mode::Bundle,
+            _ => panic!("unknown upstream mode {value}"),
+        }
+    }
+
+    fn upstream_format(value: u64) -> Format {
+        match value {
+            0 => Format::Preserve,
+            1 => Format::Iife,
+            2 => Format::CommonJs,
+            3 => Format::EsModule,
+            _ => panic!("unknown upstream format {value}"),
+        }
+    }
+
+    fn upstream_platform(value: u64) -> Platform {
+        match value {
+            0 => Platform::Browser,
+            1 => Platform::Node,
+            2 => Platform::Neutral,
+            _ => panic!("unknown upstream platform {value}"),
+        }
+    }
+
+    fn upstream_legal_comments(value: u64) -> config::LegalComments {
+        match value {
+            0 => config::LegalComments::Inline,
+            1 => config::LegalComments::None,
+            2 => config::LegalComments::EndOfFile,
+            3 => config::LegalComments::LinkedWithComment,
+            4 => config::LegalComments::ExternalWithoutComment,
+            _ => panic!("unknown upstream legal-comments mode {value}"),
+        }
+    }
+
+    #[test]
+    fn matches_upstream_missing_glob_directory_diagnostics() {
+        let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+        let file_system = mock_fs(
+            &HashMap::from([(
+                "/entry.js".into(),
+                "const x = 'a.js'; require('./src/' + x); import('./src/' + x)".into(),
+            )]),
+            MockKind::Unix,
+            "/",
+        );
+        let mut options = Options {
+            mode: Mode::Bundle,
+            code_splitting: true,
+            abs_output_dir: "/out".into(),
+            output_format: Format::EsModule,
+            omit_runtime_for_tests: true,
+            tree_shaking: true,
+            ..Options::default()
+        };
+        let _ = bundle_javascript(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "/entry.js".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut options,
+            "UPSTREAM_TEST",
+        );
+        let diagnostics: Vec<u8> = log
+            .done()
+            .iter()
+            .flat_map(|message| {
+                message.to_bytes(
+                    &crate::internal::logger::OutputOptions::default(),
+                    crate::internal::logger::TerminalInfo::default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            String::from_utf8(diagnostics).expect("diagnostics are UTF-8"),
+            "entry.js: ERROR: Could not resolve require(\"./src/**/*\")\n\
+             entry.js: ERROR: Could not resolve import(\"./src/**/*\")\n"
+        );
+    }
+
+    #[test]
+    fn matches_pinned_upstream_active_bundler_corpus() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/upstream/bundler.json"
+        )))
+        .expect("valid generated upstream bundler corpus");
+        let cases = cases.as_array().expect("bundler corpus array");
+        let mut matched = 0;
+
+        for case in cases {
+            let options_json = &case["options"];
+            let Some(option_names) = options_json.as_object().map(|options| {
+                let mut names: Vec<_> = options.keys().map(String::as_str).collect();
+                names.sort_unstable();
+                names
+            }) else {
+                panic!("bundler case options must be an object");
+            };
+            if case["file_system"] != "unix"
+                || (case["suite"] != "default"
+                    && case["suite"] != "importstar"
+                    && case["suite"] != "importstar_ts"
+                    && case["suite"] != "lower"
+                    && case["suite"] != "dce"
+                    && case["suite"] != "ts"
+                    && case["suite"] != "packagejson"
+                    && case["suite"] != "tsconfig"
+                    && case["suite"] != "loader"
+                    && case["suite"] != "css"
+                    && case["suite"] != "splitting"
+                    && case["suite"] != "yarnpnp"
+                    && case["suite"] != "glob")
+                || ((!case["expected_scan_log"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty()
+                    || !case["expected_compile_log"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .is_empty())
+                    && case["upstream_test"] != "TestGlobNoMatches"
+                    && case["upstream_test"] != "TestCSSMalformedAtImport"
+                    && case["upstream_test"] != "TestTsconfigJsonExtendsLoop"
+                    && case["upstream_test"] != "TestTsconfigJsonNodeModulesTsconfigPathBad"
+                    && case["upstream_test"] != "TestTsconfigWarningsInsideNodeModules"
+                    && case["upstream_test"] != "TestTsconfigUnrecognizedTargetWarning"
+                    && case["upstream_test"] != "TestTsconfigJsonTopLevelMistakeWarning"
+                    && case["upstream_test"]
+                        != "TestPackageJsonSideEffectsFalseKeepBareImportAndRequireES6"
+                    && case["upstream_test"]
+                        != "TestPackageJsonSideEffectsFalseKeepBareImportAndRequireCommonJS"
+                    && case["upstream_test"]
+                        != "TestPackageJsonSideEffectsFalseRemoveBareImportES6"
+                    && case["upstream_test"]
+                        != "TestPackageJsonSideEffectsFalseRemoveBareImportCommonJS"
+                    && case["upstream_test"] != "TestPackageJsonSideEffectsArrayGlob"
+                    && case["upstream_test"] != "TestTSSideEffectsFalseWarningTypeDeclarations"
+                    && case["upstream_test"] != "TestDeadCodeInsideUnusedCases"
+                    && case["upstream_test"] != "TestDuplicatePropertyWarning")
+                || case.get("expected_snapshot").is_none()
+                || !case["entry_paths"].is_array()
+                || case["entry_paths"]
+                    .as_array()
+                    .is_some_and(|paths| paths.iter().any(|path| path == "*"))
+                || case
+                    .get("unsupported_options")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|options| !options.is_empty())
+                || (option_names != ["AbsOutputFile", "Mode"]
+                    && option_names != ["AbsOutputFile", "Mode", "OutputFormat"]
+                    && option_names != ["AbsOutputDir", "Mode"]
+                    && option_names != ["AbsOutputFile"]
+                    && option_names != ["AbsOutputDir"]
+                    && option_names != ["AbsOutputFile", "Mode", "Platform"]
+                    && option_names != ["AbsOutputDir", "Mode", "Platform"]
+                    && option_names != ["AbsOutputFile", "Mode", "OutputFormat", "Platform"]
+                    && option_names != ["AbsOutputDir", "Mode", "OutputFormat", "Platform"]
+                    && option_names != ["AbsOutputDir", "LegalComments", "Mode"]
+                    && option_names != ["AbsOutputFile", "LegalComments", "Mode"]
+                    && option_names
+                        != ["AbsOutputDir", "LegalComments", "MinifyWhitespace", "Mode"]
+                    && option_names != ["AbsOutputDir", "KeepNames"]
+                    && option_names != ["AbsOutputFile", "KeepNames"]
+                    && option_names != ["AbsOutputDir", "KeepNames", "MinifySyntax"]
+                    && option_names != ["AbsOutputFile", "KeepNames", "MinifySyntax", "Mode"]
+                    && option_names != ["AbsOutputDir", "MinifySyntax"]
+                    && option_names != ["AbsOutputFile", "MinifySyntax"]
+                    && option_names != ["AbsOutputDir", "CodeSplitting", "Mode"]
+                    && option_names != ["AbsOutputDir", "CodeSplitting", "Mode", "OutputFormat"]
+                    && option_names
+                        != [
+                            "AbsOutputDir",
+                            "CodeSplitting",
+                            "MinifyWhitespace",
+                            "Mode",
+                            "OutputFormat",
+                        ]
+                    && option_names
+                        != [
+                            "AbsOutputDir",
+                            "CodeSplitting",
+                            "MinifyIdentifiers",
+                            "Mode",
+                            "OutputFormat",
+                        ]
+                    && option_names
+                        != [
+                            "AbsOutputDir",
+                            "CodeSplitting",
+                            "Mode",
+                            "OutputFormat",
+                            "PublicPath",
+                        ]
+                    && option_names
+                        != [
+                            "AbsOutputDir",
+                            "ChunkPathTemplate",
+                            "CodeSplitting",
+                            "Mode",
+                            "OutputFormat",
+                        ])
+            {
+                continue;
+            }
+            matched += 1;
+
+            let test_name = case["upstream_test"]
+                .as_str()
+                .expect("upstream bundler test name");
+            let files: HashMap<String, String> = case["files"]
+                .as_object()
+                .expect("upstream bundler files")
+                .iter()
+                .map(|(path, contents)| {
+                    (
+                        path.clone(),
+                        contents
+                            .as_str()
+                            .expect("upstream bundler file contents")
+                            .to_string(),
+                    )
+                })
+                .collect();
+            let abs_working_dir = case["abs_working_dir"]
+                .as_str()
+                .filter(|path| !path.is_empty())
+                .unwrap_or("/");
+            let file_system = mock_fs(&files, MockKind::Unix, abs_working_dir);
+            let abs_output_file =
+                upstream_string_option(options_json, "AbsOutputFile").unwrap_or_default();
+            let abs_output_dir = upstream_string_option(options_json, "AbsOutputDir")
+                .unwrap_or_else(|| {
+                    abs_output_file.rsplit_once('/').map_or_else(
+                        || "/".to_string(),
+                        |(directory, _)| {
+                            if directory.is_empty() {
+                                "/".to_string()
+                            } else {
+                                directory.to_string()
+                            }
+                        },
+                    )
+                });
+            let mut options = Options {
+                mode: upstream_numeric_option(options_json, "Mode")
+                    .map_or(Mode::PassThrough, upstream_mode),
+                abs_output_file,
+                abs_output_dir,
+                omit_runtime_for_tests: true,
+                ..Options::default()
+            };
+            if let Some(format) = upstream_numeric_option(options_json, "OutputFormat") {
+                options.output_format = upstream_format(format);
+            }
+            if options.mode == Mode::Bundle {
+                options.tree_shaking = true;
+                if options.output_format == Format::Preserve {
+                    options.output_format = Format::EsModule;
+                }
+            } else if options.mode == Mode::ConvertFormat && options.output_format == Format::Iife {
+                options.tree_shaking = true;
+            }
+            if let Some(platform) = upstream_numeric_option(options_json, "Platform") {
+                options.platform = upstream_platform(platform);
+            }
+            if let Some(legal_comments) = upstream_numeric_option(options_json, "LegalComments") {
+                options.legal_comments = upstream_legal_comments(legal_comments);
+            }
+            if let Some(minify_whitespace) = upstream_bool_option(options_json, "MinifyWhitespace")
+            {
+                options.minify_whitespace = minify_whitespace;
+            }
+            if let Some(keep_names) = upstream_bool_option(options_json, "KeepNames") {
+                options.keep_names = keep_names;
+            }
+            if let Some(minify_syntax) = upstream_bool_option(options_json, "MinifySyntax") {
+                options.minify_syntax = minify_syntax;
+            }
+            if let Some(code_splitting) = upstream_bool_option(options_json, "CodeSplitting") {
+                options.code_splitting = code_splitting;
+            }
+            if let Some(minify_identifiers) =
+                upstream_bool_option(options_json, "MinifyIdentifiers")
+            {
+                options.minify_identifiers = minify_identifiers;
+            }
+            if let Some(public_path) = upstream_string_option(options_json, "PublicPath") {
+                options.public_path = public_path;
+            }
+            if let Some(template) = options_json
+                .get("ChunkPathTemplate")
+                .and_then(serde_json::Value::as_array)
+            {
+                options.chunk_path_template = template
+                    .iter()
+                    .map(|part| config::PathTemplate {
+                        data: part["Data"].as_str().unwrap_or_default().to_string(),
+                        placeholder: match part["Placeholder"].as_u64().unwrap_or_default() {
+                            1 => config::PathPlaceholder::Dir,
+                            2 => config::PathPlaceholder::Name,
+                            3 => config::PathPlaceholder::Hash,
+                            4 => config::PathPlaceholder::Ext,
+                            _ => config::PathPlaceholder::None,
+                        },
+                    })
+                    .collect();
+            }
+            let entry_points: Vec<super::EntryPoint> = case["entry_paths"]
+                .as_array()
+                .expect("upstream bundler entry paths")
+                .iter()
+                .map(|path| super::EntryPoint {
+                    input_path: path.as_str().expect("upstream entry path").to_string(),
+                    ..super::EntryPoint::default()
+                })
+                .collect();
+            let log = Log::new_defer(
+                if case["debug_logs"].as_bool().unwrap_or_default() {
+                    DeferLogKind::All
+                } else {
+                    DeferLogKind::NoVerboseOrDebug
+                },
+                HashMap::new(),
+            );
+            let compiled = bundle_javascript(
+                &log,
+                &file_system,
+                &CacheSet::default(),
+                &entry_points,
+                &mut options,
+                "UPSTREAM_TEST",
+            );
+            let messages = log.done();
+            let diagnostic_texts: Vec<_> = messages
+                .iter()
+                .map(|message| {
+                    message.data.location.as_ref().map_or_else(
+                        || message.data.text.clone(),
+                        |location| {
+                            format!(
+                                "{}:{}:{}: {}",
+                                location.file.abs,
+                                location.line,
+                                location.column,
+                                message.data.text
+                            )
+                        },
+                    )
+                })
+                .collect();
+            let diagnostic_bytes: Vec<u8> = messages
+                .iter()
+                .flat_map(|message| {
+                    message.to_bytes(
+                        &crate::internal::logger::OutputOptions::default(),
+                        crate::internal::logger::TerminalInfo::default(),
+                    )
+                })
+                .collect();
+            let diagnostics =
+                String::from_utf8(diagnostic_bytes).expect("upstream diagnostics are valid UTF-8");
+            let expected_diagnostics = format!(
+                "{}{}",
+                case["expected_scan_log"].as_str().unwrap_or_default(),
+                case["expected_compile_log"].as_str().unwrap_or_default()
+            );
+            assert_eq!(
+                diagnostics, expected_diagnostics,
+                "{test_name}: diagnostic mismatch; messages: {diagnostic_texts:#?}"
+            );
+
+            let mut generated = String::new();
+            for output in compiled.output_files {
+                if !generated.is_empty() {
+                    generated.push('\n');
+                }
+                generated.push_str(&format!(
+                    "---------- {} ----------\n{}",
+                    output.abs_path,
+                    String::from_utf8_lossy(&output.contents)
+                ));
+            }
+            if !compiled.metafile.is_empty() {
+                generated.push_str(&format!(
+                    "---------- metafile.json ----------\n{}",
+                    compiled.metafile
+                ));
+            }
+            assert_eq!(
+                generated,
+                case["expected_snapshot"]
+                    .as_str()
+                    .expect("upstream expected bundler snapshot"),
+                "upstream bundler test {test_name}"
+            );
+        }
+
+        assert_eq!(matched, 505, "upstream basic bundler corpus case count");
+    }
 
     #[test]
     fn applies_upstream_option_defaults() {
@@ -4278,7 +5422,7 @@ mod tests {
         );
         assert_eq!(compiled.output_files.len(), 1);
         let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
-        assert!(output.contains("const value = 123;"));
+        assert!(output.contains("var value = 123;"));
         assert!(output.contains("console.log(value);"));
         assert!(!output.contains("import "));
         assert!(!output.contains("export "));
@@ -4379,9 +5523,9 @@ mod tests {
             compiled.scan_result.import_issues
         );
         let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
-        assert!(output.contains("const used = 3;"));
+        assert!(output.contains("var used = 3;"));
         assert!(output.contains("console.log(\"dependency effect\");"));
-        assert!(output.contains("const liveEntry = used;"));
+        assert!(output.contains("var liveEntry = used;"));
         assert!(output.contains("console.log(liveEntry);"));
         assert!(!output.contains("deadEntry"));
         assert!(!output.contains("deadDependency"));
@@ -4486,8 +5630,8 @@ mod tests {
 
         assert!(log.done().is_empty());
         let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
-        assert!(output.contains("const collision = 1;"));
-        assert!(output.contains("const collision2 = 2;"));
+        assert!(output.contains("var collision = 1;"));
+        assert!(output.contains("var collision2 = 2;"));
         assert!(output.contains("console.log(collision, collision2);"));
     }
 
@@ -4569,7 +5713,7 @@ mod tests {
         let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
         assert!(output.contains("require_dep"));
         assert!(output.contains("exports.value = 123;"));
-        assert!(output.contains("const dep = require_dep();"));
+        assert!(output.contains("var dep = require_dep();"));
         assert!(output.contains("console.log(dep.value);"));
         assert!(!output.contains("require(\"./dep.js\")"));
     }
@@ -4629,7 +5773,7 @@ mod tests {
         );
         assert!(!entry_code.contains("TESTC"));
         assert!(dependency.abs_path.contains("/dep-"));
-        assert!(dependency_code.contains("const value = 123;"));
+        assert!(dependency_code.contains("var value = 123;"));
         assert!(dependency_code.contains("export {"));
         assert!(dependency_code.contains("value"));
     }
@@ -4699,7 +5843,7 @@ mod tests {
             .next()
             .expect("shared chunk basename");
         let shared_code = String::from_utf8_lossy(&shared.contents);
-        assert!(shared_code.contains("const value = 123;"));
+        assert!(shared_code.contains("var value = 123;"));
         assert!(shared_code.contains("export {"));
         for entry_name in ["a.js", "b.js"] {
             let entry = compiled
@@ -4752,7 +5896,7 @@ mod tests {
         let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
         assert!(output.contains("__export(entry_exports"));
         assert!(output.contains("value: () => value"));
-        assert!(output.contains("const value = 123;"));
+        assert!(output.contains("var value = 123;"));
         assert!(output.contains("module.exports = __toCommonJS(entry_exports);"));
         assert!(!output.contains("export const"));
     }
@@ -4940,8 +6084,8 @@ mod tests {
             compiled.scan_result.import_issues
         );
         let output = String::from_utf8_lossy(&compiled.output_files[0].contents);
-        assert!(output.contains("const value = 42;"), "{output}");
-        assert!(output.contains("const result = value;"), "{output}");
+        assert!(output.contains("var value = 42;"), "{output}");
+        assert!(output.contains("var result = value;"), "{output}");
         assert!(output.contains("console.log(result);"), "{output}");
     }
 
@@ -5025,7 +6169,16 @@ mod tests {
             panic!("expected package JavaScript");
         };
         assert_eq!(repr.ast.exports_kind, ExportsKind::Esm);
-        assert!(log.done().is_empty());
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Warning);
+        assert!(
+            messages[0]
+                .data
+                .text
+                .starts_with("Ignoring this import because ")
+        );
+        assert_eq!(messages[0].notes.len(), 1);
     }
 
     #[test]

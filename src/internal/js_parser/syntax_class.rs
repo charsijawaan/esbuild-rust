@@ -17,7 +17,7 @@ use crate::internal::{
 use super::{
     parser_core::ParserCore,
     parser_types::{AwaitOrYield, FnOrArrowDataParse},
-    syntax_expression::parse_expression,
+    syntax_expression::{parse_experimental_decorator, parse_expression},
     syntax_function::parse_function_tail,
     syntax_literals::{
         parse_big_int_or_string_if_unsupported, parse_numeric_literal, parse_string_literal,
@@ -76,8 +76,12 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
             continue;
         }
         let decorators = parse_decorators(core, lexer);
-        if let Some(mut property) = parse_class_property(core, lexer, extends_or_nil.data.is_some())
-        {
+        if let Some(mut property) = parse_class_property(
+            core,
+            lexer,
+            extends_or_nil.data.is_some(),
+            !decorators.is_empty(),
+        ) {
             property.decorators = decorators;
             properties.push(property);
         }
@@ -108,6 +112,22 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
         || core.options.ts.config.use_define_for_class_fields == MaybeBool::True
         || (core.options.ts.config.use_define_for_class_fields == MaybeBool::Unspecified
             && core.options.ts.config.target != TsTarget::BelowEs2022);
+    let has_property_decorator = properties
+        .iter()
+        .any(|property| !property.decorators.is_empty());
+    let should_lower_standard_decorators = (!decorators.is_empty() || has_property_decorator)
+        && ((!core.options.ts.parse
+            && core
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::DECORATORS))
+            || (core.options.ts.parse
+                && core.options.ts.config.experimental_decorators != MaybeBool::True
+                && (core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::DECORATORS)
+                    || !use_define_for_class_fields)));
     Some(Expr::new(
         loc,
         ExprData::Class(ClassExpr {
@@ -119,9 +139,11 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
                 class_keyword,
                 body_loc,
                 close_brace_loc,
+                should_lower_standard_decorators,
                 use_define_for_class_fields,
                 ..Class::default()
             },
+            is_parenthesized: false,
         }),
     ))
 }
@@ -131,7 +153,13 @@ pub(crate) fn parse_decorators(core: &mut ParserCore, lexer: &mut Lexer) -> Vec<
     while lexer.token == Token::At {
         let at_loc = lexer.loc();
         lexer.next();
-        let value = parse_expression(core, lexer, Precedence::New, true);
+        let value = if core.options.ts.parse
+            && core.options.ts.config.experimental_decorators == MaybeBool::True
+        {
+            parse_experimental_decorator(core, lexer)
+        } else {
+            parse_expression(core, lexer, Precedence::New, true)
+        };
         decorators.push(Decorator {
             value,
             at_loc,
@@ -146,6 +174,7 @@ fn parse_class_property(
     core: &mut ParserCore,
     lexer: &mut Lexer,
     class_has_extends: bool,
+    has_decorators: bool,
 ) -> Option<Property> {
     let start_loc = lexer.loc();
     let mut is_static = false;
@@ -402,6 +431,19 @@ fn parse_class_property(
                 core.discard_scopes_up_to(scope_index);
             }
             lexer.expect_or_insert_semicolon();
+        }
+        if has_decorators
+            && core.options.ts.config.experimental_decorators == MaybeBool::True
+            && !is_method
+        {
+            return Some(Property {
+                key,
+                loc: start_loc,
+                close_bracket_loc,
+                kind: PropertyKind::DeclareOrAbstract,
+                flags,
+                ..Property::default()
+            });
         }
         return None;
     }

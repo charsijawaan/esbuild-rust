@@ -4648,6 +4648,7 @@ fn transform_css(
             minify_whitespace: options.minify_whitespace,
             minify_identifiers: options.minify_identifiers,
             unsupported_css_features: target_features.unsupported_css_features,
+            css_prefix_data: target_features.css_prefix_data.clone(),
             symbol_mode: match options.loader {
                 Loader::LocalCss => css_parser::SymbolMode::Local,
                 Loader::GlobalCss => css_parser::SymbolMode::Global,
@@ -6952,8 +6953,8 @@ mod tests {
         assert_eq!(result.output_files.len(), 1);
         assert!(result.output_files[0].path.ends_with("/out/stdin.js"));
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
-        assert!(output.contains("const value = 42;"));
-        assert!(output.contains("const result = value;"));
+        assert!(output.contains("var value = 42;"));
+        assert!(output.contains("var result = value;"));
         assert!(output.contains("console.log(result);"));
         assert!(!output.contains("import "));
         std::fs::remove_dir_all(directory).expect("remove test directory");
@@ -7864,7 +7865,7 @@ mod tests {
         );
         let es_module = code(es_module);
         assert!(es_module.contains("const x = 1;"), "{es_module}");
-        assert!(es_module.contains("export { x };"), "{es_module}");
+        assert!(es_module.contains("export {\n  x\n};"), "{es_module}");
 
         let iife = transform(
             "export const x = 1",
@@ -10198,7 +10199,7 @@ mod tests {
         });
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
-        assert!(output.contains("const value = 123;"), "{output}");
+        assert!(output.contains("var value = 123;"), "{output}");
         assert!(output.contains("console.log(value);"), "{output}");
 
         let missing = build(BuildOptions {
@@ -10558,8 +10559,8 @@ mod tests {
             "{private}"
         );
         assert!(
-            private.find("constructor()").expect("constructor")
-                < private.rfind("#secret;").expect("private declaration"),
+            private.find("#secret;").expect("private declaration")
+                < private.find("constructor()").expect("constructor"),
             "{private}"
         );
     }
@@ -11043,8 +11044,8 @@ mod tests {
         });
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
-        assert!(!output.contains("factory"));
-        assert!(!output.contains("namespace.create"));
+        assert!(!output.contains("factory"), "{output}");
+        assert!(!output.contains("namespace.create"), "{output}");
         assert!(output.contains("sideEffect();"));
         assert!(output.contains("other();"));
         assert!(output.contains("console.log(\"live\")"));
@@ -11116,9 +11117,9 @@ mod tests {
         });
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         let output = String::from_utf8_lossy(&result.output_files[0].contents);
-        assert!(output.contains("\"LongFunctionName\""));
-        assert!(output.contains("\"LongClassName\""));
-        assert!(output.contains("\"LongArrowName\""));
+        assert!(output.contains("\"LongFunctionName\""), "{output}");
+        assert!(output.contains("\"LongClassName\""), "{output}");
+        assert!(output.contains("\"LongArrowName\""), "{output}");
         assert!(!output.contains("DeadFunction"));
         let class_start = output.find("class ").expect("minified class declaration") + 6;
         let class_end = output[class_start..]
@@ -11197,7 +11198,6 @@ mod tests {
             "field name",
             "item",
             "other",
-            "param",
             "nested",
             "bound",
             "default",
@@ -11208,9 +11208,10 @@ mod tests {
             );
         }
         assert!(!transformed.contains("\"method\""));
+        assert!(!transformed.contains("\"param\""));
         assert!(!transformed.contains("__name(Fields"));
         assert!(!transformed.contains("from \"<runtime>\""));
-        assert!(transformed.contains("({ pattern: pattern ="));
+        assert!(transformed.contains("({ pattern ="));
 
         let function = code(transform(
             "export default function() {}",

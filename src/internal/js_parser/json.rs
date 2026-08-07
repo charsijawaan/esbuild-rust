@@ -283,15 +283,21 @@ pub fn is_valid_json(value: &Expr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde_json::Value;
 
     use super::{JsonOptions, is_valid_json, parse_json};
     use crate::internal::{
-        js_ast::ExprData,
+        ast::SymbolMap,
+        js_ast::{Ast, ExprData, ExprStmt, Part, Stmt, StmtData},
         js_lexer::JsonFlavor,
-        logger::{DeferLogKind, Log, Source},
+        js_printer,
+        logger::{DeferLogKind, Loc, Log, OutputOptions, Path, PrettyPaths, Source, TerminalInfo},
+        renamer::new_no_op_renamer,
     };
-    use std::collections::HashMap;
 
     fn parse(text: &str, options: JsonOptions) -> (crate::internal::js_ast::Expr, bool, Log) {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
@@ -301,6 +307,130 @@ mod tests {
         };
         let (value, ok) = parse_json(log.clone(), source, options);
         (value, ok, log)
+    }
+
+    fn upstream_source(text: &[u8]) -> Source {
+        Source {
+            pretty_paths: PrettyPaths {
+                abs: "<stdin>".into(),
+                rel: "<stdin>".into(),
+            },
+            identifier_name: "stdin".into(),
+            contents: Arc::from(text),
+            key_path: Path {
+                text: "<stdin>".into(),
+                ..Path::default()
+            },
+            ..Source::default()
+        }
+    }
+
+    fn diagnostics(log: Log) -> Vec<u8> {
+        log.done()
+            .iter()
+            .flat_map(|message| {
+                message.to_bytes(&OutputOptions::default(), TerminalInfo::default())
+            })
+            .collect()
+    }
+
+    fn base64_field(case: &Value, field: &str) -> Vec<u8> {
+        STANDARD
+            .decode(case[field].as_str().expect("base64 corpus field"))
+            .expect("valid base64 corpus field")
+    }
+
+    #[test]
+    fn matches_pinned_upstream_json_parser_corpus() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../../tests/upstream/json_parser.json"))
+                .expect("valid pinned upstream json_parser corpus");
+        let cases = cases.as_array().expect("json_parser corpus array");
+        let kind_filter = std::env::var("UPSTREAM_TEST_FILTER").ok();
+        let line_filter = std::env::var("UPSTREAM_LINE_FILTER")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        if kind_filter.is_none() && line_filter.is_none() {
+            assert_eq!(cases.len(), 122, "upstream json_parser case count changed");
+        }
+
+        let mut failures = Vec::new();
+        for case in cases {
+            let kind = case["kind"].as_str().expect("case kind");
+            let line = case["line"].as_u64().expect("case line");
+            if kind_filter.as_deref().is_some_and(|filter| kind != filter)
+                || line_filter.is_some_and(|filter| line != filter)
+            {
+                continue;
+            }
+            let input = base64_field(case, "input_base64");
+            let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+            let (expression, ok) =
+                parse_json(log.clone(), upstream_source(&input), JsonOptions::default());
+            let actual_diagnostics = diagnostics(log);
+            let expected_diagnostics = base64_field(case, "warning_base64");
+
+            if kind == "error" {
+                let expected_diagnostics = base64_field(case, "expected_base64");
+                if actual_diagnostics != expected_diagnostics {
+                    failures.push(format!(
+                        "internal/js_parser/json_parser_test.go:{line}: input {input:?}\nexpected diagnostic: {:?}\nactual diagnostic:   {:?}",
+                        String::from_utf8_lossy(&expected_diagnostics),
+                        String::from_utf8_lossy(&actual_diagnostics),
+                    ));
+                }
+                continue;
+            }
+
+            if !ok || actual_diagnostics != expected_diagnostics {
+                failures.push(format!(
+                    "internal/js_parser/json_parser_test.go:{line}: input {input:?}\nparse ok: {ok}\nexpected diagnostic: {:?}\nactual diagnostic:   {:?}",
+                    String::from_utf8_lossy(&expected_diagnostics),
+                    String::from_utf8_lossy(&actual_diagnostics),
+                ));
+                continue;
+            }
+
+            let tree = Ast {
+                parts: vec![Part {
+                    statements: vec![Stmt::new(
+                        Loc::default(),
+                        StmtData::Expr(ExprStmt {
+                            value: expression,
+                            ..ExprStmt::default()
+                        }),
+                    )],
+                    ..Part::default()
+                }],
+                ..Ast::default()
+            };
+            let renamer = new_no_op_renamer(SymbolMap::default());
+            let mut actual = js_printer::print(
+                &tree,
+                &renamer,
+                js_printer::Options {
+                    minify_whitespace: true,
+                    ..js_printer::Options::default()
+                },
+            )
+            .js;
+            if actual.len() > 1 && actual.last() == Some(&b';') {
+                actual.pop();
+            }
+            let expected = base64_field(case, "expected_base64");
+            if actual != expected {
+                failures.push(format!(
+                    "internal/js_parser/json_parser_test.go:{line}: input {input:?}\nexpected output: {:?}\nactual output:   {:?}",
+                    String::from_utf8_lossy(&expected),
+                    String::from_utf8_lossy(&actual),
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "pinned upstream json_parser failures:\n{}",
+            failures.join("\n\n")
+        );
     }
 
     #[test]

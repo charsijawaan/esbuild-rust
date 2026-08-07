@@ -737,6 +737,7 @@ pub struct FunctionExpr {
 #[derive(Clone, Debug, Default)]
 pub struct ClassExpr {
     pub class: Class,
+    pub is_parenthesized: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -940,6 +941,7 @@ pub struct BlockStmt {
 #[derive(Clone, Debug, Default)]
 pub struct TypeScriptStmt {
     pub was_declare_class: bool,
+    pub was_export_declare: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1025,6 +1027,7 @@ pub struct NamespaceStmt {
     pub name: LocRef,
     pub argument: Ref,
     pub is_export: bool,
+    pub has_export_declare: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1265,6 +1268,7 @@ pub enum TsNamespaceMemberData {
 #[derive(Clone, Debug, Default)]
 pub struct TsNamespaceMemberNamespace {
     pub exported_members: TsNamespaceMembers,
+    pub reference: Ref,
 }
 
 #[derive(Clone, Debug, Default)]

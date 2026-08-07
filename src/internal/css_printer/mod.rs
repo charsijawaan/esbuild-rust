@@ -7,13 +7,14 @@ use std::{
 
 use crate::internal::{
     ast::{ImportRecordFlags, Ref, SymbolMap},
+    compat::CssFeature,
     config::{LegalComments, MetafileFormat, SourceMap as SourceMapMode},
     css_ast::{
         Ast, ComplexSelector, MediaBinaryOp, MediaCmp, MediaQuery, MediaQueryData, MediaTypeOp,
         NamespacedName, NthIndex, Rule, RuleData, SubclassData, Token, WhitespaceFlags,
     },
     css_lexer::{TokenKind, is_name_continue, would_start_identifier_without_escapes},
-    helpers::quote_for_json,
+    helpers::{escape_closing_tag, quote_for_json},
     sourcemap::{
         Chunk as SourceMapChunk, ChunkBuilder, LineOffsetTable, SourceMap, make_chunk_builder,
     },
@@ -38,6 +39,7 @@ pub struct Options {
     pub metafile_format: MetafileFormat,
     pub source_map: SourceMapMode,
     pub add_source_mappings: bool,
+    pub unsupported_features: CssFeature,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -157,6 +159,15 @@ struct Printer<'a> {
     source_map_builder: Option<ChunkBuilder>,
     old_line_start: usize,
     old_line_end: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum IdentMode {
+    Normal,
+    Hash,
+    HashId,
+    DimensionUnit,
+    DimensionUnitAfterExponent,
 }
 
 impl Printer<'_> {
@@ -337,8 +348,12 @@ impl Printer<'_> {
                 self.css.push(b'@');
                 self.print_ident(&rule.at_token);
                 self.print_token_group(&rule.prelude, true);
-                self.print_space();
-                self.print_rule_block(&rule.rules, rule.close_brace_loc);
+                if rule.has_block {
+                    self.print_space();
+                    self.print_rule_block(&rule.rules, rule.close_brace_loc);
+                } else {
+                    self.css.push(b';');
+                }
             }
             RuleData::UnknownAt(rule) => {
                 self.css.push(b'@');
@@ -353,7 +368,11 @@ impl Printer<'_> {
             }
             RuleData::Selector(rule) => {
                 self.print_complex_selectors(&rule.selectors, true);
-                self.print_space();
+                if self.options.minify_whitespace {
+                    self.print_space();
+                } else {
+                    self.css.push(b' ');
+                }
                 self.print_rule_block(&rule.rules, rule.close_brace_loc);
             }
             RuleData::Qualified(rule) => {
@@ -416,7 +435,7 @@ impl Printer<'_> {
                     self.css.push(b';');
                 }
             }
-            RuleData::Comment(rule) => self.css.extend_from_slice(rule.text.as_bytes()),
+            RuleData::Comment(rule) => self.print_indented_comment(&rule.text),
             RuleData::AtLayer(rule) => {
                 self.css.extend_from_slice(b"@layer");
                 for (index, name) in rule.names.iter().enumerate() {
@@ -430,7 +449,8 @@ impl Printer<'_> {
                     self.css.extend_from_slice(name.join(".").as_bytes());
                 }
                 if rule.rules.is_empty() {
-                    if rule.names.is_empty() {
+                    if rule.has_block {
+                        self.print_space();
                         self.print_rule_block(&rule.rules, rule.close_brace_loc);
                     } else {
                         self.css.push(b';');
@@ -450,6 +470,8 @@ impl Printer<'_> {
                         0
                     };
                     self.print_media_queries_with_flags(&rule.queries, flags);
+                    self.print_space();
+                } else {
                     self.print_space();
                 }
                 self.print_rule_block(&rule.rules, rule.close_brace_loc);
@@ -508,7 +530,7 @@ impl Printer<'_> {
     fn print_token_group(&mut self, tokens: &[Token], leading_space: bool) {
         if !tokens.is_empty() {
             if leading_space {
-                self.css.push(b' ');
+                self.print_whitespace();
             }
             self.print_tokens(tokens);
         }
@@ -516,22 +538,26 @@ impl Printer<'_> {
 
     fn print_tokens(&mut self, tokens: &[Token]) -> bool {
         let mut has_whitespace = false;
+        let mut previous_was_unterminated_string = false;
         for (index, token) in tokens.iter().enumerate() {
             if token.kind == TokenKind::Whitespace {
                 has_whitespace = true;
                 continue;
             }
-            if has_whitespace
-                || token.whitespace.contains(WhitespaceFlags::BEFORE)
-                || index > 0
-                    && tokens[index - 1]
-                        .whitespace
-                        .contains(WhitespaceFlags::AFTER)
+            if !previous_was_unterminated_string
+                && (has_whitespace
+                    || token.whitespace.contains(WhitespaceFlags::BEFORE)
+                    || index > 0
+                        && tokens[index - 1]
+                            .whitespace
+                            .contains(WhitespaceFlags::AFTER))
             {
-                self.css.push(b' ');
+                self.print_whitespace();
             }
-            has_whitespace = token.whitespace.contains(WhitespaceFlags::AFTER);
+            has_whitespace = token.kind != TokenKind::UnterminatedString
+                && token.whitespace.contains(WhitespaceFlags::AFTER);
             self.print_token(token);
+            previous_was_unterminated_string = token.kind == TokenKind::UnterminatedString;
         }
         if has_whitespace {
             self.css.push(b' ');
@@ -565,7 +591,7 @@ impl Printer<'_> {
                         self.css.extend_from_slice(b"  ");
                     }
                 } else {
-                    self.css.push(b' ');
+                    self.print_whitespace();
                 }
             }
             has_whitespace = token.whitespace.contains(WhitespaceFlags::AFTER);
@@ -574,7 +600,7 @@ impl Printer<'_> {
             self.print_token(token);
         }
         if has_whitespace {
-            self.css.push(b' ');
+            self.print_whitespace();
         }
         has_whitespace
     }
@@ -609,7 +635,7 @@ impl Printer<'_> {
                     .whitespace
                     .contains(WhitespaceFlags::BEFORE)
             {
-                self.css.push(b' ');
+                self.print_whitespace();
             }
         }
         self.css.push(b')');
@@ -618,6 +644,26 @@ impl Printer<'_> {
     fn print_indent_levels(&mut self, levels: usize) {
         for _ in 0..levels {
             self.css.extend_from_slice(b"  ");
+        }
+    }
+
+    fn print_indented_comment(&mut self, text: &str) {
+        let escaped;
+        let text = if self
+            .options
+            .unsupported_features
+            .contains(CssFeature::INLINE_STYLE)
+        {
+            text
+        } else {
+            escaped = escape_closing_tag(text, "/style");
+            &escaped
+        };
+        for line in text.split_inclusive('\n') {
+            self.css.extend_from_slice(line.as_bytes());
+            if line.ends_with('\n') && !self.options.minify_whitespace {
+                self.print_indent();
+            }
         }
     }
 
@@ -637,9 +683,16 @@ impl Printer<'_> {
                 self.css.push(b'(');
             }
             TokenKind::Dimension => {
-                self.css
-                    .extend_from_slice(token.dimension_value().as_bytes());
-                self.print_ident(token.dimension_unit());
+                let value = token.dimension_value();
+                self.css.extend_from_slice(value.as_bytes());
+                self.print_ident_with_mode(
+                    token.dimension_unit(),
+                    if value.contains('e') || value.contains('E') {
+                        IdentMode::DimensionUnitAfterExponent
+                    } else {
+                        IdentMode::DimensionUnit
+                    },
+                );
             }
             TokenKind::AtKeyword => {
                 self.css.push(b'@');
@@ -647,9 +700,16 @@ impl Printer<'_> {
             }
             TokenKind::Hash => {
                 self.css.push(b'#');
-                self.css.extend_from_slice(token.text.as_bytes());
+                self.print_ident_with_mode(&token.text, IdentMode::Hash);
             }
             TokenKind::String => self.print_quoted(&token.text, None),
+            TokenKind::UnterminatedString => {
+                self.css.extend_from_slice(token.text.as_bytes());
+                self.css.push(b'\n');
+                if !self.options.minify_whitespace {
+                    self.print_indent();
+                }
+            }
             TokenKind::Url => {
                 let record = &self.import_records[token.payload_index as usize];
                 self.css.extend_from_slice(b"url(");
@@ -693,10 +753,20 @@ impl Printer<'_> {
 
     fn print_media_query(&mut self, query: &MediaQuery, flags: MediaQueryFlags) {
         if let MediaQueryData::ArbitraryTokens(query) = &query.data {
+            let mut tokens = query.tokens.clone();
+            while tokens
+                .first()
+                .is_some_and(|token| token.kind == TokenKind::Whitespace)
+            {
+                tokens.remove(0);
+            }
+            if let Some(first) = tokens.first_mut() {
+                first.whitespace.remove(WhitespaceFlags::BEFORE);
+            }
             if flags & MEDIA_QUERY_AFTER_IDENTIFIER != 0 {
                 self.css.push(b' ');
             }
-            self.print_tokens(&query.tokens);
+            self.print_tokens(&tokens);
             return;
         }
 
@@ -817,15 +887,15 @@ impl Printer<'_> {
                 self.add_source_mapping(compound.combinator.loc, "");
                 if compound.combinator.byte == 0 {
                     if compound_index > 0 {
-                        self.css.push(b' ');
+                        self.print_whitespace();
                     }
                 } else {
                     if compound_index > 0 && !self.options.minify_whitespace {
-                        self.css.push(b' ');
+                        self.print_whitespace();
                     }
                     self.css.push(compound.combinator.byte);
                     if !self.options.minify_whitespace {
-                        self.css.push(b' ');
+                        self.print_whitespace();
                     }
                 }
                 if let Some(name) = &compound.type_selector {
@@ -837,6 +907,7 @@ impl Printer<'_> {
                 }
                 for subclass in &compound.subclass_selectors {
                     self.add_source_mapping(subclass.range.loc, "");
+                    self.discard_hex_escape_terminator();
                     self.print_subclass(&subclass.data);
                 }
             }
@@ -846,7 +917,14 @@ impl Printer<'_> {
     fn print_namespaced_name(&mut self, name: &NamespacedName) {
         if let Some(prefix) = &name.namespace_prefix {
             self.add_source_mapping(prefix.range.loc, "");
-            self.print_ident(&prefix.text);
+            if matches!(
+                prefix.kind,
+                TokenKind::DelimAsterisk | TokenKind::DelimAmpersand
+            ) {
+                self.css.extend_from_slice(prefix.text.as_bytes());
+            } else {
+                self.print_ident(&prefix.text);
+            }
             self.css.push(b'|');
         }
         self.add_source_mapping(name.name.range.loc, "");
@@ -864,7 +942,11 @@ impl Printer<'_> {
         match subclass {
             SubclassData::Hash(selector) => {
                 self.css.push(b'#');
-                self.print_symbol(selector.name.loc, selector.name.reference);
+                self.print_symbol_with_mode(
+                    selector.name.loc,
+                    selector.name.reference,
+                    IdentMode::HashId,
+                );
             }
             SubclassData::Class(selector) => {
                 self.css.push(b'.');
@@ -896,7 +978,7 @@ impl Printer<'_> {
                 self.css
                     .extend_from_slice(if selector.is_element { b"::" } else { b":" });
                 self.print_ident(&selector.name);
-                if !selector.args.is_empty() {
+                if selector.has_args {
                     self.css.push(b'(');
                     self.print_tokens(&selector.args);
                     self.css.push(b')');
@@ -939,6 +1021,15 @@ impl Printer<'_> {
     }
 
     fn print_symbol(&mut self, location: crate::internal::logger::Loc, reference: Ref) {
+        self.print_symbol_with_mode(location, reference, IdentMode::Normal);
+    }
+
+    fn print_symbol_with_mode(
+        &mut self,
+        location: crate::internal::logger::Loc,
+        reference: Ref,
+        mode: IdentMode,
+    ) {
         let reference = self.symbols.follow_symbols_const(reference);
         let original_name = self.symbols.get(reference).original_name.clone();
         let name = self
@@ -953,25 +1044,79 @@ impl Printer<'_> {
             &original_name
         };
         self.add_source_mapping(location, source_map_name);
-        self.print_ident(&name);
+        self.print_ident_with_mode(&name, mode);
     }
 
     fn print_ident(&mut self, text: &str) {
-        if would_start_identifier_without_escapes(text.as_bytes())
+        self.print_ident_with_mode(text, IdentMode::Normal);
+    }
+
+    fn print_ident_with_mode(&mut self, text: &str, mode: IdentMode) {
+        let initial_escape = match mode {
+            IdentMode::Normal | IdentMode::HashId
+                if !would_start_identifier_without_escapes(text.as_bytes()) =>
+            {
+                1
+            }
+            IdentMode::DimensionUnit | IdentMode::DimensionUnitAfterExponent => {
+                let bytes = text.as_bytes();
+                if !would_start_identifier_without_escapes(bytes) {
+                    1
+                } else if bytes.first().is_some_and(u8::is_ascii_digit)
+                    || mode == IdentMode::DimensionUnit
+                        && matches!(bytes.first(), Some(b'e' | b'E'))
+                        && (bytes.get(1).is_some_and(u8::is_ascii_digit)
+                            || bytes.get(1) == Some(&b'-')
+                                && bytes.get(2).is_some_and(u8::is_ascii_digit))
+                {
+                    2
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        };
+        if initial_escape == 0
             && text
                 .chars()
                 .all(|character| is_name_continue(character as i32))
+            && (!self.options.ascii_only || text.is_ascii())
+            && !text.contains('\u{feff}')
         {
             self.css.extend_from_slice(text.as_bytes());
             return;
         }
-        for (index, character) in text.chars().enumerate() {
-            if (index == 0 && !would_start_identifier_without_escapes(text.as_bytes()))
-                || !is_name_continue(character as i32)
-                || self.options.ascii_only && !character.is_ascii()
+        let characters = text.chars().collect::<Vec<_>>();
+        for (index, &character) in characters.iter().enumerate() {
+            let mut escape = if self.options.ascii_only && !character.is_ascii()
+                || matches!(character, '\r' | '\n' | '\u{000c}' | '\u{feff}')
             {
-                self.css
-                    .extend_from_slice(format!("\\{:x} ", character as u32).as_bytes());
+                2
+            } else if !is_name_continue(character as i32) {
+                1
+            } else {
+                0
+            };
+            if index == 0 && initial_escape != 0 {
+                escape = initial_escape;
+            }
+            if escape == 1 && character.is_ascii_hexdigit() {
+                escape = 2;
+            }
+            if escape == 2 {
+                let escaped = format!("\\{:x}", character as u32);
+                self.css.extend_from_slice(escaped.as_bytes());
+                if escaped.len() - 1 < 6
+                    && (characters
+                        .get(index + 1)
+                        .is_some_and(char::is_ascii_hexdigit)
+                        || mode == IdentMode::HashId && index + 1 == characters.len())
+                {
+                    self.css.push(b' ');
+                }
+            } else if escape == 1 {
+                self.css.push(b'\\');
+                self.css.extend_from_slice(character.to_string().as_bytes());
             } else {
                 self.css.extend_from_slice(character.to_string().as_bytes());
             }
@@ -1016,7 +1161,10 @@ impl Printer<'_> {
                 {
                     self.css.extend_from_slice(b"\\/");
                 }
-                character if self.options.ascii_only && !character.is_ascii() => {
+                character
+                    if character == '\u{feff}'
+                        || self.options.ascii_only && !character.is_ascii() =>
+                {
                     self.print_hex_escape(character, next);
                 }
                 character => self.css.extend_from_slice(character.to_string().as_bytes()),
@@ -1028,9 +1176,11 @@ impl Printer<'_> {
     }
 
     fn print_hex_escape(&mut self, character: char, next: Option<char>) {
-        self.css
-            .extend_from_slice(format!("\\{:x}", character as u32).as_bytes());
-        if next.is_some_and(|next| next.is_ascii_hexdigit() || matches!(next, ' ' | '\t')) {
+        let escaped = format!("\\{:x}", character as u32);
+        self.css.extend_from_slice(escaped.as_bytes());
+        if next.is_some_and(|next| {
+            (escaped.len() - 1 < 6 && next.is_ascii_hexdigit()) || matches!(next, ' ' | '\t')
+        }) {
             self.css.push(b' ');
         }
     }
@@ -1038,6 +1188,36 @@ impl Printer<'_> {
     fn print_space(&mut self) {
         if !self.options.minify_whitespace {
             self.css.push(b' ');
+        }
+    }
+
+    fn print_whitespace(&mut self) {
+        let mut hex_digits = 0;
+        for &byte in self.css.iter().rev() {
+            if byte.is_ascii_hexdigit() && hex_digits < 6 {
+                hex_digits += 1;
+            } else {
+                if byte == b'\\' && (1..6).contains(&hex_digits) {
+                    self.css.push(b' ');
+                }
+                break;
+            }
+        }
+        self.css.push(b' ');
+    }
+
+    fn discard_hex_escape_terminator(&mut self) {
+        if self.css.last() != Some(&b' ') {
+            return;
+        }
+        let mut index = self.css.len() - 1;
+        let mut digits = 0;
+        while index > 0 && digits < 6 && self.css[index - 1].is_ascii_hexdigit() {
+            index -= 1;
+            digits += 1;
+        }
+        if (1..6).contains(&digits) && index > 0 && self.css[index - 1] == b'\\' {
+            self.css.pop();
         }
     }
 
@@ -1056,7 +1236,10 @@ impl Printer<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde_json::Value;
 
     use super::{Options, Printer, best_quote_char, print};
     use crate::internal::{
@@ -1068,7 +1251,10 @@ mod tests {
             SelectorRule, Token, WhitespaceFlags,
         },
         css_lexer::TokenKind,
-        logger::{Loc, Path},
+        css_parser,
+        logger::{
+            DeferLogKind, Loc, Log, MsgKind, OutputOptions, Path, PrettyPaths, Source, TerminalInfo,
+        },
         sourcemap::generate_line_offset_tables,
     };
 
@@ -1181,6 +1367,115 @@ mod tests {
         };
         printer.print_url_value(text);
         String::from_utf8(printer.css).expect("CSS output is UTF-8")
+    }
+
+    fn upstream_source(text: &[u8]) -> Source {
+        Source {
+            pretty_paths: PrettyPaths {
+                abs: "<stdin>".into(),
+                rel: "<stdin>".into(),
+            },
+            identifier_name: "stdin".into(),
+            contents: Arc::from(text),
+            key_path: Path {
+                text: "<stdin>".into(),
+                ..Path::default()
+            },
+            ..Source::default()
+        }
+    }
+
+    fn base64_field(case: &Value, field: &str) -> Vec<u8> {
+        STANDARD
+            .decode(case[field].as_str().expect("base64 corpus field"))
+            .expect("valid base64 corpus field")
+    }
+
+    #[test]
+    fn matches_pinned_upstream_css_printer_corpus() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../../tests/upstream/css_printer.json"))
+                .expect("valid pinned upstream css_printer corpus");
+        let cases = cases.as_array().expect("css_printer corpus array");
+        let mode_filter = std::env::var("UPSTREAM_TEST_FILTER").ok();
+        let line_filter = std::env::var("UPSTREAM_LINE_FILTER")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        if mode_filter.is_none() && line_filter.is_none() {
+            assert_eq!(cases.len(), 289, "upstream css_printer case count changed");
+        }
+
+        let mut failures = Vec::new();
+        for case in cases {
+            let mode = case["mode"].as_str().expect("case mode");
+            let line = case["line"].as_u64().expect("case line");
+            if mode_filter.as_deref().is_some_and(|filter| mode != filter)
+                || line_filter.is_some_and(|filter| line != filter)
+            {
+                continue;
+            }
+            let input = base64_field(case, "source_base64");
+            let expected = base64_field(case, "expected_base64");
+            let actual = if mode == "string" {
+                quoted(
+                    std::str::from_utf8(&input).expect("upstream CSS string is UTF-8"),
+                    false,
+                )
+                .into_bytes()
+            } else {
+                let minify_whitespace = mode == "minify_whitespace";
+                let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+                let tree = css_parser::parse(
+                    log.clone(),
+                    upstream_source(&input),
+                    css_parser::Options {
+                        minify_whitespace,
+                        ..css_parser::Options::default()
+                    },
+                );
+                let errors = log
+                    .done()
+                    .into_iter()
+                    .filter(|message| message.kind == MsgKind::Error)
+                    .flat_map(|message| {
+                        message.to_bytes(&OutputOptions::default(), TerminalInfo::default())
+                    })
+                    .collect::<Vec<_>>();
+                if !errors.is_empty() {
+                    failures.push(format!(
+                        "internal/css_printer/css_printer_test.go:{line}: parse errors for {input:?}: {:?}",
+                        String::from_utf8_lossy(&errors),
+                    ));
+                    continue;
+                }
+                let mut symbols = SymbolMap::new(1);
+                symbols.symbols_for_source[0] = tree.symbols.clone();
+                print(
+                    &tree,
+                    &symbols,
+                    Options {
+                        minify_whitespace,
+                        ascii_only: mode == "ascii",
+                        ..Options::default()
+                    },
+                )
+                .css
+            };
+            if actual != expected {
+                failures.push(format!(
+                    "internal/css_printer/css_printer_test.go:{line} {} {mode}: input {:?}\nexpected: {:?}\nactual:   {:?}",
+                    case["upstream_test"].as_str().expect("upstream test"),
+                    String::from_utf8_lossy(&input),
+                    String::from_utf8_lossy(&expected),
+                    String::from_utf8_lossy(&actual),
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "pinned upstream css_printer failures:\n{}",
+            failures.join("\n\n")
+        );
     }
 
     #[test]

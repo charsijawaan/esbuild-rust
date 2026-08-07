@@ -131,7 +131,7 @@ fn lower_namespace(
     is_module_scope: bool,
     enclosing_namespace: Option<Ref>,
 ) {
-    if !namespace_has_runtime_value(&namespace.statements) {
+    if !namespace.has_export_declare && !namespace_has_runtime_value(&namespace.statements) {
         return;
     }
     let name_ref = follow_symbols(core, namespace.name.reference);
@@ -276,7 +276,7 @@ fn namespace_has_runtime_value(statements: &[Stmt]) -> bool {
         .any(|statement| match statement.data.as_deref() {
             None | Some(StmtData::Empty | StmtData::TypeScript(_) | StmtData::Comment(_)) => false,
             Some(StmtData::Namespace(namespace)) => {
-                namespace_has_runtime_value(&namespace.statements)
+                namespace.has_export_declare || namespace_has_runtime_value(&namespace.statements)
             }
             Some(_) => true,
         })
@@ -562,7 +562,9 @@ fn lower_enum(
                 } else {
                     LocalKind::Var
                 },
-                is_export: enumeration.is_export && enclosing_namespace.is_none(),
+                is_export: enumeration.is_export
+                    && enclosing_namespace.is_none()
+                    && is_first_declaration,
                 ..LocalStmt::default()
             }),
         ));

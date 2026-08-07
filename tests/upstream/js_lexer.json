@@ -1,0 +1,2152 @@
+[
+  {
+    "kind": "error",
+    "line": 65,
+    "input_base64": "Lyo=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEV4cGVjdGVkICIqLyIgdG8gdGVybWluYXRlIG11bHRpLWxpbmUgY29tbWVudAo8c3RkaW4+OiBOT1RFOiBUaGUgbXVsdGktbGluZSBjb21tZW50IHN0YXJ0cyBoZXJlOgo="
+  },
+  {
+    "kind": "error",
+    "line": 66,
+    "input_base64": "Lyov",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEV4cGVjdGVkICIqLyIgdG8gdGVybWluYXRlIG11bHRpLWxpbmUgY29tbWVudAo8c3RkaW4+OiBOT1RFOiBUaGUgbXVsdGktbGluZSBjb21tZW50IHN0YXJ0cyBoZXJlOgo="
+  },
+  {
+    "kind": "error",
+    "line": 67,
+    "input_base64": "LyoqLw==",
+    "expected_base64": ""
+  },
+  {
+    "kind": "error",
+    "line": 68,
+    "input_base64": "Ly8=",
+    "expected_base64": ""
+  },
+  {
+    "kind": "hashbang",
+    "line": 93,
+    "input_base64": "IyEvdXNyL2Jpbi9lbnYgbm9kZQ==",
+    "expected_base64": "IyEvdXNyL2Jpbi9lbnYgbm9kZQ=="
+  },
+  {
+    "kind": "hashbang",
+    "line": 94,
+    "input_base64": "IyEvdXNyL2Jpbi9lbnYgbm9kZQo=",
+    "expected_base64": "IyEvdXNyL2Jpbi9lbnYgbm9kZQ=="
+  },
+  {
+    "kind": "hashbang",
+    "line": 95,
+    "input_base64": "IyEvdXNyL2Jpbi9lbnYgbm9kZQpsZXQgeA==",
+    "expected_base64": "IyEvdXNyL2Jpbi9lbnYgbm9kZQ=="
+  },
+  {
+    "kind": "error",
+    "line": 96,
+    "input_base64": "ICMhL3Vzci9iaW4vZW52IG5vZGU=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiISIK"
+  },
+  {
+    "kind": "identifier",
+    "line": 121,
+    "input_base64": "Xw==",
+    "expected_base64": "Xw=="
+  },
+  {
+    "kind": "identifier",
+    "line": 122,
+    "input_base64": "JA==",
+    "expected_base64": "JA=="
+  },
+  {
+    "kind": "identifier",
+    "line": 123,
+    "input_base64": "dGVzdA==",
+    "expected_base64": "dGVzdA=="
+  },
+  {
+    "kind": "identifier",
+    "line": 124,
+    "input_base64": "dFx1MDA2NXN0",
+    "expected_base64": "dGVzdA=="
+  },
+  {
+    "kind": "identifier",
+    "line": 125,
+    "input_base64": "dFx1ezY1fXN0",
+    "expected_base64": "dGVzdA=="
+  },
+  {
+    "kind": "error",
+    "line": 127,
+    "input_base64": "dFx1Lg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiLiIK"
+  },
+  {
+    "kind": "error",
+    "line": 128,
+    "input_base64": "dFx1MC4=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiLiIK"
+  },
+  {
+    "kind": "error",
+    "line": 129,
+    "input_base64": "dFx1MDAu",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiLiIK"
+  },
+  {
+    "kind": "error",
+    "line": 130,
+    "input_base64": "dFx1MDA2Lg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiLiIK"
+  },
+  {
+    "kind": "error",
+    "line": 131,
+    "input_base64": "dFx1ey4=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiLiIK"
+  },
+  {
+    "kind": "error",
+    "line": 132,
+    "input_base64": "dFx1ezAu",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiLiIK"
+  },
+  {
+    "kind": "identifier",
+    "line": 134,
+    "input_base64": "YeKAjA==",
+    "expected_base64": "YeKAjA=="
+  },
+  {
+    "kind": "identifier",
+    "line": 135,
+    "input_base64": "YeKAjQ==",
+    "expected_base64": "YeKAjQ=="
+  },
+  {
+    "kind": "identifier",
+    "line": 136,
+    "input_base64": "YeKAjGI=",
+    "expected_base64": "YeKAjGI="
+  },
+  {
+    "kind": "identifier",
+    "line": 137,
+    "input_base64": "YeKAjWI=",
+    "expected_base64": "YeKAjWI="
+  },
+  {
+    "kind": "number",
+    "line": 162,
+    "input_base64": "MA==",
+    "expected_number": "0"
+  },
+  {
+    "kind": "number",
+    "line": 163,
+    "input_base64": "MDAw",
+    "expected_number": "0"
+  },
+  {
+    "kind": "number",
+    "line": 164,
+    "input_base64": "MDEw",
+    "expected_number": "8"
+  },
+  {
+    "kind": "number",
+    "line": 165,
+    "input_base64": "MTIz",
+    "expected_number": "123"
+  },
+  {
+    "kind": "number",
+    "line": 166,
+    "input_base64": "OTg3",
+    "expected_number": "987"
+  },
+  {
+    "kind": "number",
+    "line": 167,
+    "input_base64": "MDAwMA==",
+    "expected_number": "0"
+  },
+  {
+    "kind": "number",
+    "line": 168,
+    "input_base64": "MDEyMw==",
+    "expected_number": "83"
+  },
+  {
+    "kind": "number",
+    "line": 169,
+    "input_base64": "MDEyMy40NTY3",
+    "expected_number": "83"
+  },
+  {
+    "kind": "number",
+    "line": 170,
+    "input_base64": "MDk4Nw==",
+    "expected_number": "987"
+  },
+  {
+    "kind": "number",
+    "line": 171,
+    "input_base64": "MDk4Ny42NTQz",
+    "expected_number": "987.6543"
+  },
+  {
+    "kind": "number",
+    "line": 172,
+    "input_base64": "MDEyODk=",
+    "expected_number": "1289"
+  },
+  {
+    "kind": "number",
+    "line": 173,
+    "input_base64": "MDEyODkuMzQ1",
+    "expected_number": "1289"
+  },
+  {
+    "kind": "number",
+    "line": 174,
+    "input_base64": "OTk5OTk5OTk5",
+    "expected_number": "999999999"
+  },
+  {
+    "kind": "number",
+    "line": 175,
+    "input_base64": "OTk5OTk5OTk5OQ==",
+    "expected_number": "9999999999"
+  },
+  {
+    "kind": "number",
+    "line": 176,
+    "input_base64": "OTk5OTk5OTk5OTk=",
+    "expected_number": "99999999999"
+  },
+  {
+    "kind": "number",
+    "line": 177,
+    "input_base64": "MTIzNDU2Nzg5MTIzNDU2Nzg5",
+    "expected_number": "123456789123456780"
+  },
+  {
+    "kind": "number",
+    "line": 178,
+    "input_base64": "MTIzNDU2Nzg5MTIzNDU2Nzg5MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    "expected_number": "1.2345678912345679e+145"
+  },
+  {
+    "kind": "number",
+    "line": 180,
+    "input_base64": "MGIwMDEwMQ==",
+    "expected_number": "5"
+  },
+  {
+    "kind": "number",
+    "line": 181,
+    "input_base64": "MEIwMDEwMQ==",
+    "expected_number": "5"
+  },
+  {
+    "kind": "number",
+    "line": 182,
+    "input_base64": "MGIxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAx",
+    "expected_number": "100352251741"
+  },
+  {
+    "kind": "number",
+    "line": 183,
+    "input_base64": "MEIxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAx",
+    "expected_number": "100352251741"
+  },
+  {
+    "kind": "error",
+    "line": 184,
+    "input_base64": "MGI=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 185,
+    "input_base64": "MEI=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 186,
+    "input_base64": "MGIwMTI=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiMiIK"
+  },
+  {
+    "kind": "error",
+    "line": 187,
+    "input_base64": "MGIwMTg=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiOCIK"
+  },
+  {
+    "kind": "error",
+    "line": 188,
+    "input_base64": "MGIwMWE=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiYSIK"
+  },
+  {
+    "kind": "error",
+    "line": 189,
+    "input_base64": "MGIwMUE=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiQSIK"
+  },
+  {
+    "kind": "number",
+    "line": 191,
+    "input_base64": "MG8xMjM0NQ==",
+    "expected_number": "5349"
+  },
+  {
+    "kind": "number",
+    "line": 192,
+    "input_base64": "ME8xMjM0NQ==",
+    "expected_number": "5349"
+  },
+  {
+    "kind": "number",
+    "line": 193,
+    "input_base64": "MG8xMjM0NTY3NjU0MzIx",
+    "expected_number": "89755965649"
+  },
+  {
+    "kind": "number",
+    "line": 194,
+    "input_base64": "ME8xMjM0NTY3NjU0MzIx",
+    "expected_number": "89755965649"
+  },
+  {
+    "kind": "error",
+    "line": 195,
+    "input_base64": "MG8=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 196,
+    "input_base64": "ME8=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 197,
+    "input_base64": "MG8wMTg=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiOCIK"
+  },
+  {
+    "kind": "error",
+    "line": 198,
+    "input_base64": "MG8wMWE=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiYSIK"
+  },
+  {
+    "kind": "error",
+    "line": 199,
+    "input_base64": "MG8wMUE=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiQSIK"
+  },
+  {
+    "kind": "number",
+    "line": 201,
+    "input_base64": "MHgxMjM0NTY3OA==",
+    "expected_number": "305419896"
+  },
+  {
+    "kind": "number",
+    "line": 202,
+    "input_base64": "MHhGRURDQkE5ODc=",
+    "expected_number": "68414056839"
+  },
+  {
+    "kind": "number",
+    "line": 203,
+    "input_base64": "MHgwMDAwMTIzNDU2Nzg=",
+    "expected_number": "305419896"
+  },
+  {
+    "kind": "number",
+    "line": 204,
+    "input_base64": "MHgxMjM0NTY3ODEyMzQ=",
+    "expected_number": "20015998308916"
+  },
+  {
+    "kind": "error",
+    "line": 205,
+    "input_base64": "MHg=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 206,
+    "input_base64": "MFg=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 207,
+    "input_base64": "MHhHRkVEQ0JB",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiRyIK"
+  },
+  {
+    "kind": "error",
+    "line": 208,
+    "input_base64": "MHhBQkNERUZH",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiRyIK"
+  },
+  {
+    "kind": "number",
+    "line": 210,
+    "input_base64": "MTIzLg==",
+    "expected_number": "123"
+  },
+  {
+    "kind": "number",
+    "line": 211,
+    "input_base64": "LjAxMjM=",
+    "expected_number": "0.0123"
+  },
+  {
+    "kind": "number",
+    "line": 212,
+    "input_base64": "MC4wMTIz",
+    "expected_number": "0.0123"
+  },
+  {
+    "kind": "number",
+    "line": 213,
+    "input_base64": "Mi4yMjUwNzM4NTg1MDcyMDE0ZS0zMDg=",
+    "expected_number": "2.2250738585072014e-308"
+  },
+  {
+    "kind": "number",
+    "line": 214,
+    "input_base64": "MS43OTc2OTMxMzQ4NjIzMTU3ZSszMDg=",
+    "expected_number": "1.7976931348623157e+308"
+  },
+  {
+    "kind": "number",
+    "line": 217,
+    "input_base64": "NC45NDA2NTY0NTg0MTI0NjU0NDE3NjU2ODc5Mjg2ODIyZS0zMjQ=",
+    "expected_number": "5e-324"
+  },
+  {
+    "kind": "number",
+    "line": 218,
+    "input_base64": "NWUtMzI0",
+    "expected_number": "5e-324"
+  },
+  {
+    "kind": "number",
+    "line": 219,
+    "input_base64": "MWUtMzI1",
+    "expected_number": "0"
+  },
+  {
+    "kind": "number",
+    "line": 222,
+    "input_base64": "MS43OTc2OTMxMzQ4NjIzMTU3MDgxNDUyNzQyMzczMTdlKzMwOA==",
+    "expected_number": "1.7976931348623157e+308"
+  },
+  {
+    "kind": "number",
+    "line": 223,
+    "input_base64": "MS43OTc2OTMxMzQ4NjIzMTU4MDhlKzMwOA==",
+    "expected_number": "Infinity"
+  },
+  {
+    "kind": "number",
+    "line": 224,
+    "input_base64": "MWUrMzA5",
+    "expected_number": "Infinity"
+  },
+  {
+    "kind": "number",
+    "line": 227,
+    "input_base64": "MHg3ZmZmX2ZmZmY=",
+    "expected_number": "2147483647"
+  },
+  {
+    "kind": "number",
+    "line": 228,
+    "input_base64": "MHg4MDAwXzAwMDA=",
+    "expected_number": "2147483648"
+  },
+  {
+    "kind": "number",
+    "line": 229,
+    "input_base64": "MHg4MDAwXzAwMDE=",
+    "expected_number": "2147483649"
+  },
+  {
+    "kind": "number",
+    "line": 232,
+    "input_base64": "MHhmZmZmX2ZmZmY=",
+    "expected_number": "4294967295"
+  },
+  {
+    "kind": "number",
+    "line": 233,
+    "input_base64": "MHgxXzAwMDBfMDAwMA==",
+    "expected_number": "4294967296"
+  },
+  {
+    "kind": "number",
+    "line": 234,
+    "input_base64": "MHgxXzAwMDBfMDAwMQ==",
+    "expected_number": "4294967297"
+  },
+  {
+    "kind": "number",
+    "line": 237,
+    "input_base64": "MHg3ZmZmX2ZmZmZfZmZmZl9mZGZm",
+    "expected_number": "9223372036854775000"
+  },
+  {
+    "kind": "number",
+    "line": 238,
+    "input_base64": "MHg4MDAwXzAwMDBfMDAwMF8wMDAw",
+    "expected_number": "9223372036854776000"
+  },
+  {
+    "kind": "number",
+    "line": 239,
+    "input_base64": "MHg4MDAwXzAwMDBfMDAwMF8zMDAw",
+    "expected_number": "9223372036854788000"
+  },
+  {
+    "kind": "number",
+    "line": 242,
+    "input_base64": "MHhmZmZmX2ZmZmZfZmZmZl9mYmZm",
+    "expected_number": "18446744073709550000"
+  },
+  {
+    "kind": "number",
+    "line": 243,
+    "input_base64": "MHgxXzAwMDBfMDAwMF8wMDAwXzAwMDA=",
+    "expected_number": "18446744073709552000"
+  },
+  {
+    "kind": "number",
+    "line": 244,
+    "input_base64": "MHgxXzAwMDBfMDAwMF8wMDAwXzEwMDA=",
+    "expected_number": "18446744073709556000"
+  },
+  {
+    "kind": "number",
+    "line": 246,
+    "input_base64": "MS4=",
+    "expected_number": "1"
+  },
+  {
+    "kind": "number",
+    "line": 247,
+    "input_base64": "LjE=",
+    "expected_number": "0.1"
+  },
+  {
+    "kind": "number",
+    "line": 248,
+    "input_base64": "MS4x",
+    "expected_number": "1.1"
+  },
+  {
+    "kind": "number",
+    "line": 249,
+    "input_base64": "MWUx",
+    "expected_number": "10"
+  },
+  {
+    "kind": "number",
+    "line": 250,
+    "input_base64": "MWUrMQ==",
+    "expected_number": "10"
+  },
+  {
+    "kind": "number",
+    "line": 251,
+    "input_base64": "MWUtMQ==",
+    "expected_number": "0.1"
+  },
+  {
+    "kind": "number",
+    "line": 252,
+    "input_base64": "LjFlMQ==",
+    "expected_number": "1"
+  },
+  {
+    "kind": "number",
+    "line": 253,
+    "input_base64": "LjFlKzE=",
+    "expected_number": "1"
+  },
+  {
+    "kind": "number",
+    "line": 254,
+    "input_base64": "LjFlLTE=",
+    "expected_number": "0.01"
+  },
+  {
+    "kind": "number",
+    "line": 255,
+    "input_base64": "MS5lMQ==",
+    "expected_number": "10"
+  },
+  {
+    "kind": "number",
+    "line": 256,
+    "input_base64": "MS5lKzE=",
+    "expected_number": "10"
+  },
+  {
+    "kind": "number",
+    "line": 257,
+    "input_base64": "MS5lLTE=",
+    "expected_number": "0.1"
+  },
+  {
+    "kind": "number",
+    "line": 258,
+    "input_base64": "MS4xZTE=",
+    "expected_number": "11"
+  },
+  {
+    "kind": "number",
+    "line": 259,
+    "input_base64": "MS4xZSsx",
+    "expected_number": "11"
+  },
+  {
+    "kind": "number",
+    "line": 260,
+    "input_base64": "MS4xZS0x",
+    "expected_number": "0.11"
+  },
+  {
+    "kind": "error",
+    "line": 262,
+    "input_base64": "MWU=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 263,
+    "input_base64": "LjFl",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 264,
+    "input_base64": "MS5l",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 265,
+    "input_base64": "MS4xZQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 266,
+    "input_base64": "MWUr",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 267,
+    "input_base64": "LjFlKw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 268,
+    "input_base64": "MS5lKw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 269,
+    "input_base64": "MS4xZSs=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 270,
+    "input_base64": "MWUt",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 271,
+    "input_base64": "LjFlLQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 272,
+    "input_base64": "MS5lLQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 273,
+    "input_base64": "MS4xZS0=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgZW5kIG9mIGZpbGUK"
+  },
+  {
+    "kind": "error",
+    "line": 274,
+    "input_base64": "MWUrLTE=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiLSIK"
+  },
+  {
+    "kind": "error",
+    "line": 275,
+    "input_base64": "MWUtKzE=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiKyIK"
+  },
+  {
+    "kind": "error",
+    "line": 277,
+    "input_base64": "MXo=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAieiIK"
+  },
+  {
+    "kind": "error",
+    "line": 278,
+    "input_base64": "MS56",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAieiIK"
+  },
+  {
+    "kind": "error",
+    "line": 279,
+    "input_base64": "MS4wZg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiZiIK"
+  },
+  {
+    "kind": "error",
+    "line": 280,
+    "input_base64": "MGIxeg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAieiIK"
+  },
+  {
+    "kind": "error",
+    "line": 281,
+    "input_base64": "MG8xeg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAieiIK"
+  },
+  {
+    "kind": "error",
+    "line": 282,
+    "input_base64": "MHgxeg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAieiIK"
+  },
+  {
+    "kind": "error",
+    "line": 283,
+    "input_base64": "MWUxeg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAieiIK"
+  },
+  {
+    "kind": "number",
+    "line": 285,
+    "input_base64": "MV8yXzM=",
+    "expected_number": "123"
+  },
+  {
+    "kind": "number",
+    "line": 286,
+    "input_base64": "LjFfMg==",
+    "expected_number": "0.12"
+  },
+  {
+    "kind": "number",
+    "line": 287,
+    "input_base64": "MV8yLjNfNA==",
+    "expected_number": "12.34"
+  },
+  {
+    "kind": "number",
+    "line": 288,
+    "input_base64": "MWUyXzM=",
+    "expected_number": "1e+23"
+  },
+  {
+    "kind": "number",
+    "line": 289,
+    "input_base64": "MV8yZTNfNA==",
+    "expected_number": "1.2e+35"
+  },
+  {
+    "kind": "number",
+    "line": 290,
+    "input_base64": "MV8yLjNfNGU1XzY=",
+    "expected_number": "1.234e+57"
+  },
+  {
+    "kind": "number",
+    "line": 291,
+    "input_base64": "MGIxXzA=",
+    "expected_number": "2"
+  },
+  {
+    "kind": "number",
+    "line": 292,
+    "input_base64": "MEIxXzA=",
+    "expected_number": "2"
+  },
+  {
+    "kind": "number",
+    "line": 293,
+    "input_base64": "MG8xXzI=",
+    "expected_number": "10"
+  },
+  {
+    "kind": "number",
+    "line": 294,
+    "input_base64": "ME8xXzI=",
+    "expected_number": "10"
+  },
+  {
+    "kind": "number",
+    "line": 295,
+    "input_base64": "MHgxXzI=",
+    "expected_number": "18"
+  },
+  {
+    "kind": "number",
+    "line": 296,
+    "input_base64": "MFgxXzI=",
+    "expected_number": "18"
+  },
+  {
+    "kind": "number",
+    "line": 297,
+    "input_base64": "MDguMF8x",
+    "expected_number": "8.01"
+  },
+  {
+    "kind": "number",
+    "line": 298,
+    "input_base64": "MDkuMF8x",
+    "expected_number": "9.01"
+  },
+  {
+    "kind": "error",
+    "line": 300,
+    "input_base64": "MF8w",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 301,
+    "input_base64": "MF8x",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 302,
+    "input_base64": "MF83",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 303,
+    "input_base64": "MF84",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 304,
+    "input_base64": "MF85",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 305,
+    "input_base64": "MDBfMA==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 306,
+    "input_base64": "MDFfMA==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 307,
+    "input_base64": "MDdfMA==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 308,
+    "input_base64": "MDhfMA==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 309,
+    "input_base64": "MDlfMA==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 310,
+    "input_base64": "MDhfMC4x",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 311,
+    "input_base64": "MDlfMC4x",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 313,
+    "input_base64": "MV9fMg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 314,
+    "input_base64": "LjFfXzI=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 315,
+    "input_base64": "MWUyX18z",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 316,
+    "input_base64": "MGIxX18w",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 317,
+    "input_base64": "MEIxX18w",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 318,
+    "input_base64": "MG8xX18y",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 319,
+    "input_base64": "ME8xX18y",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 320,
+    "input_base64": "MHgxX18y",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 321,
+    "input_base64": "MFgxX18y",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 323,
+    "input_base64": "MV8=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 324,
+    "input_base64": "MS5f",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 325,
+    "input_base64": "MV8u",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 326,
+    "input_base64": "LjFf",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 327,
+    "input_base64": "MWVf",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 328,
+    "input_base64": "MWUxXw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 329,
+    "input_base64": "MV9lMQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 330,
+    "input_base64": "LjFfZTE=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 331,
+    "input_base64": "MS5fMg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 332,
+    "input_base64": "MV8uMg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 333,
+    "input_base64": "MGJfMQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 334,
+    "input_base64": "MEJfMQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 335,
+    "input_base64": "MG9fMQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 336,
+    "input_base64": "ME9fMQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 337,
+    "input_base64": "MHhfMQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 338,
+    "input_base64": "MFhfMQ==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 339,
+    "input_base64": "MGIxXw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 340,
+    "input_base64": "MEIxXw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 341,
+    "input_base64": "MG8xXw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 342,
+    "input_base64": "ME8xXw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 343,
+    "input_base64": "MHgxXw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "error",
+    "line": 344,
+    "input_base64": "MFgxXw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "bigint",
+    "line": 369,
+    "input_base64": "MG4=",
+    "expected_base64": "MA=="
+  },
+  {
+    "kind": "bigint",
+    "line": 370,
+    "input_base64": "MTIzbg==",
+    "expected_base64": "MTIz"
+  },
+  {
+    "kind": "bigint",
+    "line": 371,
+    "input_base64": "OTAwNzE5OTI1NDc0MDk5M24=",
+    "expected_base64": "OTAwNzE5OTI1NDc0MDk5Mw=="
+  },
+  {
+    "kind": "bigint",
+    "line": 373,
+    "input_base64": "MGIwMDEwMW4=",
+    "expected_base64": "MGIwMDEwMQ=="
+  },
+  {
+    "kind": "bigint",
+    "line": 374,
+    "input_base64": "MEIwMDEwMW4=",
+    "expected_base64": "MEIwMDEwMQ=="
+  },
+  {
+    "kind": "bigint",
+    "line": 375,
+    "input_base64": "MGIxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAxbg==",
+    "expected_base64": "MGIxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAx"
+  },
+  {
+    "kind": "bigint",
+    "line": 376,
+    "input_base64": "MEIxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAxbg==",
+    "expected_base64": "MEIxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAxMDExMTAx"
+  },
+  {
+    "kind": "bigint",
+    "line": 378,
+    "input_base64": "MG8xMjM0NW4=",
+    "expected_base64": "MG8xMjM0NQ=="
+  },
+  {
+    "kind": "bigint",
+    "line": 379,
+    "input_base64": "ME8xMjM0NW4=",
+    "expected_base64": "ME8xMjM0NQ=="
+  },
+  {
+    "kind": "bigint",
+    "line": 380,
+    "input_base64": "MG8xMjM0NTY3NjU0MzIxbg==",
+    "expected_base64": "MG8xMjM0NTY3NjU0MzIx"
+  },
+  {
+    "kind": "bigint",
+    "line": 381,
+    "input_base64": "ME8xMjM0NTY3NjU0MzIxbg==",
+    "expected_base64": "ME8xMjM0NTY3NjU0MzIx"
+  },
+  {
+    "kind": "bigint",
+    "line": 383,
+    "input_base64": "MHgxMjM0NTY3OG4=",
+    "expected_base64": "MHgxMjM0NTY3OA=="
+  },
+  {
+    "kind": "bigint",
+    "line": 384,
+    "input_base64": "MHhGRURDQkE5ODdu",
+    "expected_base64": "MHhGRURDQkE5ODc="
+  },
+  {
+    "kind": "bigint",
+    "line": 385,
+    "input_base64": "MHgwMDAwMTIzNDU2Nzhu",
+    "expected_base64": "MHgwMDAwMTIzNDU2Nzg="
+  },
+  {
+    "kind": "bigint",
+    "line": 386,
+    "input_base64": "MHgxMjM0NTY3ODEyMzRu",
+    "expected_base64": "MHgxMjM0NTY3ODEyMzQ="
+  },
+  {
+    "kind": "bigint",
+    "line": 388,
+    "input_base64": "MV8yXzNu",
+    "expected_base64": "MTIz"
+  },
+  {
+    "kind": "bigint",
+    "line": 389,
+    "input_base64": "MGIxXzBfMW4=",
+    "expected_base64": "MGIxMDE="
+  },
+  {
+    "kind": "bigint",
+    "line": 390,
+    "input_base64": "MG8xXzJfM24=",
+    "expected_base64": "MG8xMjM="
+  },
+  {
+    "kind": "bigint",
+    "line": 391,
+    "input_base64": "MHgxXzJfM24=",
+    "expected_base64": "MHgxMjM="
+  },
+  {
+    "kind": "error",
+    "line": 393,
+    "input_base64": "MWUybg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAibiIK"
+  },
+  {
+    "kind": "error",
+    "line": 394,
+    "input_base64": "MS4wbg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAibiIK"
+  },
+  {
+    "kind": "error",
+    "line": 395,
+    "input_base64": "LjFu",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAibiIK"
+  },
+  {
+    "kind": "error",
+    "line": 396,
+    "input_base64": "MDAwbg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAibiIK"
+  },
+  {
+    "kind": "error",
+    "line": 397,
+    "input_base64": "MDEyM24=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAibiIK"
+  },
+  {
+    "kind": "error",
+    "line": 398,
+    "input_base64": "MDg5bg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAibiIK"
+  },
+  {
+    "kind": "error",
+    "line": 399,
+    "input_base64": "MF8xbg==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXyIK"
+  },
+  {
+    "kind": "string",
+    "line": 449,
+    "input_base64": "Jyc=",
+    "expected_utf16": []
+  },
+  {
+    "kind": "string",
+    "line": 450,
+    "input_base64": "JzEyMyc=",
+    "expected_utf16": [
+      49,
+      50,
+      51
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 452,
+    "input_base64": "JyIn",
+    "expected_utf16": [
+      34
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 453,
+    "input_base64": "J1wnJw==",
+    "expected_utf16": [
+      39
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 454,
+    "input_base64": "J1wiJw==",
+    "expected_utf16": [
+      34
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 455,
+    "input_base64": "J1xcJw==",
+    "expected_utf16": [
+      92
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 456,
+    "input_base64": "J1xhJw==",
+    "expected_utf16": [
+      97
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 457,
+    "input_base64": "J1xiJw==",
+    "expected_utf16": [
+      8
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 458,
+    "input_base64": "J1xmJw==",
+    "expected_utf16": [
+      12
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 459,
+    "input_base64": "J1xuJw==",
+    "expected_utf16": [
+      10
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 460,
+    "input_base64": "J1xyJw==",
+    "expected_utf16": [
+      13
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 461,
+    "input_base64": "J1x0Jw==",
+    "expected_utf16": [
+      9
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 462,
+    "input_base64": "J1x2Jw==",
+    "expected_utf16": [
+      11
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 464,
+    "input_base64": "J1wwJw==",
+    "expected_utf16": [
+      0
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 465,
+    "input_base64": "J1wxJw==",
+    "expected_utf16": [
+      1
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 466,
+    "input_base64": "J1wyJw==",
+    "expected_utf16": [
+      2
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 467,
+    "input_base64": "J1wzJw==",
+    "expected_utf16": [
+      3
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 468,
+    "input_base64": "J1w0Jw==",
+    "expected_utf16": [
+      4
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 469,
+    "input_base64": "J1w1Jw==",
+    "expected_utf16": [
+      5
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 470,
+    "input_base64": "J1w2Jw==",
+    "expected_utf16": [
+      6
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 471,
+    "input_base64": "J1w3Jw==",
+    "expected_utf16": [
+      7
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 473,
+    "input_base64": "J1wwMDAn",
+    "expected_utf16": [
+      0
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 474,
+    "input_base64": "J1wwMDEn",
+    "expected_utf16": [
+      1
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 475,
+    "input_base64": "J1wwMDIn",
+    "expected_utf16": [
+      2
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 476,
+    "input_base64": "J1wwMDMn",
+    "expected_utf16": [
+      3
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 477,
+    "input_base64": "J1wwMDQn",
+    "expected_utf16": [
+      4
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 478,
+    "input_base64": "J1wwMDUn",
+    "expected_utf16": [
+      5
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 479,
+    "input_base64": "J1wwMDYn",
+    "expected_utf16": [
+      6
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 480,
+    "input_base64": "J1wwMDcn",
+    "expected_utf16": [
+      7
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 482,
+    "input_base64": "J1wwMDAn",
+    "expected_utf16": [
+      0
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 483,
+    "input_base64": "J1wxMDAn",
+    "expected_utf16": [
+      64
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 484,
+    "input_base64": "J1wyMDAn",
+    "expected_utf16": [
+      128
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 485,
+    "input_base64": "J1wzMDAn",
+    "expected_utf16": [
+      192
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 486,
+    "input_base64": "J1wzNzcn",
+    "expected_utf16": [
+      255
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 487,
+    "input_base64": "J1wzNzgn",
+    "expected_utf16": [
+      31,
+      56
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 488,
+    "input_base64": "J1w0MDAn",
+    "expected_utf16": [
+      32,
+      48
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 489,
+    "input_base64": "J1w1MDAn",
+    "expected_utf16": [
+      40,
+      48
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 490,
+    "input_base64": "J1w2MDAn",
+    "expected_utf16": [
+      48,
+      48
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 491,
+    "input_base64": "J1w3MDAn",
+    "expected_utf16": [
+      56,
+      48
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 493,
+    "input_base64": "J1x4MDAn",
+    "expected_utf16": [
+      0
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 494,
+    "input_base64": "J1xYMTEn",
+    "expected_utf16": [
+      88,
+      49,
+      49
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 495,
+    "input_base64": "J1x4NzEn",
+    "expected_utf16": [
+      113
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 496,
+    "input_base64": "J1x4N2Yn",
+    "expected_utf16": [
+      127
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 497,
+    "input_base64": "J1x4N0Yn",
+    "expected_utf16": [
+      127
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 499,
+    "input_base64": "J1x1MDAwMCc=",
+    "expected_utf16": [
+      0
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 500,
+    "input_base64": "J1x1Y2FmZVx1Q0FGRVx1N0ZGRic=",
+    "expected_utf16": [
+      51966,
+      51966,
+      32767
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 501,
+    "input_base64": "J1x1RDgwMCc=",
+    "expected_utf16": [
+      55296
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 502,
+    "input_base64": "J1x1REMwMCc=",
+    "expected_utf16": [
+      56320
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 503,
+    "input_base64": "J1xVMDAwMCc=",
+    "expected_utf16": [
+      85,
+      48,
+      48,
+      48,
+      48
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 505,
+    "input_base64": "J1x1ezEwMDAwMH0n",
+    "expected_utf16": [
+      56256,
+      56320
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 506,
+    "input_base64": "J1x1ezEwRkZGRn0n",
+    "expected_utf16": [
+      56319,
+      57343
+    ]
+  },
+  {
+    "kind": "string_error",
+    "line": 507,
+    "input_base64": "J1x1ezExMDAwMH0n",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuaWNvZGUgZXNjYXBlIHNlcXVlbmNlIGlzIG91dCBvZiByYW5nZQo="
+  },
+  {
+    "kind": "string_error",
+    "line": 508,
+    "input_base64": "J1x1e0ZGRkZGRkZGfSc=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuaWNvZGUgZXNjYXBlIHNlcXVlbmNlIGlzIG91dCBvZiByYW5nZQo="
+  },
+  {
+    "kind": "string_error",
+    "line": 511,
+    "input_base64": "Jwon",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 512,
+    "input_base64": "Jw0n",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 513,
+    "input_base64": "Igoi",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 514,
+    "input_base64": "Ig0i",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string",
+    "line": 516,
+    "input_base64": "J+KAqCc=",
+    "expected_utf16": [
+      8232
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 517,
+    "input_base64": "J+KAqSc=",
+    "expected_utf16": [
+      8233
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 518,
+    "input_base64": "IuKAqCI=",
+    "expected_utf16": [
+      8232
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 519,
+    "input_base64": "IuKAqSI=",
+    "expected_utf16": [
+      8233
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 521,
+    "input_base64": "JzFcDTIn",
+    "expected_utf16": [
+      49,
+      50
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 522,
+    "input_base64": "JzFcCjIn",
+    "expected_utf16": [
+      49,
+      50
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 523,
+    "input_base64": "JzFcDQoyJw==",
+    "expected_utf16": [
+      49,
+      50
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 524,
+    "input_base64": "JzFc4oCoMic=",
+    "expected_utf16": [
+      49,
+      50
+    ]
+  },
+  {
+    "kind": "string",
+    "line": 525,
+    "input_base64": "JzFc4oCpMic=",
+    "expected_utf16": [
+      49,
+      50
+    ]
+  },
+  {
+    "kind": "string_error",
+    "line": 526,
+    "input_base64": "JzFcCg0yJw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 528,
+    "input_base64": "Iic=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 529,
+    "input_base64": "JyI=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 530,
+    "input_base64": "J1w=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 531,
+    "input_base64": "J1wn",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 533,
+    "input_base64": "J1x4",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 534,
+    "input_base64": "J1x4Jw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiJyIK"
+  },
+  {
+    "kind": "string_error",
+    "line": 535,
+    "input_base64": "J1x4Ryc=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiRyIK"
+  },
+  {
+    "kind": "string_error",
+    "line": 536,
+    "input_base64": "J1x4Ric=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiJyIK"
+  },
+  {
+    "kind": "string_error",
+    "line": 537,
+    "input_base64": "J1x4Rkcn",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiRyIK"
+  },
+  {
+    "kind": "string_error",
+    "line": 539,
+    "input_base64": "J1x1",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "string_error",
+    "line": 540,
+    "input_base64": "J1x1Jw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiJyIK"
+  },
+  {
+    "kind": "string_error",
+    "line": 541,
+    "input_base64": "J1x1MCc=",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiJyIK"
+  },
+  {
+    "kind": "string_error",
+    "line": 542,
+    "input_base64": "J1x1MDAn",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiJyIK"
+  },
+  {
+    "kind": "string_error",
+    "line": 543,
+    "input_base64": "J1x1MDAwJw==",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiJyIK"
+  },
+  {
+    "kind": "token",
+    "line": 551,
+    "input_base64": "",
+    "expected_token": "EndOfFile"
+  },
+  {
+    "kind": "token",
+    "line": 552,
+    "input_base64": "AA==",
+    "expected_token": "SyntaxError"
+  },
+  {
+    "kind": "token",
+    "line": 555,
+    "input_base64": "IyE=",
+    "expected_token": "Hashbang"
+  },
+  {
+    "kind": "token",
+    "line": 558,
+    "input_base64": "KA==",
+    "expected_token": "OpenParen"
+  },
+  {
+    "kind": "token",
+    "line": 559,
+    "input_base64": "KQ==",
+    "expected_token": "CloseParen"
+  },
+  {
+    "kind": "token",
+    "line": 560,
+    "input_base64": "Ww==",
+    "expected_token": "OpenBracket"
+  },
+  {
+    "kind": "token",
+    "line": 561,
+    "input_base64": "XQ==",
+    "expected_token": "CloseBracket"
+  },
+  {
+    "kind": "token",
+    "line": 562,
+    "input_base64": "ew==",
+    "expected_token": "OpenBrace"
+  },
+  {
+    "kind": "token",
+    "line": 563,
+    "input_base64": "fQ==",
+    "expected_token": "CloseBrace"
+  },
+  {
+    "kind": "token",
+    "line": 566,
+    "input_base64": "YnJlYWs=",
+    "expected_token": "Break"
+  },
+  {
+    "kind": "token",
+    "line": 567,
+    "input_base64": "Y2FzZQ==",
+    "expected_token": "Case"
+  },
+  {
+    "kind": "token",
+    "line": 568,
+    "input_base64": "Y2F0Y2g=",
+    "expected_token": "Catch"
+  },
+  {
+    "kind": "token",
+    "line": 569,
+    "input_base64": "Y2xhc3M=",
+    "expected_token": "Class"
+  },
+  {
+    "kind": "token",
+    "line": 570,
+    "input_base64": "Y29uc3Q=",
+    "expected_token": "Const"
+  },
+  {
+    "kind": "token",
+    "line": 571,
+    "input_base64": "Y29udGludWU=",
+    "expected_token": "Continue"
+  },
+  {
+    "kind": "token",
+    "line": 572,
+    "input_base64": "ZGVidWdnZXI=",
+    "expected_token": "Debugger"
+  },
+  {
+    "kind": "token",
+    "line": 573,
+    "input_base64": "ZGVmYXVsdA==",
+    "expected_token": "Default"
+  },
+  {
+    "kind": "token",
+    "line": 574,
+    "input_base64": "ZGVsZXRl",
+    "expected_token": "Delete"
+  },
+  {
+    "kind": "token",
+    "line": 575,
+    "input_base64": "ZG8=",
+    "expected_token": "Do"
+  },
+  {
+    "kind": "token",
+    "line": 576,
+    "input_base64": "ZWxzZQ==",
+    "expected_token": "Else"
+  },
+  {
+    "kind": "token",
+    "line": 577,
+    "input_base64": "ZW51bQ==",
+    "expected_token": "Enum"
+  },
+  {
+    "kind": "token",
+    "line": 578,
+    "input_base64": "ZXhwb3J0",
+    "expected_token": "Export"
+  },
+  {
+    "kind": "token",
+    "line": 579,
+    "input_base64": "ZXh0ZW5kcw==",
+    "expected_token": "Extends"
+  },
+  {
+    "kind": "token",
+    "line": 580,
+    "input_base64": "ZmFsc2U=",
+    "expected_token": "False"
+  },
+  {
+    "kind": "token",
+    "line": 581,
+    "input_base64": "ZmluYWxseQ==",
+    "expected_token": "Finally"
+  },
+  {
+    "kind": "token",
+    "line": 582,
+    "input_base64": "Zm9y",
+    "expected_token": "For"
+  },
+  {
+    "kind": "token",
+    "line": 583,
+    "input_base64": "ZnVuY3Rpb24=",
+    "expected_token": "Function"
+  },
+  {
+    "kind": "token",
+    "line": 584,
+    "input_base64": "aWY=",
+    "expected_token": "If"
+  },
+  {
+    "kind": "token",
+    "line": 585,
+    "input_base64": "aW1wb3J0",
+    "expected_token": "Import"
+  },
+  {
+    "kind": "token",
+    "line": 586,
+    "input_base64": "aW4=",
+    "expected_token": "In"
+  },
+  {
+    "kind": "token",
+    "line": 587,
+    "input_base64": "aW5zdGFuY2VvZg==",
+    "expected_token": "Instanceof"
+  },
+  {
+    "kind": "token",
+    "line": 588,
+    "input_base64": "bmV3",
+    "expected_token": "New"
+  },
+  {
+    "kind": "token",
+    "line": 589,
+    "input_base64": "bnVsbA==",
+    "expected_token": "Null"
+  },
+  {
+    "kind": "token",
+    "line": 590,
+    "input_base64": "cmV0dXJu",
+    "expected_token": "Return"
+  },
+  {
+    "kind": "token",
+    "line": 591,
+    "input_base64": "c3VwZXI=",
+    "expected_token": "Super"
+  },
+  {
+    "kind": "token",
+    "line": 592,
+    "input_base64": "c3dpdGNo",
+    "expected_token": "Switch"
+  },
+  {
+    "kind": "token",
+    "line": 593,
+    "input_base64": "dGhpcw==",
+    "expected_token": "This"
+  },
+  {
+    "kind": "token",
+    "line": 594,
+    "input_base64": "dGhyb3c=",
+    "expected_token": "Throw"
+  },
+  {
+    "kind": "token",
+    "line": 595,
+    "input_base64": "dHJ1ZQ==",
+    "expected_token": "True"
+  },
+  {
+    "kind": "token",
+    "line": 596,
+    "input_base64": "dHJ5",
+    "expected_token": "Try"
+  },
+  {
+    "kind": "token",
+    "line": 597,
+    "input_base64": "dHlwZW9m",
+    "expected_token": "Typeof"
+  },
+  {
+    "kind": "token",
+    "line": 598,
+    "input_base64": "dmFy",
+    "expected_token": "Var"
+  },
+  {
+    "kind": "token",
+    "line": 599,
+    "input_base64": "dm9pZA==",
+    "expected_token": "Void"
+  },
+  {
+    "kind": "token",
+    "line": 600,
+    "input_base64": "d2hpbGU=",
+    "expected_token": "While"
+  },
+  {
+    "kind": "token",
+    "line": 601,
+    "input_base64": "d2l0aA==",
+    "expected_token": "With"
+  }
+]

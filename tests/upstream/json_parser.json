@@ -1,0 +1,856 @@
+[
+  {
+    "kind": "printed",
+    "line": 73,
+    "input_base64": "ZmFsc2U=",
+    "warning_base64": "",
+    "expected_base64": "ZmFsc2U="
+  },
+  {
+    "kind": "printed",
+    "line": 74,
+    "input_base64": "dHJ1ZQ==",
+    "warning_base64": "",
+    "expected_base64": "dHJ1ZQ=="
+  },
+  {
+    "kind": "printed",
+    "line": 75,
+    "input_base64": "bnVsbA==",
+    "warning_base64": "",
+    "expected_base64": "bnVsbA=="
+  },
+  {
+    "kind": "error",
+    "line": 76,
+    "input_base64": "dW5kZWZpbmVk",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgInVuZGVmaW5lZCIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "printed",
+    "line": 80,
+    "input_base64": "Ingi",
+    "warning_base64": "",
+    "expected_base64": "Ingi"
+  },
+  {
+    "kind": "error",
+    "line": 81,
+    "input_base64": "J3gn",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEpTT04gc3RyaW5ncyBtdXN0IHVzZSBkb3VibGUgcXVvdGVzCg=="
+  },
+  {
+    "kind": "error",
+    "line": 82,
+    "input_base64": "YHhg",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgImB4YCIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "printed",
+    "line": 85,
+    "input_base64": "IuKAqCI=",
+    "warning_base64": "",
+    "expected_base64": "Ilx1MjAyOCI="
+  },
+  {
+    "kind": "printed",
+    "line": 86,
+    "input_base64": "IuKAqSI=",
+    "warning_base64": "",
+    "expected_base64": "Ilx1MjAyOSI="
+  },
+  {
+    "kind": "error",
+    "line": 87,
+    "input_base64": "Ig0i",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "error",
+    "line": 88,
+    "input_base64": "Igoi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IgAi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwMCIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IgEi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwMSIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IgIi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwMiIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IgMi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwMyIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IgQi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwNCIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IgUi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwNSIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IgYi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwNiIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Igci",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwNyIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Iggi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwOCIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Igki",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwOSIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Igsi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwQiIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Igwi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwQyIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ig4i",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwRSIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ig8i",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwRiIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IhAi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxMCIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IhEi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxMSIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IhIi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxMiIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IhMi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxMyIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IhQi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxNCIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IhUi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxNSIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "IhYi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxNiIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ihci",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxNyIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ihgi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxOCIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ihki",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxOSIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ihoi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxQSIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ihsi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxQiIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ihwi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxQyIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ih0i",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxRCIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ih4i",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxRSIK"
+  },
+  {
+    "kind": "error",
+    "line": 93,
+    "input_base64": "Ih8i",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgxRiIK"
+  },
+  {
+    "kind": "printed",
+    "line": 99,
+    "input_base64": "IlwiIg==",
+    "warning_base64": "",
+    "expected_base64": "JyIn"
+  },
+  {
+    "kind": "printed",
+    "line": 100,
+    "input_base64": "IlxcIg==",
+    "warning_base64": "",
+    "expected_base64": "IlxcIg=="
+  },
+  {
+    "kind": "printed",
+    "line": 101,
+    "input_base64": "IlwvIg==",
+    "warning_base64": "",
+    "expected_base64": "Ii8i"
+  },
+  {
+    "kind": "printed",
+    "line": 102,
+    "input_base64": "IlxiIg==",
+    "warning_base64": "",
+    "expected_base64": "IlxiIg=="
+  },
+  {
+    "kind": "printed",
+    "line": 103,
+    "input_base64": "IlxmIg==",
+    "warning_base64": "",
+    "expected_base64": "IlxmIg=="
+  },
+  {
+    "kind": "printed",
+    "line": 104,
+    "input_base64": "IlxuIg==",
+    "warning_base64": "",
+    "expected_base64": "IlxuIg=="
+  },
+  {
+    "kind": "printed",
+    "line": 105,
+    "input_base64": "IlxyIg==",
+    "warning_base64": "",
+    "expected_base64": "IlxyIg=="
+  },
+  {
+    "kind": "printed",
+    "line": 106,
+    "input_base64": "Ilx0Ig==",
+    "warning_base64": "",
+    "expected_base64": "Igki"
+  },
+  {
+    "kind": "printed",
+    "line": 107,
+    "input_base64": "Ilx1MDAwMCI=",
+    "warning_base64": "",
+    "expected_base64": "IlwwIg=="
+  },
+  {
+    "kind": "printed",
+    "line": 108,
+    "input_base64": "Ilx1MDA3OCI=",
+    "warning_base64": "",
+    "expected_base64": "Ingi"
+  },
+  {
+    "kind": "printed",
+    "line": 109,
+    "input_base64": "Ilx1MTIzNCI=",
+    "warning_base64": "",
+    "expected_base64": "IuGItCI="
+  },
+  {
+    "kind": "printed",
+    "line": 110,
+    "input_base64": "Ilx1RDgwMCI=",
+    "warning_base64": "",
+    "expected_base64": "Ilx1RDgwMCI="
+  },
+  {
+    "kind": "printed",
+    "line": 111,
+    "input_base64": "Ilx1REMwMCI=",
+    "warning_base64": "",
+    "expected_base64": "Ilx1REMwMCI="
+  },
+  {
+    "kind": "error",
+    "line": 114,
+    "input_base64": "Ilw=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVudGVybWluYXRlZCBzdHJpbmcgbGl0ZXJhbAo="
+  },
+  {
+    "kind": "error",
+    "line": 115,
+    "input_base64": "IlwwIg==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiMCIK"
+  },
+  {
+    "kind": "error",
+    "line": 116,
+    "input_base64": "IlwxIg==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiMSIK"
+  },
+  {
+    "kind": "error",
+    "line": 117,
+    "input_base64": "IlwnIg==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiJyIK"
+  },
+  {
+    "kind": "error",
+    "line": 118,
+    "input_base64": "IlxhIg==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiYSIK"
+  },
+  {
+    "kind": "error",
+    "line": 119,
+    "input_base64": "Ilx2Ig==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAidiIK"
+  },
+  {
+    "kind": "error",
+    "line": 120,
+    "input_base64": "IlwKIg==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiXHgwQSIK"
+  },
+  {
+    "kind": "error",
+    "line": 121,
+    "input_base64": "Ilx4Nzgi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAieCIK"
+  },
+  {
+    "kind": "error",
+    "line": 122,
+    "input_base64": "Ilx1ezEyMzR9Ig==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAieyIK"
+  },
+  {
+    "kind": "error",
+    "line": 123,
+    "input_base64": "Ilx1RyI=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiRyIK"
+  },
+  {
+    "kind": "error",
+    "line": 124,
+    "input_base64": "Ilx1REci",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiRyIK"
+  },
+  {
+    "kind": "error",
+    "line": 125,
+    "input_base64": "Ilx1REVHIg==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiRyIK"
+  },
+  {
+    "kind": "error",
+    "line": 126,
+    "input_base64": "Ilx1REVGRyI=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAiRyIK"
+  },
+  {
+    "kind": "error",
+    "line": 127,
+    "input_base64": "Ilx1Ig==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAnIicK"
+  },
+  {
+    "kind": "error",
+    "line": 128,
+    "input_base64": "Ilx1RCI=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAnIicK"
+  },
+  {
+    "kind": "error",
+    "line": 129,
+    "input_base64": "Ilx1REUi",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAnIicK"
+  },
+  {
+    "kind": "error",
+    "line": 130,
+    "input_base64": "Ilx1REVGIg==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFN5bnRheCBlcnJvciAnIicK"
+  },
+  {
+    "kind": "printed",
+    "line": 134,
+    "input_base64": "MA==",
+    "warning_base64": "",
+    "expected_base64": "MA=="
+  },
+  {
+    "kind": "printed",
+    "line": 135,
+    "input_base64": "LTA=",
+    "warning_base64": "",
+    "expected_base64": "LTA="
+  },
+  {
+    "kind": "printed",
+    "line": 136,
+    "input_base64": "MTIz",
+    "warning_base64": "",
+    "expected_base64": "MTIz"
+  },
+  {
+    "kind": "printed",
+    "line": 137,
+    "input_base64": "MTIzLjQ1Ng==",
+    "warning_base64": "",
+    "expected_base64": "MTIzLjQ1Ng=="
+  },
+  {
+    "kind": "printed",
+    "line": 138,
+    "input_base64": "MTIzZTIw",
+    "warning_base64": "",
+    "expected_base64": "MTIzZTIw"
+  },
+  {
+    "kind": "printed",
+    "line": 139,
+    "input_base64": "MTIzZS0yMA==",
+    "warning_base64": "",
+    "expected_base64": "MTIzZS0yMA=="
+  },
+  {
+    "kind": "error",
+    "line": 140,
+    "input_base64": "MTIzLg==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjEyMy4iIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 141,
+    "input_base64": "LTEyMy4=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjEyMy4iIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 142,
+    "input_base64": "LjEyMw==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIi4xMjMiIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 143,
+    "input_base64": "LS4xMjM=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIi4xMjMiIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 144,
+    "input_base64": "TmFO",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIk5hTiIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "error",
+    "line": 145,
+    "input_base64": "SW5maW5pdHk=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIkluZmluaXR5IiBpbiBKU09OCg=="
+  },
+  {
+    "kind": "error",
+    "line": 146,
+    "input_base64": "LUluZmluaXR5",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIi0iIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 147,
+    "input_base64": "KzE=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIisiIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 148,
+    "input_base64": "LSAx",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIi0iIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 149,
+    "input_base64": "MDE=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjAxIiBpbiBKU09OCg=="
+  },
+  {
+    "kind": "error",
+    "line": 150,
+    "input_base64": "MGIx",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjBiMSIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "error",
+    "line": 151,
+    "input_base64": "MG8x",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjBvMSIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "error",
+    "line": 152,
+    "input_base64": "MHgx",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjB4MSIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "error",
+    "line": 153,
+    "input_base64": "MG4=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjBuIiBpbiBKU09OCg=="
+  },
+  {
+    "kind": "error",
+    "line": 154,
+    "input_base64": "LTAx",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjAxIiBpbiBKU09OCg=="
+  },
+  {
+    "kind": "error",
+    "line": 155,
+    "input_base64": "LTBiMQ==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjBiMSIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "error",
+    "line": 156,
+    "input_base64": "LTBvMQ==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjBvMSIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "error",
+    "line": 157,
+    "input_base64": "LTB4MQ==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjB4MSIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "error",
+    "line": 158,
+    "input_base64": "LTBu",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEV4cGVjdGVkIG51bWJlciBpbiBKU09OIGJ1dCBmb3VuZCAiMG4iCg=="
+  },
+  {
+    "kind": "error",
+    "line": 159,
+    "input_base64": "MV8y",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjFfMiIgaW4gSlNPTgo="
+  },
+  {
+    "kind": "error",
+    "line": 160,
+    "input_base64": "MS5lMg==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIjEuZTIiIGluIEpTT04K"
+  },
+  {
+    "kind": "printed",
+    "line": 164,
+    "input_base64": "eyJ4IjowfQ==",
+    "warning_base64": "",
+    "expected_base64": "KHt4OjB9KQ=="
+  },
+  {
+    "kind": "printed",
+    "line": 165,
+    "input_base64": "eyJ4IjowLCJ5IjoxfQ==",
+    "warning_base64": "",
+    "expected_base64": "KHt4OjAseToxfSk="
+  },
+  {
+    "kind": "printed",
+    "line": 166,
+    "input_base64": "eyJ4IjowLCJ4IjoxfQ==",
+    "warning_base64": "PHN0ZGluPjogV0FSTklORzogRHVwbGljYXRlIGtleSAieCIgaW4gb2JqZWN0IGxpdGVyYWwKPHN0ZGluPjogTk9URTogVGhlIG9yaWdpbmFsIGtleSAieCIgaXMgaGVyZToK",
+    "expected_base64": "KHt4OjAseDoxfSk="
+  },
+  {
+    "kind": "error",
+    "line": 170,
+    "input_base64": "eyJ4IjowLH0=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEpTT04gZG9lcyBub3Qgc3VwcG9ydCB0cmFpbGluZyBjb21tYXMK"
+  },
+  {
+    "kind": "error",
+    "line": 171,
+    "input_base64": "e3g6MH0=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEV4cGVjdGVkIHN0cmluZyBpbiBKU09OIGJ1dCBmb3VuZCAieCIK"
+  },
+  {
+    "kind": "error",
+    "line": 172,
+    "input_base64": "ezE6MH0=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEV4cGVjdGVkIHN0cmluZyBpbiBKU09OIGJ1dCBmb3VuZCAiMSIK"
+  },
+  {
+    "kind": "error",
+    "line": 173,
+    "input_base64": "e1sieCJdOjB9",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEV4cGVjdGVkIHN0cmluZyBpbiBKU09OIGJ1dCBmb3VuZCAiWyIK"
+  },
+  {
+    "kind": "printed",
+    "line": 177,
+    "input_base64": "W10=",
+    "warning_base64": "",
+    "expected_base64": "W10="
+  },
+  {
+    "kind": "printed",
+    "line": 178,
+    "input_base64": "WzFd",
+    "warning_base64": "",
+    "expected_base64": "WzFd"
+  },
+  {
+    "kind": "printed",
+    "line": 179,
+    "input_base64": "WzEsMl0=",
+    "warning_base64": "",
+    "expected_base64": "WzEsMl0="
+  },
+  {
+    "kind": "error",
+    "line": 180,
+    "input_base64": "Wyxd",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIiwiIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 181,
+    "input_base64": "WywxXQ==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIiwiIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 182,
+    "input_base64": "WzEsXQ==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEpTT04gZG9lcyBub3Qgc3VwcG9ydCB0cmFpbGluZyBjb21tYXMK"
+  },
+  {
+    "kind": "error",
+    "line": 183,
+    "input_base64": "WzEsLDJd",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIiwiIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 187,
+    "input_base64": "KHsieCI6MH0p",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIigiIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 188,
+    "input_base64": "eyJ4IjooMCl9",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIigiIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 189,
+    "input_base64": "IyEvdXNyL2Jpbi9lbnYgbm9kZQp7fQ==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IFVuZXhwZWN0ZWQgIiMhL3Vzci9iaW4vZW52IG5vZGUiIGluIEpTT04K"
+  },
+  {
+    "kind": "error",
+    "line": 190,
+    "input_base64": "eyJ4IjowfXsieSI6MX0=",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEV4cGVjdGVkIGVuZCBvZiBmaWxlIGluIEpTT04gYnV0IGZvdW5kICJ7Igo="
+  },
+  {
+    "kind": "error",
+    "line": 194,
+    "input_base64": "Lypjb21tZW50Ki97fQ==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEpTT04gZG9lcyBub3Qgc3VwcG9ydCBjb21tZW50cwo="
+  },
+  {
+    "kind": "error",
+    "line": 195,
+    "input_base64": "Ly9jb21tZW50Cnt9",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEpTT04gZG9lcyBub3Qgc3VwcG9ydCBjb21tZW50cwo="
+  },
+  {
+    "kind": "error",
+    "line": 196,
+    "input_base64": "ey8qY29tbWVudCovfQ==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEpTT04gZG9lcyBub3Qgc3VwcG9ydCBjb21tZW50cwo="
+  },
+  {
+    "kind": "error",
+    "line": 197,
+    "input_base64": "ey8vY29tbWVudAp9",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEpTT04gZG9lcyBub3Qgc3VwcG9ydCBjb21tZW50cwo="
+  },
+  {
+    "kind": "error",
+    "line": 198,
+    "input_base64": "e30vKmNvbW1lbnQqLw==",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEpTT04gZG9lcyBub3Qgc3VwcG9ydCBjb21tZW50cwo="
+  },
+  {
+    "kind": "error",
+    "line": 199,
+    "input_base64": "e30vL2NvbW1lbnQK",
+    "warning_base64": "",
+    "expected_base64": "PHN0ZGluPjogRVJST1I6IEpTT04gZG9lcyBub3Qgc3VwcG9ydCBjb21tZW50cwo="
+  }
+]

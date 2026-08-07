@@ -282,6 +282,11 @@ impl CssFeature {
     pub const REBECCA_PURPLE: Self = Self(1 << 12);
 
     #[must_use]
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    #[must_use]
     pub const fn contains(self, feature: Self) -> bool {
         self.0 & feature.0 != 0
     }

@@ -49,6 +49,12 @@ cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+The test suite includes 4,291 generated cases extracted from the pinned
+upstream esbuild revision across the JavaScript printer and lexer, JSON parser,
+and CSS printer, lexer, and parser. The checked-in fixtures make these tests
+independent of Go; see [tests/upstream/README.md](tests/upstream/README.md) for
+reproducible regeneration instructions.
+
 ## Compiler/CLI evaluation
 
 ```sh

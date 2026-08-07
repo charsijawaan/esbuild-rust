@@ -4637,6 +4637,7 @@ fn optimize_css_import_order(
                 {
                     duplicates.truncate(reverse_index);
                     optimized.truncate(optimized_index);
+                    break;
                 } else {
                     optimized.push(entry);
                 }
@@ -4645,6 +4646,8 @@ fn optimize_css_import_order(
             continue 'next_entry;
         }
 
+        // If the adjacent empty layer was removed above, intentionally fall
+        // through so the full file replaces it.
         duplicates.push(optimized.len());
         layer_duplicates[duplicate_set_index].indices = duplicates;
         optimized.push(entry);
@@ -4680,6 +4683,7 @@ pub fn wrap_rules_with_conditions(
 ) -> (Vec<Rule>, Vec<ImportRecord>) {
     for condition in conditions.iter().rev() {
         for token in &condition.layers {
+            let is_declaration = rules.is_empty() && token.children.is_some();
             if rules.is_empty() {
                 if token.children.is_none() {
                     continue;
@@ -4697,6 +4701,7 @@ pub fn wrap_rules_with_conditions(
                     at_token: "layer".into(),
                     prelude,
                     rules,
+                    has_block: !is_declaration,
                     ..KnownAtRule::default()
                 }),
                 loc: crate::internal::logger::Loc::default(),
@@ -4837,6 +4842,7 @@ pub fn prepare_css_asts(
                         css_printer::Options {
                             minify_whitespace: options.minify_whitespace,
                             ascii_only: options.ascii_only,
+                            unsupported_features: options.unsupported_css_features,
                             ..css_printer::Options::default()
                         },
                     );
@@ -4992,6 +4998,7 @@ pub fn compile_prepared_css_asts(
                     metafile_format: options.metafile_format,
                     source_map: options.source_map,
                     add_source_mappings,
+                    unsupported_features: options.unsupported_css_features,
                 },
             );
             CompiledCssAst {
@@ -5069,6 +5076,7 @@ pub fn assemble_css_chunk(
                 line_limit: options.line_limit,
                 minify_whitespace: options.minify_whitespace,
                 ascii_only: options.ascii_only,
+                unsupported_features: options.unsupported_css_features,
                 ..css_printer::Options::default()
             },
         );
@@ -6652,6 +6660,7 @@ pub fn rename_symbols_in_chunk(
     cross_chunk_refs.dedup();
 
     if options.minify_identifiers {
+        let mut frequency = CharFreq::default();
         let mut first_top_level_slots = crate::internal::ast::SlotCounts::default();
         for &source_index in &chunk.files_in_chunk_in_order {
             let Some(InputFileRepr::Js(repr)) =
@@ -6660,6 +6669,9 @@ pub fn rename_symbols_in_chunk(
                 continue;
             };
             first_top_level_slots.union_max(repr.ast.nested_scope_slot_counts);
+            if let Some(char_freq) = &repr.ast.char_freq {
+                frequency.include(char_freq);
+            }
         }
         let mut renamer = crate::internal::renamer::MinifyRenamer::new(
             graph.symbols.clone(),
@@ -6720,7 +6732,8 @@ pub fn rename_symbols_in_chunk(
             top_level_symbols.extend(file_symbols);
         }
         renamer.allocate_top_level_symbol_slots(&top_level_symbols);
-        renamer.assign_names_by_frequency(&DEFAULT_NAME_MINIFIER_JS);
+        let minifier = DEFAULT_NAME_MINIFIER_JS.shuffle_by_char_freq(frequency);
+        renamer.assign_names_by_frequency(&minifier);
         return Box::new(renamer);
     }
 
@@ -6837,6 +6850,16 @@ pub fn compile_part_range_for_chunk(
         }
     }
 
+    let lazy_default_part_index = if repr.ast.has_lazy_export {
+        repr.meta
+            .resolved_exports
+            .get("default")
+            .and_then(|export| repr.top_level_symbol_to_parts(export.reference))
+            .and_then(|parts| parts.first())
+            .copied()
+    } else {
+        None
+    };
     let mut needs_wrapper = false;
     for part_index in part_range.part_index_begin..part_range.part_index_end {
         let part = &repr.ast.parts[part_index as usize];
@@ -6849,11 +6872,70 @@ pub fn compile_part_range_for_chunk(
             needs_wrapper = true;
             continue;
         }
+        let mut lazy_default_statements = Vec::new();
+        let statements = if Some(part_index) == lazy_default_part_index {
+            lazy_default_statements.clone_from(&part.statements);
+            if let [statement] = lazy_default_statements.as_mut_slice()
+                && let Some(js_ast::StmtData::ExportDefault(default_export)) =
+                    statement.data.as_deref_mut()
+                && let Some(js_ast::StmtData::Expr(default_expression)) =
+                    default_export.value.data.as_deref_mut()
+                && let Some(js_ast::ExprData::Object(object)) =
+                    default_expression.value.data.as_deref_mut()
+            {
+                for property in &mut object.properties {
+                    let Some(js_ast::ExprData::String(key)) = property.key.data.as_deref() else {
+                        continue;
+                    };
+                    let name = String::from_utf8_lossy(&utf16_to_string(&key.value)).into_owned();
+                    if name == "default" {
+                        continue;
+                    }
+                    let Some(export) = repr.meta.resolved_exports.get(&name) else {
+                        continue;
+                    };
+                    let Some(&export_part_index) = repr
+                        .top_level_symbol_to_parts(export.reference)
+                        .and_then(|parts| parts.first())
+                    else {
+                        continue;
+                    };
+                    let export_part = &repr.ast.parts[export_part_index as usize];
+                    if !export_part.is_live {
+                        continue;
+                    }
+                    let Some(js_ast::StmtData::Local(local)) = export_part
+                        .statements
+                        .first()
+                        .and_then(|statement| statement.data.as_deref())
+                    else {
+                        continue;
+                    };
+                    let Some(js_ast::BindingData::Identifier(identifier)) = local
+                        .declarations
+                        .first()
+                        .and_then(|declaration| declaration.binding.data.as_deref())
+                    else {
+                        continue;
+                    };
+                    property.value_or_nil = js_ast::Expr::new(
+                        property.key.loc,
+                        js_ast::ExprData::Identifier(js_ast::IdentifierExpr {
+                            reference: identifier.reference,
+                            ..js_ast::IdentifierExpr::default()
+                        }),
+                    );
+                }
+            }
+            &lazy_default_statements
+        } else {
+            &part.statements
+        };
         let part_converted = convert_stmts_for_chunk(
             graph,
             options,
             part_range.source_index,
-            &part.statements,
+            statements,
             runtime_refs.re_export,
         );
         converted
@@ -6928,6 +7010,7 @@ pub fn compile_part_range_for_chunk(
     let linker_options = crate::internal::js_printer::LinkerOptions {
         require_or_import_meta_for_source: &require_or_import_meta_for_source,
         const_values: Some(&graph.const_values),
+        ts_enums: Some(&graph.ts_enums),
         to_common_js_ref: runtime_refs.to_common_js_ref,
         to_esm_ref: runtime_refs.to_esm_ref,
         runtime_require_ref: runtime_refs.runtime_require_ref,
@@ -6985,7 +7068,15 @@ pub fn compile_part_ranges_for_chunk(
     runtime_refs: ChunkRuntimeRefs,
     renamer: &dyn crate::internal::renamer::Renamer,
 ) -> Vec<CompiledPartRange> {
-    let part_ranges = &chunk.parts_in_chunk_in_order;
+    let part_ranges: Vec<_> = chunk
+        .parts_in_chunk_in_order
+        .iter()
+        .copied()
+        .filter(|part_range| {
+            !options.omit_runtime_for_tests
+                || part_range.source_index != crate::internal::runtime::SOURCE_INDEX
+        })
+        .collect();
     let worker_count = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(part_ranges.len());
@@ -7914,7 +8005,7 @@ pub fn assemble_javascript_chunk(
             panic!("JavaScript entry chunk must reference JavaScript");
         };
         if !repr.ast.hashbang.is_empty() {
-            let text = format!("#!{}\n", repr.ast.hashbang);
+            let text = format!("{}\n", repr.ast.hashbang);
             previous_offset.advance_string(&text);
             joiner.add_string(text);
             newline_before_comment = true;
@@ -10533,7 +10624,7 @@ mod tests {
                 EntryPointTailRefs::default(),
                 &renamer,
             ),
-            b"export { foo };\n"
+            b"export {\n  foo\n};\n"
         );
     }
 
@@ -10566,7 +10657,7 @@ mod tests {
     #[test]
     fn assembles_javascript_chunk_in_upstream_order() {
         let mut input = js_file(js_ast::Ast {
-            hashbang: "usr/bin/env node".into(),
+            hashbang: "#!/usr/bin/env node".into(),
             directives: vec!["use strict".into(), "custom".into()],
             ..js_ast::Ast::default()
         });
@@ -10604,7 +10695,7 @@ mod tests {
             context(&[], &[]).substitute_final_paths(chunk.intermediate_output, str::to_owned);
         let output = String::from_utf8(joiner.done()).expect("UTF-8");
         assert!(output.starts_with(
-            "#!usr/bin/env node\n/* banner */\n\"use strict\";\n\"custom\";\nvar Bundle = (() => {\n"
+            "#!/usr/bin/env node\n/* banner */\n\"use strict\";\n\"custom\";\nvar Bundle = (() => {\n"
         ));
         assert!(output.contains("  // src/entry.js\n  work();\n  return 1;\n"));
         assert!(output.ends_with("})();\n/* footer */\n"));
@@ -16054,7 +16145,7 @@ mod tests {
         let entry_bindings = print_cross_chunk_bindings(&chunks, 0, &renamer, &options);
         assert_eq!(
             entry_bindings.prefix,
-            b"import { shared } from \"UNIQUEC00000002\";\n"
+            b"import {\n  shared\n} from \"UNIQUEC00000002\";\n"
         );
         assert!(entry_bindings.suffix.is_empty());
         assert_eq!(entry_bindings.json_metadata_imports.len(), 1);
@@ -16062,6 +16153,6 @@ mod tests {
         assert!(!entry_bindings.json_metadata_imports[0].contains("\"external\""));
         let shared_bindings = print_cross_chunk_bindings(&chunks, 2, &renamer, &options);
         assert!(shared_bindings.prefix.is_empty());
-        assert_eq!(shared_bindings.suffix, b"export { shared };\n");
+        assert_eq!(shared_bindings.suffix, b"export {\n  shared\n};\n");
     }
 }

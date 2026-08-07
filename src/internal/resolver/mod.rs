@@ -10,6 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::internal::{
+    ast::ImportKind,
     config::{
         ExternalMatchers, ExternalSettings, MaybeBool, Platform, TsAlwaysStrict, TsConfig,
         TsConfigJsx, TsImportsNotUsedAsValues, TsJsx, TsTarget,
@@ -158,21 +159,40 @@ pub fn load_as_directory(
             }
             let source = Source {
                 key_path: Path {
-                    text: package_path,
+                    text: package_path.clone(),
                     namespace: "file".into(),
                     ..Path::default()
+                },
+                pretty_paths: crate::internal::logger::PrettyPaths {
+                    abs: package_path.clone(),
+                    rel: file_system
+                        .rel(file_system.cwd(), &package_path)
+                        .unwrap_or_else(|| package_path.clone()),
                 },
                 contents: Arc::from(contents),
                 ..Source::default()
             };
-            parse_package_json(
-                log,
+            // This package is parsed again below when attaching package metadata
+            // to the resolved file. Keep this preliminary main-field lookup from
+            // emitting duplicate warnings while still forwarding parse errors.
+            let parse_log = Log::new_defer(
+                crate::internal::logger::DeferLogKind::NoVerboseOrDebug,
+                HashMap::new(),
+            );
+            let package = parse_package_json(
+                &parse_log,
                 &source,
                 path,
                 file_system,
                 platform,
                 configured_main_fields,
-            )
+            );
+            for message in parse_log.done() {
+                if message.kind == MsgKind::Error {
+                    log.add_msg(message);
+                }
+            }
+            package
         });
 
     if let Some(package) = &package {
@@ -376,6 +396,7 @@ pub fn is_node_builtin(path: &str) -> bool {
 #[derive(Clone, Copy, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ResolverContext<'a> {
+    pub import_kind: ImportKind,
     pub tsconfig: Option<&'a TsConfigJson>,
     pub pnp: Option<&'a PnpData>,
     pub external_settings: Option<&'a ExternalSettings>,
@@ -432,18 +453,250 @@ pub fn resolve_file_or_package_with_context(
     is_require: bool,
     context: ResolverContext<'_>,
 ) -> Option<LoadedPathPair> {
-    resolve_file_or_package_core(
+    let mut effective_source_dir = Cow::Borrowed(source_dir);
+    let mut effective_import_path = Cow::Borrowed(import_path);
+    let mut browser_disabled = false;
+    if platform == Platform::Browser
+        && let Some((package_dir, mapping)) = find_browser_package_mapping(
+            log,
+            file_system,
+            source_dir,
+            import_path,
+            platform,
+            configured_main_fields,
+        )
+    {
+        match mapping {
+            Some(replacement) if replacement != import_path => {
+                effective_source_dir = Cow::Owned(package_dir);
+                effective_import_path = Cow::Owned(replacement);
+            }
+            None => browser_disabled = true,
+            Some(_) => {}
+        }
+    }
+    let result = if browser_disabled && is_node_builtin(import_path) {
+        Some(LoadedPathPair {
+            paths: PathPair {
+                primary: Path {
+                    text: import_path.to_string(),
+                    namespace: "file".into(),
+                    flags: PathFlags::DISABLED,
+                    ..Path::default()
+                },
+                ..PathPair::default()
+            },
+            different_case: None,
+        })
+    } else {
+        resolve_file_or_package_core(
+            log,
+            file_system,
+            effective_source_dir.as_ref(),
+            effective_import_path.as_ref(),
+            extension_order,
+            platform,
+            configured_main_fields,
+            is_require,
+            context,
+            false,
+        )
+    };
+    if let Some(mut result) = result {
+        if browser_disabled {
+            for path in result.paths.iter_mut() {
+                path.flags = PathFlags::DISABLED;
+            }
+        }
+        apply_browser_map_to_loaded_path(
+            log,
+            file_system,
+            &mut result,
+            extension_order,
+            platform,
+            configured_main_fields,
+            is_require,
+            source_dir,
+            import_path,
+        );
+        return Some(result);
+    }
+
+    let suffix_index = import_path.find(['?', '#']).filter(|index| *index > 0)?;
+    let mut result = resolve_file_or_package_core(
         log,
         file_system,
         source_dir,
-        import_path,
+        &import_path[..suffix_index],
         extension_order,
         platform,
         configured_main_fields,
         is_require,
         context,
         false,
-    )
+    )?;
+    apply_browser_map_to_loaded_path(
+        log,
+        file_system,
+        &mut result,
+        extension_order,
+        platform,
+        configured_main_fields,
+        is_require,
+        source_dir,
+        &import_path[..suffix_index],
+    );
+    let ignored_suffix = &import_path[suffix_index..];
+    for path in result.paths.iter_mut() {
+        path.ignored_suffix = ignored_suffix.to_string();
+    }
+    Some(result)
+}
+
+fn find_browser_package_mapping(
+    log: &Log,
+    file_system: &dyn Fs,
+    source_dir: &str,
+    import_path: &str,
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+) -> Option<(String, Option<String>)> {
+    let mut directory = source_dir.to_string();
+    loop {
+        if let Some(package) = read_package_json(
+            log,
+            file_system,
+            &directory,
+            platform,
+            configured_main_fields,
+        ) {
+            let relative_key = if is_package_path(import_path) {
+                let absolute = file_system.join(&[source_dir, import_path]);
+                file_system.rel(&directory, &absolute).and_then(|relative| {
+                    (!relative.starts_with(".."))
+                        .then(|| format!("./{}", relative.replace('\\', "/")))
+                })
+            } else {
+                None
+            };
+            return package
+                .browser_map
+                .get(import_path)
+                .or_else(|| {
+                    relative_key
+                        .as_deref()
+                        .and_then(|key| package.browser_map.get(key))
+                })
+                .cloned()
+                .map(|mapping| (directory, mapping));
+        }
+        let parent = file_system.dir(&directory);
+        if parent == directory {
+            return None;
+        }
+        directory = parent;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_browser_map_to_loaded_path(
+    log: &Log,
+    file_system: &dyn Fs,
+    loaded: &mut LoadedPathPair,
+    extension_order: &[String],
+    platform: Platform,
+    configured_main_fields: Option<&[String]>,
+    is_require: bool,
+    source_dir: &str,
+    import_path: &str,
+) {
+    if platform != Platform::Browser || loaded.paths.is_external {
+        return;
+    }
+    for path in loaded.paths.iter_mut() {
+        if path.namespace != "file" || path.is_disabled() {
+            continue;
+        }
+        let mut directory = file_system.dir(&path.text);
+        loop {
+            if let Some(package) = read_package_json(
+                log,
+                file_system,
+                &directory,
+                platform,
+                configured_main_fields,
+            ) {
+                let relative = file_system
+                    .rel(&directory, &path.text)
+                    .map(|relative| format!("./{}", relative.replace('\\', "/")));
+                let requested = if is_package_path(import_path) {
+                    parse_esm_package_name(import_path)
+                        .map(|(_, subpath)| subpath)
+                        .filter(|subpath| subpath != ".")
+                } else {
+                    let absolute = file_system.join(&[source_dir, import_path]);
+                    file_system.rel(&directory, &absolute).and_then(|relative| {
+                        (!relative.starts_with(".."))
+                            .then(|| format!("./{}", relative.replace('\\', "/")))
+                    })
+                };
+                let mapping = requested
+                    .as_deref()
+                    .and_then(|requested| package.browser_map.get(requested))
+                    .or_else(|| {
+                        relative
+                            .as_deref()
+                            .and_then(|relative| package.browser_map.get(relative))
+                    });
+                if let Some(mapping) = mapping {
+                    match mapping {
+                        None => {
+                            path.flags = PathFlags::DISABLED;
+                            if !is_package_path(import_path) {
+                                path.text = file_system.join(&[source_dir, import_path]);
+                            }
+                        }
+                        Some(replacement) => {
+                            let remapped = if replacement.starts_with('.') {
+                                let absolute = file_system.join(&[&directory, replacement]);
+                                load_as_file_or_directory(
+                                    log,
+                                    file_system,
+                                    &absolute,
+                                    extension_order,
+                                    platform,
+                                    configured_main_fields,
+                                    is_require,
+                                )
+                            } else {
+                                resolve_file_or_package_core(
+                                    log,
+                                    file_system,
+                                    &directory,
+                                    replacement,
+                                    extension_order,
+                                    platform,
+                                    configured_main_fields,
+                                    is_require,
+                                    ResolverContext::default(),
+                                    false,
+                                )
+                            };
+                            if let Some(remapped) = remapped {
+                                *path = remapped.paths.primary;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            let parent = file_system.dir(&directory);
+            if parent == directory {
+                break;
+            }
+            directory = parent;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -487,10 +740,32 @@ fn resolve_file_or_package_core(
     let source_dir = source_dir.as_ref();
     let import_path = import_path.as_ref();
 
+    if let Some(url) = DataUrl::parse(import_path)
+        && url.decode_mime_type() != MimeType::Unsupported
+    {
+        return Some(LoadedPathPair {
+            paths: PathPair {
+                primary: Path {
+                    text: import_path.to_string(),
+                    namespace: "dataurl".into(),
+                    ..Path::default()
+                },
+                ..PathPair::default()
+            },
+            different_case: None,
+        });
+    }
+
     if context
         .external_settings
         .is_some_and(|settings| is_external_match(&settings.pre_resolve, import_path))
         || (context.external_packages && is_package_path(import_path))
+        || (context.import_kind == ImportKind::Url && import_path.starts_with('#'))
+        || import_path.starts_with("http://")
+        || import_path.starts_with("https://")
+        || import_path.starts_with("//")
+        || DataUrl::parse(import_path)
+            .is_some_and(|url| url.decode_mime_type() == MimeType::Unsupported)
     {
         return Some(LoadedPathPair {
             paths: PathPair {
@@ -533,7 +808,11 @@ fn resolve_file_or_package_core(
     if source_dir.is_empty() {
         return None;
     }
-    if let Some(tsconfig) = context.tsconfig {
+    if let Some(tsconfig) = context.tsconfig
+        && (is_package_path(import_path)
+            || import_path.starts_with('/')
+            || file_system.is_abs(import_path))
+    {
         if let Some(candidates) = match_tsconfig_path_candidates(tsconfig, import_path, file_system)
         {
             for candidate in candidates {
@@ -578,8 +857,40 @@ fn resolve_file_or_package_core(
             is_require,
         );
     }
+    // CSS paths use URL semantics. Like upstream (and webpack), try a path
+    // relative to the importing stylesheet before treating a bare path as a
+    // package name.
+    if context.import_kind.is_from_css() && is_package_path(import_path) {
+        let absolute = file_system.join(&[source_dir, import_path]);
+        if let Some(result) = load_as_file_or_directory(
+            log,
+            file_system,
+            &absolute,
+            extension_order,
+            platform,
+            configured_main_fields,
+            is_require,
+        ) {
+            return Some(result);
+        }
+    }
     if !is_package_path(import_path) {
         let absolute = file_system.join(&[source_dir, import_path]);
+        if matches!(import_path, "." | "..")
+            || import_path.ends_with('/')
+            || import_path.ends_with("/.")
+            || import_path.ends_with("/..")
+        {
+            return load_as_directory(
+                log,
+                file_system,
+                &absolute,
+                extension_order,
+                platform,
+                configured_main_fields,
+                is_require,
+            );
+        }
         return load_as_file_or_directory(
             log,
             file_system,
@@ -687,30 +998,76 @@ fn resolve_file_or_package_core(
         if file_system.base(&current) != "node_modules" {
             let node_modules = file_system.join(&[&current, "node_modules"]);
             let package_dir = file_system.join(&[&node_modules, package_name]);
-            if let Some(package) = read_package_json(
+            let package = read_package_json(
                 log,
                 file_system,
                 &package_dir,
                 platform,
                 configured_main_fields,
-            ) && let Some(exports) = &package.exports_map
-            {
-                let resolution = handle_package_map_post_conditions(resolve_package_exports(
-                    "/",
-                    &package_subpath,
-                    &exports.root,
-                    &package_conditions(platform, is_require, context.conditions),
-                ));
-                return finalize_package_map_resolution(
-                    log,
-                    file_system,
-                    &package_dir,
-                    &resolution,
-                    extension_order,
-                    platform,
-                    configured_main_fields,
-                    is_require,
-                );
+            );
+            if let Some(package) = &package {
+                if let Some(exports) = &package.exports_map {
+                    let resolution = handle_package_map_post_conditions(resolve_package_exports(
+                        "/",
+                        &package_subpath,
+                        &exports.root,
+                        &package_conditions(platform, is_require, context.conditions),
+                    ));
+                    return finalize_package_map_resolution(
+                        log,
+                        file_system,
+                        &package_dir,
+                        &resolution,
+                        extension_order,
+                        platform,
+                        configured_main_fields,
+                        is_require,
+                    );
+                }
+                if platform == Platform::Browser
+                    && let Some(mapping) = package.browser_map.get(&package_subpath)
+                {
+                    if let Some(replacement) = mapping {
+                        if replacement.starts_with('.') {
+                            let absolute = file_system.join(&[&package_dir, replacement]);
+                            return load_as_file_or_directory(
+                                log,
+                                file_system,
+                                &absolute,
+                                extension_order,
+                                platform,
+                                configured_main_fields,
+                                is_require,
+                            );
+                        }
+                        return resolve_file_or_package_core(
+                            log,
+                            file_system,
+                            &package_dir,
+                            replacement,
+                            extension_order,
+                            platform,
+                            configured_main_fields,
+                            is_require,
+                            context,
+                            false,
+                        );
+                    }
+                    let absolute = file_system.join(&[&node_modules, import_path]);
+                    let mut loaded = load_as_file_or_directory(
+                        log,
+                        file_system,
+                        &absolute,
+                        extension_order,
+                        platform,
+                        configured_main_fields,
+                        is_require,
+                    )?;
+                    for path in loaded.paths.iter_mut() {
+                        path.flags = PathFlags::DISABLED;
+                    }
+                    return Some(loaded);
+                }
             }
 
             let absolute = file_system.join(&[&node_modules, import_path]);
@@ -907,6 +1264,13 @@ fn load_as_file_or_directory(
     configured_main_fields: Option<&[String]>,
     is_require: bool,
 ) -> Option<LoadedPathPair> {
+    let node_modules_extension_order;
+    let extension_order = if is_inside_node_modules(path) {
+        node_modules_extension_order = sort_node_modules_extension_order(extension_order);
+        &node_modules_extension_order
+    } else {
+        extension_order
+    };
     if let Some(file) = load_as_file(file_system, path, extension_order) {
         return Some(LoadedPathPair {
             paths: file_path_pair(&file.path, file.disabled),
@@ -924,6 +1288,33 @@ fn load_as_file_or_directory(
     )
 }
 
+fn sort_node_modules_extension_order(extension_order: &[String]) -> Vec<String> {
+    let is_type_script = |extension: &str| matches!(extension, ".ts" | ".tsx" | ".mts" | ".cts");
+    let is_java_script = |extension: &str| matches!(extension, ".js" | ".jsx" | ".mjs" | ".cjs");
+    let Some(split) = extension_order
+        .iter()
+        .rposition(|extension| is_java_script(extension))
+        .map(|index| index + 1)
+    else {
+        return extension_order.to_vec();
+    };
+    extension_order[..split]
+        .iter()
+        .filter(|extension| !is_type_script(extension))
+        .chain(
+            extension_order
+                .iter()
+                .filter(|extension| is_type_script(extension)),
+        )
+        .chain(
+            extension_order[split..]
+                .iter()
+                .filter(|extension| !is_type_script(extension)),
+        )
+        .cloned()
+        .collect()
+}
+
 fn read_package_json(
     log: &Log,
     file_system: &dyn Fs,
@@ -938,9 +1329,15 @@ fn read_package_json(
     }
     let source = Source {
         key_path: Path {
-            text: package_path,
+            text: package_path.clone(),
             namespace: "file".into(),
             ..Path::default()
+        },
+        pretty_paths: crate::internal::logger::PrettyPaths {
+            abs: package_path.clone(),
+            rel: file_system
+                .rel(file_system.cwd(), &package_path)
+                .unwrap_or_else(|| package_path.clone()),
         },
         contents: Arc::from(contents),
         ..Source::default()
@@ -4421,6 +4818,51 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn retries_files_without_url_suffixes_and_externalizes_url_schemes() {
+        let files = HashMap::from([("/project/file.js".to_string(), String::new())]);
+        let file_system = mock_fs(&files, MockKind::Unix, "/");
+        let extensions = vec![".js".into()];
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+
+        for (import_path, suffix) in [("./file.js?raw", "?raw"), ("./file.js#one", "#one")] {
+            let resolved = resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project",
+                import_path,
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+            )
+            .expect("path with ignored suffix");
+            assert_eq!(resolved.paths.primary.text, "/project/file.js");
+            assert_eq!(resolved.paths.primary.ignored_suffix, suffix);
+        }
+
+        for import_path in [
+            "http://example.com/a.js",
+            "https://example.com/a.js",
+            "//example.com/a.js",
+            "data:application/javascript,export%20default%201",
+        ] {
+            let resolved = resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project",
+                import_path,
+                &extensions,
+                Platform::Browser,
+                None,
+                false,
+            )
+            .expect("implicitly external URL");
+            assert!(resolved.paths.is_external, "{import_path}");
+            assert_eq!(resolved.paths.primary.text, import_path);
+        }
     }
 
     #[test]

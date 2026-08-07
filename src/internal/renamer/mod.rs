@@ -74,6 +74,10 @@ pub trait Renamer: Sync {
         self.name_for_symbol(reference)
     }
 
+    fn flags_for_symbol(&self, _reference: Ref) -> SymbolFlags {
+        SymbolFlags::default()
+    }
+
     fn namespace_alias_for_symbol(&self, _reference: Ref) -> Option<NamespaceAlias> {
         None
     }
@@ -96,6 +100,11 @@ impl Renamer for NoOpRenamer {
     fn name_for_symbol(&self, reference: Ref) -> String {
         let reference = self.symbols.follow_symbols_const(reference);
         self.symbols.get(reference).original_name.clone()
+    }
+
+    fn flags_for_symbol(&self, reference: Ref) -> SymbolFlags {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).flags
     }
 
     fn namespace_alias_for_symbol(&self, reference: Ref) -> Option<NamespaceAlias> {
@@ -353,6 +362,11 @@ impl Renamer for MinifyRenamer {
             return symbol.original_name.clone();
         };
         self.slots[namespace as usize][index as usize].name.clone()
+    }
+
+    fn flags_for_symbol(&self, reference: Ref) -> SymbolFlags {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).flags
     }
 
     fn original_name_for_symbol(&self, reference: Ref) -> String {
@@ -650,6 +664,11 @@ impl Renamer for NumberRenamer {
         } else {
             name.clone()
         }
+    }
+
+    fn flags_for_symbol(&self, reference: Ref) -> SymbolFlags {
+        let reference = self.symbols.follow_symbols_const(reference);
+        self.symbols.get(reference).flags
     }
 
     fn original_name_for_symbol(&self, reference: Ref) -> String {

@@ -1242,9 +1242,12 @@ fn push_code_point(output: &mut Vec<u8>, code_point: i32) {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde_json::Value;
+
     use super::{Options, TokenKind, range_of_identifier, tokenize};
     use crate::internal::logger::{
-        DeferLogKind, Loc, Log, OutputOptions, PrettyPaths, Source, TerminalInfo,
+        DeferLogKind, Loc, Log, OutputOptions, Path, PrettyPaths, Source, TerminalInfo,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1255,9 +1258,94 @@ mod tests {
                 abs: "<stdin>".into(),
                 rel: "<stdin>".into(),
             },
+            identifier_name: "stdin".into(),
             contents: Arc::from(contents),
+            key_path: Path {
+                text: "<stdin>".into(),
+                ..Path::default()
+            },
             ..Source::default()
         }
+    }
+
+    fn base64_field(case: &Value, field: &str) -> Vec<u8> {
+        STANDARD
+            .decode(case[field].as_str().expect("base64 corpus field"))
+            .expect("valid base64 corpus field")
+    }
+
+    #[test]
+    fn matches_pinned_upstream_css_lexer_corpus() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../../tests/upstream/css_lexer.json"))
+                .expect("valid pinned upstream css_lexer corpus");
+        let cases = cases.as_array().expect("css_lexer corpus array");
+        let kind_filter = std::env::var("UPSTREAM_TEST_FILTER").ok();
+        let line_filter = std::env::var("UPSTREAM_LINE_FILTER")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        if kind_filter.is_none() && line_filter.is_none() {
+            assert_eq!(cases.len(), 69, "upstream css_lexer case count changed");
+        }
+
+        let mut failures = Vec::new();
+        for case in cases {
+            let kind = case["kind"].as_str().expect("case kind");
+            let line = case["line"].as_u64().expect("case line");
+            if kind_filter.as_deref().is_some_and(|filter| kind != filter)
+                || line_filter.is_some_and(|filter| line != filter)
+            {
+                continue;
+            }
+            let input = base64_field(case, "input_base64");
+            let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+            let result = tokenize(log.clone(), source(&input), Options::default());
+            let diagnostics = log
+                .done()
+                .iter()
+                .flat_map(|message| {
+                    message.to_bytes(&OutputOptions::default(), TerminalInfo::default())
+                })
+                .collect::<Vec<_>>();
+
+            if kind == "diagnostic" {
+                let expected = base64_field(case, "expected_base64");
+                if diagnostics != expected {
+                    failures.push(format!(
+                        "internal/css_lexer/css_lexer_test.go:{line}: input {input:?}\nexpected diagnostic: {:?}\nactual diagnostic:   {:?}",
+                        String::from_utf8_lossy(&expected),
+                        String::from_utf8_lossy(&diagnostics),
+                    ));
+                }
+                continue;
+            }
+            let actual_token = result
+                .tokens
+                .first()
+                .map_or(TokenKind::EndOfFile, |token| token.kind);
+            let expected_token = case["expected_token"].as_str().expect("expected token");
+            let actual_token_name = format!("{actual_token:?}");
+            if actual_token_name != expected_token {
+                failures.push(format!(
+                    "internal/css_lexer/css_lexer_test.go:{line}: input {input:?}: expected {expected_token}, actual {actual_token_name}"
+                ));
+                continue;
+            }
+            if kind == "decoded" {
+                let expected = base64_field(case, "expected_base64");
+                let actual = result.tokens[0].decoded_text(&input);
+                if actual != expected {
+                    failures.push(format!(
+                        "internal/css_lexer/css_lexer_test.go:{line}: input {input:?}\nexpected decoded: {expected:?}\nactual decoded:   {actual:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "pinned upstream css_lexer failures:\n{}",
+            failures.join("\n\n")
+        );
     }
 
     fn lex_token(contents: &str) -> (TokenKind, Vec<u8>) {

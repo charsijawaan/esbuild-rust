@@ -131,6 +131,31 @@ struct DeferLogState {
     has_errors: bool,
 }
 
+fn messages_are_duplicates(left: &Msg, right: &Msg) -> bool {
+    fn data_is_duplicate(left: &MsgData, right: &MsgData) -> bool {
+        let user_detail_matches = match (&left.user_detail, &right.user_detail) {
+            (None, None) => true,
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        };
+        user_detail_matches
+            && left.location == right.location
+            && left.text == right.text
+            && left.disable_maximum_width == right.disable_maximum_width
+    }
+
+    left.kind == right.kind
+        && left.id == right.id
+        && left.plugin_name == right.plugin_name
+        && data_is_duplicate(&left.data, &right.data)
+        && left.notes.len() == right.notes.len()
+        && left
+            .notes
+            .iter()
+            .zip(&right.notes)
+            .all(|(left, right)| data_is_duplicate(left, right))
+}
+
 impl Log {
     /// # Panics
     ///
@@ -152,6 +177,13 @@ impl Log {
                     return;
                 }
                 let mut state = add_state.lock().expect("deferred log mutex was poisoned");
+                if state
+                    .messages
+                    .iter()
+                    .any(|existing| messages_are_duplicates(existing, &message))
+                {
+                    return;
+                }
                 if message.kind == MsgKind::Error {
                     state.has_errors = true;
                 }

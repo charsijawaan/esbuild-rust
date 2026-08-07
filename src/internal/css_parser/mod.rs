@@ -1,32 +1,45 @@
 //! Port of upstream `internal/css_parser`.
 
+mod color_space;
 mod media;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::internal::{
-    ast::{CharFreq, ImportKind, ImportRecord, LocRef, Ref, Symbol, SymbolKind, SymbolMap},
-    compat::CssFeature,
+    ast::{
+        CharFreq, ImportKind, ImportRecord, ImportRecordFlags, LocRef, Ref, Symbol, SymbolKind,
+        SymbolMap,
+    },
+    compat::{CssFeature, CssPrefix},
     css_ast::{
-        Ast, AtCharsetRule, AtImportRule, AtKeyframesRule, AtLayerRule, AtMediaRule,
-        BadDeclarationRule, ClassSelector, Combinator, CommentRule, ComplexSelector, Composes,
-        CompoundSelector, CrossFileEqualityCheck, Declaration, DeclarationRule, HashSelector,
-        ImportConditions, ImportedComposesName, KNOWN_DECLARATIONS, KeyframeBlock, KnownAtRule,
-        MediaQuery, NameToken, NamespacedName, PseudoClassKind, PseudoClassSelector, QualifiedRule,
-        Rule, RuleData, SelectorRule, SubclassData, SubclassSelector, Token, UnknownAtRule,
+        Ast, AtCharsetRule, AtImportRule, AtKeyframesRule, AtLayerRule, AtMediaRule, AtScopeRule,
+        AttributeSelector, BadDeclarationRule, ClassSelector, Combinator, CommentRule,
+        ComplexSelector, Composes, CompoundSelector, CrossFileEqualityCheck, Declaration,
+        DeclarationRule, HashSelector, ImportConditions, ImportedComposesName, KNOWN_DECLARATIONS,
+        KeyframeBlock, KnownAtRule, MediaQuery, NameToken, NamespacedName, PercentageFlags,
+        PseudoClassKind, PseudoClassSelector, PseudoClassWithSelectorList, QualifiedRule, Rule,
+        RuleData, SelectorRule, SubclassData, SubclassSelector, Token, UnknownAtRule,
         WhitespaceFlags, media_queries_equal, rules_equal, tokens_are_comma_separated,
     },
     css_lexer::{self, TokenKind, is_name_continue, would_start_identifier_without_escapes},
-    logger::{Loc, Log, Path, Range, Source},
+    helpers::{F64, lerp, max2},
+    logger::{LineColumnTracker, Loc, Log, Msg, MsgData, MsgKind, Path, Range, Source},
 };
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+use color_space::{
+    ColorSpace, HueMethod, color_space_to_xyz, d50_to_d65, gam_srgb, gamut_mapping_xyz_to_srgb,
+    lab_to_xyz, lch_to_lab, lin_srgb, lin_srgb_to_xyz, oklab_to_xyz, xyz_to_color_space,
+    xyz_to_lin_srgb,
+};
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Options {
     pub minify_syntax: bool,
     pub minify_whitespace: bool,
     pub minify_identifiers: bool,
     pub symbol_mode: SymbolMode,
     pub unsupported_css_features: CssFeature,
+    pub css_prefix_data: HashMap<Declaration, CssPrefix>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -149,13 +162,14 @@ fn all_selectors_are_dead(selectors: &[ComplexSelector]) -> bool {
 #[must_use]
 pub fn parse(log: Log, source: Source, options: Options) -> Ast {
     let result = css_lexer::tokenize(
-        log,
+        log.clone(),
         source.clone(),
         css_lexer::Options {
             record_all_comments: options.minify_identifiers,
         },
     );
     let mut parser = Parser {
+        log,
         source,
         tokens: result.tokens,
         legal_comments: result.legal_comments,
@@ -172,8 +186,28 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
         make_local_symbols: options.symbol_mode == SymbolMode::Local,
         composes: HashMap::new(),
         composes_target: None,
+        composes_problem_range: None,
+        enclosing_at_media: Vec::new(),
+        layers_pre_import: Vec::new(),
+        layers_post_import: Vec::new(),
+        enclosing_layer: Vec::new(),
+        anonymous_layer_count: 0,
+        has_seen_at_import: false,
+        qualified_rule_context_depth: 0,
+        suppress_unbalanced_token_warnings: false,
+        can_inline_no_op_nesting: true,
+        selector_nesting_depth: 0,
+        nesting_warnings: HashSet::new(),
+        pending_color_fallback: None,
+        css_prefix_data: options.css_prefix_data.clone(),
     };
-    let rules = parser.parse_rule_list(false, true);
+    let mut rules = parser.parse_rule_list(false, true);
+    if options
+        .unsupported_css_features
+        .contains(CssFeature::NESTING)
+    {
+        rules = parser.lower_nesting_in_rules(rules);
+    }
     let char_freq = if options.minify_identifiers {
         let mut frequency = CharFreq::default();
         frequency.scan(&parser.source.contents, 1);
@@ -204,6 +238,8 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
         local_scope: parser.local_scope,
         global_scope: parser.global_scope,
         composes: parser.composes,
+        layers_pre_import: parser.layers_pre_import,
+        layers_post_import: parser.layers_post_import,
         source_map_comment: result.source_map_comment,
         approximate_line_count: result.approximate_line_count,
         ..Ast::default()
@@ -211,6 +247,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
 }
 
 struct Parser {
+    log: Log,
     source: Source,
     tokens: Vec<css_lexer::Token>,
     legal_comments: Vec<css_lexer::Comment>,
@@ -227,9 +264,246 @@ struct Parser {
     make_local_symbols: bool,
     composes: HashMap<Ref, Composes>,
     composes_target: Option<Ref>,
+    composes_problem_range: Option<Range>,
+    enclosing_at_media: Vec<Vec<MediaQuery>>,
+    layers_pre_import: Vec<Vec<String>>,
+    layers_post_import: Vec<Vec<String>>,
+    enclosing_layer: Vec<String>,
+    anonymous_layer_count: usize,
+    has_seen_at_import: bool,
+    qualified_rule_context_depth: usize,
+    suppress_unbalanced_token_warnings: bool,
+    can_inline_no_op_nesting: bool,
+    selector_nesting_depth: usize,
+    nesting_warnings: HashSet<Loc>,
+    pending_color_fallback: Option<Rule>,
+    css_prefix_data: HashMap<Declaration, CssPrefix>,
 }
 
 impl Parser {
+    fn record_at_layer_rule(&mut self, layers: &[Vec<String>]) {
+        if self.anonymous_layer_count > 0 {
+            return;
+        }
+        for layer in layers {
+            let mut qualified = self.enclosing_layer.clone();
+            qualified.extend(layer.iter().cloned());
+            self.layers_post_import.push(qualified);
+        }
+    }
+
+    fn warn(&self, range: Range, text: impl Into<String>) {
+        let mut tracker = LineColumnTracker::new(Some(&self.source));
+        self.log.add_msg(Msg {
+            data: tracker.msg_data(range, text),
+            ..Msg::new(MsgKind::Warning, "")
+        });
+    }
+
+    fn warn_with_note(
+        &self,
+        range: Range,
+        text: impl Into<String>,
+        note_loc: Loc,
+        note: impl Into<String>,
+    ) {
+        let mut tracker = LineColumnTracker::new(Some(&self.source));
+        let data = tracker.msg_data(range, text);
+        let note = tracker.msg_data(
+            Range {
+                loc: note_loc,
+                len: 1,
+            },
+            note,
+        );
+        self.log.add_msg(Msg {
+            data,
+            notes: vec![note],
+            ..Msg::new(MsgKind::Warning, "")
+        });
+    }
+
+    fn warn_with_text_note(&self, range: Range, text: impl Into<String>, note: impl Into<String>) {
+        let mut tracker = LineColumnTracker::new(Some(&self.source));
+        self.log.add_msg(Msg {
+            data: tracker.msg_data(range, text),
+            notes: vec![MsgData {
+                text: note.into(),
+                ..MsgData::default()
+            }],
+            ..Msg::new(MsgKind::Warning, "")
+        });
+    }
+
+    fn found_description(&self, token: css_lexer::Token) -> String {
+        match token.kind {
+            TokenKind::EndOfFile => "end of file".into(),
+            TokenKind::Whitespace => "whitespace".into(),
+            _ => format!(
+                "{:?}",
+                String::from_utf8_lossy(self.source.text_for_range(token.range))
+            ),
+        }
+    }
+
+    fn validate_media_query_tokens(&self, tokens: &[Token]) {
+        if tokens.iter().any(|token| token.kind == TokenKind::Comma) {
+            let queries = tokens.split(|token| token.kind == TokenKind::Comma);
+            if queries.clone().all(|query| !query.is_empty()) {
+                for query in queries {
+                    self.validate_media_query_tokens(query);
+                }
+                return;
+            }
+        }
+        let found = |token: &Token| {
+            if token.kind == TokenKind::Function {
+                format!("{:?}", format!("{}(", token.text))
+            } else {
+                format!("{:?}", token.text)
+            }
+        };
+        let warn = |token: &Token, expected: &str| {
+            self.warn(
+                Range {
+                    loc: token.loc,
+                    len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                },
+                format!("Expected {expected} but found {}", found(token)),
+            );
+        };
+        let Some(first) = tokens.first() else {
+            return;
+        };
+        if first.kind == TokenKind::DelimAmpersand {
+            self.warn(
+                Range {
+                    loc: first.loc,
+                    len: 1,
+                },
+                "Expected identifier but found \"&\"",
+            );
+            return;
+        }
+        if first.kind == TokenKind::Ident {
+            let first_lower = first.text.to_ascii_lowercase();
+            if matches!(first_lower.as_str(), "and" | "or" | "layer") {
+                self.warn(
+                    Range {
+                        loc: first.loc,
+                        len: i32::try_from(first.text.len()).unwrap_or(i32::MAX),
+                    },
+                    format!("Unexpected {:?}", first.text),
+                );
+                return;
+            }
+            if matches!(first_lower.as_str(), "not" | "only") {
+                let Some(second) = tokens.get(1) else {
+                    self.warn(first_range(first), "Expected identifier but found \"{\"");
+                    return;
+                };
+                if second.kind == TokenKind::Ident {
+                    let lower = second.text.to_ascii_lowercase();
+                    if matches!(lower.as_str(), "and" | "or" | "not" | "only" | "layer") {
+                        self.warn(first_range(second), format!("Unexpected {:?}", second.text));
+                        return;
+                    }
+                }
+                if first_lower == "not" && second.kind == TokenKind::OpenParen {
+                    if let Some(extra) = tokens.get(2) {
+                        warn(extra, "\"{\"");
+                    } else if let Some(children) = &second.children
+                        && children.first().is_some_and(|token| {
+                            token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("not")
+                        })
+                        && let Some(and) = children.iter().skip(2).find(|token| {
+                            token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("and")
+                        })
+                    {
+                        warn(and, "\")\"");
+                    }
+                }
+                return;
+            }
+            if let Some(second) = tokens.get(1) {
+                if second.kind == TokenKind::Function {
+                    warn(second, "\"{\"");
+                    return;
+                }
+                if second.kind == TokenKind::Ident {
+                    if !second.text.eq_ignore_ascii_case("and") {
+                        warn(second, "\"{\"");
+                        return;
+                    }
+                    let mut index = 1;
+                    while index < tokens.len() {
+                        let operator = &tokens[index];
+                        if operator.kind != TokenKind::Ident
+                            || !operator.text.eq_ignore_ascii_case("and")
+                        {
+                            warn(operator, "\"{\"");
+                            return;
+                        }
+                        let Some(condition) = tokens.get(index + 1) else {
+                            return;
+                        };
+                        if condition.kind != TokenKind::OpenParen {
+                            warn(condition, "\"{\"");
+                            return;
+                        }
+                        index += 2;
+                    }
+                }
+            }
+            return;
+        }
+
+        if first.kind == TokenKind::OpenParen {
+            if let Some(children) = &first.children
+                && children.first().is_some_and(|token| {
+                    token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("not")
+                })
+                && let Some(and) = children.iter().skip(2).find(|token| {
+                    token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("and")
+                })
+            {
+                warn(and, "\")\"");
+                return;
+            }
+            if let Some(second) = tokens.get(1)
+                && second.kind == TokenKind::Function
+            {
+                warn(second, "\"{\"");
+                return;
+            }
+            let mut operator: Option<&str> = None;
+            let mut index = 1;
+            while index + 1 < tokens.len() {
+                let token = &tokens[index];
+                if token.kind == TokenKind::Function {
+                    warn(token, "\"{\"");
+                    return;
+                }
+                if token.kind != TokenKind::Ident {
+                    break;
+                }
+                let lower = token.text.to_ascii_lowercase();
+                if !matches!(lower.as_str(), "and" | "or") {
+                    break;
+                }
+                if let Some(previous) = operator {
+                    if previous != lower {
+                        warn(token, "\"{\"");
+                        return;
+                    }
+                } else {
+                    operator = Some(if lower == "and" { "and" } else { "or" });
+                }
+                index += 2;
+            }
+        }
+    }
+
     fn parse_rule_list(
         &mut self,
         stop_at_close_brace: bool,
@@ -245,16 +519,85 @@ impl Parser {
                     self.index += 1;
                     break;
                 }
-                TokenKind::Semicolon => self.index += 1,
+                TokenKind::Semicolon if stop_at_close_brace => self.index += 1,
                 TokenKind::AtKeyword => {
+                    let mut parse_import_as_unknown = false;
+                    if !stop_at_close_brace {
+                        let token = self.current();
+                        let name = self.decoded(token);
+                        if name.eq_ignore_ascii_case("charset") {
+                            if let Some(previous) = rules
+                                .iter()
+                                .find(|rule| !matches!(rule.data, RuleData::Comment(_)))
+                            {
+                                self.warn_with_note(
+                                    token.range,
+                                    "\"@charset\" must be the first rule in the file",
+                                    previous.loc,
+                                    "This rule cannot come before a \"@charset\" rule",
+                                );
+                            }
+                        } else if name.eq_ignore_ascii_case("import") {
+                            let mut saw_import = false;
+                            if let Some(previous) = rules.iter().find(|rule| match &rule.data {
+                                RuleData::Comment(_) | RuleData::AtCharset(_) => false,
+                                RuleData::AtImport(_) => {
+                                    saw_import = true;
+                                    false
+                                }
+                                RuleData::UnknownAt(rule)
+                                    if rule.at_token.eq_ignore_ascii_case("layer")
+                                        && rule.block.is_empty()
+                                        && !saw_import =>
+                                {
+                                    false
+                                }
+                                RuleData::AtLayer(rule) if !rule.has_block && !saw_import => false,
+                                _ => true,
+                            }) {
+                                self.warn_with_note(
+                                    token.range,
+                                    "All \"@import\" rules must come first",
+                                    previous.loc,
+                                    "This rule cannot come before an \"@import\" rule",
+                                );
+                                parse_import_as_unknown = true;
+                            }
+                        }
+                    } else if self.decoded(self.current()).eq_ignore_ascii_case("import") {
+                        self.warn(
+                            self.current().range,
+                            "\"@import\" is only valid at the top level",
+                        );
+                        parse_import_as_unknown = true;
+                    }
+                    if parse_import_as_unknown {
+                        rules.push(self.parse_unknown_at_rule());
+                        continue;
+                    }
                     rules.push(self.parse_at_rule(preserve_legal_comments));
                 }
-                _ if stop_at_close_brace && self.starts_declaration() => {
+                _ if stop_at_close_brace
+                    && self.starts_declaration()
+                    && self.kind_at(self.scan_to_rule_delimiter()) != TokenKind::OpenBrace =>
+                {
                     if let Some(rule) = self.parse_declaration() {
+                        if let Some(fallback) = self.pending_color_fallback.take() {
+                            let fallback_key = match &fallback.data {
+                                RuleData::Declaration(declaration) => &declaration.key_text,
+                                _ => unreachable!(),
+                            };
+                            if !rules.iter().any(|rule| {
+                                matches!(&rule.data, RuleData::Declaration(declaration)
+                                    if declaration.key_text.eq_ignore_ascii_case(fallback_key))
+                            }) {
+                                rules.push(fallback);
+                            }
+                        }
                         rules.push(rule);
                     }
                 }
-                _ => rules.push(self.parse_qualified_rule()),
+                _ => rules.push(self.parse_qualified_rule(!stop_at_close_brace)),
             }
         }
         let lower_inset = self
@@ -263,10 +606,22 @@ impl Parser {
         if lower_inset {
             lower_inset_declarations(&mut rules, self.minify_whitespace);
         }
+        insert_prefixed_declarations(&mut rules, &self.css_prefix_data);
+        inline_empty_local_and_global_rules(&mut rules);
         if self.minify_syntax {
             mangle_border_radius_declarations(&mut rules, self.minify_whitespace);
             mangle_box_declarations(&mut rules, !lower_inset);
-            mangle_empty_and_nested_rules(&mut rules);
+            mangle_empty_and_nested_rules(
+                &mut rules,
+                !stop_at_close_brace || self.selector_nesting_depth == 0,
+            );
+            if stop_at_close_brace && self.can_inline_no_op_nesting {
+                inline_no_op_nesting_rules(&mut rules);
+            }
+            merge_adjacent_selector_rules(&mut rules);
+            for ancestor in self.enclosing_at_media.clone() {
+                unwrap_duplicate_media_rules(&mut rules, &ancestor);
+            }
             merge_adjacent_selector_rules(&mut rules);
         }
         rules
@@ -291,16 +646,54 @@ impl Parser {
         }
     }
 
-    fn convert_at_rule_prelude(&mut self, name: &str, start: usize, end: usize) -> Vec<Token> {
-        let preserve_whitespace = name.eq_ignore_ascii_case("container")
-            || name.eq_ignore_ascii_case("supports")
-            || name.eq_ignore_ascii_case("media");
-        let mut prelude = if preserve_whitespace {
-            self.convert_tokens_preserving_whitespace(start, end)
+    fn parse_unknown_at_rule(&mut self) -> Rule {
+        let token = self.current();
+        let loc = token.range.loc;
+        let at_token = self.decoded(token);
+        self.index += 1;
+        self.skip_whitespace();
+        let start = self.index;
+        let end = self.scan_to_rule_delimiter();
+        let prelude = self.convert_tokens(start, end);
+        self.index = end;
+        if at_token.eq_ignore_ascii_case("import") && self.current_kind() != TokenKind::Semicolon {
+            let message = if self.current_kind() == TokenKind::EndOfFile {
+                "Expected \";\" but found end of file"
+            } else {
+                "Expected \";\""
+            };
+            self.warn(self.current().range, message);
+        }
+        let block = if self.current_kind() == TokenKind::OpenBrace {
+            let start = self.index;
+            let end = self.scan_balanced_block(start);
+            self.index = end;
+            self.convert_tokens_preserving_whitespace_with_imports(start, end)
         } else {
-            self.convert_tokens(start, end)
+            if self.current_kind() == TokenKind::Semicolon {
+                self.index += 1;
+            }
+            Vec::new()
         };
+        Rule {
+            loc,
+            data: RuleData::UnknownAt(UnknownAtRule {
+                at_token,
+                prelude,
+                block,
+            }),
+        }
+    }
+
+    fn convert_at_rule_prelude(&mut self, name: &str, start: usize, end: usize) -> Vec<Token> {
+        let mut prelude =
+            if name.eq_ignore_ascii_case("container") || name.eq_ignore_ascii_case("media") {
+                self.convert_tokens_preserving_whitespace(start, end)
+            } else {
+                self.convert_tokens(start, end)
+            };
         trim_token_boundary_whitespace(&mut prelude);
+        trim_group_boundary_whitespace(&mut prelude);
         if name.eq_ignore_ascii_case("media") && self.minify_whitespace {
             minify_group_commas(&mut prelude);
         }
@@ -311,23 +704,76 @@ impl Parser {
         let token = self.current();
         let loc = token.range.loc;
         let name = self.decoded(token);
+        if name.eq_ignore_ascii_case("namespace") {
+            self.warn(token.range, "\"@namespace\" rules are not supported");
+        }
         self.index += 1;
+        let had_whitespace = self.current_kind() == TokenKind::Whitespace;
         self.skip_whitespace();
         if name.eq_ignore_ascii_case("charset") {
-            let encoding = if matches!(
-                self.current_kind(),
-                TokenKind::String | TokenKind::UnterminatedString
-            ) {
+            if !had_whitespace {
+                let current = self.current();
+                self.warn(
+                    current.range,
+                    format!(
+                        "Expected whitespace but found {}",
+                        self.found_description(current)
+                    ),
+                );
+            }
+            if self.current_kind() == TokenKind::String {
                 let encoding = self.decoded(self.current());
                 self.index += 1;
-                encoding
-            } else {
-                String::new()
-            };
-            self.consume_through_semicolon();
+                if !encoding.eq_ignore_ascii_case("utf-8") {
+                    self.warn(
+                        token.range,
+                        format!(
+                            "\"UTF-8\" will be used instead of unsupported charset {encoding:?}"
+                        ),
+                    );
+                }
+                if self.current_kind() == TokenKind::Semicolon {
+                    self.index += 1;
+                } else {
+                    let current = self.current();
+                    self.warn(
+                        current.range,
+                        format!(
+                            "Expected \";\" but found {}",
+                            self.found_description(current)
+                        ),
+                    );
+                }
+                return Rule {
+                    loc,
+                    data: RuleData::AtCharset(AtCharsetRule { encoding }),
+                };
+            }
+
+            let current = self.current();
+            if had_whitespace {
+                self.warn(
+                    current.range,
+                    format!(
+                        "Expected string token but found {}",
+                        self.found_description(current)
+                    ),
+                );
+            }
+            let prelude_start = self.index;
+            let end = self.scan_to_rule_delimiter();
+            let prelude = self.convert_tokens(prelude_start, end);
+            self.index = end;
+            if self.current_kind() == TokenKind::Semicolon {
+                self.index += 1;
+            }
             return Rule {
                 loc,
-                data: RuleData::AtCharset(AtCharsetRule { encoding }),
+                data: RuleData::UnknownAt(UnknownAtRule {
+                    at_token: name,
+                    prelude,
+                    block: Vec::new(),
+                }),
             };
         }
         if name.eq_ignore_ascii_case("import") {
@@ -336,28 +782,253 @@ impl Parser {
 
         let prelude_start = self.index;
         let end = self.scan_to_rule_delimiter();
+        let unclosed_media_group = name.eq_ignore_ascii_case("media")
+            && self.kind_at(end) == TokenKind::EndOfFile
+            && find_unclosed_opening(&self.tokens, prelude_start, end).is_some();
+        let old_suppress_unbalanced = self.suppress_unbalanced_token_warnings;
+        self.suppress_unbalanced_token_warnings |= unclosed_media_group;
         let mut prelude = self.convert_at_rule_prelude(&name, prelude_start, end);
+        self.suppress_unbalanced_token_warnings = old_suppress_unbalanced;
+        if unclosed_media_group {
+            self.warn(self.current().range, "Expected \")\" but found end of file");
+        }
+        if name.eq_ignore_ascii_case("media") {
+            normalize_media_commas(&mut prelude, self.minify_whitespace);
+            self.validate_media_query_tokens(&prelude);
+        }
         self.index = end;
+        if self.current_kind() == TokenKind::EndOfFile
+            && name.eq_ignore_ascii_case("scope")
+            && let Some(open_paren_index) =
+                (prelude_start..end).find(|&index| self.kind_at(index) == TokenKind::OpenParen)
+            && let Some(open_brace_index) = (open_paren_index + 1..end)
+                .find(|&index| self.kind_at(index) == TokenKind::OpenBrace)
+        {
+            self.warn(self.tokens[open_brace_index].range, "Unexpected \"{\"");
+            prelude =
+                self.convert_tokens_preserving_whitespace_without_warnings(prelude_start, end);
+            trim_token_boundary_whitespace(&mut prelude);
+            return Rule {
+                loc,
+                data: RuleData::KnownAt(KnownAtRule {
+                    at_token: name,
+                    prelude,
+                    rules: Vec::new(),
+                    ..KnownAtRule::default()
+                }),
+            };
+        }
+        if self.current_kind() == TokenKind::EndOfFile && !name.eq_ignore_ascii_case("layer") {
+            if !unclosed_media_group {
+                self.warn(self.current().range, "Expected \"{\" but found end of file");
+            }
+            if name.eq_ignore_ascii_case("media") {
+                let queries = media::parse_media_query_list(
+                    prelude,
+                    loc,
+                    self.unsupported_css_features,
+                    self.minify_syntax,
+                );
+                return Rule {
+                    loc,
+                    data: RuleData::AtMedia(AtMediaRule {
+                        queries,
+                        ..AtMediaRule::default()
+                    }),
+                };
+            }
+            if is_known_block_at_rule(&name) {
+                return Rule {
+                    loc,
+                    data: RuleData::KnownAt(KnownAtRule {
+                        at_token: name,
+                        prelude,
+                        ..KnownAtRule::default()
+                    }),
+                };
+            }
+        }
+        if name.eq_ignore_ascii_case("media") && self.current_kind() != TokenKind::OpenBrace {
+            self.warn(
+                self.current().range,
+                format!(
+                    "Expected \"{{\" but found {}",
+                    self.found_description(self.current())
+                ),
+            );
+        }
         if self.current_kind() == TokenKind::OpenBrace {
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "keyframes" | "-webkit-keyframes"
+                "keyframes"
+                    | "-webkit-keyframes"
+                    | "-moz-keyframes"
+                    | "-ms-keyframes"
+                    | "-o-keyframes"
             ) {
+                let name_token = prelude.first();
+                let has_valid_shape = matches!(name_token, Some(token) if matches!(token.kind, TokenKind::Ident | TokenKind::String))
+                    && prelude.len() == 1;
+                let invalid_name = name_token.is_some_and(|token| {
+                    let lower = token.text.to_ascii_lowercase();
+                    lower == "none" || CSS_WIDE_AND_RESERVED_KEYWORDS.contains(&lower.as_str())
+                });
+                if !has_valid_shape || invalid_name {
+                    if !has_valid_shape {
+                        self.warn(
+                            self.current().range,
+                            format!(
+                                "Expected identifier but found {}",
+                                self.found_description(self.current())
+                            ),
+                        );
+                    } else if let Some(token) = name_token
+                        && token.kind == TokenKind::Ident
+                    {
+                        self.warn_with_text_note(
+                            Range {
+                                loc: token.loc,
+                                len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                            },
+                            format!(
+                                "Cannot use {:?} as a name for \"@keyframes\" without quotes",
+                                token.text
+                            ),
+                            format!(
+                                "You can put {:?} in quotes to prevent it from becoming a CSS keyword.",
+                                token.text
+                            ),
+                        );
+                    }
+                    let block_start = self.index;
+                    let block_end = self.scan_balanced_block(block_start);
+                    self.index = block_end;
+                    let block = self
+                        .convert_tokens_preserving_whitespace_with_imports(block_start, block_end);
+                    return Rule {
+                        loc,
+                        data: RuleData::UnknownAt(UnknownAtRule {
+                            at_token: name,
+                            prelude,
+                            block,
+                        }),
+                    };
+                }
                 return self.parse_keyframes(loc, name, &prelude);
             }
             if name.eq_ignore_ascii_case("media") {
                 return self.parse_media_at_rule(loc, prelude, preserve_legal_comments);
             }
             if name.eq_ignore_ascii_case("layer") {
-                let names = parse_layer_names(&prelude);
+                let (names, layer_error) = parse_layer_names_checked(&prelude);
+                let mut is_valid = layer_error.is_none();
+                if let Some((range, message)) = layer_error {
+                    self.warn(range, message);
+                }
+                if names.len() > 1 {
+                    self.warn(self.current().range, "Expected \";\"");
+                    is_valid = false;
+                }
                 self.index += 1;
+                self.record_at_layer_rule(&names);
+                let old_enclosing_layer = self.enclosing_layer.clone();
+                if let [name] = names.as_slice() {
+                    self.enclosing_layer.extend(name.iter().cloned());
+                } else {
+                    self.anonymous_layer_count += 1;
+                }
                 let rules = self.parse_rule_list(true, preserve_legal_comments);
+                if names.len() == 1 {
+                    self.enclosing_layer = old_enclosing_layer;
+                } else {
+                    self.anonymous_layer_count -= 1;
+                }
+                if !is_valid {
+                    return Rule {
+                        loc,
+                        data: RuleData::KnownAt(KnownAtRule {
+                            at_token: name,
+                            prelude,
+                            rules,
+                            ..KnownAtRule::default()
+                        }),
+                    };
+                }
                 return Rule {
                     loc,
                     data: RuleData::AtLayer(AtLayerRule {
                         names,
                         rules,
+                        has_block: true,
                         ..AtLayerRule::default()
+                    }),
+                };
+            }
+            if name.eq_ignore_ascii_case("scope") {
+                let mut start = Vec::new();
+                let mut finish = Vec::new();
+                let mut prelude_index = 0;
+                let mut is_valid = true;
+                if let Some(token) = prelude.get(prelude_index)
+                    && token.kind == TokenKind::OpenParen
+                {
+                    start = self
+                        .parse_complex_selectors(token.children.as_deref().unwrap_or_default())
+                        .unwrap_or_default();
+                    prelude_index += 1;
+                }
+                if prelude.get(prelude_index).is_some_and(|token| {
+                    token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("to")
+                }) {
+                    prelude_index += 1;
+                    if let Some(token) = prelude.get(prelude_index)
+                        && token.kind == TokenKind::OpenParen
+                    {
+                        finish = self
+                            .parse_complex_selectors(token.children.as_deref().unwrap_or_default())
+                            .unwrap_or_default();
+                        prelude_index += 1;
+                    } else if let Some(token) = prelude.get(prelude_index) {
+                        self.warn(
+                            Range {
+                                loc: token.loc,
+                                len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                            },
+                            format!("Expected \"(\" but found {:?}", token.text),
+                        );
+                        is_valid = false;
+                    }
+                }
+                if is_valid && let Some(token) = prelude.get(prelude_index) {
+                    self.warn(
+                        Range {
+                            loc: token.loc,
+                            len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                        },
+                        format!("Expected \"{{\" but found {:?}", token.text),
+                    );
+                    is_valid = false;
+                }
+                self.index += 1;
+                let rules = self.parse_rule_list(true, preserve_legal_comments);
+                if !is_valid {
+                    return Rule {
+                        loc,
+                        data: RuleData::KnownAt(KnownAtRule {
+                            at_token: name,
+                            prelude,
+                            rules,
+                            ..KnownAtRule::default()
+                        }),
+                    };
+                }
+                return Rule {
+                    loc,
+                    data: RuleData::AtScope(AtScopeRule {
+                        start,
+                        end: finish,
+                        rules,
+                        ..AtScopeRule::default()
                     }),
                 };
             }
@@ -378,6 +1049,47 @@ impl Parser {
                 };
             }
         }
+        if name.eq_ignore_ascii_case("layer") {
+            let (names, layer_error) = parse_layer_names_checked(&prelude);
+            let is_valid = layer_error.is_none();
+            if let Some((range, message)) = layer_error {
+                self.warn(range, message);
+            }
+            match self.current_kind() {
+                TokenKind::Semicolon => {
+                    if prelude.is_empty() {
+                        self.warn(self.current().range, "Unexpected \";\"");
+                    }
+                    self.index += 1;
+                }
+                TokenKind::EndOfFile => {
+                    self.warn(self.current().range, "Expected \";\" but found end of file");
+                }
+                TokenKind::CloseBrace => {
+                    self.warn(self.current().range, "Expected \";\"");
+                }
+                _ => {}
+            }
+            if is_valid {
+                self.record_at_layer_rule(&names);
+                return Rule {
+                    loc,
+                    data: RuleData::AtLayer(AtLayerRule {
+                        names,
+                        has_block: false,
+                        ..AtLayerRule::default()
+                    }),
+                };
+            }
+            return Rule {
+                loc,
+                data: RuleData::UnknownAt(UnknownAtRule {
+                    at_token: name,
+                    prelude,
+                    block: Vec::new(),
+                }),
+            };
+        }
         let block = match self.current_kind() {
             TokenKind::Semicolon => {
                 self.index += 1;
@@ -387,7 +1099,20 @@ impl Parser {
                 let start = self.index;
                 let end = self.scan_balanced_block(start);
                 self.index = end;
-                self.convert_tokens(start, end)
+                let mut block = self.convert_tokens_preserving_whitespace_with_imports(start, end);
+                if let Some(children) = block.first_mut().and_then(|token| token.children.as_mut())
+                {
+                    trim_token_boundary_whitespace(children);
+                    if !self.minify_whitespace {
+                        if let Some(first) = children.first_mut() {
+                            first.whitespace |= WhitespaceFlags::BEFORE;
+                        }
+                        if let Some(last) = children.last_mut() {
+                            last.whitespace |= WhitespaceFlags::AFTER;
+                        }
+                    }
+                }
+                block
             }
             _ => Vec::new(),
         };
@@ -407,8 +1132,25 @@ impl Parser {
         mut prelude: Vec<Token>,
         preserve_legal_comments: bool,
     ) -> Rule {
+        let open_brace = self.current();
+        let mut brace_depth = 0usize;
+        let mut has_close_brace = false;
+        for index in self.index..self.tokens.len() {
+            match self.kind_at(index) {
+                TokenKind::OpenBrace => brace_depth += 1,
+                TokenKind::CloseBrace => {
+                    brace_depth = brace_depth.saturating_sub(1);
+                    if brace_depth == 0 {
+                        has_close_brace = true;
+                        break;
+                    }
+                }
+                TokenKind::EndOfFile => break,
+                _ => {}
+            }
+        }
         if self.minify_syntax {
-            reduce_calc_expressions(&mut prelude, false);
+            reduce_calc_expressions(&mut prelude, false, self.minify_whitespace);
         }
         let queries = media::parse_media_query_list(
             prelude,
@@ -417,9 +1159,24 @@ impl Parser {
             self.minify_syntax,
         );
         self.index += 1;
+        self.enclosing_at_media.push(queries.clone());
+        self.qualified_rule_context_depth += 1;
         let mut rules = self.parse_rule_list(true, preserve_legal_comments);
+        self.qualified_rule_context_depth = self.qualified_rule_context_depth.saturating_sub(1);
+        if !has_close_brace {
+            self.warn_with_note(
+                self.current().range,
+                "Expected \"}\" to go with \"{\"",
+                open_brace.range.loc,
+                "The unbalanced \"{\" is here:",
+            );
+        }
+        self.enclosing_at_media.pop();
         if self.minify_syntax {
             unwrap_duplicate_media_rules(&mut rules, &queries);
+            for ancestor in &self.enclosing_at_media {
+                unwrap_duplicate_media_rules(&mut rules, ancestor);
+            }
         }
         Rule {
             loc,
@@ -436,6 +1193,8 @@ impl Parser {
         let name = name_token.map_or_else(String::new, |token| token.text.clone());
         let name_loc = name_token.map_or(loc, |token| token.loc);
         let name_ref = self.new_css_symbol(&name, name_loc);
+        let outer_block_start = self.index;
+        let outer_open_brace = self.current();
         self.index += 1;
         let mut blocks = Vec::new();
         loop {
@@ -445,35 +1204,120 @@ impl Parser {
                 break;
             }
             if self.current_kind() == TokenKind::EndOfFile {
-                break;
+                self.warn_with_note(
+                    self.current().range,
+                    "Expected \"}\" to go with \"{\"",
+                    outer_open_brace.range.loc,
+                    "The unbalanced \"{\" is here:",
+                );
+                return self.keyframes_as_unknown(loc, at_token, prelude, outer_block_start);
             }
             let selector_loc = self.current().range.loc;
             let selector_start = self.index;
             let selector_end = self.scan_to_rule_delimiter();
             let selector_tokens = self.convert_tokens(selector_start, selector_end);
             self.index = selector_end;
-            if self.current_kind() != TokenKind::OpenBrace {
-                if self.current_kind() == TokenKind::Semicolon {
-                    self.index += 1;
+            let mut expect_selector = true;
+            for token in &selector_tokens {
+                if expect_selector {
+                    match token.kind {
+                        TokenKind::Percentage => {}
+                        TokenKind::Ident => {
+                            if !matches!(token.text.to_ascii_lowercase().as_str(), "from" | "to") {
+                                self.warn(
+                                    Range {
+                                        loc: token.loc,
+                                        len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                                    },
+                                    format!("Expected percentage but found {:?}", token.text),
+                                );
+                            }
+                        }
+                        _ => {
+                            self.warn(
+                                Range {
+                                    loc: token.loc,
+                                    len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                                },
+                                format!("Expected percentage but found {:?}", token.text),
+                            );
+                            return self.keyframes_as_unknown(
+                                loc,
+                                at_token,
+                                prelude,
+                                outer_block_start,
+                            );
+                        }
+                    }
+                    expect_selector = false;
+                } else if token.kind == TokenKind::Comma {
+                    expect_selector = true;
+                } else {
+                    self.warn(
+                        Range {
+                            loc: token.loc,
+                            len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                        },
+                        format!("Expected \",\" but found {:?}", token.text),
+                    );
+                    return self.keyframes_as_unknown(loc, at_token, prelude, outer_block_start);
                 }
-                continue;
             }
+            if expect_selector {
+                let current = self.current();
+                self.warn(
+                    current.range,
+                    format!(
+                        "Expected percentage but found {}",
+                        self.found_description(current)
+                    ),
+                );
+                return self.keyframes_as_unknown(loc, at_token, prelude, outer_block_start);
+            }
+            if self.current_kind() != TokenKind::OpenBrace {
+                let current = self.current();
+                self.warn(
+                    current.range,
+                    format!(
+                        "Expected \"{{\" but found {}",
+                        self.found_description(current)
+                    ),
+                );
+                return self.keyframes_as_unknown(loc, at_token, prelude, outer_block_start);
+            }
+            let inner_open_brace = self.current();
+            let inner_end = self.scan_balanced_block(self.index);
+            let has_inner_close =
+                inner_end > self.index && self.kind_at(inner_end - 1) == TokenKind::CloseBrace;
             self.index += 1;
             let rules = self.parse_rule_list(true, false);
+            if !has_inner_close {
+                self.warn_with_note(
+                    self.current().range,
+                    "Expected \"}\" to go with \"{\"",
+                    inner_open_brace.range.loc,
+                    "The unbalanced \"{\" is here:",
+                );
+                return self.keyframes_as_unknown(loc, at_token, prelude, outer_block_start);
+            }
             let mut selectors = keyframe_selectors(&selector_tokens);
             if self.minify_syntax {
                 for selector in &mut selectors {
                     if selector.eq_ignore_ascii_case("from") {
                         "0%".clone_into(selector);
+                    } else if selector == "100%" {
+                        "to".clone_into(selector);
                     }
                 }
             }
-            blocks.push(KeyframeBlock {
-                selectors,
-                rules,
-                loc: selector_loc,
-                ..KeyframeBlock::default()
-            });
+            if !self.minify_syntax || !rules.is_empty() {
+                blocks.push(KeyframeBlock {
+                    selectors,
+                    rules,
+                    loc: selector_loc,
+                    ..KeyframeBlock::default()
+                });
+            }
         }
         Rule {
             loc,
@@ -485,6 +1329,55 @@ impl Parser {
                 },
                 blocks,
                 ..AtKeyframesRule::default()
+            }),
+        }
+    }
+
+    fn keyframes_as_unknown(
+        &mut self,
+        loc: Loc,
+        at_token: String,
+        prelude: &[Token],
+        block_start: usize,
+    ) -> Rule {
+        let block_end = self.scan_balanced_block(block_start);
+        self.index = block_end;
+        let mut block =
+            self.convert_tokens_preserving_whitespace_without_warnings(block_start, block_end);
+        if !self.minify_whitespace
+            && let Some(children) = block.first_mut().and_then(|token| token.children.as_mut())
+            && !children.is_empty()
+        {
+            children[0].whitespace |= WhitespaceFlags::BEFORE;
+            if let Some(last) = children.last_mut() {
+                last.whitespace |= WhitespaceFlags::AFTER;
+            }
+            for index in 0..children.len() {
+                if children[index].kind == TokenKind::Comma {
+                    children[index].whitespace.remove(WhitespaceFlags::BEFORE);
+                    if index > 0 {
+                        children[index - 1]
+                            .whitespace
+                            .remove(WhitespaceFlags::AFTER);
+                    }
+                    if children
+                        .get(index + 1)
+                        .is_some_and(|token| token.kind != TokenKind::Comma)
+                    {
+                        children[index].whitespace |= WhitespaceFlags::AFTER;
+                        children[index + 1].whitespace |= WhitespaceFlags::BEFORE;
+                    } else {
+                        children[index].whitespace.remove(WhitespaceFlags::AFTER);
+                    }
+                }
+            }
+        }
+        Rule {
+            loc,
+            data: RuleData::UnknownAt(UnknownAtRule {
+                at_token,
+                prelude: prelude.to_vec(),
+                block,
             }),
         }
     }
@@ -553,7 +1446,7 @@ impl Parser {
     }
 
     fn convert_import_condition_component(&mut self, start: usize, end: usize) -> Vec<Token> {
-        let mut tokens = self.convert_tokens_preserving_whitespace(start, end);
+        let mut tokens = self.convert_tokens(start, end);
         trim_token_boundary_whitespace(&mut tokens);
         if self.minify_whitespace {
             minify_group_commas(&mut tokens);
@@ -598,7 +1491,7 @@ impl Parser {
         let queries = if index < end {
             let mut tokens = self.convert_import_condition_component(index, end);
             if self.minify_syntax {
-                reduce_calc_expressions(&mut tokens, false);
+                reduce_calc_expressions(&mut tokens, false, self.minify_whitespace);
             }
             media::parse_media_query_list(
                 tokens,
@@ -619,12 +1512,103 @@ impl Parser {
     }
 
     fn parse_at_import(&mut self, loc: Loc) -> Rule {
+        let prelude_start = self.index;
         let path_token = self.current();
-        let path = if matches!(path_token.kind, TokenKind::String | TokenKind::Url) {
+        let mut function_url_ended_at_eof = false;
+        let path = if path_token.kind == TokenKind::Function
+            && self.decoded(path_token).eq_ignore_ascii_case("url")
+        {
+            let string_index = next_non_whitespace_index(&self.tokens, self.index + 1);
+            let close_index = next_non_whitespace_index(&self.tokens, string_index + 1);
+            if self.kind_at(string_index) == TokenKind::String
+                && matches!(
+                    self.kind_at(close_index),
+                    TokenKind::CloseParen | TokenKind::EndOfFile
+                )
+            {
+                if self.kind_at(close_index) == TokenKind::EndOfFile {
+                    function_url_ended_at_eof = true;
+                    let matching_loc = Loc {
+                        start: path_token
+                            .range
+                            .loc
+                            .start
+                            .saturating_add(i32::try_from(path_token.range.len).unwrap_or(i32::MAX))
+                            .saturating_sub(1),
+                    };
+                    self.warn_with_note(
+                        Range {
+                            loc: Loc {
+                                start: i32::try_from(self.source.contents.len())
+                                    .unwrap_or(i32::MAX),
+                            },
+                            len: 0,
+                        },
+                        "Expected \")\" to go with \"(\"",
+                        matching_loc,
+                        "The unbalanced \"(\" is here:",
+                    );
+                    self.index = close_index;
+                } else {
+                    self.index = close_index + 1;
+                }
+                Some(self.decoded(self.tokens[string_index]))
+            } else {
+                None
+            }
+        } else if matches!(path_token.kind, TokenKind::String | TokenKind::Url) {
             self.index += 1;
-            self.decoded(path_token)
+            Some(self.decoded(path_token))
         } else {
-            String::new()
+            None
+        };
+        let Some(path) = path else {
+            self.warn(
+                path_token.range,
+                format!(
+                    "Expected URL token but found {}",
+                    self.found_description(path_token)
+                ),
+            );
+            let end = self.scan_to_rule_delimiter();
+            if path_token.kind == TokenKind::Function
+                && find_matching_close(&self.tokens, self.index + 1, end, TokenKind::CloseParen)
+                    == end
+            {
+                self.warn_with_note(
+                    Range {
+                        loc: Loc {
+                            start: i32::try_from(self.source.contents.len()).unwrap_or(i32::MAX),
+                        },
+                        len: 0,
+                    },
+                    "Expected \")\" to go with \"(\"",
+                    path_token.range.loc,
+                    "The unbalanced \"(\" is here:",
+                );
+            }
+            let prelude = self.convert_tokens_without_warnings(prelude_start, end);
+            self.index = end;
+            let block = if self.current_kind() == TokenKind::OpenBrace {
+                self.warn(self.current().range, "Expected \";\"");
+                let block_start = self.index;
+                let block_end = self.scan_balanced_block(block_start);
+                self.index = block_end;
+                self.convert_tokens_preserving_whitespace_with_imports(block_start, block_end)
+            } else {
+                if self.current_kind() == TokenKind::Semicolon {
+                    self.index += 1;
+                }
+                Vec::new()
+            };
+            return Rule {
+                loc,
+                data: RuleData::UnknownAt(UnknownAtRule {
+                    at_token: "import".into(),
+                    prelude,
+                    block,
+                }),
+            };
         };
         let import_record_index =
             u32::try_from(self.import_records.len()).expect("CSS import count fits in u32");
@@ -640,13 +1624,46 @@ impl Parser {
         let conditions_start = self.index;
         while !matches!(
             self.current_kind(),
-            TokenKind::Semicolon | TokenKind::EndOfFile
+            TokenKind::Semicolon
+                | TokenKind::OpenBrace
+                | TokenKind::CloseBrace
+                | TokenKind::EndOfFile
         ) {
             self.index += 1;
         }
         let conditions_end = self.index;
-        if self.current_kind() == TokenKind::Semicolon {
+        if self.current_kind() != TokenKind::Semicolon {
+            let delimiter = self.current();
+            let message = if delimiter.kind == TokenKind::EndOfFile {
+                "Expected \";\" but found end of file"
+            } else {
+                "Expected \";\""
+            };
+            if !function_url_ended_at_eof {
+                self.warn(delimiter.range, message);
+            }
+            if delimiter.kind == TokenKind::OpenBrace {
+                let prelude = self.convert_tokens(prelude_start, conditions_end);
+                let block_start = self.index;
+                let block_end = self.scan_balanced_block(block_start);
+                self.index = block_end;
+                let block =
+                    self.convert_tokens_preserving_whitespace_with_imports(block_start, block_end);
+                return Rule {
+                    loc,
+                    data: RuleData::UnknownAt(UnknownAtRule {
+                        at_token: "import".into(),
+                        prelude,
+                        block,
+                    }),
+                };
+            }
+        } else {
             self.index += 1;
+        }
+        if !self.has_seen_at_import {
+            self.has_seen_at_import = true;
+            self.layers_pre_import = std::mem::take(&mut self.layers_post_import);
         }
         let import_conditions = self.parse_import_conditions(conditions_start, conditions_end, loc);
         Rule {
@@ -658,13 +1675,185 @@ impl Parser {
         }
     }
 
-    fn parse_qualified_rule(&mut self) -> Rule {
+    fn parse_qualified_rule(&mut self, is_top_level: bool) -> Rule {
         let loc = self.current().range.loc;
         let prelude_start = self.index;
-        let end = self.scan_to_rule_delimiter();
-        let prelude = self.convert_tokens_preserving_whitespace(prelude_start, end);
+        let unexpected_at = is_top_level
+            && self.current_kind() == TokenKind::Delim
+            && self.source.text_for_range(self.current().range) == b"@";
+        if unexpected_at {
+            self.warn(self.current().range, "Unexpected \"@\"");
+        }
+        if is_top_level && self.current_kind() == TokenKind::DelimDollar {
+            self.warn(self.current().range, "Unexpected \"$\"");
+        } else if is_top_level && self.current_kind() == TokenKind::DelimExclamation {
+            self.warn(self.current().range, "Unexpected \"!\"");
+        } else if is_top_level && self.current_kind() == TokenKind::Comma {
+            self.warn(self.current().range, "Unexpected \",\"");
+        }
+        let mut saw_unexpected_close_brace = false;
+        let mut end = if is_top_level && self.current_kind() == TokenKind::Semicolon {
+            let mut index = self.index + 1;
+            let mut stack = Vec::new();
+            while index < self.tokens.len() {
+                let kind = self.kind_at(index);
+                if stack.is_empty() && matches!(kind, TokenKind::OpenBrace | TokenKind::EndOfFile) {
+                    break;
+                }
+                update_stack(&mut stack, kind);
+                index += 1;
+            }
+            index
+        } else {
+            self.scan_to_rule_delimiter()
+        };
+        if self.kind_at(end) == TokenKind::EndOfFile {
+            let mut stack = Vec::new();
+            for index in prelude_start..end {
+                let kind = self.kind_at(index);
+                if kind == TokenKind::OpenBrace && stack.as_slice() == [TokenKind::CloseBracket] {
+                    end = index;
+                    break;
+                }
+                update_stack(&mut stack, kind);
+            }
+        }
+        if is_top_level && self.kind_at(end) == TokenKind::Semicolon {
+            end += 1;
+            let mut stack = Vec::new();
+            while end < self.tokens.len() {
+                let kind = self.kind_at(end);
+                if stack.is_empty() && matches!(kind, TokenKind::OpenBrace | TokenKind::EndOfFile) {
+                    break;
+                }
+                update_stack(&mut stack, kind);
+                end += 1;
+            }
+        }
+        if is_top_level && self.kind_at(end) == TokenKind::CloseBrace {
+            saw_unexpected_close_brace = true;
+            let range = self.tokens[end].range;
+            self.warn(range, "Unexpected \"}\"");
+            // A stray top-level close brace is part of the malformed qualified
+            // rule instead of being a delimiter. Advancing past it is also
+            // essential because otherwise the parser retries the same token.
+            end += 1;
+            while end < self.tokens.len()
+                && !matches!(
+                    self.kind_at(end),
+                    TokenKind::OpenBrace | TokenKind::Semicolon | TokenKind::EndOfFile
+                )
+            {
+                end += 1;
+            }
+        }
+        let unclosed_selector_group = if is_top_level && self.kind_at(end) == TokenKind::EndOfFile {
+            find_unclosed_opening(&self.tokens, prelude_start, end)
+        } else {
+            None
+        };
+        let mut prelude = if unclosed_selector_group.is_some() {
+            self.convert_tokens_without_warnings(prelude_start, end)
+        } else {
+            self.convert_tokens(prelude_start, end)
+        };
+        trim_token_boundary_whitespace(&mut prelude);
+        if let Some((open_index, close)) = unclosed_selector_group {
+            trim_group_boundary_whitespace(&mut prelude);
+            let opening = self.tokens[open_index];
+            if opening.kind == TokenKind::Function && open_index + 1 == end {
+                self.warn(self.current().range, "Unexpected end of file");
+            } else {
+                let (open_text, close_text) = match close {
+                    TokenKind::CloseParen => ("(", ")"),
+                    TokenKind::CloseBracket => ("[", "]"),
+                    _ => ("{", "}"),
+                };
+                self.warn_with_note(
+                    self.current().range,
+                    format!("Expected {close_text:?} to go with {open_text:?}"),
+                    opening.range.loc,
+                    format!("The unbalanced {open_text:?} is here:"),
+                );
+            }
+        }
         self.index = end;
         if self.current_kind() != TokenKind::OpenBrace {
+            if is_top_level {
+                if unclosed_selector_group.is_some() {
+                    return Rule {
+                        loc,
+                        data: RuleData::Qualified(QualifiedRule {
+                            prelude,
+                            ..QualifiedRule::default()
+                        }),
+                    };
+                }
+                if self.current_kind() == TokenKind::EndOfFile
+                    && !saw_unexpected_close_brace
+                    && !unexpected_at
+                    && !(prelude_start..end)
+                        .any(|index| self.kind_at(index) == TokenKind::Semicolon)
+                    && !prelude
+                        .iter()
+                        .any(|token| token.kind == TokenKind::DelimSlash)
+                {
+                    self.warn(self.current().range, "Expected \"{\" but found end of file");
+                }
+                if self.current_kind() == TokenKind::Semicolon {
+                    self.index += 1;
+                }
+                return Rule {
+                    loc,
+                    data: RuleData::Qualified(QualifiedRule {
+                        prelude: self
+                            .convert_tokens_preserving_whitespace(prelude_start, self.index),
+                        ..QualifiedRule::default()
+                    }),
+                };
+            }
+            if !is_top_level
+                && self.qualified_rule_context_depth > 0
+                && self.current_kind() == TokenKind::CloseBrace
+            {
+                self.warn(self.current().range, "Unexpected \"}\"");
+                return Rule {
+                    loc,
+                    data: RuleData::Qualified(QualifiedRule {
+                        prelude,
+                        ..QualifiedRule::default()
+                    }),
+                };
+            }
+            if matches!(
+                self.kind_at(prelude_start),
+                TokenKind::OpenParen | TokenKind::OpenBracket
+            ) {
+                let found = if self.kind_at(prelude_start) == TokenKind::OpenParen {
+                    "("
+                } else {
+                    "["
+                };
+                self.warn(
+                    self.tokens[prelude_start].range,
+                    format!("Expected identifier but found {found:?}"),
+                );
+            } else if matches!(
+                self.kind_at(prelude_start),
+                TokenKind::DelimAsterisk | TokenKind::DelimExclamation
+            ) {
+                let found = if self.kind_at(prelude_start) == TokenKind::DelimAsterisk {
+                    "*"
+                } else {
+                    "!"
+                };
+                self.warn(
+                    self.tokens[prelude_start].range,
+                    format!("Expected identifier but found {found:?}"),
+                );
+            } else if self.kind_at(prelude_start) == TokenKind::Ident {
+                self.warn(self.tokens[prelude_start].range, "Expected \":\"");
+            }
             if self.current_kind() == TokenKind::Semicolon {
                 self.index += 1;
             }
@@ -673,12 +1862,93 @@ impl Parser {
                 data: RuleData::BadDeclaration(BadDeclarationRule { tokens: prelude }),
             };
         }
+        let open_brace = self.current();
+        let warn_for_unclosed_outer =
+            unclosed_block_only_needs_outer_close(&self.tokens, self.index);
         self.index += 1;
-        let selectors = self.parse_complex_selectors(&prelude);
+        let mut selectors = self.parse_complex_selectors(&prelude);
+        if selectors.is_none()
+            && prelude
+                .last()
+                .is_some_and(|token| token.kind == TokenKind::Comma)
+        {
+            self.warn(self.tokens[end].range, "Unexpected \"{\"");
+        } else if selectors.is_none()
+            && prelude
+                .last()
+                .is_some_and(|token| token.kind == TokenKind::Colon)
+            && end > prelude_start
+            && self.kind_at(end - 1) == TokenKind::Whitespace
+        {
+            self.warn(
+                self.tokens[end - 1].range,
+                "Expected identifier but found whitespace",
+            );
+        }
+        if self.minify_syntax
+            && let Some(selectors) = &mut selectors
+        {
+            let mut index = 0;
+            while index < selectors.len() {
+                if selectors[..index]
+                    .iter()
+                    .any(|existing| selectors[index].equal(existing, None))
+                {
+                    selectors.remove(index);
+                } else {
+                    index += 1;
+                }
+            }
+            mangle_leading_ampersands(selectors, self.selector_nesting_depth > 0);
+        }
         let old_composes_target = self.composes_target;
-        self.composes_target = selectors.as_deref().and_then(single_class_selector);
+        let old_composes_problem_range = self.composes_problem_range;
+        if let Some(selectors) = selectors.as_deref() {
+            if old_composes_target.is_some() && selectors_are_single_ampersand(selectors) {
+                self.composes_target = old_composes_target;
+                self.composes_problem_range = old_composes_problem_range;
+            } else if old_composes_target.is_some() {
+                self.composes_target = None;
+                self.composes_problem_range = selectors
+                    .first()
+                    .and_then(|selector| selector.selectors.first())
+                    .map(CompoundSelector::range);
+            } else if let Some(target) = single_class_selector(selectors) {
+                self.composes_target = Some(target);
+                self.composes_problem_range = None;
+            } else {
+                self.composes_target = None;
+                self.composes_problem_range = selectors
+                    .first()
+                    .and_then(|selector| selector.selectors.first())
+                    .map(CompoundSelector::range);
+            }
+        }
+        let old_can_inline_no_op_nesting = self.can_inline_no_op_nesting;
+        if let Some(selectors) = &selectors {
+            let is_only_ampersands = !selectors.is_empty()
+                && selectors.iter().all(|complex| {
+                    matches!(complex.selectors.as_slice(), [compound] if compound.is_single_ampersand())
+                });
+            if !is_only_ampersands {
+                self.can_inline_no_op_nesting =
+                    !selectors.iter().any(ComplexSelector::uses_pseudo_element);
+            }
+        }
+        self.selector_nesting_depth += 1;
         let rules = self.parse_rule_list(true, false);
+        self.selector_nesting_depth = self.selector_nesting_depth.saturating_sub(1);
+        self.can_inline_no_op_nesting = old_can_inline_no_op_nesting;
+        if warn_for_unclosed_outer {
+            self.warn_with_note(
+                self.current().range,
+                "Expected \"}\" to go with \"{\"",
+                open_brace.range.loc,
+                "The unbalanced \"{\" is here:",
+            );
+        }
         self.composes_target = old_composes_target;
+        self.composes_problem_range = old_composes_problem_range;
         if let Some(selectors) = selectors {
             Rule {
                 loc,
@@ -708,7 +1978,9 @@ impl Parser {
                 if start == index {
                     return None;
                 }
-                selectors.push(self.parse_complex_selector(&tokens[start..index])?);
+                selectors.push(
+                    self.parse_complex_selector(&tokens[start..index], selectors.is_empty())?,
+                );
                 start = index + 1;
             }
         }
@@ -716,7 +1988,11 @@ impl Parser {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn parse_complex_selector(&mut self, tokens: &[Token]) -> Option<ComplexSelector> {
+    fn parse_complex_selector(
+        &mut self,
+        tokens: &[Token],
+        is_first_in_list: bool,
+    ) -> Option<ComplexSelector> {
         let mut selectors = Vec::new();
         let mut compound = CompoundSelector::default();
         let mut pending_combinator = Combinator::default();
@@ -743,6 +2019,69 @@ impl Parser {
                 pending_combinator = Combinator::default();
             }
             match token.kind {
+                TokenKind::DelimBar
+                    if !compound.nesting_selector_locs.is_empty()
+                        && !token.whitespace.contains(WhitespaceFlags::BEFORE) =>
+                {
+                    let type_text = if let Some(next) = tokens.get(index + 1) {
+                        format!("|{}", next.text)
+                    } else {
+                        "|".into()
+                    };
+                    let workaround = if is_first_in_list && selectors.is_empty() {
+                        "wrap this selector in \":is(...)\""
+                    } else {
+                        "move the \"&\" to the end of this selector"
+                    };
+                    self.warn_with_text_note(
+                        first_range(token),
+                        format!(
+                            "Cannot use type selector {:?} directly after nesting selector \"&\"",
+                            type_text
+                        ),
+                        format!(
+                            "CSS nesting syntax does not allow the \"&\" selector to come before a type selector. You can {workaround} as a workaround. This restriction exists to avoid problems with SASS nesting, where the same syntax means something very different that has no equivalent in real CSS (appending a suffix to the parent selector)."
+                        ),
+                    );
+                    return None;
+                }
+                TokenKind::Ident | TokenKind::DelimAsterisk
+                    if !compound.nesting_selector_locs.is_empty()
+                        && !token.whitespace.contains(WhitespaceFlags::BEFORE) =>
+                {
+                    let mut end = index + 1;
+                    if tokens
+                        .get(end)
+                        .is_some_and(|token| token.kind == TokenKind::DelimBar)
+                    {
+                        end += 1;
+                        if tokens.get(end).is_some_and(|token| {
+                            matches!(token.kind, TokenKind::Ident | TokenKind::DelimAsterisk)
+                        }) {
+                            end += 1;
+                        }
+                    }
+                    let type_text = tokens[index..end]
+                        .iter()
+                        .map(|token| token.text.as_str())
+                        .collect::<String>();
+                    let workaround = if is_first_in_list && selectors.is_empty() {
+                        "wrap this selector in \":is(...)\""
+                    } else {
+                        "move the \"&\" to the end of this selector"
+                    };
+                    self.warn_with_text_note(
+                        first_range(token),
+                        format!(
+                            "Cannot use type selector {:?} directly after nesting selector \"&\"",
+                            type_text
+                        ),
+                        format!(
+                            "CSS nesting syntax does not allow the \"&\" selector to come before a type selector. You can {workaround} as a workaround. This restriction exists to avoid problems with SASS nesting, where the same syntax means something very different that has no equivalent in real CSS (appending a suffix to the parent selector)."
+                        ),
+                    );
+                    return None;
+                }
                 TokenKind::Ident | TokenKind::DelimAsterisk
                     if compound.type_selector.is_none()
                         && compound.subclass_selectors.is_empty()
@@ -782,6 +2121,25 @@ impl Parser {
                     index += 1;
                 }
                 TokenKind::Hash => {
+                    let source_token = self
+                        .tokens
+                        .iter()
+                        .find(|source_token| source_token.range.loc == token.loc)
+                        .copied();
+                    if !source_token
+                        .is_some_and(|token| token.flags.contains(css_lexer::TokenFlags::IS_ID))
+                    {
+                        let range = source_token.map_or(
+                            Range {
+                                loc: token.loc,
+                                len: i32::try_from(token.text.len() + 1).unwrap_or(i32::MAX),
+                            },
+                            |source_token| source_token.range,
+                        );
+                        let raw = String::from_utf8_lossy(self.source.text_for_range(range));
+                        self.warn(range, format!("Unexpected {raw:?}"));
+                        return None;
+                    }
                     let reference = self.new_css_symbol(&token.text, token.loc);
                     compound.subclass_selectors.push(SubclassSelector {
                         data: SubclassData::Hash(HashSelector {
@@ -796,6 +2154,80 @@ impl Parser {
                         },
                     });
                 }
+                TokenKind::OpenBracket => {
+                    let children = token.children.as_deref().unwrap_or_default();
+                    let Some(attribute) = parse_attribute_selector_tokens(children) else {
+                        if children.is_empty() {
+                            self.warn(
+                                Range {
+                                    loc: token.loc,
+                                    len: 1,
+                                },
+                                "Expected identifier but found \"]\"",
+                            );
+                        } else if matches!(
+                            children,
+                            [first, second, ..]
+                                if first.kind == TokenKind::Ident
+                                    && second.kind == TokenKind::DelimBar
+                                    && second.whitespace.contains(WhitespaceFlags::BEFORE)
+                        ) {
+                            self.warn(
+                                Range {
+                                    loc: children[1].loc,
+                                    len: 0,
+                                },
+                                "Expected \"=\" but found whitespace",
+                            );
+                        } else if matches!(
+                            children,
+                            [first, second, ..]
+                                if first.kind == TokenKind::DelimAsterisk
+                                    && second.kind == TokenKind::DelimBar
+                                    && second.whitespace.contains(WhitespaceFlags::BEFORE)
+                        ) {
+                            self.warn(
+                                Range {
+                                    loc: children[1].loc,
+                                    len: 0,
+                                },
+                                "Expected \"|\" but found whitespace",
+                            );
+                        } else if matches!(
+                            children,
+                            [first, second, ..]
+                                if first.kind == TokenKind::Ident
+                                    && second.kind == TokenKind::DelimBar
+                                    && children.get(2).is_some_and(|token| token.kind == TokenKind::DelimBar)
+                        ) {
+                            self.warn(
+                                Range {
+                                    loc: children[1].loc,
+                                    len: 1,
+                                },
+                                "Expected identifier but found \"|\"",
+                            );
+                        } else {
+                            self.warn_with_note(
+                                Range {
+                                    loc: token.loc,
+                                    len: 1,
+                                },
+                                "Expected \"]\" to go with \"[\"",
+                                token.loc,
+                                "The unbalanced \"[\" is here:",
+                            );
+                        }
+                        return None;
+                    };
+                    compound.subclass_selectors.push(SubclassSelector {
+                        data: SubclassData::Attribute(attribute),
+                        range: Range {
+                            loc: token.loc,
+                            len: 0,
+                        },
+                    });
+                }
                 TokenKind::Colon => {
                     let mut is_element = false;
                     let mut name_index = index + 1;
@@ -807,6 +2239,16 @@ impl Parser {
                         name_index += 1;
                     }
                     let name = tokens.get(name_index)?;
+                    if name.whitespace.contains(WhitespaceFlags::BEFORE) {
+                        self.warn(
+                            Range {
+                                loc: name.loc,
+                                len: 0,
+                            },
+                            "Expected identifier but found whitespace",
+                        );
+                        return None;
+                    }
                     if !matches!(name.kind, TokenKind::Ident | TokenKind::Function) {
                         return None;
                     }
@@ -814,6 +2256,25 @@ impl Parser {
                         && name.kind == TokenKind::Function
                         && matches!(name.text.to_ascii_lowercase().as_str(), "global" | "local")
                     {
+                        if let Some(comma) = name
+                            .children
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .find(|token| token.kind == TokenKind::Comma)
+                        {
+                            self.warn_with_text_note(
+                                Range {
+                                    loc: comma.loc,
+                                    len: 1,
+                                },
+                                format!("Unexpected \",\" inside \":{}(...)\"", name.text),
+                                format!(
+                                    "Different CSS tools behave differently in this case, so esbuild doesn't allow it. Either remove this comma or split this selector up into multiple comma-separated \":{}(...)\" selectors instead.",
+                                    name.text
+                                ),
+                            );
+                        }
                         let old_make_local_symbols = self.make_local_symbols;
                         self.make_local_symbols = name.text.eq_ignore_ascii_case("local");
                         let parsed = self
@@ -841,11 +2302,97 @@ impl Parser {
                         index = name_index + 1;
                         continue;
                     }
+                    if !is_element
+                        && name.kind == TokenKind::Ident
+                        && matches!(name.text.to_ascii_lowercase().as_str(), "global" | "local")
+                    {
+                        compound.nesting_selector_locs.push(token.loc);
+                        compound.was_empty_from_local_or_global = true;
+                        index = name_index + 1;
+                        continue;
+                    }
+                    if !is_element && name.kind == TokenKind::Function {
+                        let lower = name.text.to_ascii_lowercase();
+                        if matches!(
+                            lower.as_str(),
+                            "nth-child" | "nth-last-child" | "nth-of-type" | "nth-last-of-type"
+                        ) {
+                            let args = self.process_nth_pseudo_args(
+                                name.children.as_deref().unwrap_or_default(),
+                                matches!(lower.as_str(), "nth-child" | "nth-last-child"),
+                                name.loc,
+                            );
+                            compound.subclass_selectors.push(SubclassSelector {
+                                data: SubclassData::PseudoClass(PseudoClassSelector {
+                                    name: name.text.clone(),
+                                    args,
+                                    is_element: false,
+                                    has_args: true,
+                                }),
+                                range: Range {
+                                    loc: token.loc,
+                                    len: i32::try_from(name.text.len() + 2).unwrap_or(i32::MAX),
+                                },
+                            });
+                            index = name_index + 1;
+                            continue;
+                        }
+                        let kind = match name.text.to_ascii_lowercase().as_str() {
+                            "has" => Some(PseudoClassKind::Has),
+                            "is" => Some(PseudoClassKind::Is),
+                            "not" => Some(PseudoClassKind::Not),
+                            "where" => Some(PseudoClassKind::Where),
+                            _ => None,
+                        };
+                        if let Some(kind) = kind {
+                            let children = name.children.as_deref().unwrap_or_default();
+                            if children.is_empty() && kind == PseudoClassKind::Not {
+                                self.warn(
+                                    Range {
+                                        loc: name.loc,
+                                        len: 1,
+                                    },
+                                    "Unexpected \")\"",
+                                );
+                            }
+                            let selectors = if children.is_empty() {
+                                Vec::new()
+                            } else {
+                                self.parse_complex_selectors(children)?
+                            };
+                            compound.subclass_selectors.push(SubclassSelector {
+                                data: SubclassData::PseudoWithSelectorList(
+                                    PseudoClassWithSelectorList {
+                                        selectors,
+                                        kind,
+                                        ..PseudoClassWithSelectorList::default()
+                                    },
+                                ),
+                                range: Range {
+                                    loc: token.loc,
+                                    len: i32::try_from(name.text.len() + 2).unwrap_or(i32::MAX),
+                                },
+                            });
+                            index = name_index + 1;
+                            continue;
+                        }
+                    }
+                    if is_element
+                        && self.minify_syntax
+                        && name.kind == TokenKind::Ident
+                        && matches!(
+                            name.text.to_ascii_lowercase().as_str(),
+                            "before" | "after" | "first-line" | "first-letter"
+                        )
+                    {
+                        is_element = false;
+                    }
                     compound.subclass_selectors.push(SubclassSelector {
                         data: SubclassData::PseudoClass(PseudoClassSelector {
                             name: name.text.clone(),
                             args: name.children.clone().unwrap_or_default(),
                             is_element,
+                            has_args: name.children.is_some(),
                         }),
                         range: Range {
                             loc: token.loc,
@@ -854,6 +2401,49 @@ impl Parser {
                         },
                     });
                     index = name_index;
+                }
+                TokenKind::Ident => {
+                    self.warn(
+                        Range {
+                            loc: token.loc,
+                            len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                        },
+                        format!("Unexpected {:?}", token.text),
+                    );
+                    return None;
+                }
+                TokenKind::CloseBracket => {
+                    self.warn(
+                        Range {
+                            loc: token.loc,
+                            len: 1,
+                        },
+                        "Unexpected \"]\"",
+                    );
+                    return None;
+                }
+                TokenKind::DelimBar => {
+                    if tokens
+                        .get(index + 1)
+                        .is_some_and(|next| next.kind == TokenKind::DelimBar)
+                        || index > 0 && tokens[index - 1].kind == TokenKind::DelimBar
+                    {
+                        self.warn(
+                            Range {
+                                loc: token.loc,
+                                len: 1,
+                            },
+                            "Expected identifier but found \"|\"",
+                        );
+                    }
+                    return None;
+                }
+                TokenKind::Function => {
+                    self.warn(
+                        first_range(token),
+                        format!("Unexpected {:?}", format!("{}(", token.text)),
+                    );
+                    return None;
                 }
                 _ => return None,
             }
@@ -867,6 +2457,173 @@ impl Parser {
         }
     }
 
+    fn process_nth_pseudo_args(
+        &mut self,
+        args: &[Token],
+        allows_of: bool,
+        function_loc: Loc,
+    ) -> Vec<Token> {
+        let of_index = args.iter().position(|token| {
+            token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("of")
+        });
+        if of_index.is_some() && !allows_of {
+            self.warn_with_note(
+                first_range(&args[of_index.unwrap_or_default()]),
+                "Expected \")\" to go with \"(\"",
+                function_loc,
+                "The unbalanced \"(\" is here:",
+            );
+            return args.to_vec();
+        }
+        let formula_end = of_index.unwrap_or(args.len());
+        let formula_tokens = &args[..formula_end];
+        let compact = formula_tokens
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect::<String>();
+
+        if formula_tokens.len() >= 2
+            && formula_tokens[0].kind == TokenKind::DelimPlus
+            && formula_tokens[1]
+                .whitespace
+                .contains(WhitespaceFlags::BEFORE)
+        {
+            self.warn(first_range(&formula_tokens[1]), "Unexpected whitespace");
+            return args.to_vec();
+        }
+        if formula_tokens.len() >= 2
+            && formula_tokens[0].kind == TokenKind::DelimMinus
+            && formula_tokens[1]
+                .whitespace
+                .contains(WhitespaceFlags::BEFORE)
+        {
+            self.warn(first_range(&formula_tokens[0]), "Unexpected \"-\"");
+            return args.to_vec();
+        }
+
+        let lower = compact.to_ascii_lowercase();
+        let parsed = if lower == "odd" {
+            Some((2, 1, true))
+        } else if lower == "even" {
+            Some((2, 0, true))
+        } else if let Ok(number) = lower.parse::<i64>() {
+            Some((0, number, false))
+        } else {
+            parse_an_plus_b(&lower).map(|(a, b)| (a, b, true))
+        };
+        let Some((a, b, had_n)) = parsed else {
+            let first = formula_tokens.first();
+            let message = if lower == "+" {
+                "Unexpected \")\"".into()
+            } else if lower == "-" {
+                "Unexpected \"-\"".into()
+            } else if lower.ends_with("n-") {
+                "Expected number but found \")\"".into()
+            } else {
+                format!("Unexpected {:?}", compact)
+            };
+            self.warn(
+                first.map_or(
+                    Range {
+                        loc: function_loc,
+                        len: 1,
+                    },
+                    first_range,
+                ),
+                message,
+            );
+            return args.to_vec();
+        };
+
+        let formula = if !self.minify_syntax && matches!(lower.as_str(), "odd" | "even") {
+            lower
+        } else if self.minify_syntax {
+            if a == 0 {
+                b.to_string()
+            } else if a == 1 && b == 0 {
+                "n".into()
+            } else if a == 2 && b == 1 {
+                "odd".into()
+            } else {
+                format_an_plus_b(a, b)
+            }
+        } else if !had_n {
+            b.to_string()
+        } else {
+            format_an_plus_b(a, b)
+        };
+        let loc = formula_tokens
+            .first()
+            .map_or(function_loc, |token| token.loc);
+        let mut result = vec![Token {
+            kind: TokenKind::Delim,
+            text: formula,
+            loc,
+            ..Token::default()
+        }];
+
+        if let Some(of_index) = of_index {
+            let mut of = args[of_index].clone();
+            of.whitespace = WhitespaceFlags::BEFORE;
+            result.push(of);
+            let mut suffix = args[of_index + 1..].to_vec();
+            trim_token_boundary_whitespace(&mut suffix);
+            for index in 0..suffix.len() {
+                if index == 0 {
+                    let requires_space = !self.minify_whitespace
+                        || matches!(
+                            suffix[index].kind,
+                            TokenKind::Ident | TokenKind::DelimAsterisk
+                        );
+                    if requires_space {
+                        suffix[index].whitespace |= WhitespaceFlags::BEFORE;
+                        result[1].whitespace |= WhitespaceFlags::AFTER;
+                    } else {
+                        suffix[index].whitespace.remove(WhitespaceFlags::BEFORE);
+                    }
+                }
+                let is_invalid_relative_prefix = matches!(
+                    suffix[index].kind,
+                    TokenKind::DelimPlus | TokenKind::DelimTilde
+                ) && (index == 0
+                    || index > 0 && suffix[index - 1].kind == TokenKind::Comma);
+                if is_invalid_relative_prefix {
+                    self.warn(
+                        first_range(&suffix[index]),
+                        format!("Unexpected {:?}", suffix[index].text),
+                    );
+                }
+                if suffix[index].kind == TokenKind::Comma {
+                    suffix[index].whitespace.remove(WhitespaceFlags::BEFORE);
+                    if index > 0 {
+                        suffix[index - 1].whitespace.remove(WhitespaceFlags::AFTER);
+                    }
+                    if !self.minify_whitespace && index + 1 < suffix.len() {
+                        suffix[index].whitespace |= WhitespaceFlags::AFTER;
+                        suffix[index + 1].whitespace |= WhitespaceFlags::BEFORE;
+                    }
+                }
+                if !self.minify_whitespace
+                    && !is_invalid_relative_prefix
+                    && matches!(
+                        suffix[index].kind,
+                        TokenKind::DelimPlus | TokenKind::DelimGreaterThan | TokenKind::DelimTilde
+                    )
+                {
+                    suffix[index].whitespace = WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER;
+                    if index > 0 {
+                        suffix[index - 1].whitespace |= WhitespaceFlags::AFTER;
+                    }
+                    if index + 1 < suffix.len() {
+                        suffix[index + 1].whitespace |= WhitespaceFlags::BEFORE;
+                    }
+                }
+            }
+            result.extend(suffix);
+        }
+        result
+    }
+
     fn parse_declaration(&mut self) -> Option<Rule> {
         let key_token = self.current();
         let loc = key_token.range.loc;
@@ -878,16 +2635,52 @@ impl Parser {
         }
         let value_start = self.index;
         let value_end = self.scan_declaration_end();
+        let mut important = false;
+        let mut converted_value_end = value_end;
+        let mut important_index = value_end;
+        while important_index > value_start
+            && self.kind_at(important_index - 1) == TokenKind::Whitespace
+        {
+            important_index -= 1;
+        }
+        if important_index > value_start
+            && self.kind_at(important_index - 1) == TokenKind::Ident
+            && self
+                .decoded(self.tokens[important_index - 1])
+                .eq_ignore_ascii_case("important")
+        {
+            important_index -= 1;
+            while important_index > value_start
+                && self.kind_at(important_index - 1) == TokenKind::Whitespace
+            {
+                important_index -= 1;
+            }
+            if important_index > value_start
+                && self.kind_at(important_index - 1) == TokenKind::DelimExclamation
+            {
+                converted_value_end = important_index - 1;
+                important = true;
+            }
+        }
         let mut value = if key_text.starts_with("--") {
-            self.convert_custom_property_tokens(value_start, value_end)
+            self.convert_custom_property_tokens(value_start, converted_value_end)
         } else {
-            self.convert_tokens(value_start, value_end)
+            self.convert_tokens_with_imports(value_start, converted_value_end)
         };
+        let mut calc_warnings = Vec::new();
+        collect_calc_operator_warnings(&value, false, &mut calc_warnings);
+        for (range, text) in calc_warnings {
+            self.warn(range, text);
+        }
         if self.minify_syntax {
-            reduce_calc_expressions(&mut value, key_text.starts_with("--"));
+            reduce_calc_expressions(
+                &mut value,
+                key_text.starts_with("--"),
+                self.minify_whitespace,
+            );
         }
         if self.make_local_symbols && key_text.eq_ignore_ascii_case("composes") {
-            self.process_composes(&value);
+            self.process_composes(&value, key_token.range);
             self.index = value_end;
             if self.current_kind() == TokenKind::Semicolon {
                 self.index += 1;
@@ -907,17 +2700,56 @@ impl Parser {
             "container-name" => self.process_container_names(&mut value),
             _ => {}
         }
+        let would_clip_color = value_would_clip_modern_color(&value);
+        let fallback_value = if would_clip_color
+            && self
+                .unsupported_css_features
+                .contains(CssFeature::COLOR_FUNCTIONS)
+        {
+            let mut fallback = value.clone();
+            process_declaration(
+                &key_text,
+                &mut fallback,
+                self.minify_syntax,
+                self.minify_whitespace,
+                self.unsupported_css_features,
+                true,
+            );
+            Some(fallback)
+        } else {
+            None
+        };
         process_declaration(
             &key_text,
             &mut value,
             self.minify_syntax,
             self.minify_whitespace,
             self.unsupported_css_features,
+            !would_clip_color,
         );
-        let important = take_important(&mut value);
+        if !key_text.starts_with("--")
+            && !KNOWN_DECLARATIONS.contains_key(key_text.to_ascii_lowercase().as_str())
+            && let Some(corrected) = crate::internal::css_ast::maybe_correct_declaration_typo(
+                &key_text.to_ascii_lowercase(),
+            )
+        {
+            let mut tracker = LineColumnTracker::new(Some(&self.source));
+            self.log.add_msg(Msg {
+                data: tracker.msg_data(
+                    key_token.range,
+                    format!("{key_text:?} is not a known CSS property"),
+                ),
+                notes: vec![MsgData {
+                    text: format!("Did you mean {corrected:?} instead?"),
+                    ..MsgData::default()
+                }],
+                ..Msg::new(MsgKind::Warning, "")
+            });
+        }
         if !important
             && !key_text.starts_with("--")
             && let Some(last) = value.last_mut()
+            && last.kind != TokenKind::Comma
         {
             last.whitespace = if last.whitespace.contains(WhitespaceFlags::BEFORE) {
                 WhitespaceFlags::BEFORE
@@ -929,19 +2761,37 @@ impl Parser {
         if self.current_kind() == TokenKind::Semicolon {
             self.index += 1;
         }
-        Some(Rule {
+        let key = KNOWN_DECLARATIONS
+            .get(key_text.to_ascii_lowercase().as_str())
+            .copied()
+            .unwrap_or_default();
+        let rule = Rule {
             loc,
             data: RuleData::Declaration(DeclarationRule {
-                key: KNOWN_DECLARATIONS
-                    .get(key_text.to_ascii_lowercase().as_str())
-                    .copied()
-                    .unwrap_or_default(),
-                key_text,
+                key,
+                key_text: key_text.clone(),
                 value,
                 key_range: key_token.range,
                 important,
             }),
-        })
+        };
+        if self
+            .unsupported_css_features
+            .contains(CssFeature::COLOR_FUNCTIONS)
+            && let Some(value) = fallback_value
+        {
+            self.pending_color_fallback = Some(Rule {
+                loc,
+                data: RuleData::Declaration(DeclarationRule {
+                    key,
+                    key_text,
+                    value,
+                    key_range: key_token.range,
+                    important,
+                }),
+            });
+        }
+        Some(rule)
     }
 
     fn starts_declaration(&self) -> bool {
@@ -963,8 +2813,18 @@ impl Parser {
         }
     }
 
-    fn process_composes(&mut self, tokens: &[Token]) {
+    fn process_composes(&mut self, tokens: &[Token], key_range: Range) {
         let Some(target) = self.composes_target else {
+            if let Some(problem_range) = self.composes_problem_range {
+                self.warn_with_note(
+                    key_range,
+                    "\"composes\" only works inside single class selectors",
+                    problem_range.loc,
+                    "The parent selector is not a single class selector because of the syntax here:",
+                );
+            } else {
+                self.warn(key_range, "\"composes\" is not valid here");
+            }
             return;
         };
         let mut names_end = tokens.len();
@@ -1004,6 +2864,19 @@ impl Parser {
                         record.kind = ImportKind::ComposesFrom;
                         external = Some(location.payload_index);
                     }
+                }
+                TokenKind::Ident => {
+                    self.warn(
+                        Range {
+                            loc: location.loc,
+                            len: i32::try_from(location.text.len()).unwrap_or(i32::MAX),
+                        },
+                        format!(
+                            "\"composes\" declaration uses invalid location {:?}",
+                            location.text
+                        ),
+                    );
+                    return;
                 }
                 _ => return,
             }
@@ -1296,7 +3169,19 @@ impl Parser {
     }
 
     fn convert_tokens(&mut self, start: usize, end: usize) -> Vec<Token> {
-        self.convert_tokens_with_context(start, end, false)
+        self.convert_tokens_with_context(start, end, false, false, false)
+    }
+
+    fn convert_tokens_with_imports(&mut self, start: usize, end: usize) -> Vec<Token> {
+        self.convert_tokens_with_context(start, end, false, false, true)
+    }
+
+    fn convert_tokens_without_warnings(&mut self, start: usize, end: usize) -> Vec<Token> {
+        let old = self.suppress_unbalanced_token_warnings;
+        self.suppress_unbalanced_token_warnings = true;
+        let result = self.convert_tokens(start, end);
+        self.suppress_unbalanced_token_warnings = old;
+        result
     }
 
     fn convert_tokens_with_context(
@@ -1304,7 +3189,16 @@ impl Parser {
         start: usize,
         end: usize,
         inside_calc: bool,
+        mut verbatim_whitespace: bool,
+        allow_imports: bool,
     ) -> Vec<Token> {
+        if !verbatim_whitespace {
+            let first = next_non_whitespace_index(&self.tokens, start);
+            let second = next_non_whitespace_index(&self.tokens, first.saturating_add(1));
+            verbatim_whitespace = self.kind_at(first) == TokenKind::Ident
+                && self.decoded(self.tokens[first]).starts_with("--")
+                && self.kind_at(second) == TokenKind::Colon;
+        }
         let mut result: Vec<Token> = Vec::new();
         let mut pending_whitespace = false;
         let mut index = start;
@@ -1315,23 +3209,25 @@ impl Parser {
                 index += 1;
                 continue;
             }
-            let mut converted = self.convert_token(token);
+            let mut converted = self.convert_token(token, allow_imports);
             if pending_whitespace {
-                let keep_whitespace = !self.minify_whitespace
+                let keep_whitespace = verbatim_whitespace
+                    || inside_calc
+                    || !self.minify_whitespace
                     || result
                         .last()
                         .is_some_and(|previous| whitespace_is_required(previous, &converted))
-                    || result
-                        .last()
-                        .is_some_and(|previous| previous.kind == TokenKind::DelimSlash)
-                    || converted.kind == TokenKind::DelimSlash
+                    || !inside_calc
+                        && (result
+                            .last()
+                            .is_some_and(|previous| previous.kind == TokenKind::DelimSlash)
+                            || converted.kind == TokenKind::DelimSlash)
                     || inside_calc
                         && numeric_calc_division_whitespace(
                             &result,
                             &converted,
                             next_non_whitespace_kind(&self.tokens, index + 1, end),
-                        )
-                    || inside_calc && calc_product_operator_whitespace(&result, &converted);
+                        );
                 if keep_whitespace {
                     if let Some(previous) = result.last_mut() {
                         previous.whitespace |= WhitespaceFlags::AFTER;
@@ -1342,6 +3238,32 @@ impl Parser {
             }
             if let Some(close) = matching_close(token.kind) {
                 let close_index = find_matching_close(&self.tokens, index + 1, end, close);
+                if close_index == end && !self.suppress_unbalanced_token_warnings {
+                    let close_text = match close {
+                        TokenKind::CloseParen => ")",
+                        TokenKind::CloseBracket => "]",
+                        TokenKind::CloseBrace => "}",
+                        _ => "",
+                    };
+                    let open_text = match token.kind {
+                        TokenKind::Function | TokenKind::OpenParen => "(",
+                        TokenKind::OpenBracket => "[",
+                        TokenKind::OpenBrace => "{",
+                        _ => "",
+                    };
+                    self.warn_with_note(
+                        Range {
+                            loc: Loc {
+                                start: i32::try_from(self.source.contents.len())
+                                    .unwrap_or(i32::MAX),
+                            },
+                            len: 0,
+                        },
+                        format!("Expected {close_text:?} to go with {open_text:?}"),
+                        token.range.loc,
+                        format!("The unbalanced {open_text:?} is here:"),
+                    );
+                }
                 let child_inside_calc = inside_calc
                     || converted.kind == TokenKind::Function
                         && converted.text.eq_ignore_ascii_case("calc");
@@ -1349,22 +3271,80 @@ impl Parser {
                     index + 1,
                     close_index,
                     child_inside_calc,
+                    verbatim_whitespace
+                        || converted.kind == TokenKind::Function
+                            && converted.text.eq_ignore_ascii_case("var"),
+                    allow_imports,
                 ));
                 index = close_index.saturating_add(1);
+                if converted.kind == TokenKind::Function
+                    && converted.text.eq_ignore_ascii_case("url")
+                    && let Some([child]) = converted.children.as_deref()
+                    && child.kind == TokenKind::String
+                {
+                    let payload_index = u32::try_from(self.import_records.len())
+                        .expect("CSS URL count fits in u32");
+                    self.import_records.push(ImportRecord {
+                        path: Path {
+                            text: child.text.clone(),
+                            ..Path::default()
+                        },
+                        range: token.range,
+                        kind: ImportKind::Url,
+                        flags: if allow_imports {
+                            ImportRecordFlags::default()
+                        } else {
+                            ImportRecordFlags::IS_UNUSED
+                        },
+                        ..ImportRecord::default()
+                    });
+                    converted.kind = TokenKind::Url;
+                    converted.text.clear();
+                    converted.children = None;
+                    converted.payload_index = payload_index;
+                }
             } else {
                 index += 1;
             }
             result.push(converted);
         }
-        normalize_converted_token_whitespace(&mut result, self.minify_whitespace);
+        if verbatim_whitespace && pending_whitespace {
+            if let Some(last) = result.last_mut() {
+                last.whitespace |= WhitespaceFlags::AFTER;
+            } else {
+                result.push(Token {
+                    kind: TokenKind::Whitespace,
+                    ..Token::default()
+                });
+            }
+        }
+        if !verbatim_whitespace {
+            normalize_converted_token_whitespace(&mut result, self.minify_whitespace);
+        }
         result
     }
 
     fn convert_tokens_preserving_whitespace(&mut self, start: usize, end: usize) -> Vec<Token> {
-        let minify_whitespace = self.minify_whitespace;
-        self.minify_whitespace = false;
-        let result = self.convert_tokens(start, end);
-        self.minify_whitespace = minify_whitespace;
+        self.convert_tokens_with_context(start, end, false, true, false)
+    }
+
+    fn convert_tokens_preserving_whitespace_with_imports(
+        &mut self,
+        start: usize,
+        end: usize,
+    ) -> Vec<Token> {
+        self.convert_tokens_with_context(start, end, false, true, true)
+    }
+
+    fn convert_tokens_preserving_whitespace_without_warnings(
+        &mut self,
+        start: usize,
+        end: usize,
+    ) -> Vec<Token> {
+        let old = self.suppress_unbalanced_token_warnings;
+        self.suppress_unbalanced_token_warnings = true;
+        let result = self.convert_tokens_preserving_whitespace(start, end);
+        self.suppress_unbalanced_token_warnings = old;
         result
     }
 
@@ -1372,7 +3352,7 @@ impl Parser {
         let has_leading_whitespace = self.kind_at(start) == TokenKind::Whitespace;
         let has_trailing_whitespace =
             end > start && self.kind_at(end.saturating_sub(1)) == TokenKind::Whitespace;
-        let mut result = self.convert_tokens_preserving_whitespace(start, end);
+        let mut result = self.convert_tokens_preserving_whitespace_with_imports(start, end);
         if has_leading_whitespace && let Some(first) = result.first_mut() {
             first.whitespace |= WhitespaceFlags::BEFORE;
         }
@@ -1382,7 +3362,7 @@ impl Parser {
         result
     }
 
-    fn convert_token(&mut self, token: css_lexer::Token) -> Token {
+    fn convert_token(&mut self, token: css_lexer::Token, allow_imports: bool) -> Token {
         let text = self.decoded(token);
         let (kind, payload_index) = if token.kind == TokenKind::Url {
             let payload_index =
@@ -1394,6 +3374,11 @@ impl Parser {
                 },
                 range: token.range,
                 kind: ImportKind::Url,
+                flags: if allow_imports {
+                    ImportRecordFlags::default()
+                } else {
+                    ImportRecordFlags::IS_UNUSED
+                },
                 ..ImportRecord::default()
             });
             (TokenKind::Url, payload_index)
@@ -1407,18 +3392,6 @@ impl Parser {
             unit_offset: token.unit_offset,
             kind,
             ..Token::default()
-        }
-    }
-
-    fn consume_through_semicolon(&mut self) {
-        while !matches!(
-            self.current_kind(),
-            TokenKind::Semicolon | TokenKind::EndOfFile
-        ) {
-            self.index += 1;
-        }
-        if self.current_kind() == TokenKind::Semicolon {
-            self.index += 1;
         }
     }
 
@@ -1466,6 +3439,77 @@ fn update_stack(stack: &mut Vec<TokenKind>, kind: TokenKind) {
     } else if stack.last() == Some(&kind) {
         stack.pop();
     }
+}
+
+fn first_range(token: &Token) -> Range {
+    Range {
+        loc: token.loc,
+        len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+    }
+}
+
+fn parse_an_plus_b(text: &str) -> Option<(i64, i64)> {
+    let n_index = text.find('n')?;
+    if text[n_index + 1..].contains('n') {
+        return None;
+    }
+    let coefficient = match &text[..n_index] {
+        "" | "+" => 1,
+        "-" => -1,
+        value => value.parse().ok()?,
+    };
+    let remainder = &text[n_index + 1..];
+    let offset = if remainder.is_empty() {
+        0
+    } else {
+        if !matches!(remainder.as_bytes().first(), Some(b'+' | b'-')) || remainder.len() == 1 {
+            return None;
+        }
+        remainder.parse().ok()?
+    };
+    Some((coefficient, offset))
+}
+
+fn format_an_plus_b(coefficient: i64, offset: i64) -> String {
+    let mut text = match coefficient {
+        1 => "n".into(),
+        -1 => "-n".into(),
+        value => format!("{value}n"),
+    };
+    if offset > 0 {
+        text.push('+');
+        text.push_str(&offset.to_string());
+    } else if offset < 0 {
+        text.push_str(&offset.to_string());
+    }
+    text
+}
+
+fn unclosed_block_only_needs_outer_close(tokens: &[css_lexer::Token], open_index: usize) -> bool {
+    let mut stack = vec![TokenKind::CloseBrace];
+    for token in tokens.iter().skip(open_index + 1) {
+        update_stack(&mut stack, token.kind);
+        if stack.is_empty() {
+            return false;
+        }
+    }
+    stack.len() == 1
+}
+
+fn find_unclosed_opening(
+    tokens: &[css_lexer::Token],
+    start: usize,
+    end: usize,
+) -> Option<(usize, TokenKind)> {
+    let mut stack: Vec<(usize, TokenKind)> = Vec::new();
+    for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+        if let Some(close) = matching_close(token.kind) {
+            stack.push((index, close));
+        } else if stack.last().is_some_and(|entry| entry.1 == token.kind) {
+            stack.pop();
+        }
+    }
+    stack.last().copied()
 }
 
 fn normalize_converted_token_whitespace(tokens: &mut [Token], minify_whitespace: bool) {
@@ -1564,33 +3608,52 @@ fn merge_adjacent_selector_rules(rules: &mut Vec<Rule>) {
     }
 }
 
-fn mangle_empty_and_nested_rules(rules: &mut Vec<Rule>) {
+fn inline_empty_local_and_global_rules(rules: &mut Vec<Rule>) {
     let mut index = 0;
     while index < rules.len() {
-        let nested_replacement = match &mut rules[index].data {
+        let replacement = match &mut rules[index].data {
             RuleData::Selector(selector)
                 if selector.selectors.len() == 1
                     && selector.selectors[0].selectors.len() == 1
+                    && selector.selectors[0].selectors[0].was_empty_from_local_or_global
                     && selector.selectors[0].selectors[0].is_single_ampersand() =>
             {
                 Some(std::mem::take(&mut selector.rules))
             }
-            RuleData::Selector(selector) => {
-                for complex in &mut selector.selectors {
-                    if complex.selectors.len() > 1 && complex.selectors[0].is_single_ampersand() {
-                        complex.selectors.remove(0);
-                    }
-                }
-                None
-            }
             _ => None,
         };
-        if let Some(replacement) = nested_replacement {
+        if let Some(replacement) = replacement {
             rules.splice(index..=index, replacement);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn mangle_empty_and_nested_rules(rules: &mut Vec<Rule>, _is_top_level: bool) {
+    let mut index = 0;
+    while index < rules.len() {
+        if index > 0
+            && matches!(
+                rules[index].data,
+                RuleData::Selector(_) | RuleData::AtMedia(_)
+            )
+            && rules[index - 1].data.equal(&rules[index].data, None)
+        {
+            rules.remove(index);
+            continue;
+        }
+        if index > 0
+            && matches!(rules[index].data, RuleData::Declaration(_))
+            && rules[index - 1].data.equal(&rules[index].data, None)
+        {
+            rules.remove(index);
             continue;
         }
         let remove = match &mut rules[index].data {
-            RuleData::Selector(selector) => selector.rules.is_empty(),
+            RuleData::Selector(selector) => {
+                selector.rules.is_empty() || all_selectors_are_dead(&selector.selectors)
+            }
             RuleData::AtMedia(media) => media.rules.is_empty(),
             RuleData::KnownAt(rule) => {
                 rule.rules.is_empty() && known_at_rule_can_be_removed_if_empty(&rule.at_token)
@@ -1613,6 +3676,10 @@ fn mangle_empty_and_nested_rules(rules: &mut Vec<Rule>) {
                     name.extend(inner.names[0].iter().cloned());
                     layer.names[0] = name;
                     layer.rules = inner.rules;
+                    layer.has_block = inner.has_block;
+                }
+                if layer.rules.is_empty() && !layer.names.is_empty() {
+                    layer.has_block = false;
                 }
                 false
             }
@@ -1623,6 +3690,528 @@ fn mangle_empty_and_nested_rules(rules: &mut Vec<Rule>) {
         } else {
             index += 1;
         }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LeadingAmpersand {
+    CannotRemove,
+    CanAlwaysRemove,
+    CanRemoveIfNotFirst,
+}
+
+fn analyze_leading_ampersand(
+    selector: &ComplexSelector,
+    is_declaration_context: bool,
+) -> LeadingAmpersand {
+    if selector.selectors.len() > 1 && selector.selectors[0].is_single_ampersand() {
+        let second = &selector.selectors[1];
+        if second.combinator.byte == 0 && !second.nesting_selector_locs.is_empty() {
+            LeadingAmpersand::CannotRemove
+        } else if second.combinator.byte != 0
+            || second.type_selector.is_none()
+            || !is_declaration_context
+        {
+            LeadingAmpersand::CanAlwaysRemove
+        } else {
+            LeadingAmpersand::CanRemoveIfNotFirst
+        }
+    } else {
+        LeadingAmpersand::CannotRemove
+    }
+}
+
+fn mangle_leading_ampersands(selectors: &mut [ComplexSelector], is_declaration_context: bool) {
+    for selector in selectors.iter_mut().skip(1) {
+        if analyze_leading_ampersand(selector, is_declaration_context)
+            != LeadingAmpersand::CannotRemove
+        {
+            selector.selectors.remove(0);
+        }
+    }
+    let Some(first) = selectors.first() else {
+        return;
+    };
+    match analyze_leading_ampersand(first, is_declaration_context) {
+        LeadingAmpersand::CanAlwaysRemove => {
+            selectors[0].selectors.remove(0);
+        }
+        LeadingAmpersand::CanRemoveIfNotFirst => {
+            if let Some(index) =
+                selectors
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .find_map(|(index, selector)| {
+                        let first = selector.selectors.first()?;
+                        (first.nesting_selector_locs.is_empty()
+                            && (first.combinator.byte != 0 || first.type_selector.is_none()))
+                        .then_some(index)
+                    })
+            {
+                selectors[0].selectors.remove(0);
+                selectors.swap(0, index);
+            }
+        }
+        LeadingAmpersand::CannotRemove => {}
+    }
+}
+
+fn inline_no_op_nesting_rules(rules: &mut Vec<Rule>) {
+    let mut retained = Vec::with_capacity(rules.len());
+    let mut inlined = Vec::new();
+    for mut rule in std::mem::take(rules) {
+        let should_inline = matches!(
+            &rule.data,
+            RuleData::Selector(selector)
+                if !selector.selectors.is_empty()
+                    && selector.selectors.iter().all(|complex| {
+                        matches!(complex.selectors.as_slice(), [compound] if compound.is_single_ampersand())
+                    })
+        );
+        if should_inline {
+            if let RuleData::Selector(selector) = &mut rule.data {
+                inlined.append(&mut selector.rules);
+            }
+        } else {
+            retained.push(rule);
+        }
+    }
+    retained.extend(inlined);
+    *rules = retained;
+}
+
+#[derive(Clone)]
+struct LowerNestingContext {
+    parent_selectors_with_pseudo: Vec<ComplexSelector>,
+    parent_selectors_no_pseudo: Vec<ComplexSelector>,
+    lowered_rules: Vec<Rule>,
+}
+
+impl Parser {
+    fn lower_nesting_in_rules(&mut self, rules: Vec<Rule>) -> Vec<Rule> {
+        let mut results = Vec::new();
+        for rule in rules {
+            results = self.lower_nesting_in_rule(rule, results);
+        }
+        results
+    }
+
+    fn lower_nesting_in_rule(&mut self, rule: Rule, mut results: Vec<Rule>) -> Vec<Rule> {
+        let loc = rule.loc;
+        match rule.data {
+            RuleData::Selector(mut selector) => {
+                let mut with_pseudo = Vec::with_capacity(selector.selectors.len());
+                let mut no_pseudo = Vec::with_capacity(selector.selectors.len());
+                for complex in &mut selector.selectors {
+                    let uses_pseudo = complex.uses_pseudo_element();
+                    let mut substituted = Vec::with_capacity(complex.selectors.len());
+                    for compound in std::mem::take(&mut complex.selectors) {
+                        substituted = self.substitute_ampersands(
+                            compound,
+                            &mut |amp_loc| scope_selector(amp_loc),
+                            substituted,
+                            false,
+                        );
+                    }
+                    complex.selectors = substituted;
+                    with_pseudo.push(complex.clone());
+                    if !uses_pseudo {
+                        no_pseudo.push(complex.clone());
+                    }
+                }
+
+                let mut context = LowerNestingContext {
+                    parent_selectors_with_pseudo: with_pseudo,
+                    parent_selectors_no_pseudo: no_pseudo,
+                    lowered_rules: Vec::new(),
+                };
+                selector.rules = self.lower_nesting_children(selector.rules, &mut context);
+                if !selector.rules.is_empty() {
+                    results.push(Rule {
+                        loc,
+                        data: RuleData::Selector(selector),
+                    });
+                }
+                results.extend(context.lowered_rules);
+            }
+            RuleData::KnownAt(mut at) => {
+                at.rules = self.lower_nesting_in_rules(at.rules);
+                results.push(Rule {
+                    loc,
+                    data: RuleData::KnownAt(at),
+                });
+            }
+            RuleData::AtMedia(mut at) => {
+                at.rules = self.lower_nesting_in_rules(at.rules);
+                results.push(Rule {
+                    loc,
+                    data: RuleData::AtMedia(at),
+                });
+            }
+            RuleData::AtLayer(mut at) => {
+                at.rules = self.lower_nesting_in_rules(at.rules);
+                if at.rules.is_empty() && !at.names.is_empty() {
+                    at.has_block = false;
+                }
+                results.push(Rule {
+                    loc,
+                    data: RuleData::AtLayer(at),
+                });
+            }
+            RuleData::AtScope(mut at) => {
+                at.rules = self.lower_nesting_in_rules(at.rules);
+                results.push(Rule {
+                    loc,
+                    data: RuleData::AtScope(at),
+                });
+            }
+            data => results.push(Rule { loc, data }),
+        }
+        results
+    }
+
+    fn lower_nesting_children(
+        &mut self,
+        rules: Vec<Rule>,
+        context: &mut LowerNestingContext,
+    ) -> Vec<Rule> {
+        let mut remaining = Vec::new();
+        for rule in rules {
+            if let Some(rule) = self.lower_nesting_child(rule, context) {
+                remaining.push(rule);
+            }
+        }
+        remaining
+    }
+
+    fn lower_nesting_child(
+        &mut self,
+        rule: Rule,
+        context: &mut LowerNestingContext,
+    ) -> Option<Rule> {
+        let loc = rule.loc;
+        match rule.data {
+            RuleData::Selector(mut selector) => {
+                for complex in &mut selector.selectors {
+                    if complex.is_relative() {
+                        complex.selectors.insert(
+                            0,
+                            CompoundSelector {
+                                nesting_selector_locs: vec![loc],
+                                ..CompoundSelector::default()
+                            },
+                        );
+                    }
+                }
+
+                if !self
+                    .unsupported_css_features
+                    .contains(CssFeature::IS_PSEUDO_CLASS)
+                    || context.parent_selectors_no_pseudo.len() <= 1
+                {
+                    let parent =
+                        multiple_selectors_to_single(&context.parent_selectors_no_pseudo, loc);
+                    for complex in &mut selector.selectors {
+                        let mut substituted = Vec::with_capacity(complex.selectors.len());
+                        for compound in std::mem::take(&mut complex.selectors) {
+                            substituted = self.substitute_ampersands(
+                                compound,
+                                &mut |_| parent.clone(),
+                                substituted,
+                                false,
+                            );
+                        }
+                        complex.selectors = substituted;
+                    }
+                } else {
+                    let originals = selector.selectors;
+                    let mut selectors = Vec::new();
+                    let mut indices = Vec::<usize>::new();
+                    loop {
+                        for original in &originals {
+                            let mut offset = 0usize;
+                            let mut substituted = Vec::with_capacity(original.selectors.len());
+                            for compound in original.selectors.clone() {
+                                substituted = self.substitute_ampersands(
+                                    compound,
+                                    &mut |_| {
+                                        if offset == indices.len() {
+                                            indices.push(0);
+                                        }
+                                        let parent = context.parent_selectors_no_pseudo
+                                            [indices[offset]]
+                                            .clone();
+                                        offset += 1;
+                                        parent
+                                    },
+                                    substituted,
+                                    false,
+                                );
+                            }
+                            selectors.push(ComplexSelector {
+                                selectors: substituted,
+                            });
+                        }
+
+                        let mut carry = indices.len();
+                        while carry > 0 {
+                            let index = carry - 1;
+                            if indices[index] + 1 < context.parent_selectors_no_pseudo.len() {
+                                indices[index] += 1;
+                                break;
+                            }
+                            indices[index] = 0;
+                            carry -= 1;
+                        }
+                        if carry == 0 {
+                            break;
+                        }
+                    }
+                    selector.selectors = selectors;
+                }
+
+                let lowered = std::mem::take(&mut context.lowered_rules);
+                context.lowered_rules = self.lower_nesting_in_rule(
+                    Rule {
+                        loc,
+                        data: RuleData::Selector(selector),
+                    },
+                    lowered,
+                );
+                None
+            }
+            RuleData::KnownAt(mut at) => {
+                let mut child = LowerNestingContext {
+                    parent_selectors_with_pseudo: context.parent_selectors_with_pseudo.clone(),
+                    parent_selectors_no_pseudo: context.parent_selectors_no_pseudo.clone(),
+                    lowered_rules: Vec::new(),
+                };
+                at.rules = self.lower_nesting_children(at.rules, &mut child);
+                wrap_remaining_nested_declarations(loc, &mut at.rules, &mut child);
+                if !child.lowered_rules.is_empty() {
+                    at.rules = child.lowered_rules;
+                    context.lowered_rules.push(Rule {
+                        loc,
+                        data: RuleData::KnownAt(at),
+                    });
+                }
+                None
+            }
+            RuleData::AtMedia(mut at) => {
+                let mut child = LowerNestingContext {
+                    parent_selectors_with_pseudo: context.parent_selectors_with_pseudo.clone(),
+                    parent_selectors_no_pseudo: context.parent_selectors_no_pseudo.clone(),
+                    lowered_rules: Vec::new(),
+                };
+                at.rules = self.lower_nesting_children(at.rules, &mut child);
+                wrap_remaining_nested_declarations(loc, &mut at.rules, &mut child);
+                if !child.lowered_rules.is_empty() {
+                    at.rules = child.lowered_rules;
+                    context.lowered_rules.push(Rule {
+                        loc,
+                        data: RuleData::AtMedia(at),
+                    });
+                }
+                None
+            }
+            RuleData::AtLayer(mut at) => {
+                let mut child = LowerNestingContext {
+                    parent_selectors_with_pseudo: context.parent_selectors_with_pseudo.clone(),
+                    parent_selectors_no_pseudo: context.parent_selectors_no_pseudo.clone(),
+                    lowered_rules: Vec::new(),
+                };
+                at.rules = self.lower_nesting_children(at.rules, &mut child);
+                wrap_remaining_nested_declarations(loc, &mut at.rules, &mut child);
+                at.rules = child.lowered_rules;
+                if at.rules.is_empty() && !at.names.is_empty() {
+                    at.has_block = false;
+                }
+                context.lowered_rules.push(Rule {
+                    loc,
+                    data: RuleData::AtLayer(at),
+                });
+                None
+            }
+            RuleData::AtScope(mut at) => {
+                let mut child = LowerNestingContext {
+                    parent_selectors_with_pseudo: context.parent_selectors_with_pseudo.clone(),
+                    parent_selectors_no_pseudo: context.parent_selectors_no_pseudo.clone(),
+                    lowered_rules: Vec::new(),
+                };
+                at.rules = self.lower_nesting_children(at.rules, &mut child);
+                wrap_remaining_nested_declarations(loc, &mut at.rules, &mut child);
+                if !child.lowered_rules.is_empty() {
+                    at.rules = child.lowered_rules;
+                    context.lowered_rules.push(Rule {
+                        loc,
+                        data: RuleData::AtScope(at),
+                    });
+                }
+                None
+            }
+            data => Some(Rule { loc, data }),
+        }
+    }
+
+    fn substitute_ampersands(
+        &mut self,
+        mut selector: CompoundSelector,
+        replacement: &mut impl FnMut(Loc) -> ComplexSelector,
+        mut results: Vec<CompoundSelector>,
+        strip_leading_combinator: bool,
+    ) -> Vec<CompoundSelector> {
+        for nesting_loc in selector.nesting_selector_locs.clone() {
+            let mut replacement = replacement(nesting_loc);
+            let mut single;
+            if selector.combinator.byte == 0
+                && (replacement.selectors.len() == 1 || results.is_empty())
+            {
+                single = replacement.selectors.pop().unwrap_or_default();
+                results.extend(replacement.selectors);
+                if strip_leading_combinator {
+                    single.combinator = Combinator::default();
+                }
+                selector.combinator = single.combinator;
+            } else if replacement.selectors.len() == 1 {
+                single = replacement.selectors.pop().unwrap();
+                if strip_leading_combinator {
+                    single.combinator = Combinator::default();
+                }
+            } else {
+                self.report_generated_is(nesting_loc);
+                single = CompoundSelector {
+                    subclass_selectors: vec![SubclassSelector {
+                        data: SubclassData::PseudoWithSelectorList(PseudoClassWithSelectorList {
+                            kind: PseudoClassKind::Is,
+                            selectors: vec![replacement],
+                            ..PseudoClassWithSelectorList::default()
+                        }),
+                        range: Range {
+                            loc: nesting_loc,
+                            len: 1,
+                        },
+                    }],
+                    ..CompoundSelector::default()
+                };
+            }
+
+            let mut prefix = Vec::new();
+            if let Some(single_type) = single.type_selector.take() {
+                if let Some(selector_type) = selector.type_selector.take() {
+                    self.report_generated_is(nesting_loc);
+                    let range = selector_type.range();
+                    prefix.push(SubclassSelector {
+                        data: SubclassData::PseudoWithSelectorList(PseudoClassWithSelectorList {
+                            kind: PseudoClassKind::Is,
+                            selectors: vec![ComplexSelector {
+                                selectors: vec![CompoundSelector {
+                                    type_selector: Some(selector_type),
+                                    ..CompoundSelector::default()
+                                }],
+                            }],
+                            ..PseudoClassWithSelectorList::default()
+                        }),
+                        range,
+                    });
+                }
+                selector.type_selector = Some(single_type);
+            }
+            prefix.extend(single.subclass_selectors);
+            if !prefix.is_empty() {
+                prefix.append(&mut selector.subclass_selectors);
+                selector.subclass_selectors = prefix;
+            }
+        }
+        selector.nesting_selector_locs.clear();
+
+        for subclass in &mut selector.subclass_selectors {
+            if let SubclassData::PseudoWithSelectorList(pseudo) = &mut subclass.data {
+                for complex in &mut pseudo.selectors {
+                    let mut substituted = Vec::with_capacity(complex.selectors.len());
+                    for compound in std::mem::take(&mut complex.selectors) {
+                        substituted =
+                            self.substitute_ampersands(compound, replacement, substituted, true);
+                    }
+                    complex.selectors = substituted;
+                }
+            }
+        }
+        results.push(selector);
+        results
+    }
+
+    fn report_generated_is(&mut self, loc: Loc) {
+        if self
+            .unsupported_css_features
+            .contains(CssFeature::IS_PSEUDO_CLASS)
+            && self.nesting_warnings.insert(loc)
+        {
+            self.warn_with_text_note(
+                Range { loc, len: 1 },
+                "Transforming this CSS nesting syntax is not supported in the configured target environment",
+                "The nesting transform for this case must generate an \":is(...)\" but the configured target environment does not support the \":is\" pseudo-class.",
+            );
+        }
+    }
+}
+
+fn scope_selector(loc: Loc) -> ComplexSelector {
+    ComplexSelector {
+        selectors: vec![CompoundSelector {
+            subclass_selectors: vec![SubclassSelector {
+                data: SubclassData::PseudoClass(PseudoClassSelector {
+                    name: "scope".into(),
+                    ..PseudoClassSelector::default()
+                }),
+                range: Range { loc, len: 1 },
+            }],
+            ..CompoundSelector::default()
+        }],
+    }
+}
+
+fn multiple_selectors_to_single(selectors: &[ComplexSelector], loc: Loc) -> ComplexSelector {
+    if selectors.len() == 1 {
+        return selectors[0].clone();
+    }
+    let leading = selectors
+        .first()
+        .and_then(|selector| selector.selectors.first())
+        .map_or_else(Combinator::default, |compound| compound.combinator);
+    ComplexSelector {
+        selectors: vec![CompoundSelector {
+            combinator: leading,
+            subclass_selectors: vec![SubclassSelector {
+                data: SubclassData::PseudoWithSelectorList(PseudoClassWithSelectorList {
+                    kind: PseudoClassKind::Is,
+                    selectors: selectors.to_vec(),
+                    ..PseudoClassWithSelectorList::default()
+                }),
+                range: Range { loc, len: 1 },
+            }],
+            ..CompoundSelector::default()
+        }],
+    }
+}
+
+fn wrap_remaining_nested_declarations(
+    loc: Loc,
+    remaining: &mut Vec<Rule>,
+    context: &mut LowerNestingContext,
+) {
+    if !remaining.is_empty() {
+        context.lowered_rules.insert(
+            0,
+            Rule {
+                loc,
+                data: RuleData::Selector(SelectorRule {
+                    selectors: context.parent_selectors_with_pseudo.clone(),
+                    rules: std::mem::take(remaining),
+                    ..SelectorRule::default()
+                }),
+            },
+        );
     }
 }
 
@@ -1803,6 +4392,129 @@ fn single_class_selector(selectors: &[ComplexSelector]) -> Option<Ref> {
     }
 }
 
+fn selectors_are_single_ampersand(selectors: &[ComplexSelector]) -> bool {
+    matches!(selectors, [selector] if matches!(selector.selectors.as_slice(), [compound] if compound.is_single_ampersand()))
+}
+
+fn parse_attribute_selector_tokens(tokens: &[Token]) -> Option<AttributeSelector> {
+    if matches!(
+        tokens,
+        [first, second, ..]
+            if first.kind == TokenKind::DelimAsterisk
+                && second.kind == TokenKind::DelimBar
+                && second.whitespace.contains(WhitespaceFlags::BEFORE)
+    ) || matches!(
+        tokens,
+        [first, second, third, ..]
+            if first.kind == TokenKind::Ident
+                && second.kind == TokenKind::DelimBar
+                && second.whitespace.contains(WhitespaceFlags::BEFORE)
+                && third.kind != TokenKind::DelimEquals
+    ) {
+        return None;
+    }
+    let mut index = 0;
+    let name_token = |token: &Token| NameToken {
+        text: token.text.clone(),
+        range: Range {
+            loc: token.loc,
+            len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+        },
+        kind: token.kind,
+    };
+    let mut attribute = AttributeSelector::default();
+
+    if matches!(
+        tokens.get(index)?.kind,
+        TokenKind::DelimBar | TokenKind::DelimAsterisk
+    ) {
+        if tokens[index].kind == TokenKind::DelimAsterisk {
+            attribute.namespaced_name.namespace_prefix = Some(name_token(&tokens[index]));
+            index += 1;
+        }
+        if tokens.get(index)?.kind != TokenKind::DelimBar {
+            return None;
+        }
+        index += 1;
+        let name = tokens.get(index)?;
+        if name.kind != TokenKind::Ident {
+            return None;
+        }
+        attribute.namespaced_name.name = name_token(name);
+        index += 1;
+    } else {
+        let name = tokens.get(index)?;
+        if name.kind != TokenKind::Ident {
+            return None;
+        }
+        attribute.namespaced_name.name = name_token(name);
+        index += 1;
+        if tokens
+            .get(index)
+            .is_some_and(|token| token.kind == TokenKind::DelimBar)
+            && !tokens
+                .get(index + 1)
+                .is_some_and(|token| token.kind == TokenKind::DelimEquals)
+        {
+            attribute.namespaced_name.namespace_prefix =
+                Some(attribute.namespaced_name.name.clone());
+            index += 1;
+            let name = tokens.get(index)?;
+            if name.kind != TokenKind::Ident {
+                return None;
+            }
+            attribute.namespaced_name.name = name_token(name);
+            index += 1;
+        }
+    }
+
+    let matcher_start = tokens.get(index).map(|token| token.kind);
+    attribute.matcher_op = match matcher_start {
+        Some(TokenKind::DelimEquals) => {
+            index += 1;
+            "=".into()
+        }
+        Some(
+            kind @ (TokenKind::DelimTilde
+            | TokenKind::DelimBar
+            | TokenKind::DelimCaret
+            | TokenKind::DelimDollar
+            | TokenKind::DelimAsterisk),
+        ) if tokens
+            .get(index + 1)
+            .is_some_and(|token| token.kind == TokenKind::DelimEquals) =>
+        {
+            index += 2;
+            match kind {
+                TokenKind::DelimTilde => "~=",
+                TokenKind::DelimBar => "|=",
+                TokenKind::DelimCaret => "^=",
+                TokenKind::DelimDollar => "$=",
+                _ => "*=",
+            }
+            .into()
+        }
+        _ => String::new(),
+    };
+    if !attribute.matcher_op.is_empty() {
+        let value = tokens.get(index)?;
+        if !matches!(value.kind, TokenKind::String | TokenKind::Ident) {
+            return None;
+        }
+        attribute.matcher_value = value.text.clone();
+        index += 1;
+        if let Some(modifier) = tokens.get(index)
+            && modifier.kind == TokenKind::Ident
+            && modifier.text.len() == 1
+            && matches!(modifier.text.as_bytes()[0], b'i' | b'I' | b's' | b'S')
+        {
+            attribute.matcher_modifier = modifier.text.as_bytes()[0];
+            index += 1;
+        }
+    }
+    (index == tokens.len()).then_some(attribute)
+}
+
 fn push_compound(selectors: &mut Vec<CompoundSelector>, compound: &mut CompoundSelector) {
     if !compound_is_empty(compound) {
         selectors.push(std::mem::take(compound));
@@ -1841,23 +4553,6 @@ fn find_matching_close(
     end
 }
 
-fn take_important(tokens: &mut Vec<Token>) -> bool {
-    let Some(last) = tokens.last() else {
-        return false;
-    };
-    if last.kind != TokenKind::Ident || !last.text.eq_ignore_ascii_case("important") {
-        return false;
-    }
-    let Some(previous) = tokens.get(tokens.len().saturating_sub(2)) else {
-        return false;
-    };
-    if previous.kind != TokenKind::DelimExclamation {
-        return false;
-    }
-    tokens.truncate(tokens.len() - 2);
-    true
-}
-
 fn trim_token_boundary_whitespace(tokens: &mut [Token]) {
     if tokens.is_empty() {
         return;
@@ -1877,7 +4572,54 @@ fn trim_token_boundary_whitespace(tokens: &mut [Token]) {
     };
 }
 
+fn trim_group_boundary_whitespace(tokens: &mut [Token]) {
+    for token in tokens {
+        if let Some(children) = &mut token.children {
+            let first_non_whitespace = children
+                .iter()
+                .position(|child| child.kind != TokenKind::Whitespace);
+            let is_custom_property = first_non_whitespace.is_some_and(|index| {
+                children[index].kind == TokenKind::Ident
+                    && children[index].text.starts_with("--")
+                    && children
+                        .get(index + 1)
+                        .is_some_and(|child| child.kind == TokenKind::Colon)
+            });
+            if !is_custom_property {
+                if let Some(first) = children.first_mut() {
+                    first.whitespace.remove(WhitespaceFlags::BEFORE);
+                }
+                if let Some(last) = children.last_mut()
+                    && last.kind != TokenKind::Comma
+                {
+                    last.whitespace.remove(WhitespaceFlags::AFTER);
+                }
+            }
+            trim_group_boundary_whitespace(children);
+        }
+    }
+}
+
 fn whitespace_is_required(left: &Token, right: &Token) -> bool {
+    if left.kind == TokenKind::DelimAmpersand || right.kind == TokenKind::DelimAmpersand {
+        return true;
+    }
+    if right.kind == TokenKind::OpenParen
+        && matches!(
+            left.kind,
+            TokenKind::Ident | TokenKind::Symbol | TokenKind::Dimension
+        )
+    {
+        return true;
+    }
+    if left.kind == TokenKind::DelimDot && right.kind == TokenKind::Ident
+        || left.kind == TokenKind::Ident
+            && left.text.starts_with("--")
+            && right.kind == TokenKind::Colon
+        || left.kind == TokenKind::Colon && right.kind == TokenKind::Ident
+    {
+        return true;
+    }
     if matches!(left.kind, TokenKind::DelimPlus | TokenKind::DelimMinus)
         || matches!(right.kind, TokenKind::DelimPlus | TokenKind::DelimMinus)
     {
@@ -1932,16 +4674,6 @@ fn numeric_calc_division_whitespace(
     }
 }
 
-fn calc_product_operator_whitespace(previous: &[Token], current: &Token) -> bool {
-    previous
-        .last()
-        .is_some_and(|token| matches!(token.kind, TokenKind::DelimAsterisk | TokenKind::DelimSlash))
-        || matches!(
-            current.kind,
-            TokenKind::DelimAsterisk | TokenKind::DelimSlash
-        )
-}
-
 fn next_non_whitespace_kind(
     tokens: &[css_lexer::Token],
     mut index: usize,
@@ -1955,11 +4687,50 @@ fn next_non_whitespace_kind(
         .map_or(TokenKind::EndOfFile, |token| token.kind)
 }
 
+fn normalize_media_commas(tokens: &mut [Token], minify_whitespace: bool) {
+    for token in tokens.iter_mut() {
+        if let Some(children) = &mut token.children {
+            normalize_media_commas(children, minify_whitespace);
+        }
+    }
+    for index in 0..tokens.len() {
+        if tokens[index].kind != TokenKind::Comma {
+            continue;
+        }
+        tokens[index].whitespace.remove(WhitespaceFlags::BEFORE);
+        if index > 0 {
+            tokens[index - 1].whitespace.remove(WhitespaceFlags::AFTER);
+        }
+        if minify_whitespace {
+            tokens[index].whitespace.remove(WhitespaceFlags::AFTER);
+            if index + 1 < tokens.len() {
+                tokens[index + 1].whitespace.remove(WhitespaceFlags::BEFORE);
+            }
+        } else {
+            tokens[index].whitespace |= WhitespaceFlags::AFTER;
+            if index + 1 < tokens.len() {
+                tokens[index + 1].whitespace |= WhitespaceFlags::BEFORE;
+            }
+        }
+    }
+}
+
+fn next_non_whitespace_index(tokens: &[css_lexer::Token], mut index: usize) -> usize {
+    while tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::Whitespace)
+    {
+        index += 1;
+    }
+    index
+}
+
 fn lower_and_minify_single_color(
     tokens: &mut [Token],
     minify_syntax: bool,
     minify_whitespace: bool,
     unsupported_css_features: CssFeature,
+    clip_modern_colors: bool,
 ) {
     let [token] = tokens else {
         return;
@@ -2001,7 +4772,13 @@ fn lower_and_minify_single_color(
     let lower_hwb = token.kind == TokenKind::Function
         && unsupported_css_features.contains(CssFeature::HWB)
         && token.text.eq_ignore_ascii_case("hwb");
-    if !(minify_syntax || lower_hwb) {
+    let lower_color_function = token.kind == TokenKind::Function
+        && unsupported_css_features.contains(CssFeature::COLOR_FUNCTIONS)
+        && matches!(
+            token.text.to_ascii_lowercase().as_str(),
+            "color" | "lab" | "lch" | "oklab" | "oklch"
+        );
+    if !(minify_syntax || lower_hwb || lower_color_function) {
         return;
     }
     if token.kind == TokenKind::Ident {
@@ -2033,6 +4810,22 @@ fn lower_and_minify_single_color(
         return;
     }
     if token.kind == TokenKind::Function {
+        if matches!(
+            token.text.to_ascii_lowercase().as_str(),
+            "color" | "lab" | "lch" | "oklab" | "oklch"
+        ) && unsupported_css_features.contains(CssFeature::COLOR_FUNCTIONS)
+            && let Some(color) = parse_modern_color(token)
+        {
+            generate_parsed_color(
+                token,
+                color,
+                minify_syntax,
+                minify_whitespace,
+                unsupported_css_features,
+                clip_modern_colors,
+            );
+            return;
+        }
         let color = if token.text.eq_ignore_ascii_case("rgb")
             || token.text.eq_ignore_ascii_case("rgba")
         {
@@ -2052,6 +4845,15 @@ fn lower_and_minify_single_color(
                 minify_syntax,
                 minify_whitespace,
                 unsupported_css_features,
+            );
+        } else if minify_syntax && let Some(color) = parse_modern_color(token) {
+            generate_parsed_color(
+                token,
+                color,
+                minify_syntax,
+                minify_whitespace,
+                unsupported_css_features,
+                clip_modern_colors,
             );
         }
     }
@@ -2419,7 +5221,200 @@ fn float_to_byte(value: f64) -> u8 {
 }
 
 fn rounded_byte(value: f64) -> Option<u8> {
-    value.round().clamp(0.0, 255.0).to_string().parse().ok()
+    value
+        .is_finite()
+        .then(|| value.round().clamp(0.0, 255.0) as u8)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ParsedColor {
+    x: F64,
+    y: F64,
+    z: F64,
+    alpha: u8,
+}
+
+fn parse_modern_color(token: &Token) -> Option<ParsedColor> {
+    let args = token.children.as_deref()?;
+    let lower = token.text.to_ascii_lowercase();
+    let alpha_at = |index: Option<usize>| -> Option<u8> {
+        index.map_or(Some(255), |index| parse_alpha_byte(args.get(index)))
+    };
+    match lower.as_str() {
+        "color" => {
+            let (space, alpha) = match args {
+                [space, _, _, _] => (space, None),
+                [space, _, _, _, slash, _] if slash.kind == TokenKind::DelimSlash => {
+                    (space, Some(5))
+                }
+                _ => return None,
+            };
+            if space.kind != TokenKind::Ident {
+                return None;
+            }
+            let a = F64::new(
+                args[1].number_or_fraction_for_percentage(1.0, PercentageFlags::default())?,
+            );
+            let b = F64::new(
+                args[2].number_or_fraction_for_percentage(1.0, PercentageFlags::default())?,
+            );
+            let c = F64::new(
+                args[3].number_or_fraction_for_percentage(1.0, PercentageFlags::default())?,
+            );
+            let space = match space.text.to_ascii_lowercase().as_str() {
+                "a98-rgb" => ColorSpace::A98Rgb,
+                "display-p3" => ColorSpace::DisplayP3,
+                "prophoto-rgb" => ColorSpace::ProphotoRgb,
+                "rec2020" => ColorSpace::Rec2020,
+                "srgb" => ColorSpace::Srgb,
+                "srgb-linear" => ColorSpace::SrgbLinear,
+                "xyz" => ColorSpace::Xyz,
+                "xyz-d50" => ColorSpace::XyzD50,
+                "xyz-d65" => ColorSpace::XyzD65,
+                _ => return None,
+            };
+            let (x, y, z) = color_space_to_xyz(a, b, c, space);
+            Some(ParsedColor {
+                x,
+                y,
+                z,
+                alpha: alpha_at(alpha)?,
+            })
+        }
+        "lab" | "lch" | "oklab" | "oklch" => {
+            let alpha = match args {
+                [_, _, _] => None,
+                [_, _, _, slash, _] if slash.kind == TokenKind::DelimSlash => Some(4),
+                _ => return None,
+            };
+            let (x, y, z) = match lower.as_str() {
+                "lab" => {
+                    let l = F64::new(
+                        args[0]
+                            .number_or_fraction_for_percentage(100.0, PercentageFlags::default())?,
+                    );
+                    let a = F64::new(
+                        args[1]
+                            .number_or_fraction_for_percentage(125.0, PercentageFlags::ALLOW_ANY)?,
+                    );
+                    let b = F64::new(
+                        args[2]
+                            .number_or_fraction_for_percentage(125.0, PercentageFlags::ALLOW_ANY)?,
+                    );
+                    let (x, y, z) = lab_to_xyz(l, a, b);
+                    d50_to_d65(x, y, z)
+                }
+                "lch" => {
+                    let l = F64::new(
+                        args[0]
+                            .number_or_fraction_for_percentage(100.0, PercentageFlags::default())?,
+                    );
+                    let c = F64::new(args[1].number_or_fraction_for_percentage(
+                        125.0,
+                        PercentageFlags::ALLOW_ABOVE_100,
+                    )?);
+                    let h = F64::new(degrees_for_angle(&args[2])?);
+                    let (l, a, b) = lch_to_lab(l, c, h);
+                    let (x, y, z) = lab_to_xyz(l, a, b);
+                    d50_to_d65(x, y, z)
+                }
+                "oklab" => {
+                    let l = F64::new(
+                        args[0]
+                            .number_or_fraction_for_percentage(1.0, PercentageFlags::default())?,
+                    );
+                    let a = F64::new(
+                        args[1]
+                            .number_or_fraction_for_percentage(0.4, PercentageFlags::ALLOW_ANY)?,
+                    );
+                    let b = F64::new(
+                        args[2]
+                            .number_or_fraction_for_percentage(0.4, PercentageFlags::ALLOW_ANY)?,
+                    );
+                    oklab_to_xyz(l, a, b)
+                }
+                "oklch" => {
+                    let l = F64::new(
+                        args[0]
+                            .number_or_fraction_for_percentage(1.0, PercentageFlags::default())?,
+                    );
+                    let c = F64::new(args[1].number_or_fraction_for_percentage(
+                        0.4,
+                        PercentageFlags::ALLOW_ABOVE_100,
+                    )?);
+                    let h = F64::new(degrees_for_angle(&args[2])?);
+                    let (l, a, b) = lch_to_lab(l, c, h);
+                    oklab_to_xyz(l, a, b)
+                }
+                _ => unreachable!(),
+            };
+            Some(ParsedColor {
+                x,
+                y,
+                z,
+                alpha: alpha_at(alpha)?,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn value_would_clip_modern_color(tokens: &[Token]) -> bool {
+    tokens.iter().any(|token| {
+        parse_modern_color(token).is_some_and(|color| try_color_without_clipping(color).is_none())
+            || token
+                .children
+                .as_deref()
+                .is_some_and(value_would_clip_modern_color)
+    })
+}
+
+fn try_color_without_clipping(color: ParsedColor) -> Option<(u8, u8, u8, u8)> {
+    let (r, g, b) = xyz_to_lin_srgb(color.x, color.y, color.z);
+    let (r, g, b) = gam_srgb(r, g, b);
+    if [r, g, b]
+        .into_iter()
+        .any(|channel| !(-0.5 / 255.0..=255.5 / 255.0).contains(&channel.value()))
+    {
+        return None;
+    }
+    Some((
+        float_to_byte(r.value()),
+        float_to_byte(g.value()),
+        float_to_byte(b.value()),
+        color.alpha,
+    ))
+}
+
+fn generate_parsed_color(
+    token: &mut Token,
+    color: ParsedColor,
+    minify_syntax: bool,
+    minify_whitespace: bool,
+    unsupported_css_features: CssFeature,
+    clip: bool,
+) -> bool {
+    let rgba = if let Some(rgba) = try_color_without_clipping(color) {
+        rgba
+    } else if !clip {
+        return false;
+    } else {
+        let (r, g, b) = gamut_mapping_xyz_to_srgb(color.x, color.y, color.z);
+        (
+            float_to_byte(r.value()),
+            float_to_byte(g.value()),
+            float_to_byte(b.value()),
+            color.alpha,
+        )
+    };
+    generate_color_token(
+        token,
+        rgba,
+        minify_syntax,
+        minify_whitespace,
+        unsupported_css_features,
+    );
+    true
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2441,31 +5436,69 @@ fn lower_and_minify_gradient(
     minify_syntax: bool,
     minify_whitespace: bool,
     unsupported_css_features: CssFeature,
+    clip_modern_colors: bool,
 ) {
     let Some((kind, mut leading, mut stops)) = parse_gradient(token) else {
         return;
     };
-    if minify_syntax
-        || unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
-        || unsupported_css_features.contains(CssFeature::HEX_RGBA)
-        || unsupported_css_features.contains(CssFeature::HWB)
-        || unsupported_css_features.contains(CssFeature::MODERN_RGB_HSL)
-    {
+    if minify_syntax {
         for stop in &mut stops {
-            lower_and_minify_single_color(
-                std::slice::from_mut(&mut stop.color),
-                minify_syntax,
-                minify_whitespace,
-                unsupported_css_features,
-            );
+            for position in &mut stop.positions {
+                position.whitespace |= WhitespaceFlags::BEFORE;
+            }
         }
+    }
+
+    let lower_midpoints = unsupported_css_features.contains(CssFeature::GRADIENT_MIDPOINTS);
+    let mut lower_color_spaces = unsupported_css_features.contains(CssFeature::COLOR_FUNCTIONS);
+    let lower_interpolation = unsupported_css_features.contains(CssFeature::GRADIENT_INTERPOLATION);
+    if lower_interpolation {
+        lower_color_spaces = true;
+    }
+
+    let mut did_expand = false;
+    if (lower_midpoints || lower_color_spaces || lower_interpolation)
+        && let Some(parsed_stops) = try_to_parse_color_stops(kind, &stops)
+    {
+        let has_color_space = parsed_stops.iter().any(|stop| stop.has_color_space);
+        let has_midpoint = parsed_stops.iter().any(|stop| stop.midpoint.is_some());
+        let interpolation = remove_color_interpolation(&leading);
+        let should_expand = interpolation.as_ref().is_some_and(|_| lower_interpolation)
+            || has_color_space && lower_color_spaces
+            || has_midpoint && lower_midpoints;
+        if should_expand {
+            let (remaining, space, hue) = interpolation.unwrap_or_else(|| {
+                (
+                    leading.clone(),
+                    if has_color_space {
+                        ColorSpace::Oklab
+                    } else {
+                        ColorSpace::Srgb
+                    },
+                    HueMethod::Shorter,
+                )
+            });
+            stops = expand_gradient(token.loc, parsed_stops, space, hue);
+            leading = remaining;
+            did_expand = true;
+        }
+    }
+
+    for stop in &mut stops {
+        lower_and_minify_single_color(
+            std::slice::from_mut(&mut stop.color),
+            minify_syntax,
+            minify_whitespace,
+            unsupported_css_features,
+            clip_modern_colors,
+        );
     }
     if unsupported_css_features.contains(CssFeature::GRADIENT_DOUBLE_POSITION) {
         split_double_gradient_stops(&mut stops);
     } else if minify_syntax {
         merge_duplicate_gradient_stops(&mut stops);
     }
-    if minify_syntax {
+    if minify_syntax || did_expand {
         remove_implied_gradient_positions(kind, &mut stops);
     }
 
@@ -2473,6 +5506,11 @@ fn lower_and_minify_gradient(
     children.append(&mut leading);
     for mut stop in stops {
         if !children.is_empty() {
+            children
+                .last_mut()
+                .unwrap()
+                .whitespace
+                .remove(WhitespaceFlags::AFTER);
             children.push(gradient_comma(token.loc, minify_whitespace));
         }
         if stop.positions.is_empty() && stop.midpoint.is_none() {
@@ -2481,9 +5519,17 @@ fn lower_and_minify_gradient(
         children.push(stop.color);
         children.append(&mut stop.positions);
         if let Some(midpoint) = stop.midpoint {
+            children
+                .last_mut()
+                .unwrap()
+                .whitespace
+                .remove(WhitespaceFlags::AFTER);
             children.push(gradient_comma(token.loc, minify_whitespace));
             children.push(midpoint);
         }
+    }
+    if let Some(last) = children.last_mut() {
+        last.whitespace.remove(WhitespaceFlags::AFTER);
     }
     token.children = Some(children);
 }
@@ -2565,6 +5611,725 @@ fn parse_gradient(token: &Token) -> Option<(GradientKind, Vec<Token>, Vec<Gradie
         });
     }
     Some((kind, leading, stops))
+}
+
+#[derive(Clone, Debug)]
+struct GradientValue {
+    unit: String,
+    value: F64,
+}
+
+#[derive(Clone, Debug)]
+struct ParsedGradientStop {
+    position_terms: Vec<GradientValue>,
+    midpoint: Option<GradientValue>,
+    x: F64,
+    y: F64,
+    z: F64,
+    alpha: F64,
+    r: F64,
+    g: F64,
+    b: F64,
+    v0: F64,
+    v1: F64,
+    v2: F64,
+    has_color_space: bool,
+}
+
+fn parse_gradient_color(token: &Token) -> Option<(ParsedColor, bool)> {
+    if let Some(color) = parse_modern_color(token) {
+        return Some((color, true));
+    }
+    let rgba = match token.kind {
+        TokenKind::Ident => parse_hex_color(named_color_hex(&token.text.to_ascii_lowercase())?)?,
+        TokenKind::Hash => parse_hex_color(&token.text)?,
+        TokenKind::Function
+            if token.text.eq_ignore_ascii_case("rgb")
+                || token.text.eq_ignore_ascii_case("rgba") =>
+        {
+            parse_rgb(token)?
+        }
+        TokenKind::Function
+            if token.text.eq_ignore_ascii_case("hsl")
+                || token.text.eq_ignore_ascii_case("hsla") =>
+        {
+            parse_hsl(token)?
+        }
+        TokenKind::Function if token.text.eq_ignore_ascii_case("hwb") => parse_hwb(token)?,
+        _ => return None,
+    };
+    let (r, g, b) = (
+        F64::new(f64::from(rgba.0) / 255.0),
+        F64::new(f64::from(rgba.1) / 255.0),
+        F64::new(f64::from(rgba.2) / 255.0),
+    );
+    let (x, y, z) = {
+        let (r, g, b) = lin_srgb(r, g, b);
+        lin_srgb_to_xyz(r, g, b)
+    };
+    Some((
+        ParsedColor {
+            x,
+            y,
+            z,
+            alpha: rgba.3,
+        },
+        false,
+    ))
+}
+
+fn try_to_parse_color_stops(
+    kind: GradientKind,
+    stops: &[GradientStop],
+) -> Option<Vec<ParsedGradientStop>> {
+    let mut parsed = Vec::new();
+    for stop in stops {
+        let (color, has_color_space) = parse_gradient_color(&stop.color)?;
+        let (r, g, b) = gam_srgb(
+            xyz_to_lin_srgb(color.x, color.y, color.z).0,
+            xyz_to_lin_srgb(color.x, color.y, color.z).1,
+            xyz_to_lin_srgb(color.x, color.y, color.z).2,
+        );
+        let mut item = ParsedGradientStop {
+            position_terms: Vec::new(),
+            midpoint: None,
+            x: color.x,
+            y: color.y,
+            z: color.z,
+            alpha: F64::new(f64::from(color.alpha) / 255.0),
+            r,
+            g,
+            b,
+            v0: F64::new(0.0),
+            v1: F64::new(0.0),
+            v2: F64::new(0.0),
+            has_color_space,
+        };
+        for (index, position) in stop.positions.iter().enumerate() {
+            item.position_terms = vec![parse_gradient_value(position, kind)?];
+            if index + 1 < stop.positions.len() {
+                parsed.push(item.clone());
+            }
+        }
+        if let Some(midpoint) = &stop.midpoint {
+            item.midpoint = Some(parse_gradient_value(midpoint, kind)?);
+        }
+        parsed.push(item);
+    }
+
+    if parsed.is_empty() {
+        return Some(parsed);
+    }
+    if parsed[0].position_terms.is_empty() {
+        parsed[0].position_terms = vec![GradientValue {
+            unit: "%".into(),
+            value: F64::new(0.0),
+        }];
+    }
+    let last = parsed.len() - 1;
+    if parsed[last].position_terms.is_empty() {
+        parsed[last].position_terms = vec![GradientValue {
+            unit: "%".into(),
+            value: F64::new(100.0),
+        }];
+    }
+
+    for index in 0..parsed.len() {
+        let previous = (0..index).rev().find_map(|previous| {
+            parsed[previous].midpoint.clone().or_else(|| {
+                (parsed[previous].position_terms.len() == 1)
+                    .then(|| parsed[previous].position_terms[0].clone())
+            })
+        });
+        let Some(mut previous) = previous else {
+            continue;
+        };
+        if parsed[index].position_terms.len() == 1 {
+            if previous.unit == parsed[index].position_terms[0].unit {
+                parsed[index].position_terms[0].value =
+                    max2(previous.value, parsed[index].position_terms[0].value);
+            }
+            previous = parsed[index].position_terms[0].clone();
+        }
+        if let Some(midpoint) = &mut parsed[index].midpoint
+            && previous.unit == midpoint.unit
+        {
+            midpoint.value = max2(previous.value, midpoint.value);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct StopInfo {
+        from: Option<GradientValue>,
+        to: Option<GradientValue>,
+        from_count: usize,
+        to_count: usize,
+    }
+    let mut infos = vec![StopInfo::default(); parsed.len()];
+    for index in 0..parsed.len() {
+        if parsed[index].position_terms.len() == 1 {
+            continue;
+        }
+        for previous in (0..index).rev() {
+            infos[index].from_count += 1;
+            if let Some(midpoint) = &parsed[previous].midpoint {
+                infos[index].from = Some(midpoint.clone());
+                break;
+            }
+            if parsed[previous].position_terms.len() == 1 {
+                infos[index].from = Some(parsed[previous].position_terms[0].clone());
+                break;
+            }
+        }
+        for next in index..parsed.len() {
+            infos[index].to_count += 1;
+            if let Some(midpoint) = &parsed[next].midpoint {
+                infos[index].to = Some(midpoint.clone());
+                break;
+            }
+            if next + 1 < parsed.len() && parsed[next + 1].position_terms.len() == 1 {
+                infos[index].to = Some(parsed[next + 1].position_terms[0].clone());
+                break;
+            }
+        }
+    }
+    for index in 0..parsed.len() {
+        if parsed[index].position_terms.len() == 1 {
+            continue;
+        }
+        let info = &infos[index];
+        let (from, to) = (info.from.as_ref()?, info.to.as_ref()?);
+        let t =
+            F64::new(info.from_count as f64).div_const((info.from_count + info.to_count) as f64);
+        parsed[index].position_terms = if from.unit == to.unit {
+            vec![GradientValue {
+                unit: from.unit.clone(),
+                value: lerp(from.value, to.value, t),
+            }]
+        } else {
+            vec![
+                GradientValue {
+                    unit: from.unit.clone(),
+                    value: t.negated().add_const(1.0).mul(from.value),
+                },
+                GradientValue {
+                    unit: to.unit.clone(),
+                    value: t.mul(to.value),
+                },
+            ]
+        };
+    }
+    for index in 0..parsed.len() {
+        if let Some(midpoint) = &parsed[index].midpoint {
+            let next = parsed.get(index + 1)?;
+            if parsed[index].position_terms.len() != 1
+                || midpoint.unit != parsed[index].position_terms[0].unit
+                || next.position_terms.len() != 1
+                || midpoint.unit != next.position_terms[0].unit
+            {
+                return None;
+            }
+        }
+    }
+    Some(parsed)
+}
+
+fn parse_gradient_value(token: &Token, kind: GradientKind) -> Option<GradientValue> {
+    let (value, unit) = parse_gradient_position(token, kind)?;
+    Some(GradientValue {
+        unit,
+        value: F64::new(value),
+    })
+}
+
+fn remove_color_interpolation(tokens: &[Token]) -> Option<(Vec<Token>, ColorSpace, HueMethod)> {
+    for index in 0..tokens.len().saturating_sub(1) {
+        if tokens[index].kind != TokenKind::Ident || !tokens[index].text.eq_ignore_ascii_case("in")
+        {
+            continue;
+        }
+        let space_token = &tokens[index + 1];
+        if space_token.kind != TokenKind::Ident {
+            continue;
+        }
+        let space = match space_token.text.to_ascii_lowercase().as_str() {
+            "a98-rgb" => ColorSpace::A98Rgb,
+            "display-p3" => ColorSpace::DisplayP3,
+            "hsl" => ColorSpace::Hsl,
+            "hwb" => ColorSpace::Hwb,
+            "lab" => ColorSpace::Lab,
+            "lch" => ColorSpace::Lch,
+            "oklab" => ColorSpace::Oklab,
+            "oklch" => ColorSpace::Oklch,
+            "prophoto-rgb" => ColorSpace::ProphotoRgb,
+            "rec2020" => ColorSpace::Rec2020,
+            "srgb" => ColorSpace::Srgb,
+            "srgb-linear" => ColorSpace::SrgbLinear,
+            "xyz" => ColorSpace::Xyz,
+            "xyz-d50" => ColorSpace::XyzD50,
+            "xyz-d65" => ColorSpace::XyzD65,
+            _ => return None,
+        };
+        let mut end = index + 2;
+        let mut hue = HueMethod::Shorter;
+        if space.is_polar()
+            && index + 3 < tokens.len()
+            && tokens[index + 3].kind == TokenKind::Ident
+            && tokens[index + 3].text.eq_ignore_ascii_case("hue")
+            && tokens[index + 2].kind == TokenKind::Ident
+        {
+            hue = match tokens[index + 2].text.to_ascii_lowercase().as_str() {
+                "shorter" => HueMethod::Shorter,
+                "longer" => HueMethod::Longer,
+                "increasing" => HueMethod::Increasing,
+                "decreasing" => HueMethod::Decreasing,
+                _ => return None,
+            };
+            end = index + 4;
+        }
+        let mut remaining = tokens[..index].to_vec();
+        remaining.extend_from_slice(&tokens[end..]);
+        if let Some(first) = remaining.first_mut() {
+            first.whitespace.remove(WhitespaceFlags::BEFORE);
+        }
+        if let Some(last) = remaining.last_mut() {
+            last.whitespace.remove(WhitespaceFlags::AFTER);
+        }
+        return Some((remaining, space, hue));
+    }
+    None
+}
+
+fn expand_gradient(
+    loc: Loc,
+    mut parsed: Vec<ParsedGradientStop>,
+    space: ColorSpace,
+    hue: HueMethod,
+) -> Vec<GradientStop> {
+    for stop in &mut parsed {
+        let (v0, v1, v2) = xyz_to_color_space(stop.x, stop.y, stop.z, space);
+        (stop.v0, stop.v1, stop.v2) = premultiply_color(v0, v1, v2, stop.alpha, space);
+    }
+    let mut generated = Vec::new();
+    for index in 0..parsed.len() {
+        let stop = &parsed[index];
+        generated.push(GradientStop {
+            color: make_gradient_color_token(loc, stop.x, stop.y, stop.z, stop.alpha),
+            positions: vec![make_gradient_position_token(loc, &stop.position_terms)],
+            midpoint: None,
+        });
+        generated.last_mut().unwrap().positions[0].whitespace = WhitespaceFlags::BEFORE;
+        if index + 1 < parsed.len() {
+            generate_interpolated_stops(
+                loc,
+                &mut generated,
+                0,
+                &parsed[index],
+                &parsed[index + 1],
+                (
+                    stop.x,
+                    stop.y,
+                    stop.z,
+                    stop.r,
+                    stop.g,
+                    stop.b,
+                    stop.alpha,
+                    F64::new(0.0),
+                ),
+                {
+                    let next = &parsed[index + 1];
+                    (
+                        next.x,
+                        next.y,
+                        next.z,
+                        next.r,
+                        next.g,
+                        next.b,
+                        next.alpha,
+                        F64::new(1.0),
+                    )
+                },
+                space,
+                hue,
+            );
+        }
+    }
+    generated
+}
+
+type InterpolationPoint = (F64, F64, F64, F64, F64, F64, F64, F64);
+
+#[allow(clippy::too_many_arguments)]
+fn generate_interpolated_stops(
+    loc: Loc,
+    generated: &mut Vec<GradientStop>,
+    depth: usize,
+    from: &ParsedGradientStop,
+    to: &ParsedGradientStop,
+    previous: InterpolationPoint,
+    next: InterpolationPoint,
+    space: ColorSpace,
+    hue: HueMethod,
+) {
+    if depth > 4 {
+        return;
+    }
+    let t = previous.7.add(next.7).div_const(2.0);
+    let mut position_t = t;
+    if let Some(midpoint) = &from.midpoint {
+        let from_position = from.position_terms[0].value;
+        let to_position = to.position_terms[0].value;
+        let stop_position = lerp(from_position, to_position, t);
+        let h = midpoint
+            .value
+            .sub(from_position)
+            .div(to_position.sub(from_position));
+        let p = stop_position
+            .sub(from_position)
+            .div(to_position.sub(from_position));
+        position_t = if h.value() <= 0.0 {
+            F64::new(1.0)
+        } else if h.value() >= 1.0 {
+            F64::new(0.0)
+        } else {
+            p.pow(F64::new(-1.0).div(h.log2()))
+        };
+    }
+    let (v0, v1, v2) = interpolate_colors(
+        from.v0, from.v1, from.v2, to.v0, to.v1, to.v2, space, hue, position_t,
+    );
+    let alpha = lerp(from.alpha, to.alpha, position_t);
+    let (v0, v1, v2) = unpremultiply_color(v0, v1, v2, alpha, space);
+    let (x, y, z) = color_space_to_xyz(v0, v1, v2, space);
+    let (r, g, b) = {
+        let (r, g, b) = xyz_to_lin_srgb(x, y, z);
+        gam_srgb(r, g, b)
+    };
+    let dr = r.mul(alpha).sub(
+        previous
+            .3
+            .mul(previous.6)
+            .add(next.3.mul(next.6))
+            .div_const(2.0),
+    );
+    let dg = g.mul(alpha).sub(
+        previous
+            .4
+            .mul(previous.6)
+            .add(next.4.mul(next.6))
+            .div_const(2.0),
+    );
+    let db = b.mul(alpha).sub(
+        previous
+            .5
+            .mul(previous.6)
+            .add(next.5.mul(next.6))
+            .div_const(2.0),
+    );
+    const EPSILON: f64 = 4.0 / 255.0;
+    if dr.squared().add(dg.squared()).add(db.squared()).value() < EPSILON * EPSILON {
+        return;
+    }
+    let current = (x, y, z, r, g, b, alpha, t);
+    generate_interpolated_stops(
+        loc,
+        generated,
+        depth + 1,
+        from,
+        to,
+        previous,
+        current,
+        space,
+        hue,
+    );
+    let mut position = make_gradient_position_token(
+        loc,
+        &interpolate_positions(&from.position_terms, &to.position_terms, t),
+    );
+    position.whitespace = WhitespaceFlags::BEFORE;
+    generated.push(GradientStop {
+        color: make_gradient_color_token(loc, x, y, z, alpha),
+        positions: vec![position],
+        midpoint: None,
+    });
+    generate_interpolated_stops(
+        loc,
+        generated,
+        depth + 1,
+        from,
+        to,
+        current,
+        next,
+        space,
+        hue,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn interpolate_colors(
+    a0: F64,
+    a1: F64,
+    a2: F64,
+    b0: F64,
+    b1: F64,
+    b2: F64,
+    space: ColorSpace,
+    hue: HueMethod,
+    t: F64,
+) -> (F64, F64, F64) {
+    let v1 = lerp(a1, b1, t);
+    match space {
+        ColorSpace::Hsl | ColorSpace::Hwb => {
+            (interpolate_hues(a0, b0, t, hue), v1, lerp(a2, b2, t))
+        }
+        ColorSpace::Lch | ColorSpace::Oklch => {
+            (lerp(a0, b0, t), v1, interpolate_hues(a2, b2, t, hue))
+        }
+        _ => (lerp(a0, b0, t), v1, lerp(a2, b2, t)),
+    }
+}
+
+fn interpolate_hues(mut a: F64, mut b: F64, t: F64, method: HueMethod) -> F64 {
+    a = a.div_const(360.0);
+    b = b.div_const(360.0);
+    a = a.sub(a.floor());
+    b = b.sub(b.floor());
+    let delta = b.sub(a).value();
+    match method {
+        HueMethod::Shorter => {
+            if delta > 0.5 {
+                a = a.add_const(1.0);
+            }
+            if delta < -0.5 {
+                b = b.add_const(1.0);
+            }
+        }
+        HueMethod::Longer => {
+            if delta > 0.0 && delta < 0.5 {
+                a = a.add_const(1.0);
+            }
+            if delta > -0.5 && delta <= 0.0 {
+                b = b.add_const(1.0);
+            }
+        }
+        HueMethod::Increasing if b.value() < a.value() => b = b.add_const(1.0),
+        HueMethod::Decreasing if a.value() < b.value() => a = a.add_const(1.0),
+        _ => {}
+    }
+    lerp(a, b, t).mul_const(360.0)
+}
+
+fn interpolate_positions(a: &[GradientValue], b: &[GradientValue], t: F64) -> Vec<GradientValue> {
+    let mut result: Vec<GradientValue> = Vec::new();
+    for term in a {
+        let index = result
+            .iter()
+            .position(|item| item.unit == term.unit)
+            .unwrap_or_else(|| {
+                result.push(GradientValue {
+                    unit: term.unit.clone(),
+                    value: F64::new(0.0),
+                });
+                result.len() - 1
+            });
+        result[index].value = t
+            .negated()
+            .add_const(1.0)
+            .mul(term.value)
+            .add(result[index].value);
+    }
+    for term in b {
+        let index = result
+            .iter()
+            .position(|item| item.unit == term.unit)
+            .unwrap_or_else(|| {
+                result.push(GradientValue {
+                    unit: term.unit.clone(),
+                    value: F64::new(0.0),
+                });
+                result.len() - 1
+            });
+        result[index].value = t.mul(term.value).add(result[index].value);
+    }
+    if result.len() > 1
+        && let Some(index) = result.iter().position(|term| term.value.value() == 0.0)
+    {
+        result.remove(index);
+    }
+    result
+}
+
+fn premultiply_color(
+    mut v0: F64,
+    mut v1: F64,
+    mut v2: F64,
+    alpha: F64,
+    space: ColorSpace,
+) -> (F64, F64, F64) {
+    if alpha.value() < 1.0 {
+        match space {
+            ColorSpace::Hsl | ColorSpace::Hwb => v2 = v2.mul(alpha),
+            ColorSpace::Lch | ColorSpace::Oklch => v0 = v0.mul(alpha),
+            _ => {
+                v0 = v0.mul(alpha);
+                v2 = v2.mul(alpha);
+            }
+        }
+        v1 = v1.mul(alpha);
+    }
+    (v0, v1, v2)
+}
+
+fn unpremultiply_color(
+    mut v0: F64,
+    mut v1: F64,
+    mut v2: F64,
+    alpha: F64,
+    space: ColorSpace,
+) -> (F64, F64, F64) {
+    if alpha.value() > 0.0 && alpha.value() < 1.0 {
+        match space {
+            ColorSpace::Hsl | ColorSpace::Hwb => v2 = v2.div(alpha),
+            ColorSpace::Lch | ColorSpace::Oklch => v0 = v0.div(alpha),
+            _ => {
+                v0 = v0.div(alpha);
+                v2 = v2.div(alpha);
+            }
+        }
+        v1 = v1.div(alpha);
+    }
+    (v0, v1, v2)
+}
+
+fn format_gradient_float(value: F64, decimals: usize) -> String {
+    let mut text = format!("{:.*}", decimals, value.value());
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
+fn make_gradient_position_token(loc: Loc, terms: &[GradientValue]) -> Token {
+    if terms.len() == 1 {
+        let term = &terms[0];
+        let number = format_gradient_float(term.value, 2);
+        return Token {
+            loc,
+            kind: if term.unit == "%" {
+                TokenKind::Percentage
+            } else {
+                TokenKind::Dimension
+            },
+            text: format!("{number}{}", term.unit),
+            unit_offset: if term.unit == "%" {
+                0
+            } else {
+                number.len() as u16
+            },
+            ..Token::default()
+        };
+    }
+    let mut children = Vec::new();
+    for (index, term) in terms.iter().enumerate() {
+        if index > 0 {
+            children.push(Token {
+                loc,
+                kind: TokenKind::DelimPlus,
+                text: "+".into(),
+                whitespace: WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER,
+                ..Token::default()
+            });
+        }
+        children.push(make_gradient_position_token(
+            loc,
+            std::slice::from_ref(term),
+        ));
+    }
+    Token {
+        loc,
+        kind: TokenKind::Function,
+        text: "calc".into(),
+        children: Some(children),
+        ..Token::default()
+    }
+}
+
+fn make_gradient_color_token(loc: Loc, x: F64, y: F64, z: F64, alpha: F64) -> Token {
+    let alpha_byte = alpha.mul_const(255.0).round().value() as u8;
+    let color = ParsedColor {
+        x,
+        y,
+        z,
+        alpha: alpha_byte,
+    };
+    if let Some((r, g, b, a)) = try_color_without_clipping(color) {
+        return Token {
+            loc,
+            kind: TokenKind::Hash,
+            text: if a == 255 {
+                format!("{r:02x}{g:02x}{b:02x}")
+            } else {
+                format!("{r:02x}{g:02x}{b:02x}{a:02x}")
+            },
+            ..Token::default()
+        };
+    }
+    let mut children = vec![
+        Token {
+            loc,
+            kind: TokenKind::Ident,
+            text: "xyz".into(),
+            whitespace: WhitespaceFlags::AFTER,
+            ..Token::default()
+        },
+        Token {
+            loc,
+            kind: TokenKind::Number,
+            text: format_gradient_float(x, 3),
+            whitespace: WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER,
+            ..Token::default()
+        },
+        Token {
+            loc,
+            kind: TokenKind::Number,
+            text: format_gradient_float(y, 3),
+            whitespace: WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER,
+            ..Token::default()
+        },
+        Token {
+            loc,
+            kind: TokenKind::Number,
+            text: format_gradient_float(z, 3),
+            whitespace: WhitespaceFlags::BEFORE,
+            ..Token::default()
+        },
+    ];
+    if alpha.value() < 1.0 {
+        children.push(Token {
+            loc,
+            kind: TokenKind::DelimSlash,
+            text: "/".into(),
+            whitespace: WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER,
+            ..Token::default()
+        });
+        children.push(Token {
+            loc,
+            kind: TokenKind::Number,
+            text: format_gradient_float(alpha, 3),
+            whitespace: WhitespaceFlags::BEFORE,
+            ..Token::default()
+        });
+    }
+    Token {
+        loc,
+        kind: TokenKind::Function,
+        text: "color".into(),
+        children: Some(children),
+        ..Token::default()
+    }
 }
 
 fn gradient_comma(loc: Loc, minify_whitespace: bool) -> Token {
@@ -3005,12 +6770,14 @@ fn process_declaration(
     minify_syntax: bool,
     minify_whitespace: bool,
     unsupported_css_features: CssFeature,
+    clip_modern_colors: bool,
 ) {
     let key = key.to_ascii_lowercase();
     let lower_color_syntax = unsupported_css_features.contains(CssFeature::REBECCA_PURPLE)
         || unsupported_css_features.contains(CssFeature::HEX_RGBA)
         || unsupported_css_features.contains(CssFeature::HWB)
-        || unsupported_css_features.contains(CssFeature::MODERN_RGB_HSL);
+        || unsupported_css_features.contains(CssFeature::MODERN_RGB_HSL)
+        || unsupported_css_features.contains(CssFeature::COLOR_FUNCTIONS);
     if minify_syntax {
         minify_numeric_tokens(value);
     }
@@ -3021,6 +6788,7 @@ fn process_declaration(
                 minify_syntax,
                 minify_whitespace,
                 unsupported_css_features,
+                clip_modern_colors,
             );
         } else if key == "background" {
             for token in value.iter_mut() {
@@ -3029,12 +6797,15 @@ fn process_declaration(
                     minify_syntax,
                     minify_whitespace,
                     unsupported_css_features,
+                    clip_modern_colors,
                 );
             }
         }
     }
     if (minify_syntax
         || unsupported_css_features.contains(CssFeature::GRADIENT_DOUBLE_POSITION)
+        || unsupported_css_features.contains(CssFeature::GRADIENT_MIDPOINTS)
+        || unsupported_css_features.contains(CssFeature::GRADIENT_INTERPOLATION)
         || lower_color_syntax)
         && matches!(
             key.as_str(),
@@ -3047,6 +6818,7 @@ fn process_declaration(
                 minify_syntax,
                 minify_whitespace,
                 unsupported_css_features,
+                clip_modern_colors,
             );
         }
     }
@@ -3056,6 +6828,7 @@ fn process_declaration(
             minify_syntax,
             minify_whitespace,
             unsupported_css_features,
+            clip_modern_colors,
         );
     }
     if !minify_syntax {
@@ -3142,10 +6915,12 @@ fn minify_decimal(text: &str) -> Option<String> {
     let mut result = text.trim_end_matches('0').trim_end_matches('.').to_owned();
     if let Some(fraction) = result.strip_prefix("0.") {
         result = format!(".{fraction}");
+    } else if let Some(fraction) = result.strip_prefix("+0.") {
+        result = format!("+.{fraction}");
     } else if let Some(fraction) = result.strip_prefix("-0.") {
         result = format!("-.{fraction}");
     }
-    if result.is_empty() || result == "-" {
+    if result.is_empty() || result == "-" || result == "+" {
         result.push('0');
     }
     (result.len() < text.len()).then_some(result)
@@ -3834,6 +7609,152 @@ fn expand_box_quad(tokens: &[Token], allow_auto: bool) -> Option<Vec<Token>> {
     ])
 }
 
+fn insert_prefixed_declarations(
+    rules: &mut Vec<Rule>,
+    prefix_data: &HashMap<Declaration, CssPrefix>,
+) {
+    if prefix_data.is_empty() {
+        return;
+    }
+    let declaration_keys = rules
+        .iter()
+        .filter_map(|rule| match &rule.data {
+            RuleData::Declaration(declaration) => Some(declaration.key_text.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let original = std::mem::take(rules);
+    for rule in original {
+        let RuleData::Declaration(declaration) = &rule.data else {
+            rules.push(rule);
+            continue;
+        };
+        let Some(prefixes) = prefix_data.get(&declaration.key).copied() else {
+            rules.push(rule);
+            continue;
+        };
+        for (prefix, flag) in [
+            ("-webkit-", CssPrefix::WEBKIT),
+            ("-khtml-", CssPrefix::KHTML),
+            ("-moz-", CssPrefix::MOZ),
+            ("-ms-", CssPrefix::MS),
+            ("-o-", CssPrefix::O),
+        ] {
+            if prefixes.contains(flag)
+                && let Some(prefixed) =
+                    prefixed_declaration(&rule, declaration, prefix, &declaration_keys, rules)
+            {
+                rules.push(prefixed);
+            }
+        }
+        rules.push(rule);
+    }
+}
+
+fn prefixed_declaration(
+    rule: &Rule,
+    declaration: &DeclarationRule,
+    prefix: &str,
+    declaration_keys: &HashSet<String>,
+    prior_rules: &[Rule],
+) -> Option<Rule> {
+    let mut key_text = format!("{prefix}{}", declaration.key_text);
+    if declaration_keys.contains(&key_text.to_ascii_lowercase()) {
+        return None;
+    }
+    match declaration.key {
+        Declaration::BackgroundClip => {
+            if !matches!(declaration.value.as_slice(), [token]
+                if token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("text"))
+            {
+                return None;
+            }
+        }
+        Declaration::Position => {
+            if !matches!(declaration.value.as_slice(), [token]
+                if token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("sticky"))
+            {
+                return None;
+            }
+        }
+        Declaration::Width
+        | Declaration::MinWidth
+        | Declaration::MaxWidth
+        | Declaration::Height
+        | Declaration::MinHeight
+        | Declaration::MaxHeight => {
+            if !matches!(declaration.value.as_slice(), [token]
+                if token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("stretch"))
+            {
+                return None;
+            }
+        }
+        _ => {}
+    }
+
+    let mut value = declaration.value.clone();
+    match declaration.key {
+        Declaration::Position => {
+            key_text.clone_from(&declaration.key_text);
+            value[0].text = "-webkit-sticky".into();
+        }
+        Declaration::Width
+        | Declaration::MinWidth
+        | Declaration::MaxWidth
+        | Declaration::Height
+        | Declaration::MinHeight
+        | Declaration::MaxHeight => {
+            key_text.clone_from(&declaration.key_text);
+            value[0].text = match prefix {
+                "-webkit-" => "-webkit-fill-available".into(),
+                "-moz-" => "-moz-available".into(),
+                _ => return None,
+            };
+        }
+        Declaration::UserSelect
+            if prefix == "-moz-"
+                && matches!(value.as_slice(), [token]
+                    if token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("none")) =>
+        {
+            value[0].text = "-moz-none".into();
+        }
+        Declaration::MaskComposite if prefix == "-webkit-" => {
+            for token in &mut value {
+                if token.kind == TokenKind::Ident {
+                    token.text = match token.text.to_ascii_lowercase().as_str() {
+                        "add" => "source-over".into(),
+                        "subtract" => "source-out".into(),
+                        "intersect" => "source-in".into(),
+                        "exclude" => "xor".into(),
+                        _ => continue,
+                    };
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if key_text.eq_ignore_ascii_case(&declaration.key_text)
+        && prior_rules.iter().any(|rule| {
+            matches!(&rule.data, RuleData::Declaration(previous)
+                if previous.key_text.eq_ignore_ascii_case(&key_text)
+                    && tokens_equal_ignoring_whitespace(&previous.value, &value))
+        })
+    {
+        return None;
+    }
+    Some(Rule {
+        loc: rule.loc,
+        data: RuleData::Declaration(DeclarationRule {
+            key: Declaration::Unknown,
+            key_text,
+            value,
+            key_range: declaration.key_range,
+            important: declaration.important,
+        }),
+    })
+}
+
 fn lower_inset_declarations(rules: &mut Vec<Rule>, minify_whitespace: bool) {
     let mut rewritten = Vec::with_capacity(rules.len());
     for rule in rules.drain(..) {
@@ -4195,6 +8116,7 @@ fn lower_and_minify_box_shadows(
     minify_syntax: bool,
     minify_whitespace: bool,
     unsupported_css_features: CssFeature,
+    clip_modern_colors: bool,
 ) {
     let original = std::mem::take(tokens);
     let mut start = 0;
@@ -4206,6 +8128,7 @@ fn lower_and_minify_box_shadows(
                 minify_syntax,
                 minify_whitespace,
                 unsupported_css_features,
+                clip_modern_colors,
             );
             tokens.extend(shadow);
             if index < original.len() {
@@ -4221,6 +8144,7 @@ fn lower_and_minify_box_shadow(
     minify_syntax: bool,
     minify_whitespace: bool,
     unsupported_css_features: CssFeature,
+    clip_modern_colors: bool,
 ) {
     let mut inset_count = 0;
     let mut color_count = 0;
@@ -4251,6 +8175,7 @@ fn lower_and_minify_box_shadow(
                     minify_syntax,
                     minify_whitespace,
                     unsupported_css_features,
+                    clip_modern_colors,
                 );
             } else if token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case("inset") {
                 inset_count += 1;
@@ -4520,10 +8445,102 @@ fn percent_to_number_if_shorter(token: &mut Token) {
     }
 }
 
-fn reduce_calc_expressions(tokens: &mut [Token], preserve_replacement_whitespace: bool) {
+fn collect_calc_operator_warnings(
+    tokens: &[Token],
+    inside_calc: bool,
+    warnings: &mut Vec<(Range, String)>,
+) {
+    for (index, token) in tokens.iter().enumerate() {
+        if inside_calc
+            && index > 0
+            && token.kind.is_numeric()
+            && matches!(token.text.as_bytes().first(), Some(b'+' | b'-'))
+            && !matches!(
+                tokens[index - 1].kind,
+                TokenKind::Comma
+                    | TokenKind::DelimPlus
+                    | TokenKind::DelimMinus
+                    | TokenKind::DelimAsterisk
+                    | TokenKind::DelimSlash
+            )
+        {
+            let operator = &token.text[..1];
+            warnings.push((
+                Range {
+                    loc: token.loc,
+                    len: 1,
+                },
+                format!(
+                    "The {operator:?} operator only works if there is whitespace on both sides"
+                ),
+            ));
+        }
+        if inside_calc && matches!(token.kind, TokenKind::DelimPlus | TokenKind::DelimMinus) {
+            let operator = if token.kind == TokenKind::DelimPlus {
+                "+"
+            } else {
+                "-"
+            };
+            let is_prefix = index == 0
+                || matches!(
+                    tokens[index - 1].kind,
+                    TokenKind::Comma
+                        | TokenKind::DelimPlus
+                        | TokenKind::DelimMinus
+                        | TokenKind::DelimAsterisk
+                        | TokenKind::DelimSlash
+                );
+            if is_prefix {
+                warnings.push((
+                    Range {
+                        loc: token.loc,
+                        len: 1,
+                    },
+                    format!(
+                        "{operator:?} can only be used as an infix operator, not a prefix operator"
+                    ),
+                ));
+            } else {
+                let has_before = token.whitespace.contains(WhitespaceFlags::BEFORE)
+                    || tokens[index - 1]
+                        .whitespace
+                        .contains(WhitespaceFlags::AFTER);
+                let has_after = token.whitespace.contains(WhitespaceFlags::AFTER)
+                    || tokens
+                        .get(index + 1)
+                        .is_some_and(|next| next.whitespace.contains(WhitespaceFlags::BEFORE));
+                if !has_before || !has_after {
+                    warnings.push((
+                        Range {
+                            loc: token.loc,
+                            len: 1,
+                        },
+                        format!(
+                            "The {operator:?} operator only works if there is whitespace on both sides"
+                        ),
+                    ));
+                }
+            }
+        }
+        if let Some(children) = &token.children {
+            collect_calc_operator_warnings(
+                children,
+                inside_calc
+                    || token.kind == TokenKind::Function && token.text.eq_ignore_ascii_case("calc"),
+                warnings,
+            );
+        }
+    }
+}
+
+fn reduce_calc_expressions(
+    tokens: &mut [Token],
+    preserve_replacement_whitespace: bool,
+    minify_whitespace: bool,
+) {
     for token in tokens.iter_mut() {
         if let Some(children) = &mut token.children {
-            reduce_calc_expressions(children, preserve_replacement_whitespace);
+            reduce_calc_expressions(children, preserve_replacement_whitespace, minify_whitespace);
         }
         if token.kind != TokenKind::Function || !token.text.eq_ignore_ascii_case("calc") {
             continue;
@@ -4538,17 +8555,10 @@ fn reduce_calc_expressions(tokens: &mut [Token], preserve_replacement_whitespace
             && !contains_var_function(children)
             && let Some(children) = &mut token.children
         {
-            simplify_mixed_calc(children);
+            simplify_mixed_calc(children, minify_whitespace);
             replacement = evaluate_calc_numeric(children).and_then(|value| {
                 numeric_token_from_parts(token, value.number, value.kind, &value.unit)
             });
-        }
-        if replacement.is_none()
-            && let Some(children) = &mut token.children
-            && !contains_var_function(children)
-            && !has_failed_numeric_calc_product(children)
-        {
-            clear_calc_product_whitespace(children);
         }
         if let Some(mut replacement) = replacement {
             replacement.loc = token.loc;
@@ -4561,54 +8571,6 @@ fn reduce_calc_expressions(tokens: &mut [Token], preserve_replacement_whitespace
     }
 }
 
-fn has_failed_numeric_calc_product(tokens: &[Token]) -> bool {
-    for window in tokens.windows(3) {
-        let operator = window[1].kind;
-        if matches!(operator, TokenKind::DelimAsterisk | TokenKind::DelimSlash) {
-            let left = numeric_token(&window[0]);
-            let right = numeric_token(&window[2]);
-            if operator == TokenKind::DelimSlash
-                && right.is_some_and(|right| right.kind == TokenKind::Number && right.number == 0.0)
-                && left.is_some()
-            {
-                return true;
-            }
-            if let Some(value) = evaluate_calc_numeric(window)
-                && numeric_token_from_parts(&window[0], value.number, value.kind, &value.unit)
-                    .is_none()
-            {
-                return true;
-            }
-        }
-    }
-    tokens.iter().any(|token| {
-        token
-            .children
-            .as_deref()
-            .is_some_and(has_failed_numeric_calc_product)
-    })
-}
-
-fn clear_calc_product_whitespace(tokens: &mut [Token]) {
-    for index in 0..tokens.len() {
-        if matches!(
-            tokens[index].kind,
-            TokenKind::DelimAsterisk | TokenKind::DelimSlash
-        ) {
-            tokens[index].whitespace = WhitespaceFlags::default();
-            if index > 0 {
-                tokens[index - 1].whitespace.remove(WhitespaceFlags::AFTER);
-            }
-            if index + 1 < tokens.len() {
-                tokens[index + 1].whitespace.remove(WhitespaceFlags::BEFORE);
-            }
-        }
-        if let Some(children) = &mut tokens[index].children {
-            clear_calc_product_whitespace(children);
-        }
-    }
-}
-
 fn contains_var_function(tokens: &[Token]) -> bool {
     tokens.iter().any(|token| {
         token.kind == TokenKind::Function && token.text.eq_ignore_ascii_case("var")
@@ -4616,7 +8578,7 @@ fn contains_var_function(tokens: &[Token]) -> bool {
     })
 }
 
-fn simplify_mixed_calc(tokens: &mut Vec<Token>) -> bool {
+fn simplify_mixed_calc(tokens: &mut Vec<Token>, minify_whitespace: bool) -> bool {
     let original = tokens.clone();
     for token in tokens.iter_mut() {
         let is_group = token.kind == TokenKind::OpenParen
@@ -4625,7 +8587,7 @@ fn simplify_mixed_calc(tokens: &mut Vec<Token>) -> bool {
             && let Some(children) = &mut token.children
             && !contains_var_function(children)
         {
-            simplify_mixed_calc(children);
+            simplify_mixed_calc(children, minify_whitespace);
         }
     }
     unwrap_single_calc_groups(tokens);
@@ -4635,7 +8597,59 @@ fn simplify_mixed_calc(tokens: &mut Vec<Token>) -> bool {
     rewrite_shorter_calc_reciprocals(tokens);
     combine_calc_sum_terms(tokens);
     trim_token_boundary_whitespace(tokens);
-    *tokens != original
+    let mut changed = *tokens != original;
+    let pure_product_can_serialize = is_pure_calc_product(tokens)
+        && evaluate_calc_numeric(tokens)
+            .is_none_or(|value| float_to_string_for_calc(value.number).is_some());
+    if minify_whitespace && (changed || pure_product_can_serialize) {
+        compact_calc_product_whitespace(tokens);
+        changed |= *tokens != original;
+    }
+    changed
+}
+
+fn is_pure_calc_product(tokens: &[Token]) -> bool {
+    let mut has_product = false;
+    for token in tokens {
+        if matches!(token.kind, TokenKind::DelimPlus | TokenKind::DelimMinus) {
+            return false;
+        }
+        if matches!(token.kind, TokenKind::DelimAsterisk | TokenKind::DelimSlash) {
+            has_product = true;
+        }
+        if let Some(children) = &token.children {
+            if !is_pure_calc_product(children) {
+                return false;
+            }
+            has_product |= children.iter().any(|child| {
+                matches!(child.kind, TokenKind::DelimAsterisk | TokenKind::DelimSlash)
+            });
+        }
+    }
+    has_product
+}
+
+fn compact_calc_product_whitespace(tokens: &mut [Token]) {
+    for index in 0..tokens.len() {
+        if let Some(children) = &mut tokens[index].children {
+            compact_calc_product_whitespace(children);
+        }
+        if !matches!(
+            tokens[index].kind,
+            TokenKind::DelimAsterisk | TokenKind::DelimSlash
+        ) {
+            continue;
+        }
+        if index > 0 {
+            tokens[index - 1].whitespace.remove(WhitespaceFlags::AFTER);
+        }
+        tokens[index]
+            .whitespace
+            .remove(WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER);
+        if index + 1 < tokens.len() {
+            tokens[index + 1].whitespace.remove(WhitespaceFlags::BEFORE);
+        }
+    }
 }
 
 fn unwrap_single_calc_groups(tokens: &mut [Token]) {
@@ -4700,7 +8714,7 @@ fn flatten_calc_sums(tokens: &mut Vec<Token>) {
 fn flatten_calc_products(tokens: &mut Vec<Token>) {
     let mut index = 0;
     while index < tokens.len() {
-        let can_flatten_after = index == 0 || tokens[index - 1].kind == TokenKind::DelimAsterisk;
+        let can_flatten_after = index == 0 || tokens[index - 1].kind != TokenKind::DelimSlash;
         let can_flatten_before = index + 1 == tokens.len()
             || matches!(
                 tokens[index + 1].kind,
@@ -4952,6 +8966,9 @@ fn parse_calc_product(tokens: &[Token], index: &mut usize) -> Option<CalcNumeric
                 left.number *= right.number;
             }
             TokenKind::DelimSlash if right.kind == TokenKind::Number && right.number != 0.0 => {
+                if left.kind == TokenKind::Percentage && right.number.abs() >= 1_000_000.0 {
+                    return None;
+                }
                 left.number /= right.number;
             }
             _ => return None,
@@ -4991,11 +9008,17 @@ fn numeric_token(token: &Token) -> Option<NumericToken<'_>> {
             token.dimension_value().parse::<f64>().ok()?,
             token.dimension_unit(),
         ),
+        TokenKind::Ident if token.text.eq_ignore_ascii_case("infinity") => (f64::INFINITY, ""),
+        TokenKind::Ident if token.text.eq_ignore_ascii_case("-infinity") => (f64::NEG_INFINITY, ""),
         _ => return None,
     };
-    number.is_finite().then_some(NumericToken {
+    (!number.is_nan()).then_some(NumericToken {
         number,
-        kind: token.kind,
+        kind: if token.kind == TokenKind::Ident {
+            TokenKind::Number
+        } else {
+            token.kind
+        },
         unit,
     })
 }
@@ -5044,22 +9067,70 @@ fn float_to_string_for_calc(number: f64) -> Option<String> {
         .then_some(text)
 }
 
-fn parse_layer_names(tokens: &[Token]) -> Vec<Vec<String>> {
+fn parse_layer_names_checked(tokens: &[Token]) -> (Vec<Vec<String>>, Option<(Range, String)>) {
     let mut names = Vec::new();
-    let mut parts = Vec::new();
-    for token in tokens {
-        match token.kind {
-            TokenKind::Ident => parts.push(token.text.clone()),
-            TokenKind::Comma if !parts.is_empty() => {
-                names.push(std::mem::take(&mut parts));
+    let mut index = 0;
+    while index < tokens.len() {
+        let mut parts = Vec::new();
+        loop {
+            let Some(token) = tokens.get(index) else {
+                break;
+            };
+            if token.kind != TokenKind::Ident {
+                return (
+                    names,
+                    Some((
+                        Range {
+                            loc: token.loc,
+                            len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                        },
+                        format!("Unexpected {:?}", token.text),
+                    )),
+                );
             }
-            _ => {}
+            if matches!(token.text.as_str(), "initial" | "inherit" | "unset") {
+                return (
+                    names,
+                    Some((
+                        Range {
+                            loc: token.loc,
+                            len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                        },
+                        format!("{:?} cannot be used as a layer name", token.text),
+                    )),
+                );
+            }
+            parts.push(token.text.clone());
+            index += 1;
+            if tokens
+                .get(index)
+                .is_some_and(|token| token.kind == TokenKind::DelimDot)
+            {
+                index += 1;
+                continue;
+            }
+            break;
         }
-    }
-    if !parts.is_empty() {
         names.push(parts);
+        if index == tokens.len() {
+            break;
+        }
+        if tokens[index].kind != TokenKind::Comma {
+            let token = &tokens[index];
+            return (
+                names,
+                Some((
+                    Range {
+                        loc: token.loc,
+                        len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+                    },
+                    format!("Unexpected {:?}", token.text),
+                )),
+            );
+        }
+        index += 1;
     }
-    names
+    (names, None)
 }
 
 fn keyframe_selectors(tokens: &[Token]) -> Vec<String> {
@@ -5084,17 +9155,43 @@ fn is_known_block_at_rule(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "counter-style"
+            | "annotation"
+            | "bottom-center"
+            | "bottom-left-corner"
+            | "bottom-left"
+            | "bottom-right-corner"
+            | "bottom-right"
+            | "character-variant"
             | "container"
             | "document"
             | "font-face"
             | "font-feature-values"
             | "font-palette-values"
+            | "historical-forms"
+            | "left-bottom"
+            | "left-middle"
+            | "left-top"
+            | "-moz-document"
+            | "-ms-viewport"
+            | "ornaments"
             | "page"
             | "position-try"
             | "property"
+            | "right-bottom"
+            | "right-middle"
+            | "right-top"
             | "starting-style"
+            | "styleset"
+            | "stylistic"
             | "supports"
+            | "swash"
+            | "top-center"
+            | "top-left-corner"
+            | "top-left"
+            | "top-right-corner"
+            | "top-right"
             | "view-transition"
+            | "viewport"
     )
 }
 
@@ -5109,12 +9206,17 @@ fn known_at_rule_preserves_legal_comments(name: &str) -> bool {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde_json::Value;
+
     use super::{ALPHA_FRACTION_TABLE, Options, SymbolMode, make_dead_rule_mangler, parse};
     use crate::internal::{
         ast::{ImportKind, SymbolKind, SymbolMap},
         compat::CssFeature,
         css_printer,
-        logger::{DeferLogKind, Log, PrettyPaths, Source},
+        logger::{
+            DeferLogKind, Log, MsgKind, OutputOptions, Path, PrettyPaths, Source, TerminalInfo,
+        },
     };
 
     fn source(contents: &str) -> Source {
@@ -5149,8 +9251,23 @@ mod tests {
 
     fn parse_and_print_with_parser_options(contents: &str, options: Options) -> String {
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
-        let tree = parse(log.clone(), source(contents), options);
-        assert!(log.done().is_empty());
+        let tree = parse(log.clone(), source(contents), options.clone());
+        let messages = log.done();
+        assert!(
+            messages.is_empty(),
+            "unexpected parser messages: {:?}",
+            messages
+                .iter()
+                .map(|message| (
+                    &message.data.text,
+                    message
+                        .data
+                        .location
+                        .as_ref()
+                        .map(|location| (location.line, location.column))
+                ))
+                .collect::<Vec<_>>()
+        );
         let mut symbols = SymbolMap::new(1);
         symbols.symbols_for_source[0] = tree.symbols.clone();
         String::from_utf8(
@@ -5165,6 +9282,165 @@ mod tests {
             .css,
         )
         .expect("CSS output is UTF-8")
+    }
+
+    fn upstream_source(contents: &[u8]) -> Source {
+        Source {
+            pretty_paths: PrettyPaths {
+                abs: "<stdin>".into(),
+                rel: "<stdin>".into(),
+            },
+            identifier_name: "stdin".into(),
+            contents: Arc::from(contents),
+            key_path: Path {
+                text: "<stdin>".into(),
+                ..Path::default()
+            },
+            ..Source::default()
+        }
+    }
+
+    fn base64_field(case: &Value, field: &str) -> Vec<u8> {
+        STANDARD
+            .decode(case[field].as_str().expect("base64 corpus field"))
+            .expect("valid base64 corpus field")
+    }
+
+    #[test]
+    fn matches_pinned_upstream_css_parser_corpus() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../../tests/upstream/css_parser.json"))
+                .expect("valid pinned upstream css_parser corpus");
+        let cases = cases.as_array().expect("css_parser corpus array");
+        assert_eq!(cases.len(), 2_781, "upstream css_parser case count changed");
+        let test_filter = std::env::var("UPSTREAM_TEST_FILTER").ok();
+        let line_filter = std::env::var("UPSTREAM_LINE_FILTER")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+
+        let mut failures = Vec::new();
+        for case in cases {
+            let upstream_test = case["upstream_test"].as_str().expect("upstream test");
+            let line = case["line"].as_u64().expect("case line");
+            if test_filter
+                .as_deref()
+                .is_some_and(|filter| upstream_test != filter)
+                || line_filter.is_some_and(|filter| line != filter)
+            {
+                continue;
+            }
+            let input = base64_field(case, "source_base64");
+            let expected = base64_field(case, "expected_base64");
+            let expected_log = base64_field(case, "expected_log_base64");
+            let options = Options {
+                minify_syntax: case["minify_syntax"].as_bool().expect("minify_syntax"),
+                minify_whitespace: case["minify_whitespace"]
+                    .as_bool()
+                    .expect("minify_whitespace"),
+                symbol_mode: if case["loader"].as_u64().expect("loader") == 14 {
+                    SymbolMode::Local
+                } else {
+                    SymbolMode::Disabled
+                },
+                unsupported_css_features: CssFeature::from_bits(
+                    case["unsupported_css_features"]
+                        .as_u64()
+                        .expect("unsupported_css_features") as u16,
+                ),
+                css_prefix_data: if case["all_prefixes"].as_bool().expect("all_prefixes") {
+                    crate::internal::compat::css_prefix_data(&HashMap::from([
+                        (
+                            crate::internal::compat::Engine::Chrome,
+                            crate::internal::compat::Semver {
+                                parts: vec![0],
+                                ..Default::default()
+                            },
+                        ),
+                        (
+                            crate::internal::compat::Engine::Edge,
+                            crate::internal::compat::Semver {
+                                parts: vec![0],
+                                ..Default::default()
+                            },
+                        ),
+                        (
+                            crate::internal::compat::Engine::Firefox,
+                            crate::internal::compat::Semver {
+                                parts: vec![0],
+                                ..Default::default()
+                            },
+                        ),
+                        (
+                            crate::internal::compat::Engine::Ie,
+                            crate::internal::compat::Semver {
+                                parts: vec![0],
+                                ..Default::default()
+                            },
+                        ),
+                        (
+                            crate::internal::compat::Engine::Ios,
+                            crate::internal::compat::Semver {
+                                parts: vec![0],
+                                ..Default::default()
+                            },
+                        ),
+                        (
+                            crate::internal::compat::Engine::Opera,
+                            crate::internal::compat::Semver {
+                                parts: vec![0],
+                                ..Default::default()
+                            },
+                        ),
+                        (
+                            crate::internal::compat::Engine::Safari,
+                            crate::internal::compat::Semver {
+                                parts: vec![0],
+                                ..Default::default()
+                            },
+                        ),
+                    ]))
+                } else {
+                    HashMap::new()
+                },
+                ..Options::default()
+            };
+            let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+            let tree = parse(log.clone(), upstream_source(&input), options.clone());
+            let actual_log = log
+                .done()
+                .into_iter()
+                .filter(|message| message.kind != MsgKind::Debug)
+                .flat_map(|message| {
+                    message.to_bytes(&OutputOptions::default(), TerminalInfo::default())
+                })
+                .collect::<Vec<_>>();
+            let mut symbols = SymbolMap::new(1);
+            symbols.symbols_for_source[0] = tree.symbols.clone();
+            let actual = css_printer::print(
+                &tree,
+                &symbols,
+                css_printer::Options {
+                    minify_whitespace: options.minify_whitespace,
+                    ..css_printer::Options::default()
+                },
+            )
+            .css;
+            if actual != expected || actual_log != expected_log {
+                failures.push(format!(
+                    "internal/css_parser/css_parser_test.go:{line} {upstream_test}: input {:?}\nexpected CSS: {:?}\nactual CSS:   {:?}\nexpected log: {:?}\nactual log:   {:?}",
+                    String::from_utf8_lossy(&input),
+                    String::from_utf8_lossy(&expected),
+                    String::from_utf8_lossy(&actual),
+                    String::from_utf8_lossy(&expected_log),
+                    String::from_utf8_lossy(&actual_log),
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "pinned upstream css_parser failures:\n{}",
+            failures.join("\n\n")
+        );
     }
 
     #[test]
@@ -5205,7 +9481,7 @@ mod tests {
             parse_and_print_with_parser_options(
                 "a { background: linear-gradient(red calc(10%) calc(20%), blue) }\
                  b { background: linear-gradient(var(--stops)) }",
-                options,
+                options.clone(),
             ),
             "a {\n\
              \x20\x20background:\n\
@@ -5297,7 +9573,7 @@ mod tests {
             parse_and_print_with_parser_options(
                 "a { color: #0123 } b { color: #1230 } c { color: #1234 }\
                  d { color: #123f } e { color: #12345678 } f { color: #ff00007f }",
-                options,
+                options.clone(),
             ),
             "a {\n\
              \x20\x20color: rgba(0, 17, 34, .2);\n\
@@ -5324,7 +9600,7 @@ mod tests {
                  d{color:#0000007f}e{color:#000000fe}",
                 Options {
                     minify_whitespace: true,
-                    ..options
+                    ..options.clone()
                 },
             ),
             "a{color:rgba(0,0,0,.004)}b{color:rgba(0,0,0,.008)}\
@@ -5359,7 +9635,7 @@ mod tests {
              }\
              b { background-image: linear-gradient(#11223344 10%, blue) }\
              c { text-shadow: 0 0 #1234; --x: #1234 }",
-            options,
+            options.clone(),
         );
         assert!(
             output.contains("background: border-box rgba(17, 34, 51, .267)"),
@@ -5387,7 +9663,7 @@ mod tests {
                 Options {
                     minify_syntax: true,
                     minify_whitespace: true,
-                    ..options
+                    ..options.clone()
                 },
             ),
             "a{color:rgba(255,0,0,.5)}b{color:rgba(0,128,0,.25)}\
@@ -5407,7 +9683,7 @@ mod tests {
                      outline-color: hwb(.75turn 20% 40% / .6667);\
                      fill: hwb(1deg 40% 80%);\
                      stroke: hwb(1deg 9000% 50%) }",
-                options,
+                options.clone(),
             ),
             "a {\n\
              \x20\x20color: #669933;\n\
@@ -5423,7 +9699,7 @@ mod tests {
                      outline-color: hwb(.75turn 20% 40% / .6667) }",
                 Options {
                     minify_whitespace: true,
-                    ..options
+                    ..options.clone()
                 },
             ),
             "a{color:#669933;outline-color:#663399aa}"
@@ -5434,7 +9710,7 @@ mod tests {
                      outline-color: hwb(.75turn 20% 40% / .6667) }",
                 Options {
                     minify_syntax: true,
-                    ..options
+                    ..options.clone()
                 },
             ),
             "a {\n  color: #693;\n  outline-color: #639a;\n}\n"
@@ -5449,7 +9725,7 @@ mod tests {
                 Options {
                     minify_syntax: true,
                     minify_whitespace: true,
-                    ..options
+                    ..options.clone()
                 },
             ),
             "a{color:hwb(90deg,20%,40%);fill:hwb(none 20% 40%);stroke:hwb(90deg 20% none)}"
@@ -5542,7 +9818,7 @@ mod tests {
             assert_eq!(
                 parse_and_print_with_parser_options(
                     &format!("a {{ {property}: hwb(90 20% 40%) }}"),
-                    options,
+                    options.clone(),
                 ),
                 format!("a {{\n  {property}: #669933;\n}}\n"),
                 "{property}"
@@ -5566,7 +9842,7 @@ mod tests {
                  }",
                 Options {
                     minify_whitespace: true,
-                    ..options
+                    ..options.clone()
                 },
             ),
             "a{background:border-box #669933;\
@@ -5615,7 +9891,7 @@ mod tests {
             ..Options::default()
         };
         assert_eq!(
-            parse_and_print_with_parser_options(input, options),
+            parse_and_print_with_parser_options(input, options.clone()),
             "a{color:rgb(1,2, 3)}\
              b{color:rgb(1%,2%, 3%)}\
              c{color:hsl(1,2%, 3%)}\
@@ -5688,7 +9964,7 @@ mod tests {
             assert_eq!(
                 parse_and_print_with_parser_options(
                     &format!("a{{{property}:rgb(1 2 3/4%)}}"),
-                    options,
+                    options.clone(),
                 ),
                 format!("a{{{property}:rgba(1,2,3,0.04)}}"),
                 "{property}"
@@ -5706,7 +9982,7 @@ mod tests {
             assert_eq!(
                 parse_and_print_with_parser_options(
                     &format!("a{{background-image:{gradient}(rgb(1 2 3),hsl(.5turn 20% 30%))}}"),
-                    options,
+                    options.clone(),
                 ),
                 format!("a{{background-image:{gradient}(rgb(1,2, 3),hsl(180,20%, 30%))}}"),
                 "{gradient}"
@@ -5722,7 +9998,7 @@ mod tests {
                    --x:rgb(1 2 3/4%);\
                    unknown:rgb(1 2 3/4%)}\
                  b{background-image:linear-gradient(var(--x),rgb(1 2 3))}",
-                options,
+                options.clone(),
             ),
             "a{background:border-box rgba(1,2,3,0.04);\
                box-shadow:0 0 rgba(1,2,3,0.04),inset 1px 2px hsl(180,20%, 30%);\
@@ -5749,7 +10025,7 @@ mod tests {
                    outline-color:hsl(.5turn,var(--x),3%);\
                    fill:rgb(var(--x) var(--y) var(--z));\
                    stroke:rgb(1px 2 3)}",
-                options,
+                options.clone(),
             ),
             "a{color:hsl(180 var(--x));\
                background:hsl(180,foo);\
@@ -5794,7 +10070,7 @@ mod tests {
             parse_and_print_with_parser_options(
                 "a{inset:1px}b{inset:1px 2%}c{inset:1px 2% 3em}\
                  d{inset:1px 2% 3em 4}e{inset:5px!important}",
-                options,
+                options.clone(),
             ),
             "a {\n\
              \x20\x20top: 1px;\n\
@@ -5832,7 +10108,7 @@ mod tests {
             parse_and_print_with_parser_options(
                 "a{inset:auto}b{inset:var(--x)}c{inset:calc(1px + 2px)}\
                  d{inset:1px 2px 3px 4px 5px}",
-                options,
+                options.clone(),
             ),
             "a {\n\
              \x20\x20inset: auto;\n\
@@ -5856,7 +10132,7 @@ mod tests {
                 Options {
                     minify_syntax: true,
                     minify_whitespace: true,
-                    ..options
+                    ..options.clone()
                 },
             ),
             "a{top:0;right:1px;bottom:2px;left:3px}\
@@ -6161,7 +10437,7 @@ mod tests {
                 "@media not (width > 10px),\
                  ((width > 1px) and (height < 2px)),\
                  screen and ((width >= 3px) or (height <= 4px)) {a{color:red}}",
-                options,
+                options.clone(),
             ),
             "@media(max-width:10px),(not (max-width:1px))and (not (min-height:2px)),\
              screen and ((min-width:3px)or (max-height:4px)){a{color:red}}"
@@ -6236,7 +10512,7 @@ mod tests {
             ..Options::default()
         };
         assert_eq!(
-            parse_and_print_with_parser_options(input, options),
+            parse_and_print_with_parser_options(input, options.clone()),
             "@import \"a.css\" (min-width: 1px);\n\
              @import \"b.css\" layer not (min-height: 2px);\n\
              @import \"c.css\" layer(foo, bar) supports(display: grid) (min-width: 3px);\n"
@@ -6247,7 +10523,7 @@ mod tests {
                 Options {
                     minify_syntax: true,
                     minify_whitespace: true,
-                    ..options
+                    ..options.clone()
                 },
             ),
             "@import\"a.css\"(min-width:1px);\

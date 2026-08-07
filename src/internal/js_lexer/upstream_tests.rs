@@ -3,17 +3,166 @@
 
 use std::{collections::HashMap, panic::AssertUnwindSafe, sync::Arc};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde_json::Value;
+
 use super::{Lexer, Token};
 use crate::internal::{
     config::TsOptions,
-    logger::{DeferLogKind, Log, Source},
+    logger::{DeferLogKind, Log, OutputOptions, Path, PrettyPaths, Source, TerminalInfo},
 };
 
 fn source(text: &[u8]) -> Source {
     Source {
+        pretty_paths: PrettyPaths {
+            abs: "<stdin>".into(),
+            rel: "<stdin>".into(),
+        },
+        identifier_name: "stdin".into(),
         contents: Arc::from(text),
+        key_path: Path {
+            text: "<stdin>".into(),
+            ..Path::default()
+        },
         ..Source::default()
     }
+}
+
+fn diagnostics(log: Log) -> Vec<u8> {
+    log.done()
+        .iter()
+        .flat_map(|message| message.to_bytes(&OutputOptions::default(), TerminalInfo::default()))
+        .collect()
+}
+
+fn base64_field(case: &Value, field: &str) -> Vec<u8> {
+    STANDARD
+        .decode(case[field].as_str().expect("base64 corpus field"))
+        .expect("valid base64 corpus field")
+}
+
+#[test]
+#[allow(clippy::float_cmp, clippy::too_many_lines)]
+fn matches_pinned_upstream_js_lexer_corpus() {
+    let cases: Value = serde_json::from_str(include_str!("../../../tests/upstream/js_lexer.json"))
+        .expect("valid pinned upstream js_lexer corpus");
+    let cases = cases.as_array().expect("js_lexer corpus array");
+    let kind_filter = std::env::var("UPSTREAM_TEST_FILTER").ok();
+    let line_filter = std::env::var("UPSTREAM_LINE_FILTER")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    if kind_filter.is_none() && line_filter.is_none() {
+        assert_eq!(cases.len(), 335, "upstream js_lexer case count changed");
+    }
+
+    let mut failures = Vec::new();
+    for case in cases {
+        let kind = case["kind"].as_str().expect("case kind");
+        let line = case["line"].as_u64().expect("case line");
+        if kind_filter.as_deref().is_some_and(|filter| kind != filter)
+            || line_filter.is_some_and(|filter| line != filter)
+        {
+            continue;
+        }
+        let input = base64_field(case, "input_base64");
+        let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut lexer = Lexer::new(log.clone(), source(&input), TsOptions::default());
+            if kind == "string" || kind == "string_error" {
+                let decoded = lexer.string_literal().to_vec();
+                (lexer, Some(decoded))
+            } else {
+                (lexer, None)
+            }
+        }));
+
+        if kind == "error" || kind == "string_error" {
+            let actual_diagnostics = diagnostics(log);
+            let expected_diagnostics = base64_field(case, "expected_base64");
+            if actual_diagnostics != expected_diagnostics {
+                failures.push(format!(
+                    "internal/js_lexer/js_lexer_test.go:{line} {kind}: input {input:?}\npanicked: {}\nexpected diagnostic: {:?}\nactual diagnostic:   {:?}",
+                    result.is_err(),
+                    String::from_utf8_lossy(&expected_diagnostics),
+                    String::from_utf8_lossy(&actual_diagnostics),
+                ));
+            }
+            continue;
+        }
+
+        let Ok((lexer, decoded)) = result else {
+            failures.push(format!(
+                "internal/js_lexer/js_lexer_test.go:{line} {kind}: unexpected panic for {input:?}"
+            ));
+            let _ = diagnostics(log);
+            continue;
+        };
+        let actual_diagnostics = diagnostics(log);
+        if !actual_diagnostics.is_empty() {
+            failures.push(format!(
+                "internal/js_lexer/js_lexer_test.go:{line} {kind}: unexpected diagnostic for {input:?}: {:?}",
+                String::from_utf8_lossy(&actual_diagnostics),
+            ));
+            continue;
+        }
+
+        let mismatch = match kind {
+            "hashbang" | "identifier" | "bigint" => {
+                let expected = base64_field(case, "expected_base64");
+                (lexer.identifier.string != expected).then(|| {
+                    format!(
+                        "expected {expected:?}, actual {:?}",
+                        lexer.identifier.string
+                    )
+                })
+            }
+            "number" => {
+                let expected_text = case["expected_number"].as_str().expect("expected number");
+                let expected = if expected_text == "Infinity" {
+                    f64::INFINITY
+                } else {
+                    expected_text.parse::<f64>().expect("valid expected number")
+                };
+                (lexer.token != Token::NumericLiteral || lexer.number != expected).then(|| {
+                    format!(
+                        "expected NumericLiteral {expected:?}, actual {:?} {:?}",
+                        lexer.token, lexer.number
+                    )
+                })
+            }
+            "string" => {
+                let expected = case["expected_utf16"]
+                    .as_array()
+                    .expect("expected UTF-16")
+                    .iter()
+                    .map(|value| u16::try_from(value.as_u64().expect("UTF-16 unit")).unwrap())
+                    .collect::<Vec<_>>();
+                let actual = decoded.expect("decoded string");
+                (lexer.token != Token::StringLiteral || actual != expected).then(|| {
+                    format!(
+                        "expected StringLiteral {expected:?}, actual {:?} {actual:?}",
+                        lexer.token
+                    )
+                })
+            }
+            "token" => {
+                let expected = case["expected_token"].as_str().expect("expected token");
+                let actual = format!("{:?}", lexer.token);
+                (actual != expected).then(|| format!("expected {expected}, actual {actual}"))
+            }
+            _ => Some(format!("unknown corpus kind {kind}")),
+        };
+        if let Some(mismatch) = mismatch {
+            failures.push(format!(
+                "internal/js_lexer/js_lexer_test.go:{line} {kind}: input {input:?}: {mismatch}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "pinned upstream js_lexer failures:\n{}",
+        failures.join("\n\n")
+    );
 }
 
 fn lexer(text: &[u8]) -> (Lexer, Log) {

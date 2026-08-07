@@ -68,7 +68,7 @@ pub(crate) fn parse_import_after_keyword(
             }
         }
     }
-    let close_paren_loc = lexer.loc();
+    let close_paren_loc = core.save_expr_comments_here(lexer);
     lexer.expect(Token::CloseParen);
     Expr::new(
         loc,

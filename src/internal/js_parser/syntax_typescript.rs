@@ -5,6 +5,7 @@ use crate::internal::{
     js_ast::{
         EnumStmt, EnumValue, Expr, ExprData, ExprStmt, IdentifierExpr, Precedence, ScopeMember,
         Stmt, StmtData, TsNamespaceMember, TsNamespaceMemberData, TsNamespaceScope, TypeScriptStmt,
+        for_each_identifier_binding,
     },
     js_lexer::{Lexer, Token},
 };
@@ -320,6 +321,10 @@ pub(crate) fn parse_type_script_statement(
     }
     if lexer.is_contextual_keyword(b"interface") {
         lexer.next();
+        if core.is_current_scope_module_scope() {
+            core.local_type_names
+                .insert(String::from_utf8_lossy(lexer.raw()).into_owned());
+        }
         lexer.expect(Token::Identifier);
         while lexer.token != Token::OpenBrace {
             if lexer.token == Token::EndOfFile {
@@ -431,6 +436,10 @@ pub(crate) fn parse_type_script_statement(
                 }),
             ));
         }
+        if core.is_current_scope_module_scope() {
+            core.local_type_names
+                .insert(String::from_utf8_lossy(lexer.raw()).into_owned());
+        }
         lexer.expect(Token::Identifier);
         let mut depth = 0_usize;
         while lexer.token != Token::Equals || depth > 0 {
@@ -469,12 +478,49 @@ fn parse_namespace_statement(
 ) -> Stmt {
     let name_loc = lexer.loc();
     let name_text = String::from_utf8_lossy(lexer.raw()).into_owned();
+    let existing_ref = core.current_scope.as_ref().and_then(|scope| {
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .get(&name_text)
+            .map(|member| member.reference)
+    });
     let name = LocRef {
         loc: name_loc,
         reference: core.declare_symbol(SymbolKind::TsNamespace, name_loc, &name_text),
     };
     lexer.expect(Token::Identifier);
     let argument = core.new_symbol(SymbolKind::Hoisted, name_text.clone());
+    let inherited_namespace = if is_export {
+        core.current_scope.as_ref().and_then(|scope| {
+            let scope = scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let member = scope
+                .ts_namespace
+                .as_ref()?
+                .exported_members
+                .get(&name_text)?;
+            match &member.data {
+                TsNamespaceMemberData::Namespace(namespace) => Some(namespace.clone()),
+                _ => None,
+            }
+        })
+    } else {
+        None
+    };
+    let namespace_identity = inherited_namespace
+        .as_ref()
+        .map_or(name.reference, |namespace| namespace.reference);
+    core.ts_namespace_owner.insert(argument, namespace_identity);
+    core.ts_namespace_owner
+        .insert(name.reference, namespace_identity);
+    let exported_members = existing_ref
+        .and_then(|reference| core.ts_namespace_members.get(&reference).cloned())
+        .or_else(|| core.ts_namespace_members.get(&name.reference).cloned())
+        .or_else(|| inherited_namespace.map(|namespace| namespace.exported_members))
+        .unwrap_or_default();
 
     core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Entry, loc);
     core.current_scope
@@ -483,13 +529,14 @@ fn parse_namespace_statement(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .ts_namespace = Some(TsNamespaceScope {
+        exported_members,
         argument_ref: argument,
         ..TsNamespaceScope::default()
     });
     let old_context = core.fn_or_arrow_data_parse;
     core.fn_or_arrow_data_parse.is_this_disallowed = true;
     core.fn_or_arrow_data_parse.is_return_disallowed = true;
-    let statements = if lexer.token == Token::Dot {
+    let mut statements = if lexer.token == Token::Dot {
         let dot_loc = lexer.loc();
         lexer.next();
         vec![parse_namespace_statement(core, lexer, dot_loc, true)]
@@ -501,6 +548,20 @@ fn parse_namespace_statement(
         statements
     };
     core.fn_or_arrow_data_parse = old_context;
+    register_exported_namespace_members(core, &mut statements);
+    let exported_members = core
+        .current_scope
+        .as_ref()
+        .expect("namespace scope")
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .ts_namespace
+        .as_ref()
+        .expect("namespace metadata")
+        .exported_members
+        .clone();
+    core.ts_namespace_members
+        .insert(name.reference, exported_members);
     {
         let mut scope = core
             .current_scope
@@ -526,6 +587,13 @@ fn parse_namespace_statement(
     }
     core.pop_scope();
 
+    let has_export_declare = statements.iter().any(|statement| {
+        matches!(
+            statement.data.as_deref(),
+            Some(StmtData::TypeScript(statement)) if statement.was_export_declare
+        )
+    });
+
     Stmt::new(
         loc,
         StmtData::Namespace(crate::internal::js_ast::NamespaceStmt {
@@ -533,8 +601,96 @@ fn parse_namespace_statement(
             name,
             argument,
             is_export,
+            has_export_declare,
         }),
     )
+}
+
+fn register_exported_namespace_members(core: &mut ParserCore, statements: &mut [Stmt]) {
+    let mut members = Vec::new();
+    for statement in statements {
+        match statement.data.as_deref_mut() {
+            Some(StmtData::Function(function)) if function.is_export => {
+                if let Some(name) = function.function.name {
+                    members.push((name, TsNamespaceMemberData::Property));
+                }
+            }
+            Some(StmtData::Class(class)) if class.is_export => {
+                if let Some(name) = class.class.name {
+                    members.push((name, TsNamespaceMemberData::Property));
+                }
+            }
+            Some(StmtData::Local(local)) if local.is_export => {
+                for declaration in &mut local.declarations {
+                    for_each_identifier_binding(&mut declaration.binding, &mut |loc, binding| {
+                        members.push((
+                            LocRef {
+                                loc,
+                                reference: binding.reference,
+                            },
+                            TsNamespaceMemberData::Property,
+                        ));
+                    });
+                }
+            }
+            Some(StmtData::Namespace(namespace)) if namespace.is_export => {
+                let exported_members = core
+                    .ts_namespace_members
+                    .get(&namespace.name.reference)
+                    .cloned()
+                    .unwrap_or_default();
+                members.push((
+                    namespace.name,
+                    TsNamespaceMemberData::Namespace(
+                        crate::internal::js_ast::TsNamespaceMemberNamespace {
+                            exported_members,
+                            reference: namespace.name.reference,
+                        },
+                    ),
+                ));
+            }
+            Some(StmtData::Enum(enumeration)) if enumeration.is_export => {
+                let exported_members = core
+                    .ts_namespace_members
+                    .get(&enumeration.name.reference)
+                    .cloned()
+                    .unwrap_or_default();
+                members.push((
+                    enumeration.name,
+                    TsNamespaceMemberData::Namespace(
+                        crate::internal::js_ast::TsNamespaceMemberNamespace {
+                            exported_members,
+                            reference: enumeration.name.reference,
+                        },
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let scope = core
+        .current_scope
+        .as_ref()
+        .expect("namespace scope")
+        .clone();
+    let mut scope = scope
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let namespace = scope.ts_namespace.as_mut().expect("namespace metadata");
+    for (name, data) in members {
+        let text = core.symbols[usize::try_from(name.reference.inner_index).expect("symbol index")]
+            .original_name
+            .clone();
+        namespace.exported_members.insert(
+            text,
+            TsNamespaceMember {
+                data,
+                loc: name.loc,
+                is_enum_value: false,
+            },
+        );
+    }
 }
 
 fn parse_declare_statement(
@@ -635,7 +791,13 @@ fn parse_declare_statement(
     if lexer.token == Token::Semicolon {
         lexer.next();
     }
-    Stmt::new(loc, StmtData::TypeScript(TypeScriptStmt::default()))
+    Stmt::new(
+        loc,
+        StmtData::TypeScript(TypeScriptStmt {
+            was_export_declare: is_export,
+            ..TypeScriptStmt::default()
+        }),
+    )
 }
 
 fn parse_declare_function(
@@ -687,12 +849,49 @@ pub(crate) fn parse_enum_statement(
     lexer.expect(Token::Enum);
     let name_loc = lexer.loc();
     let name_text = String::from_utf8_lossy(lexer.raw()).into_owned();
+    let existing_ref = core.current_scope.as_ref().and_then(|scope| {
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .get(&name_text)
+            .map(|member| member.reference)
+    });
     let name = LocRef {
         loc: name_loc,
         reference: core.declare_symbol(SymbolKind::TsEnum, name_loc, &name_text),
     };
     lexer.expect(Token::Identifier);
     let argument = core.new_symbol(SymbolKind::Hoisted, name_text.clone());
+    let inherited_namespace = if is_export {
+        core.current_scope.as_ref().and_then(|scope| {
+            let scope = scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let member = scope
+                .ts_namespace
+                .as_ref()?
+                .exported_members
+                .get(&name_text)?;
+            match &member.data {
+                TsNamespaceMemberData::Namespace(namespace) => Some(namespace.clone()),
+                _ => None,
+            }
+        })
+    } else {
+        None
+    };
+    let namespace_identity = inherited_namespace
+        .as_ref()
+        .map_or(name.reference, |namespace| namespace.reference);
+    core.ts_namespace_owner.insert(argument, namespace_identity);
+    core.ts_namespace_owner
+        .insert(name.reference, namespace_identity);
+    let exported_members = existing_ref
+        .and_then(|reference| core.ts_namespace_members.get(&reference).cloned())
+        .or_else(|| core.ts_namespace_members.get(&name.reference).cloned())
+        .or_else(|| inherited_namespace.map(|namespace| namespace.exported_members))
+        .unwrap_or_default();
     core.push_scope_for_parse_pass(crate::internal::js_ast::ScopeKind::Entry, loc);
     {
         let mut scope = core
@@ -702,6 +901,7 @@ pub(crate) fn parse_enum_statement(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         scope.ts_namespace = Some(TsNamespaceScope {
+            exported_members,
             argument_ref: argument,
             is_enum_scope: true,
             ..TsNamespaceScope::default()
@@ -768,6 +968,19 @@ pub(crate) fn parse_enum_statement(
     }
     lexer.expect(Token::CloseBrace);
     core.fn_or_arrow_data_parse = old_context;
+    let exported_members = core
+        .current_scope
+        .as_ref()
+        .expect("enum scope")
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .ts_namespace
+        .as_ref()
+        .expect("enum namespace metadata")
+        .exported_members
+        .clone();
+    core.ts_namespace_members
+        .insert(name.reference, exported_members);
     register_enum_argument(core, argument, name_loc, &name_text);
     core.pop_scope();
     Stmt::new(
@@ -825,9 +1038,9 @@ fn skip_balanced_group(lexer: &mut Lexer, open: Token, close: Token) {
 
 fn skip_type_until_statement_end(lexer: &mut Lexer) {
     let mut delimiters = Vec::new();
-    let mut has_type_token = false;
+    let mut can_end_type = false;
     loop {
-        if has_type_token
+        if can_end_type
             && delimiters.is_empty()
             && lexer.has_newline_before
             && is_statement_start(lexer)
@@ -839,6 +1052,7 @@ fn skip_type_until_statement_end(lexer: &mut Lexer) {
                 lexer.next();
                 return;
             }
+            Token::CloseBrace if delimiters.is_empty() => return,
             Token::EndOfFile if delimiters.is_empty() => return,
             Token::OpenParen => delimiters.push(Token::CloseParen),
             Token::OpenBracket => delimiters.push(Token::CloseBracket),
@@ -852,7 +1066,28 @@ fn skip_type_until_statement_end(lexer: &mut Lexer) {
             }
             _ => {}
         }
-        has_type_token = true;
+        can_end_type = matches!(
+            lexer.token,
+            Token::Identifier
+                | Token::EscapedKeyword
+                | Token::NumericLiteral
+                | Token::StringLiteral
+                | Token::BigIntegerLiteral
+                | Token::NoSubstitutionTemplateLiteral
+                | Token::True
+                | Token::False
+                | Token::Null
+                | Token::This
+                | Token::CloseParen
+                | Token::CloseBracket
+                | Token::CloseBrace
+                | Token::GreaterThan
+        ) && !lexer.is_contextual_keyword(b"keyof")
+            && !lexer.is_contextual_keyword(b"readonly")
+            && !lexer.is_contextual_keyword(b"unique")
+            && !lexer.is_contextual_keyword(b"infer")
+            && !lexer.is_contextual_keyword(b"asserts")
+            && !matches!(lexer.token, Token::Typeof | Token::New);
         lexer.next();
     }
 }
@@ -860,7 +1095,9 @@ fn skip_type_until_statement_end(lexer: &mut Lexer) {
 fn is_statement_start(lexer: &Lexer) -> bool {
     matches!(
         lexer.token,
-        Token::Var
+        Token::At
+            | Token::Identifier
+            | Token::Var
             | Token::Const
             | Token::Function
             | Token::Class

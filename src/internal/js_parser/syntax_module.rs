@@ -4,13 +4,13 @@ use std::collections::HashMap;
 
 use crate::internal::{
     ast::{
-        AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportKind, ImportRecord,
-        ImportRecordFlags, LocRef, SymbolKind,
+        AssertOrWithEntry, AssertOrWithKeyword, ImportAssertOrWith, ImportKind, ImportPhase,
+        ImportRecord, ImportRecordFlags, LocRef, SymbolKind,
     },
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         Binding, BindingData, ClauseItem, Decl, ExportClauseStmt, ExportDefaultStmt,
-        ExportEqualsStmt, ExportFromStmt, ExportStarAlias, ExportStarStmt, ExprStmt,
+        ExportEqualsStmt, ExportFromStmt, ExportStarAlias, ExportStarStmt, ExprData, ExprStmt,
         IdentifierBinding, ImportStmt, LocalKind, LocalStmt, Precedence, Stmt, StmtData,
         generate_non_unique_name_from_path,
     },
@@ -22,7 +22,7 @@ use super::{
     parser_core::ParserCore,
     syntax_class::parse_class_prefix,
     syntax_expression::{parse_expression, parse_expression_suffix},
-    syntax_function::parse_function_declaration_prefix,
+    syntax_function::{parse_async_statement_prefix, parse_function_declaration_prefix},
     syntax_import::parse_import_after_keyword,
 };
 
@@ -90,6 +90,8 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
     }
 
     let mut statement = ImportStmt::default();
+    let mut phase = ImportPhase::Evaluation;
+    let mut clause_consumed = false;
     let mut was_bare = false;
     if let Some(default_name) = preconsumed_default {
         statement.default_name = Some(default_name);
@@ -124,39 +126,81 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
                 lexer.expect_contextual_keyword(b"from");
             }
             Token::OpenBrace => {
-                let (items, is_single_line, had_type_only_items) = parse_clause(core, lexer, false);
+                let (items, is_single_line, _) = parse_clause(core, lexer, false);
                 statement.items = Some(items);
                 statement.is_single_line = is_single_line;
-                was_bare =
-                    had_type_only_items && statement.items.as_ref().is_some_and(Vec::is_empty);
                 lexer.expect_contextual_keyword(b"from");
             }
             Token::Identifier => {
-                statement.default_name = Some(LocRef {
-                    loc: lexer.loc(),
-                    reference: core.store_name_in_ref(lexer.identifier.clone()),
-                });
+                let first_name = lexer.identifier.clone();
+                let first_loc = lexer.loc();
+                let is_defer = lexer.raw() == b"defer";
+                let is_source = lexer.raw() == b"source";
                 lexer.next();
-                if lexer.token == Token::Comma {
+                if is_defer && lexer.token == Token::Asterisk {
+                    phase = ImportPhase::Defer;
+                    clause_consumed = true;
                     lexer.next();
-                    match lexer.token {
-                        Token::Asterisk => {
+                    lexer.expect_contextual_keyword(b"as");
+                    statement.namespace_ref = core.store_name_in_ref(lexer.identifier.clone());
+                    statement.star_name_loc = Some(lexer.loc());
+                    lexer.expect(Token::Identifier);
+                    lexer.expect_contextual_keyword(b"from");
+                } else if is_source && lexer.token == Token::Identifier {
+                    phase = ImportPhase::Source;
+                    clause_consumed = true;
+                    if lexer.raw() == b"from" {
+                        let name = LocRef {
+                            loc: lexer.loc(),
+                            reference: core.store_name_in_ref(lexer.identifier.clone()),
+                        };
+                        lexer.next();
+                        if lexer.is_contextual_keyword(b"from") {
+                            statement.default_name = Some(name);
                             lexer.next();
-                            lexer.expect_contextual_keyword(b"as");
-                            statement.namespace_ref =
-                                core.store_name_in_ref(lexer.identifier.clone());
-                            statement.star_name_loc = Some(lexer.loc());
-                            lexer.expect(Token::Identifier);
+                        } else {
+                            phase = ImportPhase::Evaluation;
+                            statement.default_name = Some(LocRef {
+                                loc: first_loc,
+                                reference: core.store_name_in_ref(first_name),
+                            });
                         }
-                        Token::OpenBrace => {
-                            let (items, is_single_line, _) = parse_clause(core, lexer, false);
-                            statement.items = Some(items);
-                            statement.is_single_line = is_single_line;
-                        }
-                        _ => lexer.unexpected(),
+                    } else {
+                        statement.default_name = Some(LocRef {
+                            loc: lexer.loc(),
+                            reference: core.store_name_in_ref(lexer.identifier.clone()),
+                        });
+                        lexer.next();
+                        lexer.expect_contextual_keyword(b"from");
                     }
+                } else {
+                    statement.default_name = Some(LocRef {
+                        loc: first_loc,
+                        reference: core.store_name_in_ref(first_name),
+                    });
                 }
-                lexer.expect_contextual_keyword(b"from");
+                if !clause_consumed && statement.default_name.is_some() {
+                    if lexer.token == Token::Comma {
+                        lexer.next();
+                        match lexer.token {
+                            Token::Asterisk => {
+                                lexer.next();
+                                lexer.expect_contextual_keyword(b"as");
+                                statement.namespace_ref =
+                                    core.store_name_in_ref(lexer.identifier.clone());
+                                statement.star_name_loc = Some(lexer.loc());
+                                lexer.expect(Token::Identifier);
+                            }
+                            Token::OpenBrace => {
+                                let (items, is_single_line, _) = parse_clause(core, lexer, false);
+                                statement.items = Some(items);
+                                statement.is_single_line = is_single_line;
+                            }
+                            _ => lexer.unexpected(),
+                        }
+                    }
+                    lexer.expect_contextual_keyword(b"from");
+                }
             }
             _ => lexer.unexpected(),
         }
@@ -165,21 +209,50 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
     let (path_range, path, assert_or_with, path_flags) = parse_path(core, lexer);
     lexer.expect_or_insert_semicolon();
     if core.options.ts.parse
-        && was_bare
+        && core.options.ts.config.unused_import_flags()
+            == crate::internal::config::TsUnusedImportFlags::KEEP_VALUES
         && statement.items.as_ref().is_some_and(Vec::is_empty)
-        && statement.default_name.is_none()
     {
-        core.has_type_script_export = true;
-        return Stmt::new(
-            loc,
-            StmtData::TypeScript(crate::internal::js_ast::TypeScriptStmt::default()),
-        );
+        if statement.default_name.is_none() {
+            core.has_type_script_export = true;
+            return Stmt::new(
+                loc,
+                StmtData::TypeScript(crate::internal::js_ast::TypeScriptStmt::default()),
+            );
+        }
+        statement.items = None;
     }
-    if statement.star_name_loc.is_none() {
+    if let Some(star_name_loc) = statement.star_name_loc {
+        let name =
+            String::from_utf8_lossy(core.load_name_from_ref(statement.namespace_ref)).into_owned();
+        statement.namespace_ref = core.declare_symbol(SymbolKind::Import, star_name_loc, &name);
+    } else {
         statement.namespace_ref = core.new_symbol(
             SymbolKind::Other,
             format!("import_{}", generate_non_unique_name_from_path(&path)),
         );
+        core.current_scope
+            .as_ref()
+            .expect("imports require a current scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(statement.namespace_ref);
+    }
+
+    if let Some(default_name) = &mut statement.default_name {
+        let name =
+            String::from_utf8_lossy(core.load_name_from_ref(default_name.reference)).into_owned();
+        default_name.reference = core.declare_symbol(SymbolKind::Import, default_name.loc, &name);
+        core.is_import_item.insert(default_name.reference);
+    }
+    if let Some(items) = &mut statement.items {
+        for item in items {
+            let name =
+                String::from_utf8_lossy(core.load_name_from_ref(item.name.reference)).into_owned();
+            item.name.reference = core.declare_symbol(SymbolKind::Import, item.name.loc, &name);
+            core.is_import_item.insert(item.name.reference);
+        }
     }
     let mut flags = if was_bare {
         ImportRecordFlags::WAS_ORIGINALLY_BARE_IMPORT
@@ -189,6 +262,7 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
     flags |= path_flags;
     statement.import_record_index =
         add_import_record(core, path_range, path, assert_or_with, flags);
+    core.import_records[statement.import_record_index as usize].phase = phase;
     Stmt::new(loc, StmtData::Import(statement))
 }
 
@@ -296,7 +370,15 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
                 lexer.next();
                 let (path_range, path, assert_or_with, flags) = parse_path(core, lexer);
                 lexer.expect_or_insert_semicolon();
-                if had_type_only_items && items.is_empty() {
+                if had_type_only_items
+                    && items.is_empty()
+                    && !core
+                        .options
+                        .ts
+                        .config
+                        .unused_import_flags()
+                        .contains(crate::internal::config::TsUnusedImportFlags::KEEP_STMT)
+                {
                     core.has_type_script_export = true;
                     return Stmt::new(
                         loc,
@@ -320,7 +402,15 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
                 )
             } else {
                 lexer.expect_or_insert_semicolon();
-                if had_type_only_items && items.is_empty() {
+                if had_type_only_items
+                    && items.is_empty()
+                    && !core
+                        .options
+                        .ts
+                        .config
+                        .unused_import_flags()
+                        .contains(crate::internal::config::TsUnusedImportFlags::KEEP_STMT)
+                {
                     core.has_type_script_export = true;
                     return Stmt::new(
                         loc,
@@ -342,7 +432,13 @@ pub(crate) fn parse_export_statement(core: &mut ParserCore, lexer: &mut Lexer) -
 
 fn parse_export_default(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Stmt {
     let default_loc = lexer.loc();
+    let mut has_no_side_effects_comment = lexer
+        .has_comment_before
+        .contains(crate::internal::js_lexer::CommentBefore::NO_SIDE_EFFECTS);
     lexer.expect(Token::Default);
+    has_no_side_effects_comment |= lexer
+        .has_comment_before
+        .contains(crate::internal::js_lexer::CommentBefore::NO_SIDE_EFFECTS);
     if let Some(statement) =
         super::syntax_typescript::parse_type_script_statement(core, lexer, true)
     {
@@ -353,7 +449,34 @@ fn parse_export_default(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> S
     if is_abstract_class {
         lexer.next();
     }
-    let value = if lexer.token == Token::Function {
+    let mut value = if lexer.is_contextual_keyword(b"async") {
+        let expression =
+            parse_async_statement_prefix(core, lexer).expect("async token was already checked");
+        if matches!(expression.data.as_deref(), Some(ExprData::Function(_))) {
+            let ExprData::Function(function) =
+                *expression.data.expect("async function expression has data")
+            else {
+                unreachable!("async function prefix returns a function");
+            };
+            Stmt::new(
+                loc,
+                StmtData::Function(crate::internal::js_ast::FunctionStmt {
+                    function: function.function,
+                    ..crate::internal::js_ast::FunctionStmt::default()
+                }),
+            )
+        } else {
+            let value = parse_expression_suffix(core, lexer, expression, Precedence::Comma, true);
+            lexer.expect_or_insert_semicolon();
+            Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value,
+                    ..ExprStmt::default()
+                }),
+            )
+        }
+    } else if lexer.token == Token::Function {
         let expression = parse_function_declaration_prefix(core, lexer)
             .expect("function token was already checked");
         let crate::internal::js_ast::ExprData::Function(function) =
@@ -394,6 +517,12 @@ fn parse_export_default(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> S
         )
     };
 
+    super::syntax_statement::apply_no_side_effects_comment(
+        core,
+        &mut value,
+        has_no_side_effects_comment,
+    );
+
     let existing_name = match value.data.as_deref() {
         Some(StmtData::Function(function)) => function.function.name,
         Some(StmtData::Class(class)) => class.class.name,
@@ -414,25 +543,31 @@ fn parse_export_default(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> S
 
 fn parse_export_star(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Stmt {
     lexer.expect(Token::Asterisk);
-    let alias = if lexer.is_contextual_keyword(b"as") {
+    let (alias, alias_namespace_ref) = if lexer.is_contextual_keyword(b"as") {
         lexer.next();
         let alias_loc = lexer.loc();
         let (name, _) = clause_alias(lexer);
+        let namespace_ref = core.new_symbol(SymbolKind::Other, name.clone());
         lexer.next();
-        Some(ExportStarAlias {
-            original_name: name,
-            loc: alias_loc,
-        })
+        (
+            Some(ExportStarAlias {
+                original_name: name,
+                loc: alias_loc,
+            }),
+            Some(namespace_ref),
+        )
     } else {
-        None
+        (None, None)
     };
     lexer.expect_contextual_keyword(b"from");
     let (path_range, path, assert_or_with, flags) = parse_path(core, lexer);
     lexer.expect_or_insert_semicolon();
-    let namespace_ref = core.new_symbol(
-        SymbolKind::Other,
-        format!("{}_star", generate_non_unique_name_from_path(&path)),
-    );
+    let namespace_ref = alias_namespace_ref.unwrap_or_else(|| {
+        core.new_symbol(
+            SymbolKind::Other,
+            format!("{}_star", generate_non_unique_name_from_path(&path)),
+        )
+    });
     let import_record_index = add_import_record(core, path_range, path, assert_or_with, flags);
     Stmt::new(
         loc,

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::internal::{
+    ast::SymbolFlags,
     compat::JsFeature,
     js_ast::{
         Arg, AwaitExpr, Binding, BindingData, BlockStmt, BreakStmt, Catch, ClassStmt, CommentStmt,
@@ -17,7 +18,7 @@ use super::{
     parser_core::ParserCore,
     syntax_arrow::parse_arrow_body,
     syntax_binding::parse_binding,
-    syntax_class::parse_class_prefix,
+    syntax_class::{parse_class_prefix, parse_decorators},
     syntax_expression::{
         parse_expression, parse_expression_suffix, parse_expression_suffix_with_flags,
     },
@@ -99,6 +100,80 @@ fn parse_if_branch_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt {
+    let has_no_side_effects_comment = lexer
+        .has_comment_before
+        .contains(crate::internal::js_lexer::CommentBefore::NO_SIDE_EFFECTS);
+    let mut statement = parse_statement_without_no_side_effects_comment(core, lexer);
+    apply_no_side_effects_comment(core, &mut statement, has_no_side_effects_comment);
+    statement
+}
+
+fn mark_symbol_call_can_be_unwrapped(core: &mut ParserCore, reference: crate::internal::ast::Ref) {
+    if ParserCore::is_stored_name_ref(reference) {
+        return;
+    }
+    let index = usize::try_from(reference.inner_index).expect("symbol index fits usize");
+    if let Some(symbol) = core.symbols.get_mut(index) {
+        symbol.flags |= SymbolFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED;
+    }
+}
+
+pub(crate) fn apply_no_side_effects_comment(
+    core: &mut ParserCore,
+    statement: &mut Stmt,
+    has_no_side_effects_comment: bool,
+) {
+    if core.options.ignore_dce_annotations {
+        return;
+    }
+    match statement.data.as_deref_mut() {
+        Some(StmtData::Function(function)) => {
+            if has_no_side_effects_comment {
+                function.function.has_no_side_effects_comment = true;
+            }
+            if function.function.has_no_side_effects_comment
+                && let Some(name) = function.function.name
+            {
+                mark_symbol_call_can_be_unwrapped(core, name.reference);
+            }
+        }
+        Some(StmtData::Local(local)) if local.kind == LocalKind::Const => {
+            let Some(declaration) = local.declarations.first_mut() else {
+                return;
+            };
+            let is_no_side_effects = match declaration.value_or_nil.data.as_deref_mut() {
+                Some(ExprData::Arrow(arrow)) => {
+                    if has_no_side_effects_comment {
+                        arrow.has_no_side_effects_comment = true;
+                    }
+                    arrow.has_no_side_effects_comment
+                }
+                Some(ExprData::Function(function)) => {
+                    if has_no_side_effects_comment {
+                        function.function.has_no_side_effects_comment = true;
+                    }
+                    function.function.has_no_side_effects_comment
+                }
+                _ => false,
+            };
+            if is_no_side_effects
+                && let Some(BindingData::Identifier(binding)) = declaration.binding.data.as_deref()
+            {
+                mark_symbol_call_can_be_unwrapped(core, binding.reference);
+            }
+        }
+        Some(StmtData::ExportDefault(export)) => {
+            apply_no_side_effects_comment(core, &mut export.value, has_no_side_effects_comment);
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_statement_without_no_side_effects_comment(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+) -> Stmt {
     let loc = lexer.loc();
     if let Some(statement) =
         super::syntax_typescript::parse_type_script_statement(core, lexer, false)
@@ -111,7 +186,6 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
     {
         let await_range = lexer.range();
         if !core.is_inside_function_scope() {
-            core.mark_syntax_feature(JsFeature::TOP_LEVEL_AWAIT, await_range);
             if core.top_level_await_keyword.len == 0 {
                 core.top_level_await_keyword = await_range;
             }
@@ -379,8 +453,42 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             class_declaration_from_expression(core, loc, expression)
         }
         Token::At => {
-            let expression = parse_class_prefix(core, lexer).expect("decorator token was checked");
-            class_declaration_from_expression(core, loc, expression)
+            let decorators = parse_decorators(core, lexer);
+            let mut statement = if lexer.token == Token::Export {
+                parse_export_statement(core, lexer)
+            } else if core.options.ts.parse && lexer.is_contextual_keyword(b"abstract") {
+                parse_statement(core, lexer)
+            } else {
+                let expression = parse_class_prefix(core, lexer).unwrap_or_else(|| {
+                    lexer.expected(Token::Class);
+                });
+                class_declaration_from_expression(core, loc, expression)
+            };
+            let class = match statement.data.as_deref_mut() {
+                Some(StmtData::Class(class)) => Some(&mut class.class),
+                Some(StmtData::ExportDefault(export)) => match export.value.data.as_deref_mut() {
+                    Some(StmtData::Class(class)) => Some(&mut class.class),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(class) = class {
+                class.decorators = decorators;
+                class.should_lower_standard_decorators = !class.decorators.is_empty()
+                    && core.options.ts.config.experimental_decorators
+                        != crate::internal::config::MaybeBool::True
+                    && (core
+                        .options
+                        .unsupported_js_features
+                        .contains(JsFeature::DECORATORS)
+                        || !class.use_define_for_class_fields);
+            } else {
+                core.add_error_range(
+                    Range { loc, len: 1 },
+                    "Decorators are only valid on class declarations",
+                );
+            }
+            statement
         }
         Token::Import => parse_import_statement(core, lexer),
         Token::Export => parse_export_statement(core, lexer),
@@ -579,7 +687,7 @@ pub(crate) fn parse_statement(core: &mut ParserCore, lexer: &mut Lexer) -> Stmt 
             let mut cases = Vec::new();
             let mut found_default = false;
             while lexer.token != Token::CloseBrace {
-                let case_loc = lexer.loc();
+                let case_loc = core.save_expr_comments_here(lexer);
                 let value_or_nil = if lexer.token == Token::Default {
                     if found_default {
                         core.add_error_range(
@@ -896,7 +1004,6 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
             );
             await_range = Range::default();
         } else if !core.is_inside_function_scope() {
-            core.mark_syntax_feature(JsFeature::TOP_LEVEL_AWAIT, await_range);
             if core.top_level_await_keyword.len == 0 {
                 core.top_level_await_keyword = await_range;
             }
@@ -993,7 +1100,6 @@ fn parse_for_statement(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> St
         {
             let await_range = lexer.range();
             if !core.is_inside_function_scope() {
-                core.mark_syntax_feature(JsFeature::TOP_LEVEL_AWAIT, await_range);
                 if core.top_level_await_keyword.len == 0 {
                     core.top_level_await_keyword = await_range;
                 }

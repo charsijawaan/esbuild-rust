@@ -1,6 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     panic::{AssertUnwindSafe, catch_unwind},
+    sync::Arc,
 };
 
 use crate::internal::{
@@ -27,7 +28,10 @@ use super::{
     parser_core::ParserCore,
     parser_types::AwaitOrYield,
     syntax_statement::parse_statements_up_to,
-    visit::visit_top_level_statements,
+    visit::{
+        merge_adjacent_expression_statements, precompute_type_script_enum_constants,
+        visit_top_level_statements,
+    },
 };
 
 const MODULE_SCOPE_LOC: Loc = Loc { start: -1 };
@@ -260,6 +264,7 @@ pub fn lazy_export_ast(
         module_type_data: core.options.module_type_data,
         parts,
         symbols: core.symbols,
+        expr_comments: core.expr_comments,
         module_scope: core.module_scope,
         top_level_symbol_to_parts_from_parser,
         import_records: core.import_records,
@@ -301,6 +306,9 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         }
         if options.jsx.import_source.is_empty() {
             options.jsx.import_source = "react".into();
+        }
+        if options.defines.is_none() {
+            options.defines = Some(Arc::new(crate::internal::config::process_defines(&[])));
         }
         let mut lexer = Lexer::new(log.clone(), source.clone(), options.ts.clone());
         let mut core = ParserCore::new_with_log(source, options, log);
@@ -387,9 +395,21 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             ));
         }
         core.declared_symbols.clear();
+        if has_esm_exports
+            || has_import_statement
+            || core.options.module_type_data.module_type.is_esm()
+        {
+            Scope::recursive_set_strict_mode(
+                core.current_scope
+                    .as_ref()
+                    .expect("parse pass requires a module scope"),
+                StrictModeKind::ImplicitStrictEsm,
+            );
+        }
         core.hoist_symbols();
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
+        precompute_type_script_enum_constants(&mut core, &statements);
         let (mut parts, mut module_metadata, uses_exports_ref, uses_module_ref) =
             if core.options.tree_shaking {
                 build_tree_shaking_parts(&mut core, statements, declared_symbols_by_statement)
@@ -415,6 +435,10 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                     .get(&core.module_ref)
                     .is_some_and(|usage| usage.count_estimate > 0);
                 let module_metadata = scan_module_metadata(&mut core, &mut statements);
+                prepend_generated_namespace_import_declarations(
+                    &mut core,
+                    &module_metadata.named_imports,
+                );
                 let mut parts = vec![Part {
                     symbol_uses: HashMap::new(),
                     can_be_removed_if_unused: true,
@@ -431,14 +455,21 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                         import_record_indices,
                         declared_symbols: std::mem::take(&mut core.declared_symbols),
                         symbol_uses: std::mem::take(&mut core.symbol_uses),
+                        import_symbol_property_uses: std::mem::take(
+                            &mut core.import_symbol_property_uses,
+                        ),
                         ..Part::default()
                     });
                 }
                 (parts, module_metadata, uses_exports_ref, uses_module_ref)
             };
+        if core.options.ts.parse {
+            remove_unused_type_script_import_equals(&mut core, &mut parts);
+        }
         insert_runtime_import_part(&mut core, &mut module_metadata, &mut parts);
         insert_generated_import_parts(&core, &module_metadata, &mut parts);
         insert_generated_define_parts(&core, &mut parts);
+        insert_top_level_temp_part(&core, &mut parts);
         assert_eq!(
             core.remaining_scope_count(),
             0,
@@ -461,17 +492,14 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             crate::internal::ast::SlotCounts::default()
         };
 
-        let exports_kind = if has_esm_exports
-            || has_import_statement
-            || core.options.module_type_data.module_type.is_esm()
-        {
+        let exports_kind = if has_esm_exports {
             ExportsKind::Esm
-        } else if core.options.module_type_data.module_type.is_common_js()
-            || core.has_top_level_return
-            || uses_exports_ref
-            || uses_module_ref
-        {
+        } else if core.has_top_level_return || uses_exports_ref || uses_module_ref {
             ExportsKind::CommonJs
+        } else if core.options.module_type_data.module_type.is_common_js() {
+            ExportsKind::CommonJs
+        } else if core.options.module_type_data.module_type.is_esm() || has_import_statement {
+            ExportsKind::Esm
         } else {
             ExportsKind::None
         };
@@ -480,8 +508,9 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         for (part_index, part) in parts.iter().enumerate() {
             for declared in &part.declared_symbols {
                 if declared.is_top_level {
+                    let reference = core.follow_symbol_link(declared.reference);
                     top_level_symbol_to_parts_from_parser
-                        .entry(declared.reference)
+                        .entry(reference)
                         .or_insert_with(Vec::new)
                         .push(u32::try_from(part_index).expect("part index fits in u32"));
                 }
@@ -494,6 +523,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             parts,
             char_freq,
             symbols: core.symbols,
+            expr_comments: core.expr_comments,
             module_scope: Some(module_scope),
             hashbang,
             directives,
@@ -509,7 +539,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             source_map_comment: lexer.source_mapping_url.clone(),
             export_keyword: core.esm_export_keyword,
             top_level_await_keyword: core.top_level_await_keyword,
-            live_top_level_await_keyword: core.top_level_await_keyword,
+            live_top_level_await_keyword: core.live_top_level_await_keyword,
             exports_ref: core.exports_ref,
             module_ref: core.module_ref,
             wrapper_ref,
@@ -546,6 +576,7 @@ fn insert_generated_import_parts(
     let mut generated_imports = core
         .jsx_import_records
         .values()
+        .chain(core.glob_import_records.values())
         .copied()
         .collect::<Vec<_>>();
     generated_imports.sort_unstable_by_key(|(record_index, _)| *record_index);
@@ -735,10 +766,68 @@ fn insert_generated_define_parts(core: &ParserCore, parts: &mut Vec<Part>) {
     }
 }
 
+fn insert_top_level_temp_part(core: &ParserCore, parts: &mut Vec<Part>) {
+    if core.top_level_temp_refs.is_empty() {
+        return;
+    }
+    let insert_at = parts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, part)| {
+            !part
+                .statements
+                .iter()
+                .all(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))))
+        })
+        .map_or(parts.len(), |(index, _)| index);
+    let declarations = core
+        .top_level_temp_refs
+        .iter()
+        .copied()
+        .map(|reference| Decl {
+            binding: Binding {
+                data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                    reference,
+                }))),
+                ..Binding::default()
+            },
+            ..Decl::default()
+        })
+        .collect();
+    let declared_symbols = core
+        .top_level_temp_refs
+        .iter()
+        .copied()
+        .map(|reference| DeclaredSymbol {
+            reference,
+            is_top_level: true,
+        })
+        .collect();
+    parts.insert(
+        insert_at,
+        Part {
+            statements: vec![Stmt::new(
+                Loc::default(),
+                StmtData::Local(LocalStmt {
+                    declarations,
+                    kind: LocalKind::Var,
+                    ..LocalStmt::default()
+                }),
+            )],
+            declared_symbols,
+            ..Part::default()
+        },
+    );
+}
+
 fn is_generated_import_record(core: &ParserCore, index: usize) -> bool {
-    core.jsx_import_records.values().any(|(record_index, _)| {
-        usize::try_from(*record_index).expect("import record index") == index
-    })
+    core.jsx_import_records
+        .values()
+        .chain(core.glob_import_records.values())
+        .any(|(record_index, _)| {
+            usize::try_from(*record_index).expect("import record index") == index
+        })
 }
 
 fn split_top_level_local_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
@@ -761,6 +850,38 @@ fn split_top_level_local_statements(statements: Vec<Stmt>) -> Vec<Stmt> {
     result
 }
 
+fn append_relocated_top_level_vars(core: &mut ParserCore, statements: &mut Vec<Stmt>) {
+    if core.relocated_top_level_vars.is_empty() {
+        return;
+    }
+    let mut already_declared = HashSet::new();
+    let mut declarations = Vec::new();
+    for local in std::mem::take(&mut core.relocated_top_level_vars) {
+        let reference = core.follow_symbol_link(local.reference);
+        if already_declared.insert(reference) {
+            declarations.push(Decl {
+                binding: Binding {
+                    loc: local.loc,
+                    data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                        reference,
+                    }))),
+                },
+                ..Decl::default()
+            });
+        }
+    }
+    if !declarations.is_empty() {
+        statements.push(Stmt::new(
+            declarations[0].binding.loc,
+            StmtData::Local(LocalStmt {
+                declarations,
+                kind: LocalKind::Var,
+                ..LocalStmt::default()
+            }),
+        ));
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn build_tree_shaking_parts(
     core: &mut ParserCore,
@@ -776,9 +897,7 @@ fn build_tree_shaking_parts(
     let mut uses_module_ref = false;
 
     core.scopes_for_current_part.clear();
-    for (mut statement, declared_symbols) in
-        statements.into_iter().zip(declared_symbols_by_statement)
-    {
+    for (statement, declared_symbols) in statements.into_iter().zip(declared_symbols_by_statement) {
         let move_before = core.options.mode != crate::internal::config::Mode::PassThrough
             && matches!(
                 statement.data.as_deref(),
@@ -786,39 +905,26 @@ fn build_tree_shaking_parts(
             );
         let move_after = matches!(statement.data.as_deref(), Some(StmtData::ExportEquals(_)));
         core.symbol_uses.clear();
+        core.import_symbol_property_uses.clear();
         core.declared_symbols = declared_symbols;
         core.scopes_for_current_part.clear();
 
         let mut import_record_indices = top_level_import_record_indices(&statement);
         let first_generated_import_record = core.import_records.len();
-        visit_top_level_statements(core, std::slice::from_mut(&mut statement));
-        let mut statements = lower_context.lower_statements(core, vec![statement]);
+        let mut statements = vec![statement];
+        visit_top_level_statements(core, &mut statements);
+        let mut statements = lower_context.lower_statements(core, statements);
+        append_relocated_top_level_vars(core, &mut statements);
         if core.options.keep_names && core.source.key_path.text != "<runtime>" {
             apply_keep_names_to_statements(core, &mut statements);
         }
-        if core.options.tree_shaking {
-            let helpers = make_helper_context(|reference| {
-                core.symbols[usize::try_from(reference.inner_index).expect("symbol index")].kind
-                    == SymbolKind::Unbound
-            });
-            for statement in &mut statements {
-                if let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut()
-                    && !expression.is_from_class_or_fn_that_can_be_removed_if_unused
-                {
-                    expression.value = helpers.simplify_unused_expr(
-                        &expression.value,
-                        core.options.unsupported_js_features,
-                    );
-                }
-            }
-            statements.retain(|statement| {
-                !matches!(
-                    statement.data.as_deref(),
-                    Some(StmtData::Expr(expression)) if expression.value.data.is_none()
-                )
-            });
+        let defer_import_scan = move_before
+            && statements
+                .iter()
+                .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))));
+        if !defer_import_scan {
+            scan_module_metadata_into(core, &mut statements, &mut metadata);
         }
-        scan_module_metadata_into(core, &mut statements, &mut metadata);
 
         uses_exports_ref |= core
             .symbol_uses
@@ -859,6 +965,7 @@ fn build_tree_shaking_parts(
             import_record_indices,
             declared_symbols: std::mem::take(&mut core.declared_symbols),
             symbol_uses: std::mem::take(&mut core.symbol_uses),
+            import_symbol_property_uses: std::mem::take(&mut core.import_symbol_property_uses),
             can_be_removed_if_unused,
             ..Part::default()
         };
@@ -871,9 +978,40 @@ fn build_tree_shaking_parts(
         }
     }
 
-    metadata
-        .named_imports
-        .extend(std::mem::take(&mut core.generated_named_imports));
+    // TypeScript import trimming needs use counts from the whole file. Import
+    // parts are hoisted ahead of the other parts, but scanning them must happen
+    // after all other parts have been visited so those counts are complete.
+    for part in &mut before_parts {
+        if part
+            .statements
+            .iter()
+            .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))))
+        {
+            core.declared_symbols = std::mem::take(&mut part.declared_symbols);
+            scan_module_metadata_into(core, &mut part.statements, &mut metadata);
+            part.declared_symbols = std::mem::take(&mut core.declared_symbols);
+        }
+    }
+
+    let generated_named_imports = std::mem::take(&mut core.generated_named_imports);
+    for (&reference, import) in &generated_named_imports {
+        if let Some(part) = before_parts.iter_mut().find(|part| {
+            part.import_record_indices
+                .contains(&import.import_record_index)
+        }) {
+            if !part
+                .declared_symbols
+                .iter()
+                .any(|declared| declared.reference == reference)
+            {
+                part.declared_symbols.push(DeclaredSymbol {
+                    reference,
+                    is_top_level: true,
+                });
+            }
+        }
+    }
+    metadata.named_imports.extend(generated_named_imports);
 
     let mut ordered_parts = vec![Part {
         symbol_uses: HashMap::new(),
@@ -903,6 +1041,109 @@ fn build_tree_shaking_parts(
     }
 
     (ordered_parts, metadata, uses_exports_ref, uses_module_ref)
+}
+
+fn remove_unused_type_script_import_equals(core: &mut ParserCore, parts: &mut Vec<Part>) {
+    loop {
+        let mut removed_any = false;
+        for part in parts.iter_mut() {
+            let mut kept = Vec::with_capacity(part.statements.len());
+            for statement in std::mem::take(&mut part.statements) {
+                let removal = statement.data.as_deref().and_then(|data| match data {
+                    StmtData::Local(local) if local.was_ts_import_equals && !local.is_export => {
+                        let declaration = local.declarations.first()?;
+                        let BindingData::Identifier(binding) =
+                            declaration.binding.data.as_deref()?
+                        else {
+                            return None;
+                        };
+                        let symbol_index = usize::try_from(binding.reference.inner_index)
+                            .expect("symbol index fits usize");
+                        if core.symbols[symbol_index].use_count_estimate != 0 {
+                            return None;
+                        }
+
+                        let mut value = &declaration.value_or_nil;
+                        while let Some(ExprData::Dot(dot)) = value.data.as_deref() {
+                            value = &dot.target;
+                        }
+                        let value_ref = match value.data.as_deref()? {
+                            ExprData::Identifier(identifier) => identifier.reference,
+                            ExprData::ImportIdentifier(identifier) => identifier.reference,
+                            _ => return None,
+                        };
+                        Some((binding.reference, value_ref))
+                    }
+                    _ => None,
+                });
+
+                let Some((binding_ref, value_ref)) = removal else {
+                    kept.push(statement);
+                    continue;
+                };
+
+                let value_index =
+                    usize::try_from(value_ref.inner_index).expect("symbol index fits usize");
+                core.symbols[value_index].use_count_estimate -= 1;
+                if let Some(usage) = part.symbol_uses.get_mut(&value_ref) {
+                    usage.count_estimate -= 1;
+                    if usage.count_estimate == 0 {
+                        part.symbol_uses.remove(&value_ref);
+                    }
+                }
+                part.declared_symbols
+                    .retain(|declared| declared.reference != binding_ref);
+                removed_any = true;
+            }
+            part.statements = kept;
+        }
+
+        if !removed_any {
+            break;
+        }
+    }
+
+    let mut index = 0usize;
+    parts.retain(|part| {
+        let keep = index == 0 || !part.statements.is_empty();
+        index += 1;
+        keep
+    });
+}
+
+fn prepend_generated_namespace_import_declarations(
+    core: &mut ParserCore,
+    named_imports: &HashMap<Ref, NamedImport>,
+) {
+    let mut generated = named_imports
+        .iter()
+        .filter_map(|(&reference, import)| {
+            let symbol = &core.symbols
+                [usize::try_from(reference.inner_index).expect("symbol index fits usize")];
+            (symbol.import_item_status == crate::internal::ast::ImportItemStatus::Generated)
+                .then_some((import.import_record_index, import.alias.clone(), reference))
+        })
+        .collect::<Vec<_>>();
+    generated.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    if generated.is_empty() {
+        return;
+    }
+
+    let generated_refs = generated
+        .iter()
+        .map(|(_, _, reference)| *reference)
+        .collect::<HashSet<_>>();
+    core.declared_symbols
+        .retain(|declared| !generated_refs.contains(&declared.reference));
+    let mut declarations = generated
+        .into_iter()
+        .map(|(_, _, reference)| DeclaredSymbol {
+            reference,
+            is_top_level: true,
+        })
+        .collect::<Vec<_>>();
+    declarations.append(&mut core.declared_symbols);
+    core.declared_symbols = declarations;
 }
 
 fn keep_name_expression(core: &mut ParserCore, value: Expr, name: &str) -> Expr {
@@ -975,6 +1216,27 @@ fn class_has_static_name(class: &crate::internal::js_ast::Class) -> bool {
     })
 }
 
+fn class_has_keep_name_static_block(class: &crate::internal::js_ast::Class) -> bool {
+    class.properties.iter().any(|property| {
+        let Some(block) = &property.class_static_block else {
+            return false;
+        };
+        let [statement] = block.block.statements.as_slice() else {
+            return false;
+        };
+        let Some(StmtData::Expr(statement)) = statement.data.as_deref() else {
+            return false;
+        };
+        let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
+            return false;
+        };
+        statement.is_from_class_or_fn_that_can_be_removed_if_unused
+            && matches!(call.args.as_slice(), [first, second]
+                if matches!(first.data.as_deref(), Some(ExprData::This))
+                    && matches!(second.data.as_deref(), Some(ExprData::String(_))))
+    })
+}
+
 fn insert_class_name_static_block(
     core: &mut ParserCore,
     class: &mut crate::internal::js_ast::Class,
@@ -1023,11 +1285,24 @@ fn insert_class_name_static_block(
 }
 
 fn keep_inferred_declaration_name(core: &mut ParserCore, value: &mut Expr, reference: Ref) {
+    if core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+        .flags
+        .contains(crate::internal::ast::SymbolFlags::DID_KEEP_NAME)
+    {
+        return;
+    }
     let name = core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
         .original_name
         .clone();
     if let Some(ExprData::Class(class)) = value.data.as_deref_mut() {
-        if class.class.name.is_none() {
+        let has_synthetic_inner_name = class.class.name.is_some_and(|inner| {
+            core.symbols[usize::try_from(inner.reference.inner_index).expect("symbol index")]
+                .original_name
+                == format!("_{name}")
+        });
+        if (class.class.name.is_none() || has_synthetic_inner_name)
+            && !class_has_keep_name_static_block(&class.class)
+        {
             insert_class_name_static_block(core, &mut class.class, &name);
         }
         return;
@@ -1154,7 +1429,11 @@ fn apply_keep_names_to_statements(core: &mut ParserCore, statements: &mut Vec<St
             }
         }
     }
-    *statements = result;
+    *statements = if core.options.minify_syntax {
+        merge_adjacent_expression_statements(result)
+    } else {
+        result
+    };
 }
 
 fn top_level_import_record_indices(statement: &Stmt) -> Vec<u32> {
@@ -1176,6 +1455,81 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
     metadata
 }
 
+fn trim_unused_imports(core: &ParserCore, import: &mut ImportStmt) -> bool {
+    if core.options.mode == crate::internal::config::Mode::Bundle && !core.options.ts.parse {
+        return false;
+    }
+    let unused_import_flags = core.options.ts.config.unused_import_flags();
+    let keep_values =
+        unused_import_flags.contains(crate::internal::config::TsUnusedImportFlags::KEEP_VALUES);
+    let keep_unused_imports = core.options.ts.parse
+        && keep_values
+        && core.options.mode != crate::internal::config::Mode::Bundle
+        && !core.options.minify_identifiers;
+    if (!core.options.minify_syntax && !core.options.ts.parse) || keep_unused_imports {
+        return false;
+    }
+    let contains_direct_eval = core.module_scope.as_ref().is_some_and(|scope| {
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_direct_eval
+    });
+    let can_remove_value = |reference: Ref| {
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+            .use_count_estimate
+            == 0
+            && (core.options.ts.parse || !contains_direct_eval)
+    };
+    let is_used_in_typescript = |reference: Ref| {
+        keep_values
+            || core
+                .ts_use_counts
+                .get(usize::try_from(reference.inner_index).expect("symbol index"))
+                .copied()
+                .unwrap_or_default()
+                != 0
+    };
+
+    let mut found_imports = false;
+    let mut is_unused_in_typescript = true;
+    if let Some(default_name) = import.default_name {
+        found_imports = true;
+        if core.options.ts.parse && is_used_in_typescript(default_name.reference) {
+            is_unused_in_typescript = false;
+        }
+        if can_remove_value(default_name.reference) {
+            import.default_name = None;
+        }
+    }
+    if import.star_name_loc.is_some() {
+        found_imports = true;
+        if core.options.ts.parse && is_used_in_typescript(import.namespace_ref) {
+            is_unused_in_typescript = false;
+        }
+        if can_remove_value(import.namespace_ref) {
+            import.star_name_loc = None;
+        }
+    }
+    if let Some(items) = &mut import.items {
+        found_imports = true;
+        items.retain(|item| {
+            if core.options.ts.parse && is_used_in_typescript(item.name.reference) {
+                is_unused_in_typescript = false;
+            }
+            !can_remove_value(item.name.reference)
+        });
+        if items.is_empty() {
+            import.items = None;
+        }
+    }
+
+    core.options.ts.parse
+        && found_imports
+        && is_unused_in_typescript
+        && !unused_import_flags.contains(crate::internal::config::TsUnusedImportFlags::KEEP_STMT)
+}
+
 #[allow(clippy::too_many_lines)]
 fn scan_module_metadata_into(
     core: &mut ParserCore,
@@ -1183,6 +1537,19 @@ fn scan_module_metadata_into(
     metadata: &mut ModuleMetadata,
 ) {
     for statement in statements {
+        let unused_import_record = match statement.data.as_deref_mut() {
+            Some(StmtData::Import(import)) => {
+                trim_unused_imports(core, import).then_some(import.import_record_index)
+            }
+            _ => None,
+        };
+        if let Some(import_record_index) = unused_import_record {
+            core.import_records
+                [usize::try_from(import_record_index).expect("import record index")]
+            .flags |= ImportRecordFlags::IS_UNUSED;
+            statement.data = None;
+            continue;
+        }
         match statement.data.as_deref_mut() {
             Some(StmtData::Import(import)) => {
                 core.record_declared_symbol(import.namespace_ref);
@@ -1406,7 +1773,7 @@ fn scan_module_metadata_into(
                     .expect("symbol index")]
                 .original_name
                 .clone();
-                record_export(
+                record_type_script_export(
                     core,
                     &mut metadata.named_exports,
                     enumeration.name.loc,
@@ -1419,7 +1786,7 @@ fn scan_module_metadata_into(
                     [usize::try_from(namespace.name.reference.inner_index).expect("symbol index")]
                 .original_name
                 .clone();
-                record_export(
+                record_type_script_export(
                     core,
                     &mut metadata.named_exports,
                     namespace.name.loc,
@@ -1453,6 +1820,23 @@ fn record_export(
             },
         );
     }
+}
+
+fn record_type_script_export(
+    core: &mut ParserCore,
+    exports: &mut HashMap<String, NamedExport>,
+    loc: Loc,
+    alias: &str,
+    reference: Ref,
+) {
+    // TypeScript declarations such as enums and namespaces can legally merge
+    // with another declaration. Declaration binding has already diagnosed
+    // incompatible collisions, so a pre-existing export here is the one shared
+    // export for the merged declaration instead of a duplicate export.
+    if exports.contains_key(alias) {
+        return;
+    }
+    record_export(core, exports, loc, alias, reference);
 }
 
 fn declare_top_level_symbols(
@@ -1518,6 +1902,7 @@ fn declare_top_level_symbols(
             Some(StmtData::Import(import)) => {
                 if let Some(name) = &mut import.default_name {
                     bind_loc_ref(core, name, SymbolKind::Import, &mut declared);
+                    core.is_import_item.insert(name.reference);
                 }
                 if let Some(star_loc) = import.star_name_loc {
                     let mut name = crate::internal::ast::LocRef {
@@ -1530,8 +1915,31 @@ fn declare_top_level_symbols(
                 if let Some(items) = &mut import.items {
                     for item in items {
                         bind_loc_ref(core, &mut item.name, SymbolKind::Import, &mut declared);
+                        core.is_import_item.insert(item.name.reference);
                     }
                 }
+                let mut entries = HashMap::new();
+                if let Some(name) = import.default_name {
+                    entries.insert("default".into(), name);
+                }
+                if let Some(items) = &import.items {
+                    for item in items {
+                        entries.insert(
+                            item.alias.clone(),
+                            crate::internal::ast::LocRef {
+                                loc: item.name.loc,
+                                reference: item.name.reference,
+                            },
+                        );
+                    }
+                }
+                core.import_items_for_namespace.insert(
+                    import.namespace_ref,
+                    super::parser_core::NamespaceImportItems {
+                        entries,
+                        import_record_index: import.import_record_index,
+                    },
+                );
             }
             Some(StmtData::ExportDefault(export)) => match export.value.data.as_deref_mut() {
                 Some(StmtData::Function(function)) => {
@@ -1667,8 +2075,12 @@ fn strip_directive_prologue(
         directives.push("use strict".to_owned());
     }
 
-    let mut count = 0;
+    let mut total_count = 0;
     for statement in statements.iter() {
+        if matches!(statement.data.as_deref(), Some(StmtData::Comment(_))) {
+            total_count += 1;
+            continue;
+        }
         let Some(StmtData::Expr(expression)) = statement.data.as_deref() else {
             break;
         };
@@ -1687,9 +2099,15 @@ fn strip_directive_prologue(
         if !directives.contains(&directive) {
             directives.push(directive);
         }
-        count += 1;
+        total_count += 1;
     }
-    statements.drain(..count);
+    if total_count > 0 {
+        let comments = statements
+            .drain(..total_count)
+            .filter(|statement| matches!(statement.data.as_deref(), Some(StmtData::Comment(_))))
+            .collect::<Vec<_>>();
+        statements.splice(..0, comments);
+    }
     (directives, legacy_octal_locs)
 }
 
@@ -3760,10 +4178,7 @@ mod tests {
         assert!(
             ast.parts[1].statements[..9]
                 .iter()
-                .all(|statement| matches!(
-                    statement.data.as_deref(),
-                    Some(StmtData::TypeScript(_))
-                ))
+                .all(|statement| statement.data.is_none())
         );
         let Some(StmtData::Class(runtime)) = ast.parts[1].statements[9].data.as_deref() else {
             panic!("expected abstract runtime class");
@@ -3793,14 +4208,8 @@ mod tests {
         );
         assert!(ok);
         assert!(log.done().is_empty());
-        assert!(matches!(
-            ast.parts[1].statements[0].data.as_deref(),
-            Some(StmtData::TypeScript(_))
-        ));
-        assert!(matches!(
-            ast.parts[1].statements[1].data.as_deref(),
-            Some(StmtData::TypeScript(_))
-        ));
+        assert!(ast.parts[1].statements[0].data.is_none());
+        assert!(ast.parts[1].statements[1].data.is_none());
         assert!(matches!(
             ast.parts[1].statements[2].data.as_deref(),
             Some(StmtData::Function(function)) if function.function.has_body
@@ -3930,14 +4339,8 @@ mod tests {
         );
         assert!(ok);
         assert!(log.done().is_empty());
-        assert!(matches!(
-            ast.parts[1].statements[0].data.as_deref(),
-            Some(StmtData::TypeScript(_))
-        ));
-        assert!(matches!(
-            ast.parts[1].statements[1].data.as_deref(),
-            Some(StmtData::TypeScript(_))
-        ));
+        assert!(ast.parts[1].statements[0].data.is_none());
+        assert!(ast.parts[1].statements[1].data.is_none());
         assert!(matches!(
             ast.parts[1].statements[2].data.as_deref(),
             Some(StmtData::ExportDefault(export))
@@ -3954,7 +4357,6 @@ mod tests {
     fn parses_class_member_and_parameter_decorators() {
         let mut options = Options::default();
         options.ts.parse = true;
-        options.ts.config.experimental_decorators = crate::internal::config::MaybeBool::True;
         let (ast, ok, log) = parse_source_with_options(
             "@sealed class Example {\
                @field accessor value = 1;\
@@ -4655,14 +5057,8 @@ mod tests {
         assert!(ok);
         assert!(log.done().is_empty());
         assert_eq!(ast.parts[1].statements.len(), 3);
-        assert!(matches!(
-            ast.parts[1].statements[0].data.as_deref(),
-            Some(StmtData::TypeScript(_))
-        ));
-        assert!(matches!(
-            ast.parts[1].statements[1].data.as_deref(),
-            Some(StmtData::TypeScript(_))
-        ));
+        assert!(ast.parts[1].statements[0].data.is_none());
+        assert!(ast.parts[1].statements[1].data.is_none());
         assert!(matches!(
             ast.parts[1].statements[2].data.as_deref(),
             Some(StmtData::Local(_))
@@ -4882,10 +5278,7 @@ mod tests {
         assert!(ok);
         assert!(log.done().is_empty());
         assert_eq!(ast.parts[1].statements.len(), 3);
-        assert!(matches!(
-            ast.parts[1].statements[0].data.as_deref(),
-            Some(StmtData::TypeScript(_))
-        ));
+        assert!(ast.parts[1].statements[0].data.is_none());
         let Some(StmtData::Import(import)) = ast.parts[1].statements[1].data.as_deref() else {
             panic!("expected retained runtime import");
         };

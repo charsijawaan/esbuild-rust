@@ -708,7 +708,8 @@ where
     ) -> bool {
         for statement in statements {
             match statement.data.as_deref() {
-                Some(
+                None
+                | Some(
                     StmtData::Function(_)
                     | StmtData::Empty
                     | StmtData::Import(_)

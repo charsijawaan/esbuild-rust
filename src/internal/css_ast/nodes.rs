@@ -445,6 +445,7 @@ impl RuleData {
             }
             (Self::KnownAt(left), Self::KnownAt(right)) => {
                 left.at_token.eq_ignore_ascii_case(&right.at_token)
+                    && left.has_block == right.has_block
                     && tokens_equal(&left.prelude, &right.prelude, check)
                     && rules_equal(&left.rules, &right.rules, check)
             }
@@ -505,6 +506,7 @@ impl RuleData {
             }
             Self::KnownAt(rule) => {
                 let mut hash = hash_combine_string(3, &rule.at_token);
+                hash = hash_combine(hash, u32::from(rule.has_block));
                 hash = hash_tokens(hash, &rule.prelude);
                 hash_rules(hash, &rule.rules)
             }
@@ -629,12 +631,25 @@ pub struct KeyframeBlock {
     pub close_brace_loc: Loc,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct KnownAtRule {
     pub at_token: String,
     pub prelude: Vec<Token>,
     pub rules: Vec<Rule>,
     pub close_brace_loc: Loc,
+    pub has_block: bool,
+}
+
+impl Default for KnownAtRule {
+    fn default() -> Self {
+        Self {
+            at_token: String::new(),
+            prelude: Vec::new(),
+            rules: Vec::new(),
+            close_brace_loc: Loc::default(),
+            has_block: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -682,6 +697,7 @@ pub struct AtLayerRule {
     pub names: Vec<Vec<String>>,
     pub rules: Vec<Rule>,
     pub close_brace_loc: Loc,
+    pub has_block: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1359,6 +1375,7 @@ pub struct PseudoClassSelector {
     pub name: String,
     pub args: Vec<Token>,
     pub is_element: bool,
+    pub has_args: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

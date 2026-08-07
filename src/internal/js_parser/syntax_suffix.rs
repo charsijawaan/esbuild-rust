@@ -191,7 +191,7 @@ pub(crate) fn parse_call_args(
     if lexer.has_newline_before {
         is_multi_line = true;
     }
-    let close_paren_loc = lexer.loc();
+    let close_paren_loc = core.save_expr_comments_here(lexer);
     lexer.expect(Token::CloseParen);
     (args, close_paren_loc, is_multi_line)
 }
@@ -200,9 +200,47 @@ pub(crate) fn parse_call_args(
 pub(crate) fn parse_high_precedence_suffix_chain(
     core: &mut ParserCore,
     lexer: &mut Lexer,
+    left: Expr,
+    minimum_precedence: Precedence,
+    is_new_target: bool,
+    parse_nested: impl FnMut(&mut ParserCore, &mut Lexer, Precedence) -> Expr,
+) -> Expr {
+    parse_high_precedence_suffix_chain_impl(
+        core,
+        lexer,
+        left,
+        minimum_precedence,
+        is_new_target,
+        false,
+        parse_nested,
+    )
+}
+
+pub(crate) fn parse_high_precedence_suffix_chain_for_experimental_decorator(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
+    left: Expr,
+    minimum_precedence: Precedence,
+    parse_nested: impl FnMut(&mut ParserCore, &mut Lexer, Precedence) -> Expr,
+) -> Expr {
+    parse_high_precedence_suffix_chain_impl(
+        core,
+        lexer,
+        left,
+        minimum_precedence,
+        false,
+        true,
+        parse_nested,
+    )
+}
+
+fn parse_high_precedence_suffix_chain_impl(
+    core: &mut ParserCore,
+    lexer: &mut Lexer,
     mut left: Expr,
     minimum_precedence: Precedence,
     is_new_target: bool,
+    forbid_index_suffix: bool,
     mut parse_nested: impl FnMut(&mut ParserCore, &mut Lexer, Precedence) -> Expr,
 ) -> Expr {
     let mut optional_chain = OptionalChain::None;
@@ -311,22 +349,41 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                         );
                     }
                     _ => {
-                        if !lexer.is_identifier_or_keyword() {
-                            lexer.expected(Token::Identifier);
-                        }
-                        let name = lexer.identifier.clone();
                         let name_loc = lexer.loc();
-                        lexer.next();
-                        left = Expr::new(
-                            left.loc,
-                            core.dot_or_mangled_prop_parse(
-                                left,
-                                name,
-                                name_loc,
-                                optional_start,
-                                WasOriginallyDotOrIndex::Dot,
-                            ),
-                        );
+                        if lexer.token == Token::PrivateIdentifier {
+                            let reference = core.store_name_in_ref(lexer.identifier.clone());
+                            lexer.next();
+                            left = Expr::new(
+                                left.loc,
+                                ExprData::Index(IndexExpr {
+                                    target: left,
+                                    index: Expr::new(
+                                        name_loc,
+                                        ExprData::PrivateIdentifier(PrivateIdentifierExpr {
+                                            reference,
+                                        }),
+                                    ),
+                                    optional_chain: optional_start,
+                                    ..IndexExpr::default()
+                                }),
+                            );
+                        } else {
+                            if !lexer.is_identifier_or_keyword() {
+                                lexer.expected(Token::Identifier);
+                            }
+                            let name = lexer.identifier.clone();
+                            lexer.next();
+                            left = Expr::new(
+                                left.loc,
+                                core.dot_or_mangled_prop_parse(
+                                    left,
+                                    name,
+                                    name_loc,
+                                    optional_start,
+                                    WasOriginallyDotOrIndex::Dot,
+                                ),
+                            );
+                        }
                     }
                 }
                 if optional_start == OptionalChain::Start {
@@ -334,6 +391,9 @@ pub(crate) fn parse_high_precedence_suffix_chain(
                 }
             }
             Token::OpenBracket => {
+                if forbid_index_suffix {
+                    return left;
+                }
                 lexer.next();
                 let index = parse_nested(core, lexer, Precedence::Lowest);
                 let close_bracket_loc = lexer.loc();
@@ -501,6 +561,38 @@ mod tests {
             Some(ExprData::Call(_))
         ));
         assert_eq!(lexer.token, Token::Plus);
+    }
+
+    #[test]
+    fn parses_optional_private_member_suffix() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(&b"base?.#field"[..]),
+            ..Source::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), TsOptions::default());
+        let mut core = super::ParserCore::new(source, Options::default());
+        let left =
+            crate::internal::js_parser::syntax_literals::parse_simple_prefix(&mut core, &mut lexer)
+                .expect("expected identifier");
+        let result = parse_high_precedence_suffix_chain(
+            &mut core,
+            &mut lexer,
+            left,
+            crate::internal::js_ast::Precedence::Lowest,
+            false,
+            |_, _, _| unreachable!("optional private access has no nested expression"),
+        );
+        assert!(matches!(
+            result.data.as_deref(),
+            Some(ExprData::Index(index))
+                if index.optional_chain == crate::internal::js_ast::OptionalChain::Start
+                    && matches!(
+                        index.index.data.as_deref(),
+                        Some(ExprData::PrivateIdentifier(_))
+                    )
+        ));
+        assert_eq!(lexer.token, Token::EndOfFile);
     }
 
     #[test]

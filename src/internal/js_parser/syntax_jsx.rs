@@ -147,13 +147,30 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
             match lexer.token {
                 Token::Identifier => {
                     let (key_range, key_name) = parse_jsx_namespaced_name(core, lexer);
-                    if attribute_locs
-                        .insert(key_name.clone(), key_range.loc)
-                        .is_some()
+                    if let Some(original_loc) =
+                        attribute_locs.insert(key_name.clone(), key_range.loc)
+                        && let Some(log) = &core.log
                     {
-                        core.add_warning_range(
+                        let note = core.tracker.msg_data(
+                            crate::internal::logger::Range {
+                                loc: original_loc,
+                                len: 0,
+                            },
+                            format!("The original {key_name:?} attribute is here:"),
+                        );
+                        log.add_id_with_notes(
+                            crate::internal::logger::MsgId::JsDuplicateObjectKey,
+                            if crate::internal::helpers::is_inside_node_modules(
+                                &core.source.key_path.text,
+                            ) {
+                                crate::internal::logger::MsgKind::Debug
+                            } else {
+                                crate::internal::logger::MsgKind::Warning
+                            },
+                            Some(&mut core.tracker),
                             key_range,
                             format!("Duplicate {key_name:?} attribute in JSX element"),
+                            vec![note],
                         );
                     }
                     let key = Expr::new(
@@ -165,6 +182,7 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                     );
                     let (value_or_nil, flags) = if lexer.token == Token::Equals {
                         lexer.next_inside_jsx_element();
+                        let mut flags = PropertyFlags::NONE;
                         let value = match lexer.token {
                             Token::StringLiteral => {
                                 let string_loc = lexer.loc();
@@ -189,6 +207,7 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                                 value
                             }
                             Token::LessThan => {
+                                flags |= PropertyFlags::WAS_SHORTHAND;
                                 let child_loc = lexer.loc();
                                 lexer.next_inside_jsx_element();
                                 let value = parse_jsx_element(core, lexer, child_loc);
@@ -202,7 +221,7 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                                 value
                             }
                         };
-                        (value, PropertyFlags::NONE)
+                        (value, flags)
                     } else {
                         (
                             Expr::new(
@@ -224,7 +243,7 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                 }
                 Token::OpenBrace => {
                     lexer.next();
-                    let spread_loc = lexer.loc();
+                    let spread_loc = core.save_expr_comments_here(lexer);
                     lexer.expect(Token::DotDotDot);
                     let value = parse_expression(core, lexer, Precedence::Comma, true);
                     properties.push(Property {

@@ -229,7 +229,7 @@ pub(crate) fn parse_tagged_template_suffix(
     let loc = tag.loc;
     let tag_was_originally_property_access = is_property_access(&tag);
     let head_loc = lexer.loc();
-    let (_, head_raw) = lexer.cooked_and_raw_template_contents();
+    let (head_cooked, head_raw) = lexer.cooked_and_raw_template_contents();
     let head_raw = String::from_utf8(head_raw).expect("template source text must be valid UTF-8");
     let mut parts = Vec::new();
 
@@ -241,9 +241,10 @@ pub(crate) fn parse_tagged_template_suffix(
             let value = parse_value(lexer);
             let tail_loc = lexer.loc();
             lexer.rescan_close_brace_as_template_token();
-            let (_, tail_raw) = lexer.cooked_and_raw_template_contents();
+            let (tail_cooked, tail_raw) = lexer.cooked_and_raw_template_contents();
             parts.push(TemplatePart {
                 value,
+                tail_cooked: tail_cooked.unwrap_or_default(),
                 tail_raw: String::from_utf8(tail_raw)
                     .expect("template source text must be valid UTF-8"),
                 tail_loc,
@@ -261,6 +262,7 @@ pub(crate) fn parse_tagged_template_suffix(
         ExprData::Template(TemplateExpr {
             tag_or_nil: tag,
             tag_was_originally_property_access,
+            head_cooked: head_cooked.unwrap_or_default(),
             head_raw,
             parts,
             head_loc,

@@ -64,7 +64,7 @@ impl CssCache {
         }
 
         let temporary_log = Log::new_defer(DeferLogKind::All, log.overrides.as_ref().clone());
-        let ast = css_parser::parse(temporary_log.clone(), source.clone(), options);
+        let ast = css_parser::parse(temporary_log.clone(), source.clone(), options.clone());
         let messages = temporary_log.done();
         replay_messages(log, &messages);
         self.entries

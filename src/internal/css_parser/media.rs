@@ -161,7 +161,14 @@ impl MediaParser<'_> {
     }
 
     fn parse_media_in_parens(&mut self) -> Option<MediaQuery> {
-        let token = self.current()?.clone();
+        let mut token = self.current()?.clone();
+        // Whitespace between media-query terms belongs to the media-query
+        // grammar, not to the token tree for an individual term. Upstream
+        // converts each term from its own lexer slice, so these boundary bits
+        // are absent there too.
+        token
+            .whitespace
+            .remove(WhitespaceFlags::BEFORE | WhitespaceFlags::AFTER);
         if !matches!(token.kind, TokenKind::OpenParen | TokenKind::Function) {
             return None;
         }

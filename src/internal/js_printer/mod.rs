@@ -6,15 +6,15 @@ use std::{
 };
 
 use crate::internal::ast::{
-    INVALID_REF, ImportKind, ImportPhase, ImportRecord, ImportRecordFlags, Ref,
+    INVALID_REF, ImportKind, ImportPhase, ImportRecord, ImportRecordFlags, Ref, SymbolFlags,
 };
 use crate::internal::compat::JsFeature;
 use crate::internal::config::{LegalComments, MetafileFormat};
-use crate::internal::helpers::{escape_closing_tag, quote_for_json};
+use crate::internal::helpers::{escape_closing_tag, quote_for_json, utf16_to_string};
 use crate::internal::js_ast::{
-    AssignTarget, Ast, Binding, BindingData, BlockStmt, Expr, ExprData, ExprStmt, IfStmt,
+    AssignTarget, Ast, Binding, BindingData, BlockStmt, CallKind, Expr, ExprData, ExprStmt, IfStmt,
     LocalKind, OpCode, OptionalChain, Precedence, PropertyFlags, PropertyKind, ReturnStmt, Stmt,
-    StmtData, is_identifier_es5_and_es_next, is_optional_chain, join_with_comma,
+    StmtData, StringExpr, is_identifier_es5_and_es_next, is_optional_chain, join_with_comma,
 };
 use crate::internal::renamer::Renamer;
 use crate::internal::sourcemap::{
@@ -54,6 +54,7 @@ pub struct RequireOrImportMeta {
 pub struct LinkerOptions<'a> {
     pub require_or_import_meta_for_source: &'a dyn Fn(u32) -> RequireOrImportMeta,
     pub const_values: Option<&'a HashMap<Ref, crate::internal::js_ast::ConstValue>>,
+    pub ts_enums: Option<&'a HashMap<Ref, HashMap<String, crate::internal::js_ast::TsEnumValue>>>,
     pub to_common_js_ref: Ref,
     pub to_esm_ref: Ref,
     pub runtime_require_ref: Ref,
@@ -303,8 +304,9 @@ pub fn format_number(
 
     if value.is_infinite() {
         let is_negative = value.is_sign_negative();
-        let wrap = ((options.minify_syntax || with_nesting) && level >= Precedence::Multiply)
-            || (is_negative && level >= Precedence::Prefix);
+        let wrap = (with_nesting && level >= Precedence::Multiply)
+            || (options.minify_syntax && level > Precedence::Multiply)
+            || (is_negative && level > Precedence::Prefix);
         let magnitude = if !options.minify_syntax && !with_nesting {
             "Infinity"
         } else if options.minify_whitespace {
@@ -323,7 +325,7 @@ pub fn format_number(
     let magnitude = format_non_negative_float(value.abs(), options.minify_whitespace);
     if !value.is_sign_negative() {
         magnitude
-    } else if level >= Precedence::Prefix {
+    } else if level > Precedence::Prefix {
         format!("(-{magnitude})")
     } else {
         format!("-{magnitude}")
@@ -461,6 +463,16 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
         options,
         linker_options: None,
         module_type_is_esm: false,
+        with_nesting: 0,
+        forbid_in: false,
+        space_after_unary_not: false,
+        expr_comments: None,
+        printed_expr_comments: HashSet::new(),
+        suppress_parenthesized_object_or_class: false,
+        for_of_init_start: false,
+        stmt_start: None,
+        arrow_expr_start: None,
+        export_default_start: None,
         indent: options.indent,
         import_records: &[],
         has_legal_comment: HashSet::new(),
@@ -564,6 +576,16 @@ fn print_internal<'a>(
         options,
         linker_options,
         module_type_is_esm: tree.module_type_data.module_type.is_esm(),
+        with_nesting: 0,
+        forbid_in: false,
+        space_after_unary_not: false,
+        expr_comments: Some(&tree.expr_comments),
+        printed_expr_comments: HashSet::new(),
+        suppress_parenthesized_object_or_class: false,
+        for_of_init_start: false,
+        stmt_start: None,
+        arrow_expr_start: None,
+        export_default_start: None,
         indent: options.indent,
         import_records: &tree.import_records,
         has_legal_comment: HashSet::new(),
@@ -612,6 +634,16 @@ struct Printer<'a> {
     options: Options,
     linker_options: Option<LinkerOptions<'a>>,
     module_type_is_esm: bool,
+    with_nesting: usize,
+    forbid_in: bool,
+    space_after_unary_not: bool,
+    expr_comments: Option<&'a HashMap<crate::internal::logger::Loc, Vec<String>>>,
+    printed_expr_comments: HashSet<crate::internal::logger::Loc>,
+    suppress_parenthesized_object_or_class: bool,
+    for_of_init_start: bool,
+    stmt_start: Option<usize>,
+    arrow_expr_start: Option<usize>,
+    export_default_start: Option<usize>,
     indent: usize,
     import_records: &'a [ImportRecord],
     has_legal_comment: HashSet<String>,
@@ -620,7 +652,184 @@ struct Printer<'a> {
     source_map_builder: Option<ChunkBuilder>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SubstitutionContext {
+    CallTargetOrTemplateTag,
+    DeleteTarget,
+}
+
 impl Printer<'_> {
+    fn substitute_imported_enum(&self, expression: &Expr) -> Option<Expr> {
+        let linker_options = self.linker_options?;
+        let ts_enums = linker_options.ts_enums?;
+        let (target, name) = match expression.data.as_deref()? {
+            ExprData::Dot(dot) if dot.optional_chain == OptionalChain::None => {
+                (&dot.target, dot.name.clone())
+            }
+            ExprData::Index(index) if index.optional_chain == OptionalChain::None => {
+                let ExprData::String(name) = index.index.data.as_deref()? else {
+                    return None;
+                };
+                (
+                    &index.target,
+                    String::from_utf8_lossy(&utf16_to_string(&name.value)).into_owned(),
+                )
+            }
+            _ => return None,
+        };
+        let ExprData::ImportIdentifier(identifier) = target.data.as_deref()? else {
+            return None;
+        };
+        let canonical = self.renamer.canonical_ref_for_symbol(identifier.reference);
+        let values = ts_enums
+            .get(&canonical)
+            .or_else(|| ts_enums.get(&identifier.reference))?;
+        let value = values.get(&name)?;
+        let value = if value.is_string {
+            Expr::new(
+                expression.loc,
+                ExprData::String(StringExpr {
+                    value: value.string.clone(),
+                    ..StringExpr::default()
+                }),
+            )
+        } else {
+            Expr::new(expression.loc, ExprData::Number(value.number))
+        };
+        if name.contains("*/") {
+            Some(value)
+        } else {
+            Some(Expr::new(
+                expression.loc,
+                ExprData::InlinedEnum(crate::internal::js_ast::InlinedEnumExpr {
+                    value,
+                    comment: name,
+                }),
+            ))
+        }
+    }
+
+    fn substitute_known_function_calls(
+        &self,
+        expression: &Expr,
+        result_is_unused: bool,
+    ) -> Option<Expr> {
+        match expression.data.as_deref() {
+            Some(ExprData::Call(call)) => {
+                let reference = match call.target.data.as_deref() {
+                    Some(ExprData::Identifier(identifier)) => Some(identifier.reference),
+                    Some(ExprData::ImportIdentifier(identifier)) => Some(identifier.reference),
+                    _ => None,
+                };
+                if let Some(reference) = reference {
+                    let flags = self.renamer.flags_for_symbol(reference);
+                    let can_inline = !flags.contains(SymbolFlags::COULD_POTENTIALLY_BE_MUTATED);
+                    if can_inline && flags.contains(SymbolFlags::IS_EMPTY_FUNCTION) {
+                        let mut replacement = Expr::default();
+                        for argument in &call.args {
+                            let argument =
+                                if matches!(argument.data.as_deref(), Some(ExprData::Spread(_))) {
+                                    Expr::new(
+                                        argument.loc,
+                                        ExprData::Array(crate::internal::js_ast::ArrayExpr {
+                                            items: vec![argument.clone()],
+                                            is_single_line: true,
+                                            ..crate::internal::js_ast::ArrayExpr::default()
+                                        }),
+                                    )
+                                } else {
+                                    argument.clone()
+                                };
+                            replacement = join_with_comma(replacement, argument);
+                        }
+                        if !result_is_unused {
+                            replacement = join_with_comma(
+                                replacement,
+                                Expr::new(expression.loc, ExprData::Undefined),
+                            );
+                        }
+                        return Some(
+                            self.substitute_known_function_calls(&replacement, result_is_unused)
+                                .unwrap_or(replacement),
+                        );
+                    }
+                    if can_inline
+                        && flags.contains(SymbolFlags::IS_IDENTITY_FUNCTION)
+                        && matches!(call.args.as_slice(), [argument]
+                            if !matches!(argument.data.as_deref(), Some(ExprData::Spread(_))))
+                    {
+                        return Some(
+                            self.substitute_known_function_calls(&call.args[0], result_is_unused)
+                                .unwrap_or_else(|| call.args[0].clone()),
+                        );
+                    }
+                }
+            }
+            Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryComma => {
+                let left = self.substitute_known_function_calls(&binary.left, true);
+                let right = self.substitute_known_function_calls(&binary.right, result_is_unused);
+                if left.is_some() || right.is_some() {
+                    return Some(join_with_comma(
+                        left.unwrap_or_else(|| binary.left.clone()),
+                        right.unwrap_or_else(|| binary.right.clone()),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn guard_substitution(&self, expression: Expr, context: SubstitutionContext) -> Expr {
+        let needs_guard = match context {
+            SubstitutionContext::DeleteTarget => !matches!(
+                expression.data.as_deref(),
+                Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryComma
+            ),
+            SubstitutionContext::CallTargetOrTemplateTag => match expression.data.as_deref() {
+                Some(ExprData::Dot(_) | ExprData::Index(_)) => true,
+                Some(ExprData::Identifier(identifier)) => {
+                    self.renamer.original_name_for_symbol(identifier.reference) == "eval"
+                }
+                _ => false,
+            },
+        };
+        if needs_guard {
+            let loc = expression.loc;
+            join_with_comma(Expr::new(loc, ExprData::Number(0.0)), expression)
+        } else {
+            expression
+        }
+    }
+
+    fn print_expr_with_substitution_context(
+        &mut self,
+        expression: &Expr,
+        level: Precedence,
+        result_is_unused: bool,
+        is_new_target: bool,
+        context: SubstitutionContext,
+    ) {
+        if let Some(replacement) =
+            self.substitute_known_function_calls(expression, result_is_unused)
+        {
+            let replacement = self.guard_substitution(replacement, context);
+            self.print_expr_at_with_usage_and_new_target(
+                &replacement,
+                level,
+                result_is_unused,
+                is_new_target,
+            );
+        } else {
+            self.print_expr_at_with_usage_and_new_target(
+                expression,
+                level,
+                result_is_unused,
+                is_new_target,
+            );
+        }
+    }
+
     fn add_source_mapping(&mut self, location: crate::internal::logger::Loc, original_name: &str) {
         if location.start < 0 {
             return;
@@ -628,6 +837,91 @@ impl Printer<'_> {
         if let Some(builder) = &mut self.source_map_builder {
             builder.add_source_mapping(location, original_name, &self.output);
         }
+    }
+
+    fn will_print_expr_comments_at_loc(&self, loc: crate::internal::logger::Loc) -> bool {
+        !self.options.minify_whitespace
+            && !self.printed_expr_comments.contains(&loc)
+            && self
+                .expr_comments
+                .is_some_and(|comments| comments.contains_key(&loc))
+    }
+
+    fn print_expr_comments_at_loc(&mut self, loc: crate::internal::logger::Loc) {
+        if !self.will_print_expr_comments_at_loc(loc) {
+            return;
+        }
+        let output_len = self.output.len();
+        let preserve_stmt_start = self.stmt_start == Some(output_len);
+        let preserve_arrow_expr_start = self.arrow_expr_start == Some(output_len);
+        let preserve_export_default_start = self.export_default_start == Some(output_len);
+        let comments = self
+            .expr_comments
+            .and_then(|comments| comments.get(&loc))
+            .cloned()
+            .unwrap_or_default();
+        self.printed_expr_comments.insert(loc);
+        for comment in comments {
+            self.print_indented_comment(&comment);
+            self.print_indent();
+        }
+        if preserve_stmt_start {
+            self.stmt_start = Some(self.output.len());
+        }
+        if preserve_arrow_expr_start {
+            self.arrow_expr_start = Some(self.output.len());
+        }
+        if preserve_export_default_start {
+            self.export_default_start = Some(self.output.len());
+        }
+    }
+
+    fn print_expr_comments_after_close_token_at_loc(&mut self, loc: crate::internal::logger::Loc) {
+        if !self.will_print_expr_comments_at_loc(loc) {
+            return;
+        }
+        let output_len = self.output.len();
+        let preserve_stmt_start = self.stmt_start == Some(output_len);
+        let preserve_arrow_expr_start = self.arrow_expr_start == Some(output_len);
+        let preserve_export_default_start = self.export_default_start == Some(output_len);
+        let comments = self
+            .expr_comments
+            .and_then(|comments| comments.get(&loc))
+            .cloned()
+            .unwrap_or_default();
+        self.printed_expr_comments.insert(loc);
+        for comment in comments {
+            self.print_indent();
+            self.print_indented_comment(&comment);
+        }
+        if preserve_stmt_start {
+            self.stmt_start = Some(self.output.len());
+        }
+        if preserve_arrow_expr_start {
+            self.arrow_expr_start = Some(self.output.len());
+        }
+        if preserve_export_default_start {
+            self.export_default_start = Some(self.output.len());
+        }
+    }
+
+    fn print_expr_without_leading_newline(&mut self, expr: &Expr, level: Precedence) {
+        if !self.will_print_expr_comments_at_loc(expr.loc) {
+            self.print_expr_at(expr, level);
+            return;
+        }
+        self.output.push(b'(');
+        self.print_newline();
+        self.indent += 1;
+        self.print_indent();
+        let old_suppress = self.suppress_parenthesized_object_or_class;
+        self.suppress_parenthesized_object_or_class = true;
+        self.print_expr_at(expr, level);
+        self.suppress_parenthesized_object_or_class = old_suppress;
+        self.print_newline();
+        self.indent -= 1;
+        self.print_indent();
+        self.output.push(b')');
     }
 
     fn print_indented_comment(&mut self, text: &str) {
@@ -781,14 +1075,10 @@ impl Printer<'_> {
             }
             StmtData::Expr(expression) => {
                 self.print_indent();
-                let wrap = expression_starts_with_brace_or_function(&expression.value);
-                if wrap {
-                    self.output.push(b'(');
-                }
+                let old_stmt_start = self.stmt_start;
+                self.stmt_start = Some(self.output.len());
                 self.print_expr_at_with_usage(&expression.value, Precedence::Lowest, true);
-                if wrap {
-                    self.output.push(b')');
-                }
+                self.stmt_start = old_stmt_start;
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -803,6 +1093,12 @@ impl Printer<'_> {
                 self.print_block(block, true);
             }
             StmtData::Function(function) => {
+                if !self.options.minify_whitespace && function.function.has_no_side_effects_comment
+                {
+                    self.print_indent();
+                    self.output.extend_from_slice(b"// @__NO_SIDE_EFFECTS__");
+                    self.print_newline();
+                }
                 self.print_indent();
                 if function.is_export {
                     self.output.extend_from_slice(b"export ");
@@ -811,11 +1107,14 @@ impl Printer<'_> {
                 self.print_newline();
             }
             StmtData::Class(class) => {
-                self.print_indent();
+                let omit_indent = self.print_decorators(&class.class.decorators, true);
+                if !omit_indent {
+                    self.print_indent();
+                }
                 if class.is_export {
                     self.output.extend_from_slice(b"export ");
                 }
-                self.print_class(&class.class);
+                self.print_class_body(&class.class);
                 self.print_newline();
             }
             StmtData::Return(return_statement) => {
@@ -858,7 +1157,9 @@ impl Printer<'_> {
                 self.output.push(b'(');
                 self.print_expr_at(&with_statement.value, Precedence::Lowest);
                 self.output.push(b')');
+                self.with_nesting += 1;
                 self.print_loop_body(&with_statement.body, with_statement.is_single_line_body);
+                self.with_nesting -= 1;
             }
             StmtData::DoWhile(do_while) => {
                 self.print_indent();
@@ -930,9 +1231,30 @@ impl Printer<'_> {
                     });
                 self.print_optional_space();
                 self.output.push(b'(');
+                let has_init_comment = match for_statement.init.data.as_deref() {
+                    Some(StmtData::Expr(expression)) => {
+                        self.will_print_expr_comments_at_loc(expression.value.loc)
+                    }
+                    _ => false,
+                };
+                let is_multi_line = has_init_comment
+                    || self.will_print_expr_comments_at_loc(for_statement.value.loc);
+                if is_multi_line {
+                    self.print_newline();
+                    self.indent += 1;
+                    self.print_indent();
+                }
+                let old_for_of_init_start = self.for_of_init_start;
+                self.for_of_init_start = true;
                 self.print_for_init(&for_statement.init);
+                self.for_of_init_start = old_for_of_init_start;
                 self.output.extend_from_slice(b" of ");
                 self.print_expr_at(&for_statement.value, Precedence::Spread);
+                if is_multi_line {
+                    self.print_newline();
+                    self.indent -= 1;
+                    self.print_indent();
+                }
                 self.output.push(b')');
                 self.print_loop_body(&for_statement.body, for_statement.is_single_line_body);
             }
@@ -980,6 +1302,7 @@ impl Printer<'_> {
                 self.indent += 1;
                 for case in &switch_statement.cases {
                     self.print_indent();
+                    self.print_expr_comments_at_loc(case.loc);
                     if case.value_or_nil.data.is_some() {
                         self.output.extend_from_slice(b"case ");
                         self.print_expr_at(&case.value_or_nil, Precedence::Lowest);
@@ -1049,9 +1372,14 @@ impl Printer<'_> {
             StmtData::Import(import) => {
                 self.print_indent();
                 self.output.extend_from_slice(b"import");
+                match self.import_records[import.import_record_index as usize].phase {
+                    ImportPhase::Evaluation => {}
+                    ImportPhase::Defer => self.output.extend_from_slice(b" defer"),
+                    ImportPhase::Source => self.output.extend_from_slice(b" source"),
+                }
                 let has_clause = import.default_name.is_some()
                     || import.star_name_loc.is_some()
-                    || import.items.as_ref().is_some_and(|items| !items.is_empty());
+                    || import.items.is_some();
                 if has_clause {
                     if import.default_name.is_some() {
                         self.output.push(b' ');
@@ -1079,7 +1407,7 @@ impl Printer<'_> {
                             self.output.push(b',');
                             self.print_optional_space();
                         }
-                        self.print_import_items(items, true);
+                        self.print_import_items(items, true, import.is_single_line);
                     }
                     let ends_with_identifier =
                         import.star_name_loc.is_some() || import.items.is_none();
@@ -1092,7 +1420,7 @@ impl Printer<'_> {
                     self.print_optional_space();
                 }
                 self.print_import_path(import.import_record_index, false);
-                self.print_import_attributes(import.import_record_index, false);
+                self.print_import_attributes(import.import_record_index, false, false);
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -1100,7 +1428,7 @@ impl Printer<'_> {
                 self.print_indent();
                 self.output.extend_from_slice(b"export");
                 self.print_optional_space();
-                self.print_import_items(&export.items, false);
+                self.print_import_items(&export.items, false, export.is_single_line);
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -1113,7 +1441,7 @@ impl Printer<'_> {
                 self.output.extend_from_slice(b"from");
                 self.print_optional_space();
                 self.print_import_path(export.import_record_index, false);
-                self.print_import_attributes(export.import_record_index, false);
+                self.print_import_attributes(export.import_record_index, false, false);
                 self.output.push(b';');
                 self.print_newline();
             }
@@ -1124,29 +1452,70 @@ impl Printer<'_> {
                 self.output.push(b'*');
                 if let Some(alias) = &export.alias {
                     self.print_optional_space();
-                    self.output.extend_from_slice(b"as ");
-                    self.print_identifier(&alias.original_name);
-                    self.output.push(b' ');
+                    self.output.extend_from_slice(b"as");
+                    let alias_is_identifier = is_identifier_es5_and_es_next(&alias.original_name);
+                    if !self.options.minify_whitespace || alias_is_identifier {
+                        self.output.push(b' ');
+                    }
+                    self.print_clause_name(&alias.original_name);
+                    if !self.options.minify_whitespace || alias_is_identifier {
+                        self.output.push(b' ');
+                    }
                 } else {
                     self.print_optional_space();
                 }
                 self.output.extend_from_slice(b"from");
                 self.print_optional_space();
                 self.print_import_path(export.import_record_index, false);
-                self.print_import_attributes(export.import_record_index, false);
+                self.print_import_attributes(export.import_record_index, false, false);
                 self.output.push(b';');
                 self.print_newline();
             }
             StmtData::ExportDefault(export) => {
-                self.print_indent();
+                if !self.options.minify_whitespace
+                    && matches!(
+                        export.value.data.as_deref(),
+                        Some(StmtData::Function(function))
+                            if function.function.has_no_side_effects_comment
+                    )
+                {
+                    self.print_indent();
+                    self.output.extend_from_slice(b"// @__NO_SIDE_EFFECTS__");
+                    self.print_newline();
+                }
+                let omit_indent = match export.value.data.as_deref() {
+                    Some(StmtData::Class(class)) => {
+                        self.print_decorators(&class.class.decorators, true)
+                    }
+                    _ => false,
+                };
+                if !omit_indent {
+                    self.print_indent();
+                }
                 self.output.extend_from_slice(b"export default ");
                 match export.value.data.as_deref() {
                     Some(StmtData::Expr(expression)) => {
-                        self.print_expr_at(&expression.value, Precedence::Spread);
-                        self.output.push(b';');
+                        let old_export_default_start = self.export_default_start;
+                        if !matches!(
+                            expression.value.data.as_deref(),
+                            Some(ExprData::Function(function)) if !function.is_parenthesized
+                        ) {
+                            self.export_default_start = Some(self.output.len());
+                        }
+                        self.print_expr_without_leading_newline(
+                            &expression.value,
+                            Precedence::Spread,
+                        );
+                        self.export_default_start = old_export_default_start;
+                        if !matches!(
+                            expression.value.data.as_deref(),
+                            Some(ExprData::Function(function)) if !function.is_parenthesized
+                        ) {
+                            self.output.push(b';');
+                        }
                     }
                     Some(StmtData::Function(function)) => self.print_function(&function.function),
-                    Some(StmtData::Class(class)) => self.print_class(&class.class),
+                    Some(StmtData::Class(class)) => self.print_class_body(&class.class),
                     _ => panic!("Internal error: invalid default export"),
                 }
                 self.print_newline();
@@ -1258,20 +1627,7 @@ impl Printer<'_> {
             self.print_block(block, !has_else);
             return true;
         }
-        if is_single_line
-            && matches!(
-                body.data.as_deref(),
-                Some(
-                    StmtData::Empty
-                        | StmtData::Debugger
-                        | StmtData::Expr(_)
-                        | StmtData::Return(_)
-                        | StmtData::Throw(_)
-                        | StmtData::Break(_)
-                        | StmtData::Continue(_)
-                )
-            )
-        {
+        if is_single_line && body.data.is_some() {
             self.print_optional_space();
             let indent = std::mem::take(&mut self.indent);
             self.print_stmt(body);
@@ -1313,6 +1669,17 @@ impl Printer<'_> {
                         self.print_expr_at(&item.default_value_or_nil, Precedence::Spread);
                     }
                 }
+                if !array.has_spread
+                    && matches!(
+                        array
+                            .items
+                            .last()
+                            .and_then(|item| item.binding.data.as_deref()),
+                        Some(BindingData::Missing)
+                    )
+                {
+                    self.output.push(b',');
+                }
                 self.output.push(b']');
             }
             Some(BindingData::Object(object)) => {
@@ -1353,7 +1720,7 @@ impl Printer<'_> {
                             && let Some(ExprData::String(key)) = property.key.data.as_deref()
                         {
                             self.output
-                                .extend(quote_utf16(&key.value, self.options, true));
+                                .extend(quote_utf16(&key.value, self.options, false));
                         } else {
                             self.print_property_key(&property.key);
                         }
@@ -1408,12 +1775,17 @@ impl Printer<'_> {
                 self.print_optional_space();
                 self.output.push(b'=');
                 self.print_optional_space();
-                self.print_expr_at(&declaration.value_or_nil, Precedence::Spread);
+                self.print_expr_without_leading_newline(
+                    &declaration.value_or_nil,
+                    Precedence::Spread,
+                );
             }
         }
     }
 
     fn print_for_init(&mut self, statement: &Stmt) {
+        let old_forbid_in = self.forbid_in;
+        self.forbid_in = true;
         match statement.data.as_deref() {
             None | Some(StmtData::Empty) => {}
             Some(StmtData::Local(local)) => self.print_local(local, false),
@@ -1422,20 +1794,30 @@ impl Printer<'_> {
             }
             _ => panic!("Internal error: invalid for-loop initializer"),
         }
+        self.forbid_in = old_forbid_in;
     }
 
     fn print_import_items(
         &mut self,
         items: &[crate::internal::js_ast::ClauseItem],
         is_import: bool,
+        is_single_line: bool,
     ) {
+        let is_multi_line = !self.options.minify_whitespace && !is_single_line;
         self.output.push(b'{');
-        if !items.is_empty() {
+        if is_multi_line {
+            self.indent += 1;
+        } else if !items.is_empty() {
             self.print_optional_space();
         }
         for (index, item) in items.iter().enumerate() {
             if index > 0 {
                 self.output.push(b',');
+            }
+            if is_multi_line {
+                self.print_newline();
+                self.print_indent();
+            } else if index > 0 {
                 self.print_optional_space();
             }
             let local_name = self.renamer.name_for_symbol(item.name.reference);
@@ -1446,11 +1828,21 @@ impl Printer<'_> {
             };
             self.print_clause_name(original);
             if original != alias {
-                self.output.extend_from_slice(b" as ");
+                if !self.options.minify_whitespace || is_identifier_es5_and_es_next(original) {
+                    self.output.push(b' ');
+                }
+                self.output.extend_from_slice(b"as");
+                if !self.options.minify_whitespace || is_identifier_es5_and_es_next(alias) {
+                    self.output.push(b' ');
+                }
                 self.print_clause_name(alias);
             }
         }
-        if !items.is_empty() {
+        if is_multi_line {
+            self.print_newline();
+            self.indent -= 1;
+            self.print_indent();
+        } else if !items.is_empty() {
             self.print_optional_space();
         }
         self.output.push(b'}');
@@ -1468,7 +1860,15 @@ impl Printer<'_> {
             }
             self.print_clause_name(&item.original_name);
             if item.original_name != item.alias {
-                self.output.extend_from_slice(b" as ");
+                if !self.options.minify_whitespace
+                    || is_identifier_es5_and_es_next(&item.original_name)
+                {
+                    self.output.push(b' ');
+                }
+                self.output.extend_from_slice(b"as");
+                if !self.options.minify_whitespace || is_identifier_es5_and_es_next(&item.alias) {
+                    self.output.push(b' ');
+                }
                 self.print_clause_name(&item.alias);
             }
         }
@@ -1536,14 +1936,19 @@ impl Printer<'_> {
         }
     }
 
-    fn print_import_attributes(&mut self, index: u32, is_dynamic: bool) {
+    fn print_import_attributes(&mut self, index: u32, is_dynamic: bool, is_multi_line: bool) {
         let record = &self.import_records[usize::try_from(index).expect("import record index")];
         let Some(attributes) = &record.assert_or_with else {
             return;
         };
         if is_dynamic {
             self.output.push(b',');
-            self.print_optional_space();
+            if is_multi_line {
+                self.print_newline();
+                self.print_indent();
+            } else {
+                self.print_optional_space();
+            }
             self.output.push(b'{');
             self.print_optional_space();
         } else {
@@ -1629,13 +2034,49 @@ impl Printer<'_> {
         self.output.push(b')');
     }
 
-    fn print_class(&mut self, class: &crate::internal::js_ast::Class) {
-        for decorator in &class.decorators {
-            self.output.push(b'@');
-            self.print_expr_at(&decorator.value, Precedence::Lowest);
-            self.print_newline();
-            self.print_indent();
+    fn print_decorator(&mut self, decorator: &crate::internal::js_ast::Decorator) {
+        self.output.push(b'@');
+        let wrap = matches!(decorator.value.data.as_deref(), Some(ExprData::New(_)));
+        if wrap {
+            self.output.push(b'(');
         }
+        self.print_expr_at(&decorator.value, Precedence::Lowest);
+        if wrap {
+            self.output.push(b')');
+        }
+    }
+
+    fn print_decorators(
+        &mut self,
+        decorators: &[crate::internal::js_ast::Decorator],
+        newline_by_default: bool,
+    ) -> bool {
+        let mut omit_indent = !newline_by_default;
+        for (index, decorator) in decorators.iter().enumerate() {
+            if newline_by_default && !omit_indent {
+                self.print_indent();
+            }
+            self.print_decorator(decorator);
+            omit_indent = decorator.omit_newline_after || !newline_by_default;
+            if omit_indent {
+                if index + 1 == decorators.len() {
+                    self.output.push(b' ');
+                } else {
+                    self.print_optional_space();
+                }
+            } else {
+                self.print_newline();
+            }
+        }
+        !decorators.is_empty() && omit_indent
+    }
+
+    fn print_class(&mut self, class: &crate::internal::js_ast::Class) {
+        self.print_decorators(&class.decorators, false);
+        self.print_class_body(class);
+    }
+
+    fn print_class_body(&mut self, class: &crate::internal::js_ast::Class) {
         self.output.extend_from_slice(b"class");
         if let Some(name) = class.name {
             self.output.push(b' ');
@@ -1650,12 +2091,25 @@ impl Printer<'_> {
         self.print_newline();
         self.indent += 1;
         for property in &class.properties {
-            self.print_indent();
+            let mut needs_indent = true;
             for decorator in &property.decorators {
-                self.output.push(b'@');
-                self.print_expr_at(&decorator.value, Precedence::Lowest);
-                self.print_newline();
+                if needs_indent {
+                    self.print_indent();
+                }
+                self.print_decorator(decorator);
+                if decorator.omit_newline_after {
+                    self.print_optional_space();
+                    needs_indent = false;
+                } else {
+                    self.print_newline();
+                    needs_indent = true;
+                }
+            }
+            if needs_indent {
                 self.print_indent();
+            }
+            if self.options.minify_whitespace && !property.decorators.is_empty() {
+                self.output.push(b' ');
             }
             if property.kind == PropertyKind::ClassStaticBlock {
                 self.output.extend_from_slice(b"static");
@@ -1667,6 +2121,14 @@ impl Printer<'_> {
             }
             if property.flags.contains(PropertyFlags::IS_STATIC) {
                 self.output.extend_from_slice(b"static ");
+            }
+            if property.kind == PropertyKind::AutoAccessor {
+                self.output.extend_from_slice(b"accessor");
+                if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+                    self.print_optional_space();
+                } else {
+                    self.output.push(b' ');
+                }
             }
             if property.kind.is_method_definition()
                 && let Some(ExprData::Function(function)) = property.value_or_nil.data.as_deref()
@@ -1704,6 +2166,9 @@ impl Printer<'_> {
             self.print_newline();
         }
         self.indent -= 1;
+        if self.options.minify_whitespace && self.output.last() == Some(&b';') {
+            self.output.pop();
+        }
         self.print_indent();
         self.output.push(b'}');
     }
@@ -1711,13 +2176,23 @@ impl Printer<'_> {
     fn print_class_key(&mut self, property: &crate::internal::js_ast::Property) {
         if property.flags.contains(PropertyFlags::IS_COMPUTED) {
             self.output.push(b'[');
+            let wrap = matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryComma
+            );
+            if wrap {
+                self.output.push(b'(');
+            }
             self.print_expr_at(&property.key, Precedence::Lowest);
+            if wrap {
+                self.output.push(b')');
+            }
             self.output.push(b']');
         } else if property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY)
             && let Some(ExprData::String(key)) = property.key.data.as_deref()
         {
             self.output
-                .extend(quote_utf16(&key.value, self.options, true));
+                .extend(quote_utf16(&key.value, self.options, false));
         } else {
             self.print_property_key(&property.key);
         }
@@ -1755,6 +2230,43 @@ impl Printer<'_> {
         result_is_unused: bool,
         is_new_target: bool,
     ) {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || {
+            self.print_expr_at_with_usage_and_new_target_inner(
+                expr,
+                level,
+                result_is_unused,
+                is_new_target,
+            );
+        });
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn print_expr_at_with_usage_and_new_target_inner(
+        &mut self,
+        expr: &Expr,
+        level: Precedence,
+        result_is_unused: bool,
+        is_new_target: bool,
+    ) {
+        if let Some(replacement) = self.substitute_imported_enum(expr) {
+            self.print_expr_at_with_usage_and_new_target(
+                &replacement,
+                level,
+                result_is_unused,
+                is_new_target,
+            );
+            return;
+        }
+        if let Some(replacement) = self.substitute_known_function_calls(expr, result_is_unused) {
+            self.print_expr_at_with_usage_and_new_target(
+                &replacement,
+                level,
+                result_is_unused,
+                is_new_target,
+            );
+            return;
+        }
+        self.print_expr_comments_at_loc(expr.loc);
         let Some(data) = expr.data.as_deref() else {
             return;
         };
@@ -1790,12 +2302,27 @@ impl Printer<'_> {
                 _ => false,
             };
         let wrap_lowered_bigint = lower_bigint && (level >= Precedence::New || is_new_target);
+        let wrap_forbidden_in = self.forbid_in
+            && matches!(data, ExprData::Binary(binary) if binary.op == OpCode::BinaryIn);
+        let wrap_destructuring_assignment = (self.stmt_start == Some(self.output.len())
+            || self.arrow_expr_start == Some(self.output.len()))
+            && matches!(
+                data,
+                ExprData::Binary(binary)
+                    if matches!(binary.left.data.as_deref(), Some(ExprData::Object(_)))
+            );
         let wrap = own_level < level
             || (has_pure_comment && level >= Precedence::Postfix)
             || wrap_for_new_target
-            || wrap_lowered_bigint;
+            || wrap_lowered_bigint
+            || wrap_forbidden_in
+            || wrap_destructuring_assignment;
         if wrap {
             self.output.push(b'(');
+        }
+        let old_forbid_in = self.forbid_in;
+        if wrap {
+            self.forbid_in = false;
         }
         match data {
             ExprData::Missing => {}
@@ -1826,9 +2353,9 @@ impl Printer<'_> {
                         .extend_from_slice(if *value { b"true" } else { b"false" });
                 }
             }
-            ExprData::Number(value) => self
-                .output
-                .extend_from_slice(format_number(*value, level, self.options, false).as_bytes()),
+            ExprData::Number(value) => self.output.extend_from_slice(
+                format_number(*value, level, self.options, self.with_nesting != 0).as_bytes(),
+            ),
             ExprData::BigInt(value) if !lower_bigint => {
                 self.output.extend_from_slice(value.as_bytes());
                 self.output.push(b'n');
@@ -1856,6 +2383,9 @@ impl Printer<'_> {
                 self.output.push(b')');
             }
             ExprData::String(value) => {
+                if value.has_property_key_comment && !self.options.minify_whitespace {
+                    self.output.extend_from_slice(b"/* @__KEY__ */ ");
+                }
                 if value.prefer_template
                     && !self.options.minify_syntax
                     && !self
@@ -1876,19 +2406,7 @@ impl Printer<'_> {
             ExprData::NewTarget(_) => self.output.extend_from_slice(b"new.target"),
             ExprData::ImportMeta(_) => self.output.extend_from_slice(b"import.meta"),
             ExprData::Identifier(identifier) => {
-                let reference = self.renamer.canonical_ref_for_symbol(identifier.reference);
-                if let Some(value) = self
-                    .linker_options
-                    .and_then(|options| options.const_values)
-                    .and_then(|values| values.get(&reference))
-                {
-                    self.print_expr_at(
-                        &crate::internal::js_ast::const_value_to_expr(expr.loc, value),
-                        level,
-                    );
-                } else {
-                    self.print_symbol_expr(identifier.reference);
-                }
+                self.print_symbol_expr(identifier.reference);
             }
             ExprData::ImportIdentifier(identifier) => {
                 let reference = self.renamer.canonical_ref_for_symbol(identifier.reference);
@@ -1909,29 +2427,88 @@ impl Printer<'_> {
                 self.print_identifier(&self.renamer.name_for_symbol(identifier.reference));
             }
             ExprData::NameOfSymbol(name) => {
-                self.print_identifier(&self.renamer.name_for_symbol(name.reference));
+                if name.has_property_key_comment && !self.options.minify_whitespace {
+                    self.output.extend_from_slice(b"/* @__KEY__ */ ");
+                }
+                let value: Vec<u16> = self
+                    .renamer
+                    .name_for_symbol(name.reference)
+                    .encode_utf16()
+                    .collect();
+                self.output.extend(quote_utf16(&value, self.options, true));
             }
             ExprData::Array(array) => {
                 self.output.push(b'[');
+                let old_forbid_in = self.forbid_in;
+                self.forbid_in = false;
+                let is_multi_line = !self.options.minify_whitespace
+                    && ((!array.items.is_empty() && !array.is_single_line)
+                        || array
+                            .items
+                            .iter()
+                            .any(|item| self.will_print_expr_comments_at_loc(item.loc))
+                        || self.will_print_expr_comments_at_loc(array.close_bracket_loc));
+                if is_multi_line {
+                    self.indent += 1;
+                }
                 for (index, item) in array.items.iter().enumerate() {
                     if index > 0 {
                         self.output.push(b',');
+                    }
+                    if is_multi_line {
+                        self.print_newline();
+                        self.print_indent();
+                    } else if index > 0 {
                         self.print_optional_space();
                     }
                     self.print_expr_at(item, Precedence::Spread);
                 }
+                if matches!(
+                    array.items.last().and_then(|item| item.data.as_deref()),
+                    Some(ExprData::Missing)
+                ) {
+                    self.output.push(b',');
+                }
+                if is_multi_line {
+                    self.print_newline();
+                    self.print_expr_comments_after_close_token_at_loc(array.close_bracket_loc);
+                    self.indent -= 1;
+                    self.print_indent();
+                }
+                self.forbid_in = old_forbid_in;
                 self.output.push(b']');
             }
             ExprData::Object(object) => {
+                let is_multi_line = !self.options.minify_whitespace
+                    && ((!object.properties.is_empty() && !object.is_single_line)
+                        || self.will_print_expr_comments_at_loc(object.close_brace_loc)
+                        || object
+                            .properties
+                            .iter()
+                            .any(|property| self.will_print_expr_comments_at_loc(property.loc)));
+                let output_len = self.output.len();
+                let wrap = self.stmt_start == Some(output_len)
+                    || self.arrow_expr_start == Some(output_len);
+                if wrap {
+                    self.output.push(b'(');
+                }
                 self.output.push(b'{');
-                if !object.properties.is_empty() {
+                if is_multi_line {
+                    self.indent += 1;
+                } else if !object.properties.is_empty() {
                     self.print_optional_space();
                 }
                 for (index, property) in object.properties.iter().enumerate() {
                     if index > 0 {
                         self.output.push(b',');
+                    }
+                    if is_multi_line {
+                        self.print_newline();
+                        self.print_indent();
+                    } else if index > 0 {
                         self.print_optional_space();
                     }
+                    self.print_expr_comments_at_loc(property.loc);
                     if property.kind == PropertyKind::Spread {
                         self.output.extend_from_slice(b"...");
                         self.print_expr_at(&property.value_or_nil, Precedence::Spread);
@@ -1959,36 +2536,66 @@ impl Printer<'_> {
                         continue;
                     }
                     self.print_class_key(property);
-                    let is_shorthand = !property.flags.contains(PropertyFlags::IS_COMPUTED)
-                        && !property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY)
-                        && property.initializer_or_nil.data.is_none()
-                        && matches!(
-                            (
-                                property.key.data.as_deref(),
-                                property.value_or_nil.data.as_deref()
-                            ),
-                            (
-                                Some(ExprData::String(key)),
-                                Some(ExprData::Identifier(value))
-                            ) if String::from_utf16_lossy(&key.value)
-                                == self.renamer.name_for_symbol(value.reference)
-                        );
+                    let key_name = property.key.data.as_deref().and_then(|key| match key {
+                        ExprData::String(key) => Some(String::from_utf16_lossy(&key.value)),
+                        _ => None,
+                    });
+                    let is_shorthand = property.value_or_nil.data.is_none()
+                        || (!property.flags.contains(PropertyFlags::IS_COMPUTED)
+                            && !property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY)
+                            && !self
+                                .options
+                                .unsupported_features
+                                .contains(JsFeature::OBJECT_EXTENSIONS)
+                            && !self.will_print_expr_comments_at_loc(property.value_or_nil.loc)
+                            && matches!(
+                                (
+                                    property.key.data.as_deref(),
+                                    property.value_or_nil.data.as_deref()
+                                ),
+                                (
+                                    Some(ExprData::String(key)),
+                                    Some(ExprData::Identifier(value))
+                                ) if String::from_utf16_lossy(&key.value)
+                                    == self.renamer.name_for_symbol(value.reference)
+                            )
+                            && key_name.as_deref().is_some_and(|name| {
+                                name != "__proto__"
+                                    || property.flags.contains(PropertyFlags::WAS_SHORTHAND)
+                            }));
                     if !is_shorthand {
                         self.output.push(b':');
                         self.print_optional_space();
-                        self.print_expr_at(&property.value_or_nil, Precedence::Spread);
+                        let old_forbid_in = self.forbid_in;
+                        self.forbid_in = false;
+                        self.print_expr_without_leading_newline(
+                            &property.value_or_nil,
+                            Precedence::Spread,
+                        );
+                        self.forbid_in = old_forbid_in;
                     }
                     if property.initializer_or_nil.data.is_some() {
                         self.print_optional_space();
                         self.output.push(b'=');
                         self.print_optional_space();
-                        self.print_expr_at(&property.initializer_or_nil, Precedence::Spread);
+                        self.print_expr_without_leading_newline(
+                            &property.initializer_or_nil,
+                            Precedence::Spread,
+                        );
                     }
                 }
-                if !object.properties.is_empty() {
+                if is_multi_line {
+                    self.print_newline();
+                    self.print_expr_comments_after_close_token_at_loc(object.close_brace_loc);
+                    self.indent -= 1;
+                    self.print_indent();
+                } else if !object.properties.is_empty() {
                     self.print_optional_space();
                 }
                 self.output.push(b'}');
+                if wrap {
+                    self.output.push(b')');
+                }
             }
             ExprData::Spread(spread) => {
                 self.output.extend_from_slice(b"...");
@@ -2006,14 +2613,36 @@ impl Printer<'_> {
                     self.output.extend_from_slice(operator.text.as_bytes());
                     if operator.is_keyword {
                         self.output.push(b' ');
+                    } else if unary.op == OpCode::UnaryNot && self.space_after_unary_not {
+                        self.output.push(b' ');
+                    } else if (unary.op == OpCode::UnaryPositive
+                        && expression_starts_with_sign(&unary.value, true))
+                        || (unary.op == OpCode::UnaryNegative
+                            && expression_starts_with_sign(&unary.value, false))
+                    {
+                        self.output.push(b' ');
                     }
-                    self.print_expr_at(&unary.value, Precedence::Prefix);
+                    if unary.op == OpCode::UnaryDelete {
+                        self.print_expr_with_substitution_context(
+                            &unary.value,
+                            Precedence::Prefix,
+                            false,
+                            false,
+                            SubstitutionContext::DeleteTarget,
+                        );
+                    } else {
+                        self.print_expr_at(&unary.value, Precedence::Prefix);
+                    }
                 }
             }
             ExprData::Binary(binary) => {
                 let operator = binary.op.table_entry();
                 let higher = higher_precedence(operator.level);
-                let left_level = if binary.op == OpCode::BinaryPower
+                let left_level = if binary.op == OpCode::BinaryNullishCoalescing
+                    && matches!(binary.left.data.as_deref(), Some(ExprData::Binary(left)) if matches!(left.op, OpCode::BinaryLogicalOr | OpCode::BinaryLogicalAnd))
+                {
+                    Precedence::Prefix
+                } else if binary.op == OpCode::BinaryPower
                     && power_left_requires_parentheses(&binary.left, self.options.minify_syntax)
                 {
                     Precedence::Call
@@ -2027,7 +2656,7 @@ impl Printer<'_> {
                     left_level,
                     binary.op == OpCode::BinaryComma,
                 );
-                self.print_binary_operator(binary.op);
+                self.print_binary_operator(binary.op, &binary.right);
                 if self.options.minify_whitespace
                     && ((binary.op == OpCode::BinaryAdd
                         && expression_starts_with_sign(&binary.right, true))
@@ -2036,23 +2665,39 @@ impl Printer<'_> {
                 {
                     self.output.push(b' ');
                 }
+                let right_level = if binary.op == OpCode::BinaryNullishCoalescing
+                    && matches!(binary.right.data.as_deref(), Some(ExprData::Binary(right)) if matches!(right.op, OpCode::BinaryLogicalOr | OpCode::BinaryLogicalAnd))
+                {
+                    Precedence::Prefix
+                } else if binary.op.is_right_associative() {
+                    operator.level
+                } else if binary.op == OpCode::BinaryComma {
+                    operator.level
+                } else {
+                    higher
+                };
+                let old_space_after_unary_not = self.space_after_unary_not;
+                self.space_after_unary_not = binary.op == OpCode::BinaryLessThan
+                    && matches!(
+                        binary.right.data.as_deref(),
+                        Some(ExprData::Unary(unary))
+                            if unary.op == OpCode::UnaryNot
+                                && expression_starts_with_sign(&unary.value, false)
+                    );
                 if binary.op.is_right_associative() {
                     self.print_expr_at_with_usage(
                         &binary.right,
-                        operator.level,
+                        right_level,
                         binary.op == OpCode::BinaryComma && result_is_unused,
                     );
                 } else {
                     self.print_expr_at_with_usage(
                         &binary.right,
-                        if binary.op == OpCode::BinaryComma {
-                            operator.level
-                        } else {
-                            higher
-                        },
+                        right_level,
                         binary.op == OpCode::BinaryComma && result_is_unused,
                     );
                 }
+                self.space_after_unary_not = old_space_after_unary_not;
             }
             ExprData::If(conditional) => {
                 self.print_expr_at(
@@ -2069,19 +2714,33 @@ impl Printer<'_> {
                 self.print_expr_at(&conditional.no, Precedence::Assign);
             }
             ExprData::Dot(dot) => {
-                if (dot.optional_chain == OptionalChain::None && is_optional_chain(&dot.target))
-                    || matches!(dot.target.data.as_deref(), Some(ExprData::Number(_)))
+                let target_is_for_of_let = self.for_of_init_start
+                    && matches!(
+                        dot.target.data.as_deref(),
+                        Some(ExprData::Identifier(identifier))
+                            if self.renamer.original_name_for_symbol(identifier.reference) == "let"
+                    );
+                if dot.optional_chain == OptionalChain::None
+                    && (is_optional_chain(&dot.target) || target_is_for_of_let)
                 {
                     self.output.push(b'(');
                     self.print_expr_at(&dot.target, Precedence::Lowest);
                     self.output.push(b')');
                 } else {
+                    let target_start = self.output.len();
                     self.print_expr_at_with_usage_and_new_target(
                         &dot.target,
                         Precedence::Postfix,
                         false,
                         is_new_target && dot.optional_chain == OptionalChain::None,
                     );
+                    if matches!(dot.target.data.as_deref(), Some(ExprData::Number(_)))
+                        && self.output[target_start..].iter().all(u8::is_ascii_digit)
+                        && dot.optional_chain != OptionalChain::Start
+                        && is_identifier_es5_and_es_next(&dot.name)
+                    {
+                        self.output.push(b' ');
+                    }
                 }
                 if is_identifier_es5_and_es_next(&dot.name) {
                     if dot.optional_chain == OptionalChain::Start {
@@ -2133,7 +2792,10 @@ impl Printer<'_> {
                         self.output.extend_from_slice(b"?.");
                     }
                     self.output.push(b'[');
+                    let old_forbid_in = self.forbid_in;
+                    self.forbid_in = false;
                     self.print_expr_at(&index.index, Precedence::Lowest);
+                    self.forbid_in = old_forbid_in;
                     self.output.push(b']');
                 }
             }
@@ -2141,17 +2803,73 @@ impl Printer<'_> {
                 if has_pure_comment {
                     self.output.extend_from_slice(b"/* @__PURE__ */ ");
                 }
-                if call.optional_chain == OptionalChain::None && is_optional_chain(&call.target) {
+                let target_is_unbound_eval = matches!(
+                    call.target.data.as_deref(),
+                    Some(ExprData::Identifier(identifier))
+                        if self.renamer.original_name_for_symbol(identifier.reference) == "eval"
+                );
+                let target_became_property_access = call.kind
+                    != CallKind::TargetWasOriginallyPropertyAccess
+                    && match call.target.data.as_deref() {
+                        Some(ExprData::Dot(_) | ExprData::Index(_)) => true,
+                        Some(ExprData::ImportIdentifier(identifier)) => {
+                            identifier.was_originally_identifier
+                                && self
+                                    .renamer
+                                    .namespace_alias_for_symbol(identifier.reference)
+                                    .is_some()
+                        }
+                        Some(ExprData::Identifier(identifier)) => self
+                            .renamer
+                            .namespace_alias_for_symbol(identifier.reference)
+                            .is_some(),
+                        _ => false,
+                    };
+                let force_indirect_call = (target_is_unbound_eval
+                    && call.kind != CallKind::DirectEval
+                    && call.optional_chain == OptionalChain::None)
+                    || target_became_property_access;
+                let postfix_target_needs_wrap = matches!(
+                    call.target.data.as_deref(),
+                    Some(ExprData::Unary(unary))
+                        if matches!(unary.op, OpCode::UnaryPostDecrement | OpCode::UnaryPostIncrement)
+                );
+                if force_indirect_call {
+                    self.output.extend_from_slice(b"(0,");
+                    self.print_optional_space();
+                    self.print_expr_with_substitution_context(
+                        &call.target,
+                        Precedence::Postfix,
+                        false,
+                        false,
+                        SubstitutionContext::CallTargetOrTemplateTag,
+                    );
+                    self.output.push(b')');
+                } else if call.optional_chain == OptionalChain::None
+                    && (is_optional_chain(&call.target) || postfix_target_needs_wrap)
+                {
                     self.output.push(b'(');
-                    self.print_expr_at(&call.target, Precedence::Lowest);
+                    self.print_expr_with_substitution_context(
+                        &call.target,
+                        Precedence::Lowest,
+                        false,
+                        false,
+                        SubstitutionContext::CallTargetOrTemplateTag,
+                    );
                     self.output.push(b')');
                 } else {
-                    self.print_expr_at(&call.target, Precedence::Postfix);
+                    self.print_expr_with_substitution_context(
+                        &call.target,
+                        Precedence::Postfix,
+                        false,
+                        false,
+                        SubstitutionContext::CallTargetOrTemplateTag,
+                    );
                 }
                 if call.optional_chain == OptionalChain::Start {
                     self.output.extend_from_slice(b"?.");
                 }
-                self.print_arguments(&call.args);
+                self.print_arguments(&call.args, call.close_paren_loc, call.is_multi_line);
             }
             ExprData::New(new) => {
                 if has_pure_comment {
@@ -2173,7 +2891,7 @@ impl Printer<'_> {
                     || !new.args.is_empty()
                     || level >= Precedence::Postfix
                 {
-                    self.print_arguments(&new.args);
+                    self.print_arguments(&new.args, new.close_paren_loc, new.is_multi_line);
                 }
             }
             ExprData::InlinedEnum(inlined) => {
@@ -2183,7 +2901,7 @@ impl Printer<'_> {
                     result_is_unused,
                     is_new_target,
                 );
-                if !self.options.minify_whitespace {
+                if !self.options.minify_whitespace && !inlined.comment.contains("*/") {
                     self.output.extend_from_slice(b" /* ");
                     self.output.extend_from_slice(inlined.comment.as_bytes());
                     self.output.extend_from_slice(b" */");
@@ -2211,14 +2929,25 @@ impl Printer<'_> {
                         self.output.push(b' ');
                     }
                 }
-                self.print_expr_at(&yield_expression.value_or_nil, Precedence::Yield);
+                self.print_expr_without_leading_newline(
+                    &yield_expression.value_or_nil,
+                    Precedence::Yield,
+                );
             }
             ExprData::Function(function) => {
-                if function.is_parenthesized {
+                let wrap = function.is_parenthesized
+                    || self.stmt_start == Some(self.output.len())
+                    || self.export_default_start == Some(self.output.len());
+                if wrap {
                     self.output.push(b'(');
                 }
+                if !self.options.minify_whitespace && function.function.has_no_side_effects_comment
+                {
+                    self.output
+                        .extend_from_slice(b"/* @__NO_SIDE_EFFECTS__ */ ");
+                }
                 self.print_function(&function.function);
-                if function.is_parenthesized {
+                if wrap {
                     self.output.push(b')');
                 }
             }
@@ -2226,6 +2955,10 @@ impl Printer<'_> {
                 let wrap_arrow = arrow.is_parenthesized && !wrap;
                 if wrap_arrow {
                     self.output.push(b'(');
+                }
+                if !self.options.minify_whitespace && arrow.has_no_side_effects_comment {
+                    self.output
+                        .extend_from_slice(b"/* @__NO_SIDE_EFFECTS__ */ ");
                 }
                 let can_omit_parameter_parentheses = self.options.minify_whitespace
                     && !arrow.has_rest_arg
@@ -2271,30 +3004,51 @@ impl Printer<'_> {
                 self.print_optional_space();
                 self.output.extend_from_slice(b"=>");
                 self.print_optional_space();
+                let old_forbid_in = self.forbid_in;
+                self.forbid_in = false;
                 if arrow.prefer_expr
                     && let [statement] = arrow.body.block.statements.as_slice()
                     && let Some(StmtData::Return(return_statement)) = statement.data.as_deref()
                     && return_statement.value_or_nil.data.is_some()
                 {
-                    let wrap_object = matches!(
+                    let wrap_body = matches!(
                         return_statement.value_or_nil.data.as_deref(),
-                        Some(ExprData::Object(_))
+                        Some(ExprData::Binary(binary)) if binary.op == OpCode::BinaryComma
                     );
-                    if wrap_object {
+                    if wrap_body {
                         self.output.push(b'(');
                     }
-                    self.print_expr_at(&return_statement.value_or_nil, Precedence::Assign);
-                    if wrap_object {
+                    let old_arrow_expr_start = self.arrow_expr_start;
+                    self.arrow_expr_start = Some(self.output.len());
+                    self.print_expr_without_leading_newline(
+                        &return_statement.value_or_nil,
+                        Precedence::Comma,
+                    );
+                    self.arrow_expr_start = old_arrow_expr_start;
+                    if wrap_body {
                         self.output.push(b')');
                     }
                 } else {
                     self.print_block(&arrow.body.block, false);
                 }
+                self.forbid_in = old_forbid_in;
                 if wrap_arrow {
                     self.output.push(b')');
                 }
             }
-            ExprData::Class(class) => self.print_class(&class.class),
+            ExprData::Class(class) => {
+                let print_parentheses = (class.is_parenthesized
+                    && !self.suppress_parenthesized_object_or_class)
+                    || self.stmt_start == Some(self.output.len())
+                    || self.export_default_start == Some(self.output.len());
+                if print_parentheses {
+                    self.output.push(b'(');
+                }
+                self.print_class(&class.class);
+                if print_parentheses {
+                    self.output.push(b')');
+                }
+            }
             ExprData::Template(template) => self.print_template(template, is_new_target),
             ExprData::RequireString(require) => {
                 let wrap_as_target = level >= Precedence::New && !wrap;
@@ -2348,12 +3102,30 @@ impl Printer<'_> {
                     result_is_unused,
                 ) && !self.print_external_dynamic_import_fallback(import.import_record_index)
                 {
-                    let phase = self.import_records
-                        [usize::try_from(import.import_record_index).expect("import record index")]
-                    .phase;
+                    let (phase, record_loc) = {
+                        let record =
+                            &self.import_records[usize::try_from(import.import_record_index)
+                                .expect("import record index")];
+                        (record.phase, record.range.loc)
+                    };
+                    let is_multi_line = !self.options.minify_whitespace
+                        && (self.will_print_expr_comments_at_loc(record_loc)
+                            || self.will_print_expr_comments_at_loc(import.close_paren_loc));
                     self.print_import_start(phase);
+                    if is_multi_line {
+                        self.indent += 1;
+                        self.print_newline();
+                        self.print_indent();
+                        self.print_expr_comments_at_loc(record_loc);
+                    }
                     self.print_import_path(import.import_record_index, false);
-                    self.print_import_attributes(import.import_record_index, true);
+                    self.print_import_attributes(import.import_record_index, true, is_multi_line);
+                    if is_multi_line {
+                        self.print_newline();
+                        self.print_expr_comments_after_close_token_at_loc(import.close_paren_loc);
+                        self.indent -= 1;
+                        self.print_indent();
+                    }
                     self.output.push(b')');
                 }
                 if wrap_as_target {
@@ -2361,18 +3133,40 @@ impl Printer<'_> {
                 }
             }
             ExprData::ImportCall(import) => {
+                let is_multi_line = !self.options.minify_whitespace
+                    && (self.will_print_expr_comments_at_loc(import.expr.loc)
+                        || (import.options_or_nil.data.is_some()
+                            && self.will_print_expr_comments_at_loc(import.options_or_nil.loc))
+                        || self.will_print_expr_comments_at_loc(import.close_paren_loc));
                 self.print_import_start(import.phase);
+                if is_multi_line {
+                    self.indent += 1;
+                    self.print_newline();
+                    self.print_indent();
+                }
                 self.print_expr_at(&import.expr, Precedence::Spread);
                 if import.options_or_nil.data.is_some() {
                     self.output.push(b',');
-                    self.print_optional_space();
+                    if is_multi_line {
+                        self.print_newline();
+                        self.print_indent();
+                    } else {
+                        self.print_optional_space();
+                    }
                     self.print_expr_at(&import.options_or_nil, Precedence::Spread);
+                }
+                if is_multi_line {
+                    self.print_newline();
+                    self.print_expr_comments_after_close_token_at_loc(import.close_paren_loc);
+                    self.indent -= 1;
+                    self.print_indent();
                 }
                 self.output.push(b')');
             }
             ExprData::JsxElement(element) => self.print_jsx_element(element),
             ExprData::JsxText(text) => self.output.extend_from_slice(text.raw.as_bytes()),
         }
+        self.forbid_in = old_forbid_in;
         if wrap {
             self.output.push(b')');
         }
@@ -2588,15 +3382,43 @@ impl Printer<'_> {
         self.print_identifier(&self.renamer.name_for_symbol(reference));
     }
 
-    fn print_arguments(&mut self, arguments: &[Expr]) {
+    fn print_arguments(
+        &mut self,
+        arguments: &[Expr],
+        close_paren_loc: crate::internal::logger::Loc,
+        was_multi_line: bool,
+    ) {
         self.output.push(b'(');
+        let old_forbid_in = self.forbid_in;
+        self.forbid_in = false;
+        let is_multi_line = !self.options.minify_whitespace
+            && ((was_multi_line && !arguments.is_empty())
+                || arguments
+                    .iter()
+                    .any(|argument| self.will_print_expr_comments_at_loc(argument.loc))
+                || self.will_print_expr_comments_at_loc(close_paren_loc));
+        if is_multi_line {
+            self.indent += 1;
+        }
         for (index, argument) in arguments.iter().enumerate() {
             if index > 0 {
                 self.output.push(b',');
+            }
+            if is_multi_line {
+                self.print_newline();
+                self.print_indent();
+            } else if index > 0 {
                 self.print_optional_space();
             }
             self.print_expr_at(argument, Precedence::Spread);
         }
+        if is_multi_line {
+            self.print_newline();
+            self.print_expr_comments_after_close_token_at_loc(close_paren_loc);
+            self.indent -= 1;
+            self.print_indent();
+        }
+        self.forbid_in = old_forbid_in;
         self.output.push(b')');
     }
 
@@ -2607,7 +3429,7 @@ impl Printer<'_> {
                 self.print_identifier(&name);
             } else {
                 self.output
-                    .extend(quote_utf16(&string.value, self.options, true));
+                    .extend(quote_utf16(&string.value, self.options, false));
             }
         } else {
             self.print_expr_at(key, Precedence::Lowest);
@@ -2635,11 +3457,12 @@ impl Printer<'_> {
                 self.print_expr_at(&template.tag_or_nil, Precedence::Lowest);
                 self.output.push(b')');
             } else {
-                self.print_expr_at_with_usage_and_new_target(
+                self.print_expr_with_substitution_context(
                     &template.tag_or_nil,
                     Precedence::Postfix,
                     false,
                     is_new_target,
+                    SubstitutionContext::CallTargetOrTemplateTag,
                 );
             }
         } else if template.parts.is_empty() && self.options.minify_syntax {
@@ -2675,10 +3498,27 @@ impl Printer<'_> {
     }
 
     fn print_jsx_element(&mut self, element: &crate::internal::js_ast::JsxElementExpr) {
+        let is_tag_single_line = element.is_tag_single_line || self.options.minify_whitespace;
         self.output.push(b'<');
         self.print_jsx_tag(&element.tag_or_nil);
+        if !is_tag_single_line {
+            self.indent += 1;
+        }
         for property in &element.properties {
-            self.output.push(b' ');
+            if is_tag_single_line {
+                if self.options.minify_whitespace {
+                    if !matches!(property.kind, PropertyKind::Spread)
+                        && !property.flags.contains(PropertyFlags::IS_COMPUTED)
+                    {
+                        self.print_space_before_identifier();
+                    }
+                } else {
+                    self.output.push(b' ');
+                }
+            } else {
+                self.output.push(b'\n');
+                self.print_indent();
+            }
             if property.kind == PropertyKind::Spread {
                 self.output.extend_from_slice(b"{...");
                 self.print_expr_at(&property.value_or_nil, Precedence::Spread);
@@ -2708,7 +3548,9 @@ impl Printer<'_> {
                 Some(ExprData::JsxText(text)) => {
                     self.output.extend_from_slice(text.raw.as_bytes());
                 }
-                Some(ExprData::JsxElement(_)) => {
+                Some(ExprData::JsxElement(_))
+                    if property.flags.contains(PropertyFlags::WAS_SHORTHAND) =>
+                {
                     self.print_expr_at(&property.value_or_nil, Precedence::Lowest);
                 }
                 _ => {
@@ -2718,8 +3560,18 @@ impl Printer<'_> {
                 }
             }
         }
+        if !is_tag_single_line {
+            self.indent -= 1;
+            if !element.properties.is_empty() {
+                self.output.push(b'\n');
+                self.print_indent();
+            }
+        }
         if element.tag_or_nil.data.is_some() && element.nullable_children.is_empty() {
-            self.output.extend_from_slice(b" />");
+            if is_tag_single_line || element.properties.is_empty() {
+                self.print_optional_space();
+            }
+            self.output.extend_from_slice(b"/>");
             return;
         }
         self.output.push(b'>');
@@ -2791,6 +3643,14 @@ impl Printer<'_> {
         }
     }
 
+    fn print_space_before_identifier(&mut self) {
+        if self.output.last().is_some_and(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'\\') || *byte >= 0x80
+        }) {
+            self.output.push(b' ');
+        }
+    }
+
     fn print_symbol_expr(&mut self, reference: crate::internal::ast::Ref) {
         if let Some(alias) = self.renamer.namespace_alias_for_symbol(reference) {
             self.print_symbol_expr(alias.namespace_ref);
@@ -2811,18 +3671,40 @@ impl Printer<'_> {
         }
     }
 
-    fn print_binary_operator(&mut self, operator: OpCode) {
+    fn print_binary_operator(&mut self, operator: OpCode, right: &Expr) {
         let entry = operator.table_entry();
         if operator == OpCode::BinaryComma {
             self.output.push(b',');
             self.print_optional_space();
             return;
         }
-        if entry.is_keyword || !self.options.minify_whitespace {
+        if !self.options.minify_whitespace {
+            self.output.push(b' ');
+        } else if entry.is_keyword {
+            if self.output.last().is_some_and(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'_' | b'$' | b'\\' | b'/')
+                    || *byte >= 0x80
+            }) {
+                self.output.push(b' ');
+            }
+        } else if matches!(
+            operator,
+            OpCode::BinaryGreaterThan
+                | OpCode::BinaryGreaterThanOrEqual
+                | OpCode::BinaryShiftRight
+                | OpCode::BinaryUnsignedShiftRight
+        ) && self.output.ends_with(b"--")
+        {
             self.output.push(b' ');
         }
         self.output.extend_from_slice(entry.text.as_bytes());
-        if entry.is_keyword || !self.options.minify_whitespace {
+        if !self.options.minify_whitespace
+            || (entry.is_keyword && expression_starts_with_identifier(right, self.options))
+            || (operator == OpCode::BinaryDivide
+                && matches!(right.data.as_deref(), Some(ExprData::RegExp(_))))
+            || (self.output.last() == Some(&b'<') && expression_is_script_regexp(right))
+        {
             self.output.push(b' ');
         }
     }
@@ -2843,6 +3725,7 @@ fn can_omit_space_after_return(expression: &Expr, options: Options) -> bool {
             | ExprData::Template(_)
             | ExprData::RegExp(_)
             | ExprData::Arrow(_)
+            | ExprData::PrivateIdentifier(_)
             | ExprData::JsxElement(_),
         ) => true,
         Some(ExprData::Unary(unary)) => !unary.op.table_entry().is_keyword,
@@ -2923,7 +3806,9 @@ fn expression_starts_with_identifier(expression: &Expr, options: Options) -> boo
             | ExprData::RequireString(_)
             | ExprData::RequireResolveString(_)
             | ExprData::ImportString(_)
-            | ExprData::ImportCall(_),
+            | ExprData::ImportCall(_)
+            | ExprData::Function(_)
+            | ExprData::Class(_),
         ) => true,
         Some(ExprData::Number(value)) => format_number(*value, Precedence::Lowest, options, false)
             .as_bytes()
@@ -3005,32 +3890,9 @@ fn expression_starts_with_identifier(expression: &Expr, options: Options) -> boo
     }
 }
 
-fn expression_starts_with_brace_or_function(expression: &Expr) -> bool {
-    match expression.data.as_deref() {
-        Some(ExprData::Object(_) | ExprData::Class(_)) => true,
-        Some(ExprData::Function(function)) => !function.is_parenthesized,
-        Some(ExprData::Binary(binary)) => expression_starts_with_brace_or_function(&binary.left),
-        Some(ExprData::If(conditional)) => {
-            expression_starts_with_brace_or_function(&conditional.test)
-        }
-        Some(ExprData::Dot(dot)) => expression_starts_with_brace_or_function(&dot.target),
-        Some(ExprData::Index(index)) => expression_starts_with_brace_or_function(&index.target),
-        Some(ExprData::Call(call)) => expression_starts_with_brace_or_function(&call.target),
-        Some(ExprData::Template(template)) if template.tag_or_nil.data.is_some() => {
-            expression_starts_with_brace_or_function(&template.tag_or_nil)
-        }
-        Some(ExprData::InlinedEnum(inlined)) => {
-            expression_starts_with_brace_or_function(&inlined.value)
-        }
-        Some(ExprData::Annotation(annotation)) => {
-            expression_starts_with_brace_or_function(&annotation.value)
-        }
-        _ => false,
-    }
-}
-
 fn expression_starts_with_sign(expression: &Expr, positive: bool) -> bool {
     match expression.data.as_deref() {
+        Some(ExprData::Number(value)) => !positive && value.is_sign_negative(),
         Some(ExprData::Unary(unary)) => {
             if positive {
                 matches!(unary.op, OpCode::UnaryPositive | OpCode::UnaryPreIncrement)
@@ -3046,6 +3908,21 @@ fn expression_starts_with_sign(expression: &Expr, positive: bool) -> bool {
         Some(ExprData::Annotation(annotation)) => {
             expression_starts_with_sign(&annotation.value, positive)
         }
+        _ => false,
+    }
+}
+
+fn expression_is_script_regexp(expression: &Expr) -> bool {
+    match expression.data.as_deref() {
+        Some(ExprData::RegExp(value)) => value
+            .as_bytes()
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"/script")),
+        Some(ExprData::Dot(dot)) => expression_is_script_regexp(&dot.target),
+        Some(ExprData::Index(index)) => expression_is_script_regexp(&index.target),
+        Some(ExprData::Call(call)) => expression_is_script_regexp(&call.target),
+        Some(ExprData::InlinedEnum(inlined)) => expression_is_script_regexp(&inlined.value),
+        Some(ExprData::Annotation(annotation)) => expression_is_script_regexp(&annotation.value),
         _ => false,
     }
 }
@@ -3197,7 +4074,10 @@ fn higher_precedence(level: Precedence) -> Precedence {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     use super::{
         LinkerOptions, Options, RequireOrImportMeta, format_non_negative_float, format_number,
@@ -3205,12 +4085,12 @@ mod tests {
     };
     use crate::internal::{
         ast::{INVALID_REF, ImportRecordFlags, Index32, Ref, Symbol, SymbolKind, SymbolMap},
-        compat::JsFeature,
+        compat::{Engine, JsFeature, Semver, unsupported_js_features},
         config::LegalComments,
         helpers::string_to_utf16,
         js_ast::{Ast, CommentStmt, ExprData, ModuleType, Part, Precedence, Stmt, StmtData},
         js_parser,
-        logger::{DeferLogKind, Loc, Log, Source},
+        logger::{DeferLogKind, Loc, Log, MsgKind, Source},
         renamer::new_no_op_renamer,
         sourcemap::generate_line_offset_tables,
     };
@@ -3285,7 +4165,7 @@ mod tests {
         )
         .js;
         let output = String::from_utf8(output).expect("printer output is UTF-8");
-        assert!(output.contains("({}.hasOwnProperty.call(value,key)&&copy())"));
+        assert!(output.contains("({}).hasOwnProperty.call(value,key)&&copy()"));
     }
 
     #[test]
@@ -3414,6 +4294,7 @@ mod tests {
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
                     const_values: None,
+                    ts_enums: None,
                     to_common_js_ref,
                     to_esm_ref: INVALID_REF,
                     runtime_require_ref: INVALID_REF,
@@ -3476,6 +4357,7 @@ mod tests {
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
                     const_values: None,
+                    ts_enums: None,
                     to_common_js_ref: INVALID_REF,
                     to_esm_ref: INVALID_REF,
                     runtime_require_ref: INVALID_REF,
@@ -3530,6 +4412,7 @@ mod tests {
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
                     const_values: None,
+                    ts_enums: None,
                     to_common_js_ref: INVALID_REF,
                     to_esm_ref: INVALID_REF,
                     runtime_require_ref: INVALID_REF,
@@ -3584,6 +4467,7 @@ mod tests {
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
                     const_values: None,
+                    ts_enums: None,
                     to_common_js_ref: INVALID_REF,
                     to_esm_ref,
                     runtime_require_ref: INVALID_REF,
@@ -3626,6 +4510,7 @@ mod tests {
         let linker_options = LinkerOptions {
             require_or_import_meta_for_source: &metadata,
             const_values: None,
+            ts_enums: None,
             to_common_js_ref: INVALID_REF,
             to_esm_ref,
             runtime_require_ref,
@@ -3699,6 +4584,7 @@ mod tests {
                 LinkerOptions {
                     require_or_import_meta_for_source: &metadata,
                     const_values: None,
+                    ts_enums: None,
                     to_common_js_ref: INVALID_REF,
                     to_esm_ref,
                     runtime_require_ref,
@@ -3907,11 +4793,11 @@ mod tests {
                 },
                 false
             ),
-            "(1/0)"
+            "1/0"
         );
         assert_eq!(
             format_number(-0.0, Precedence::Prefix, Options::default(), false),
-            "(-0)"
+            "-0"
         );
         assert_eq!(
             format_number(-1.0, Precedence::Lowest, Options::default(), false),
@@ -4812,5 +5698,154 @@ mod tests {
              \x20\x201;\n\
              })(split || (split = {}));\n"
         );
+    }
+
+    #[test]
+    fn matches_pinned_upstream_js_printer_corpus() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/upstream/js_printer.json"
+        )))
+        .expect("upstream js_printer corpus must be valid JSON");
+        let cases = cases
+            .as_array()
+            .expect("upstream js_printer corpus must be an array");
+        assert_eq!(cases.len(), 695, "upstream case count changed");
+        assert_eq!(
+            cases
+                .iter()
+                .filter_map(|case| case["upstream_test"].as_str())
+                .collect::<HashSet<_>>()
+                .len(),
+            37,
+            "upstream top-level test count changed"
+        );
+
+        let mut failures = Vec::new();
+        let filter = std::env::var("UPSTREAM_TEST_FILTER").ok();
+        let line_filter = std::env::var("UPSTREAM_LINE_FILTER")
+            .ok()
+            .and_then(|line| line.parse::<u64>().ok());
+        for case in cases {
+            let upstream_test = case["upstream_test"]
+                .as_str()
+                .expect("upstream_test must be a string");
+            if filter
+                .as_deref()
+                .is_some_and(|filter| !upstream_test.contains(filter))
+            {
+                continue;
+            }
+            let line = case["line"].as_u64().expect("line must be an integer");
+            if line_filter.is_some_and(|filter| filter != line) {
+                continue;
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_upstream_printer_case(case)
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => failures.push(format!(
+                    "internal/js_printer/js_printer_test.go:{line} {upstream_test}: {message}"
+                )),
+                Err(_) => failures.push(format!(
+                    "internal/js_printer/js_printer_test.go:{line} {upstream_test}: panicked"
+                )),
+            }
+            if failures.len() >= 40 {
+                break;
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "pinned upstream js_printer failures:\n{}",
+            failures.join("\n\n")
+        );
+    }
+
+    fn run_upstream_printer_case(case: &serde_json::Value) -> Result<(), String> {
+        let source_text = case["source"]
+            .as_str()
+            .ok_or_else(|| "source must be a string".to_owned())?;
+        let expected = case["expected"]
+            .as_str()
+            .ok_or_else(|| "expected must be a string".to_owned())?;
+        let mode = case["mode"]
+            .as_str()
+            .ok_or_else(|| "mode must be a string".to_owned())?;
+        let minify_syntax = mode.contains("minify_syntax");
+        let minify_whitespace = mode.contains("minify_whitespace");
+        let ascii_only = mode.contains("ascii");
+        let unsupported_features = if mode.contains("target") {
+            let target = case["target"]
+                .as_i64()
+                .ok_or_else(|| "target mode requires an integer target".to_owned())?;
+            unsupported_js_features(&HashMap::from([(
+                Engine::Es,
+                Semver {
+                    parts: vec![i32::try_from(target).map_err(|error| error.to_string())?],
+                    ..Semver::default()
+                },
+            )]))
+        } else {
+            JsFeature::NONE
+        };
+
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(source_text.as_bytes()),
+            identifier_name: "<stdin>".into(),
+            ..Source::default()
+        };
+        let mut parser_options = js_parser::Options {
+            unsupported_js_features: unsupported_features,
+            minify_syntax,
+            minify_whitespace,
+            ascii_only,
+            defines: Some(Arc::new(crate::internal::config::process_defines(&[]))),
+            ..js_parser::Options::default()
+        };
+        if mode.contains("jsx") {
+            parser_options.jsx.parse = true;
+            parser_options.jsx.preserve = true;
+        }
+        let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
+        let errors = log
+            .done()
+            .into_iter()
+            .filter(|message| message.kind == MsgKind::Error)
+            .map(|message| message.data.text)
+            .collect::<Vec<_>>();
+        if !ok || !errors.is_empty() {
+            return Err(format!(
+                "parse failed for {source_text:?}: {}",
+                errors.join("; ")
+            ));
+        }
+        let mut symbols = SymbolMap::new(1);
+        symbols.symbols_for_source[0] = ast.symbols.clone();
+        let renamer = new_no_op_renamer(symbols);
+        let actual = String::from_utf8(
+            print(
+                &ast,
+                &renamer,
+                Options {
+                    unsupported_features,
+                    minify_syntax,
+                    minify_whitespace,
+                    ascii_only,
+                    ..Options::default()
+                },
+            )
+            .js,
+        )
+        .map_err(|error| error.to_string())?;
+        if actual != expected {
+            return Err(format!(
+                "input {source_text:?}\nexpected {expected:?}\nactual   {actual:?}"
+            ));
+        }
+        Ok(())
     }
 }

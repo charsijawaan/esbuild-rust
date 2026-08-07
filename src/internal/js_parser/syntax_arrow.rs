@@ -73,7 +73,7 @@ pub(crate) fn parse_empty_parenthesized_arrow(
         loc,
         Vec::new(),
         false,
-        true,
+        false,
         false,
     ))
 }
@@ -109,7 +109,7 @@ pub(crate) fn parse_arrow_after_parenthesized_expression(
         loc,
         args,
         false,
-        true,
+        false,
         has_rest_arg,
     ))
 }
@@ -301,10 +301,18 @@ fn expression_to_binding(
                 if property.kind != PropertyKind::Field {
                     return None;
                 }
+                let (value, default_value_or_nil) = if let Some(ExprData::Binary(binary)) =
+                    property.value_or_nil.data.as_deref()
+                    && binary.op == OpCode::BinaryAssign
+                {
+                    (binary.left.clone(), binary.right.clone())
+                } else {
+                    (property.value_or_nil, property.initializer_or_nil)
+                };
                 properties.push(PropertyBinding {
                     key: property.key,
-                    value: expression_to_binding(core, property.value_or_nil, syntax_features)?,
-                    default_value_or_nil: property.initializer_or_nil,
+                    value: expression_to_binding(core, value, syntax_features)?,
+                    default_value_or_nil,
                     loc: property.loc,
                     close_bracket_loc: property.close_bracket_loc,
                     is_computed: property.flags.contains(PropertyFlags::IS_COMPUTED),

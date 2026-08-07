@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -18,7 +18,7 @@ use crate::internal::{
         IndexExpr, NameOfSymbolExpr, NamedImport, OptionalChain, Scope, ScopeKind, ScopeMember,
         ScopeRef, StrictModeKind, SymbolUse, for_each_identifier_binding,
     },
-    js_lexer::{MaybeSubstring, range_of_identifier},
+    js_lexer::{Lexer, MaybeSubstring, range_of_identifier},
     logger::{LineColumnTracker, Loc, Log, MsgId, MsgKind, Path, Range, Source},
 };
 
@@ -34,6 +34,12 @@ pub(crate) struct ScopeOrder {
     loc: Loc,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NamespaceImportItems {
+    pub(crate) entries: HashMap<String, LocRef>,
+    pub(crate) import_record_index: u32,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ParserCore {
     pub(crate) options: Options,
@@ -47,17 +53,32 @@ pub(crate) struct ParserCore {
     pub(crate) symbols: Vec<Symbol>,
     pub(crate) import_records: Vec<ImportRecord>,
     pub(crate) symbol_uses: HashMap<Ref, SymbolUse>,
+    pub(crate) import_symbol_property_uses: HashMap<Ref, HashMap<String, SymbolUse>>,
     pub(crate) declared_symbols: Vec<DeclaredSymbol>,
     pub(crate) runtime_imports: HashMap<String, LocRef>,
     pub(crate) jsx_imports: HashMap<super::parser_types::JsxImport, Ref>,
     pub(crate) jsx_import_records: HashMap<String, (u32, Ref)>,
+    pub(crate) glob_import_records: HashMap<String, (u32, Ref)>,
+    pub(crate) glob_imports: HashMap<(ImportKind, String), Ref>,
     pub(crate) generated_named_imports: HashMap<Ref, NamedImport>,
+    pub(crate) import_items_for_namespace: HashMap<Ref, NamespaceImportItems>,
+    pub(crate) is_import_item: HashSet<Ref>,
+    pub(crate) local_type_names: HashSet<String>,
     pub(crate) generated_injected_defines: HashMap<u32, Ref>,
+    pub(crate) top_level_temp_refs: Vec<Ref>,
+    pub(crate) auto_accessor_storage_counts: HashMap<String, u32>,
+    pub(crate) named_top_level_temp_counts: HashMap<String, u32>,
+    pub(crate) class_pre_statements: Vec<crate::internal::js_ast::Stmt>,
+    pub(crate) class_post_statements: Vec<crate::internal::js_ast::Stmt>,
+    pub(crate) relocated_top_level_vars: Vec<LocRef>,
+    pub(crate) expr_comments: HashMap<Loc, Vec<String>>,
     pub(crate) allocated_names: Vec<Vec<u8>>,
     pub(crate) mangled_props: HashMap<String, Ref>,
     pub(crate) reserved_props: HashMap<String, bool>,
     pub(crate) unrepresentable_identifiers: HashMap<String, bool>,
     pub(crate) ts_enums: HashMap<Ref, HashMap<String, crate::internal::js_ast::TsEnumValue>>,
+    pub(crate) ts_namespace_members: HashMap<Ref, crate::internal::js_ast::TsNamespaceMembers>,
+    pub(crate) ts_namespace_owner: HashMap<Ref, Ref>,
     pub(crate) ts_enum_values_by_ref: HashMap<Ref, crate::internal::js_ast::TsEnumValue>,
     pub(crate) const_values: HashMap<Ref, ConstValue>,
     pub(crate) ts_use_counts: Vec<u32>,
@@ -73,14 +94,19 @@ pub(crate) struct ParserCore {
     pub(crate) esm_import_meta: Range,
     pub(crate) esm_export_keyword: Range,
     pub(crate) top_level_await_keyword: Range,
+    pub(crate) live_top_level_await_keyword: Range,
     pub(crate) fn_or_arrow_data_parse: FnOrArrowDataParse,
     pub(crate) lower_all_of_these_private_names: HashMap<String, bool>,
     pub(crate) hoisted_ref_for_sloppy_mode_block_fn: HashMap<Ref, Ref>,
     pub(crate) visit_loop_depth: usize,
     pub(crate) visit_switch_depth: usize,
     pub(crate) visit_try_body_depth: usize,
+    pub(crate) visit_try_catch_loc: Loc,
+    pub(crate) single_statement_depth: usize,
     pub(crate) visit_new_target_allowed: bool,
     pub(crate) visit_is_async_generator: bool,
+    pub(crate) visit_this_is_nested: bool,
+    pub(crate) visit_is_outside_fn_or_arrow: bool,
     pub(crate) has_top_level_return: bool,
     pub(crate) has_jsx_element: bool,
     pub(crate) has_type_script_export: bool,
@@ -102,17 +128,32 @@ impl ParserCore {
             symbols: Vec::new(),
             import_records: Vec::new(),
             symbol_uses: HashMap::new(),
+            import_symbol_property_uses: HashMap::new(),
             declared_symbols: Vec::new(),
             runtime_imports: HashMap::new(),
             jsx_imports: HashMap::new(),
             jsx_import_records: HashMap::new(),
+            glob_import_records: HashMap::new(),
+            glob_imports: HashMap::new(),
             generated_named_imports: HashMap::new(),
+            import_items_for_namespace: HashMap::new(),
+            is_import_item: HashSet::new(),
+            local_type_names: HashSet::new(),
             generated_injected_defines: HashMap::new(),
+            top_level_temp_refs: Vec::new(),
+            auto_accessor_storage_counts: HashMap::new(),
+            named_top_level_temp_counts: HashMap::new(),
+            class_pre_statements: Vec::new(),
+            class_post_statements: Vec::new(),
+            relocated_top_level_vars: Vec::new(),
+            expr_comments: HashMap::new(),
             allocated_names: Vec::new(),
             mangled_props: HashMap::new(),
             reserved_props: HashMap::new(),
             unrepresentable_identifiers: HashMap::new(),
             ts_enums: HashMap::new(),
+            ts_namespace_members: HashMap::new(),
+            ts_namespace_owner: HashMap::new(),
             ts_enum_values_by_ref: HashMap::new(),
             const_values: HashMap::new(),
             ts_use_counts: Vec::new(),
@@ -128,14 +169,19 @@ impl ParserCore {
             esm_import_meta: Range::default(),
             esm_export_keyword: Range::default(),
             top_level_await_keyword: Range::default(),
+            live_top_level_await_keyword: Range::default(),
             fn_or_arrow_data_parse: FnOrArrowDataParse::default(),
             lower_all_of_these_private_names: HashMap::new(),
             hoisted_ref_for_sloppy_mode_block_fn: HashMap::new(),
             visit_loop_depth: 0,
             visit_switch_depth: 0,
             visit_try_body_depth: 0,
+            visit_try_catch_loc: Loc::default(),
+            single_statement_depth: 0,
             visit_new_target_allowed: false,
             visit_is_async_generator: false,
+            visit_this_is_nested: false,
+            visit_is_outside_fn_or_arrow: true,
             has_top_level_return: false,
             has_jsx_element: false,
             has_type_script_export: false,
@@ -337,7 +383,7 @@ impl ParserCore {
         }
     }
 
-    fn follow_symbol_link(&self, mut reference: Ref) -> Ref {
+    pub(crate) fn follow_symbol_link(&self, mut reference: Ref) -> Ref {
         loop {
             let index = usize::try_from(reference.inner_index).expect("symbol index fits usize");
             let link = self.symbols[index].link;
@@ -684,12 +730,12 @@ impl ParserCore {
             let mut scope = to_flatten
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let parent = scope
-                .parent
-                .as_ref()
-                .and_then(std::sync::Weak::upgrade)
-                .expect("flattened scopes must have a parent");
+            let parent = scope.parent.as_ref().and_then(std::sync::Weak::upgrade);
             (parent, std::mem::take(&mut scope.children))
+        };
+        let Some(parent) = parent else {
+            self.scopes_in_order.remove(scope_index);
+            return;
         };
         self.current_scope = Some(parent.clone());
         self.scopes_in_order.remove(scope_index);
@@ -814,6 +860,26 @@ impl ParserCore {
         if usage.count_estimate == 0 {
             self.symbol_uses.remove(&reference);
         }
+    }
+
+    pub(crate) fn record_import_symbol_property_use(&mut self, reference: Ref, name: String) {
+        if self.options.mode != Mode::Bundle || self.is_control_flow_dead {
+            return;
+        }
+        let usage = self
+            .symbol_uses
+            .get_mut(&reference)
+            .expect("property target usage must have been recorded");
+        usage.count_estimate -= 1;
+        if usage.count_estimate == 0 {
+            self.symbol_uses.remove(&reference);
+        }
+        self.import_symbol_property_uses
+            .entry(reference)
+            .or_default()
+            .entry(name)
+            .or_default()
+            .count_estimate += 1;
     }
 
     pub(crate) fn ignore_usage_of_identifier_in_dot_chain(&mut self, mut expr: &Expr) {
@@ -1083,6 +1149,86 @@ impl ParserCore {
                 ..CallExpr::default()
             }),
         )
+    }
+
+    pub(crate) fn generate_top_level_temp_ref(&mut self) -> Ref {
+        let index = self.top_level_temp_refs.len();
+        let suffix = char::from_u32(u32::from(b'a') + u32::try_from(index).unwrap_or(25).min(25))
+            .unwrap_or('z');
+        let reference = self.new_symbol(SymbolKind::Other, format!("_{suffix}"));
+        self.module_scope
+            .as_ref()
+            .expect("top-level temporaries require a module scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(reference);
+        self.top_level_temp_refs.push(reference);
+        reference
+    }
+
+    pub(crate) fn generate_named_top_level_temp_ref(&mut self, name: String) -> Ref {
+        let count = self
+            .named_top_level_temp_counts
+            .entry(name.clone())
+            .or_default();
+        *count += 1;
+        let name = if *count == 1 {
+            name
+        } else {
+            format!("{name}{count}")
+        };
+        let reference = self.new_symbol(SymbolKind::Other, name);
+        self.module_scope
+            .as_ref()
+            .expect("top-level temporaries require a module scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(reference);
+        self.record_declared_symbol(reference);
+        reference
+    }
+
+    pub(crate) fn generate_auto_accessor_storage_ref(&mut self, name: &str) -> Ref {
+        let name = name.strip_prefix('#').unwrap_or(name);
+        let count = {
+            let count = self
+                .auto_accessor_storage_counts
+                .entry(name.to_string())
+                .or_default();
+            *count += 1;
+            *count
+        };
+        let reference = self.new_symbol(
+            SymbolKind::Other,
+            format!("{}{}", "_".repeat(count as usize), name),
+        );
+        self.module_scope
+            .as_ref()
+            .expect("auto-accessor storage requires a module scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(reference);
+        self.top_level_temp_refs.push(reference);
+        reference
+    }
+
+    pub(crate) fn save_expr_comments_here(&mut self, lexer: &mut Lexer) -> Loc {
+        let loc = lexer.loc();
+        if !self.options.minify_whitespace && !lexer.comments_before_token.is_empty() {
+            let comments = lexer
+                .comments_before_token
+                .drain(..)
+                .map(|range| {
+                    String::from_utf8_lossy(&self.source.comment_text_without_indent(range))
+                        .into_owned()
+                })
+                .collect();
+            self.expr_comments.insert(loc, comments);
+        }
+        loc
     }
 
     pub(crate) fn make_promise_ref(&mut self) -> Ref {
