@@ -90,7 +90,7 @@ combinations of `Mode`, `OutputFormat`, `Platform`, legal-comment settings,
 both single-file and code-splitting builds, glob import attributes, empty-glob
 warnings, and entry-point glob expansion. The missing-glob-directory
 diagnostic-only case is also covered. So 4,866 concrete upstream cases are
-currently active in `cargo test`; the remaining 497 captured bundler cases are
+currently active in `cargo test`; the remaining 496 captured bundler cases are
 the parity backlog, not claimed as passing coverage.
 
 The generated JSON is checked in so `cargo test` does not require Go or a
