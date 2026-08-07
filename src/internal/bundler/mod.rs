@@ -3811,6 +3811,14 @@ mod tests {
                     && option_names != ["AbsOutputFile", "MinifySyntax", "Mode", "OutputFormat"]
                     && option_names
                         != ["AbsOutputFile", "MinifyWhitespace", "Mode", "OutputFormat"]
+                    && option_names
+                        != [
+                            "AbsOutputFile",
+                            "MinifyWhitespace",
+                            "Mode",
+                            "OutputFormat",
+                            "Platform",
+                        ]
                     && option_names != ["AbsOutputFile", "KeepNames", "Mode"]
                     && !(option_names == ["AbsOutputFile", "UnsupportedJSFeatures"]
                         && matches!(
@@ -4100,7 +4108,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 570 },
+            if selected_test.is_some() { 1 } else { 571 },
             "upstream basic bundler corpus case count"
         );
     }
