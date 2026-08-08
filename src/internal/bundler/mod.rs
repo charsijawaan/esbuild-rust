@@ -3839,6 +3839,9 @@ mod tests {
                                     | "TestTSAbstractClassFieldUseDefine"
                             )
                         ))
+                    && !(option_names == ["AbsOutputFile", "Mode", "TS", "UnsupportedJSFeatures"]
+                        && case["upstream_test"]
+                            == "TestParameterPropsUseDefineForClassFieldsTrueLowered")
                     && !(option_names == ["AbsOutputFile", "UnsupportedJSFeatures"]
                         && matches!(
                             case["upstream_test"].as_str(),
@@ -4138,7 +4141,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 579 },
+            if selected_test.is_some() { 1 } else { 580 },
             "upstream basic bundler corpus case count"
         );
     }

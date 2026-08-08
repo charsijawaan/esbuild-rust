@@ -3712,6 +3712,7 @@ fn visit_class(
             core.visit_this_is_nested = old_this_is_nested;
         }
     }
+    move_type_script_parameter_property_constructor_to_front(class);
     preserve_type_script_omitted_computed_field_keys(core, class, resolve_identifiers);
     lower_standard_decorators(core, class, outer_class_name);
     let decorator_keys = prepare_type_script_computed_property_keys(core, class);
@@ -3720,35 +3721,10 @@ fn visit_class(
     lower_type_script_static_field_assignments(core, class, outer_class_name, class_post_start);
     lower_type_script_class_field_assignments(core, class);
     if let Some(constructor_index) = class_constructor_index(class) {
-        let parameter_field_count = class.properties[constructor_index]
+        if let Some(ExprData::Function(function)) = class.properties[constructor_index]
             .value_or_nil
             .data
-            .as_deref()
-            .and_then(|data| match data {
-                ExprData::Function(function) => Some(
-                    function
-                        .function
-                        .args
-                        .iter()
-                        .filter(|argument| argument.is_typescript_ctor_field)
-                        .count(),
-                ),
-                _ => None,
-            })
-            .unwrap_or_default();
-        if constructor_index != 0 && parameter_field_count != 0 {
-            let generated_field_count = if class.use_define_for_class_fields {
-                parameter_field_count
-            } else {
-                0
-            };
-            let end = (constructor_index + 1 + generated_field_count).min(class.properties.len());
-            let constructor_and_fields: Vec<_> =
-                class.properties.drain(constructor_index..end).collect();
-            class.properties.splice(0..0, constructor_and_fields);
-        }
-        if let Some(ExprData::Function(function)) =
-            class.properties[0].value_or_nil.data.as_deref_mut()
+            .as_deref_mut()
         {
             for argument in &mut function.function.args {
                 argument.is_typescript_ctor_field = false;
@@ -3774,6 +3750,39 @@ fn visit_class(
     } else {
         used_inner_name
     }
+}
+
+fn move_type_script_parameter_property_constructor_to_front(class: &mut Class) {
+    let Some(constructor_index) = class_constructor_index(class) else {
+        return;
+    };
+    let parameter_field_count = class.properties[constructor_index]
+        .value_or_nil
+        .data
+        .as_deref()
+        .and_then(|data| match data {
+            ExprData::Function(function) => Some(
+                function
+                    .function
+                    .args
+                    .iter()
+                    .filter(|argument| argument.is_typescript_ctor_field)
+                    .count(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if constructor_index == 0 || parameter_field_count == 0 {
+        return;
+    }
+    let generated_field_count = if class.use_define_for_class_fields {
+        parameter_field_count
+    } else {
+        0
+    };
+    let end = (constructor_index + 1 + generated_field_count).min(class.properties.len());
+    let constructor_and_fields: Vec<_> = class.properties.drain(constructor_index..end).collect();
+    class.properties.splice(0..0, constructor_and_fields);
 }
 
 fn preserve_type_script_omitted_computed_field_keys(
@@ -6093,6 +6102,11 @@ fn lower_type_script_constructor_parameter_fields(core: &ParserCore, class: &mut
     };
     let is_derived = class.extends_or_nil.data.is_some();
     let use_define = class.use_define_for_class_fields;
+    let lower_define = use_define
+        && core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::CLASS_FIELD);
     let mut assignments = Vec::new();
     let mut field_properties = Vec::new();
     {
@@ -6110,34 +6124,37 @@ fn lower_type_script_constructor_parameter_fields(core: &ParserCore, class: &mut
             };
             let loc = argument.binding.loc;
             let name = symbol_name(core, identifier.reference);
-            assignments.push(Stmt::new(
+            let parameter = Expr::new(
                 loc,
-                StmtData::Expr(ExprStmt {
-                    value: Expr::new(
-                        loc,
-                        ExprData::Binary(BinaryExpr {
-                            left: Expr::new(
-                                loc,
-                                ExprData::Dot(DotExpr {
-                                    target: Expr::new(loc, ExprData::This),
-                                    name: name.clone(),
-                                    name_loc: loc,
-                                    ..DotExpr::default()
-                                }),
-                            ),
-                            right: Expr::new(
-                                loc,
-                                ExprData::Identifier(IdentifierExpr {
-                                    reference: identifier.reference,
-                                    ..IdentifierExpr::default()
-                                }),
-                            ),
-                            op: OpCode::BinaryAssign,
-                        }),
-                    ),
-                    ..ExprStmt::default()
+                ExprData::Identifier(IdentifierExpr {
+                    reference: identifier.reference,
+                    ..IdentifierExpr::default()
                 }),
-            ));
+            );
+            if !lower_define {
+                assignments.push(Stmt::new(
+                    loc,
+                    StmtData::Expr(ExprStmt {
+                        value: Expr::new(
+                            loc,
+                            ExprData::Binary(BinaryExpr {
+                                left: Expr::new(
+                                    loc,
+                                    ExprData::Dot(DotExpr {
+                                        target: Expr::new(loc, ExprData::This),
+                                        name: name.clone(),
+                                        name_loc: loc,
+                                        ..DotExpr::default()
+                                    }),
+                                ),
+                                right: parameter.clone(),
+                                op: OpCode::BinaryAssign,
+                            }),
+                        ),
+                        ..ExprStmt::default()
+                    }),
+                ));
+            }
             if use_define {
                 field_properties.push(Property {
                     kind: PropertyKind::Field,
@@ -6148,20 +6165,24 @@ fn lower_type_script_constructor_parameter_fields(core: &ParserCore, class: &mut
                             ..StringExpr::default()
                         }),
                     ),
+                    initializer_or_nil: if lower_define {
+                        parameter
+                    } else {
+                        Expr::default()
+                    },
                     ..Property::default()
                 });
             }
         }
-        if assignments.is_empty() {
-            return;
-        }
-        let statements = &mut function.function.body.block.statements;
-        if is_derived {
-            if !insert_parameter_fields_after_super(statements, &assignments) {
-                return;
+        if !assignments.is_empty() {
+            let statements = &mut function.function.body.block.statements;
+            if is_derived {
+                if !insert_parameter_fields_after_super(statements, &assignments) {
+                    return;
+                }
+            } else {
+                statements.splice(0..0, assignments);
             }
-        } else {
-            statements.splice(0..0, assignments);
         }
     }
     class.properties.splice(
