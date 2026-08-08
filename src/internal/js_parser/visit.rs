@@ -4482,7 +4482,8 @@ fn lower_unsupported_type_script_define_class_fields(core: &mut ParserCore, clas
 
     let mut computed_key_effects = Expr::default();
     let mut initializers = Vec::new();
-    class.properties.retain_mut(|property| {
+    let mut retained = Vec::with_capacity(class.properties.len());
+    for mut property in std::mem::take(&mut class.properties) {
         if property.kind != PropertyKind::Field
             || property.flags.contains(PropertyFlags::IS_STATIC)
             || matches!(
@@ -4490,7 +4491,16 @@ fn lower_unsupported_type_script_define_class_fields(core: &mut ParserCore, clas
                 Some(ExprData::PrivateIdentifier(_))
             )
         {
-            return true;
+            if property.flags.contains(PropertyFlags::IS_COMPUTED)
+                && computed_key_effects.data.is_some()
+            {
+                property.key = join_with_comma(
+                    std::mem::take(&mut computed_key_effects),
+                    std::mem::take(&mut property.key),
+                );
+            }
+            retained.push(property);
+            continue;
         }
 
         let loc = property.loc;
@@ -4529,8 +4539,8 @@ fn lower_unsupported_type_script_define_class_fields(core: &mut ParserCore, clas
                 ..ExprStmt::default()
             }),
         ));
-        false
-    });
+    }
+    class.properties = retained;
 
     if computed_key_effects.data.is_some() {
         if class.extends_or_nil.data.is_some() {
