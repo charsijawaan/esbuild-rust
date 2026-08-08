@@ -3712,6 +3712,7 @@ fn visit_class(
             core.visit_this_is_nested = old_this_is_nested;
         }
     }
+    preserve_type_script_omitted_computed_field_keys(core, class, resolve_identifiers);
     lower_standard_decorators(core, class, outer_class_name);
     let decorator_keys = prepare_type_script_computed_property_keys(core, class);
     lower_type_script_experimental_decorators(core, class, outer_class_name, &decorator_keys);
@@ -3772,6 +3773,155 @@ fn visit_class(
     } else {
         used_inner_name
     }
+}
+
+fn preserve_type_script_omitted_computed_field_keys(
+    core: &mut ParserCore,
+    class: &mut Class,
+    resolve_identifiers: bool,
+) {
+    if !core.options.ts.parse
+        || class.use_define_for_class_fields
+        || core.options.ts.config.experimental_decorators
+            == crate::internal::config::MaybeBool::True
+    {
+        return;
+    }
+
+    let mut pending = Expr::default();
+    let mut last_computed_index: Option<usize> = None;
+    let mut last_computed_prefix = Expr::default();
+    let mut retained: Vec<Property> = Vec::with_capacity(class.properties.len());
+    for mut property in std::mem::take(&mut class.properties) {
+        let omit = property.kind == PropertyKind::Field
+            && property.flags.contains(PropertyFlags::IS_COMPUTED)
+            && property.initializer_or_nil.data.is_none()
+            && property.value_or_nil.data.is_none()
+            && property.decorators.is_empty()
+            && !matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::PrivateIdentifier(_))
+            );
+        if omit {
+            let mut key = std::mem::take(&mut property.key);
+            if !resolve_identifiers {
+                visit_expr(core, &mut key, true);
+            }
+            pending = join_with_comma(pending, key);
+            continue;
+        }
+        if property.flags.contains(PropertyFlags::IS_COMPUTED)
+            && property.kind.is_method_definition()
+        {
+            if let Some(index) = last_computed_index
+                && last_computed_prefix.data.is_some()
+            {
+                let previous = &mut retained[index];
+                previous.key = join_with_comma(
+                    std::mem::take(&mut last_computed_prefix),
+                    std::mem::take(&mut previous.key),
+                );
+            }
+            last_computed_index = Some(retained.len());
+            last_computed_prefix = std::mem::take(&mut pending);
+        }
+        retained.push(property);
+    }
+    class.properties = retained;
+
+    if pending.data.is_none() {
+        if let Some(index) = last_computed_index
+            && last_computed_prefix.data.is_some()
+        {
+            let property = &mut class.properties[index];
+            property.key = join_with_comma(last_computed_prefix, std::mem::take(&mut property.key));
+        }
+        return;
+    }
+    if let Some(index) = last_computed_index {
+        let property = &mut class.properties[index];
+        let loc = property.key.loc;
+        let reference = generate_class_computed_key_temp(core, loc);
+        let original_key = std::mem::take(&mut property.key);
+        property.key = join_with_comma(
+            join_with_comma(
+                join_with_comma(
+                    last_computed_prefix,
+                    assign(computed_key_temp(core, loc, reference), original_key),
+                ),
+                pending,
+            ),
+            computed_key_temp(core, loc, reference),
+        );
+    } else if class.extends_or_nil.data.is_some() {
+        let loc = class.extends_or_nil.loc;
+        let reference = generate_class_computed_key_temp(core, loc);
+        let extends = std::mem::take(&mut class.extends_or_nil);
+        class.extends_or_nil = join_with_comma(
+            join_with_comma(
+                assign(computed_key_temp(core, loc, reference), extends),
+                pending,
+            ),
+            computed_key_temp(core, loc, reference),
+        );
+    } else {
+        core.class_pre_statements.push(Stmt::new(
+            class.body_loc,
+            StmtData::Expr(ExprStmt {
+                value: pending,
+                ..ExprStmt::default()
+            }),
+        ));
+    }
+}
+
+fn generate_class_computed_key_temp(core: &mut ParserCore, loc: Loc) -> Ref {
+    let mut enclosing_scope = core.current_scope.clone();
+    while let Some(scope) = enclosing_scope.clone() {
+        let (kind, parent) = {
+            let scope = scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                scope.kind,
+                scope.parent.as_ref().and_then(std::sync::Weak::upgrade),
+            )
+        };
+        if !matches!(kind, ScopeKind::ClassBody | ScopeKind::ClassName) {
+            break;
+        }
+        enclosing_scope = parent;
+    }
+    let is_top_level = enclosing_scope.as_ref().is_some_and(|scope| {
+        core.module_scope
+            .as_ref()
+            .is_some_and(|module| std::sync::Arc::ptr_eq(scope, module))
+    });
+    if is_top_level {
+        return core.generate_top_level_temp_ref();
+    }
+
+    let reference = core.new_symbol(SymbolKind::Other, "_a");
+    if let Some(scope) = enclosing_scope {
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(reference);
+    }
+    core.record_declared_symbol(reference);
+    core.class_pre_statements.push(Stmt::new(
+        loc,
+        StmtData::Local(LocalStmt {
+            declarations: vec![Decl {
+                binding: identifier_binding(loc, reference),
+                ..Decl::default()
+            }],
+            kind: LocalKind::Var,
+            ..LocalStmt::default()
+        }),
+    ));
+    reference
 }
 
 fn decorator_target(loc: Loc, reference: Ref) -> Expr {

@@ -1096,6 +1096,7 @@ fn is_statement_start(lexer: &Lexer) -> bool {
     matches!(
         lexer.token,
         Token::At
+            | Token::OpenBracket
             | Token::Identifier
             | Token::Var
             | Token::Const

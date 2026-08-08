@@ -312,6 +312,7 @@ fn parse_class_property(
         PropertyFlags::NONE
     };
     let mut close_bracket_loc = Loc::default();
+    let property_scope_index = core.scopes_in_order.len();
     let mut key = if let Some((name, loc, _)) = preconsumed_key {
         class_property_name(core, loc, name)
     } else {
@@ -445,6 +446,7 @@ fn parse_class_property(
                 ..Property::default()
             });
         }
+        core.discard_scopes_up_to(property_scope_index);
         return None;
     }
 
@@ -816,5 +818,42 @@ mod tests {
             panic!("expected class");
         };
         assert!(!class.class.use_define_for_class_fields);
+    }
+
+    #[test]
+    fn preserves_computed_type_script_class_fields() {
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let source = Source {
+            contents: Arc::from(
+                &b"class Foo { named: any; [computed]: any; abstract omitted: any; abstract [REMOVE_THIS]: any; abstract [(x => y => x + y)('nested')('scopes')]: any }"[..],
+            ),
+            ..Source::default()
+        };
+        let ts_options = TsOptions {
+            parse: true,
+            config: crate::internal::config::TsConfig {
+                use_define_for_class_fields: MaybeBool::True,
+                ..crate::internal::config::TsConfig::default()
+            },
+            ..TsOptions::default()
+        };
+        let mut lexer = Lexer::new(log, source.clone(), ts_options.clone());
+        let mut core = super::ParserCore::new(
+            source,
+            Options {
+                ts: ts_options,
+                ..Options::default()
+            },
+        );
+        let expr = parse_class_prefix(&mut core, &mut lexer).expect("class");
+        let Some(ExprData::Class(class)) = expr.data.as_deref() else {
+            panic!("expected class");
+        };
+        assert_eq!(class.class.properties.len(), 2);
+        assert!(
+            class.class.properties[1]
+                .flags
+                .contains(PropertyFlags::IS_COMPUTED)
+        );
     }
 }

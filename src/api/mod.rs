@@ -10322,7 +10322,7 @@ mod tests {
             "{assignment_fields}"
         );
         assert!(
-            assignment_fields.contains("[sideEffect()];"),
+            assignment_fields.starts_with("sideEffect();\nclass Foo"),
             "{assignment_fields}"
         );
         assert!(

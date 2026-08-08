@@ -3831,8 +3831,14 @@ mod tests {
                             )
                         ))
                     && !(option_names == ["AbsOutputFile", "TS"]
-                        && case["upstream_test"]
-                            == "TestThisInsideFunctionTSNoBundleUseDefineForClassFields")
+                        && matches!(
+                            case["upstream_test"].as_str(),
+                            Some(
+                                "TestThisInsideFunctionTSNoBundleUseDefineForClassFields"
+                                    | "TestTSAbstractClassFieldUseAssign"
+                                    | "TestTSAbstractClassFieldUseDefine"
+                            )
+                        ))
                     && !(option_names == ["AbsOutputFile", "UnsupportedJSFeatures"]
                         && matches!(
                             case["upstream_test"].as_str(),
@@ -4131,7 +4137,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 576 },
+            if selected_test.is_some() { 1 } else { 578 },
             "upstream basic bundler corpus case count"
         );
     }

@@ -2175,7 +2175,7 @@ mod tests {
     use super::{HelperCall, lazy_export_ast, parse};
     use crate::internal::{
         compat::JsFeature,
-        config::Format,
+        config::{Format, MaybeBool, TsConfig, TsOptions},
         helpers::string_to_utf16,
         js_ast::{Expr, ExprData, LocalKind, OpCode, StmtData, StringExpr},
         js_parser::Options,
@@ -2274,6 +2274,42 @@ mod tests {
             ast.parts[1].statements[1].data.as_deref(),
             Some(StmtData::If(_))
         ));
+    }
+
+    #[test]
+    fn preserves_computed_type_script_class_fields_after_visiting() {
+        let (ast, ok, log) = parse_source_with_options(
+            "const keepThisToo = Symbol('keepThisToo'); declare const REMOVE_THIS_TOO: unique symbol; abstract class Foo { keepThis: any; [keepThisToo]: any; abstract REMOVE_THIS: any; abstract [REMOVE_THIS_TOO]: any; abstract [(x => y => x + y)('nested')('scopes')]: any } (() => new Foo())()",
+            Options {
+                ts: TsOptions {
+                    parse: true,
+                    config: TsConfig {
+                        use_define_for_class_fields: MaybeBool::True,
+                        ..TsConfig::default()
+                    },
+                    ..TsOptions::default()
+                },
+                ..Options::default()
+            },
+        );
+        assert!(ok);
+        assert!(log.done().is_empty());
+        let class = ast
+            .parts
+            .iter()
+            .flat_map(|part| &part.statements)
+            .find_map(|statement| match statement.data.as_deref() {
+                Some(StmtData::Class(class)) => Some(&class.class),
+                Some(StmtData::Local(local)) => local.declarations.iter().find_map(|declaration| {
+                    match declaration.value_or_nil.data.as_deref() {
+                        Some(ExprData::Class(class)) => Some(&class.class),
+                        _ => None,
+                    }
+                }),
+                _ => None,
+            })
+            .expect("class statement");
+        assert_eq!(class.properties.len(), 2);
     }
 
     #[test]
