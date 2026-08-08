@@ -5395,6 +5395,7 @@ fn class_field_assignment(loc: Loc, target: Expr, initializer: Expr) -> Stmt {
                     op: OpCode::BinaryAssign,
                 }),
             ),
+            must_not_be_merged: true,
             ..ExprStmt::default()
         }),
     )
