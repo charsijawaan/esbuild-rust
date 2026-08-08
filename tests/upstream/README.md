@@ -80,7 +80,7 @@ constructed by loops and helpers are also captured. The checked-in fixture has
 diagnostic-only cases. It records unsupported non-serializable option fields
 instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 
-The active bundler tranche exact-compares 574 Unix snapshots from the default,
+The active bundler tranche exact-compares 576 Unix snapshots from the default,
 DCE, import-star, TypeScript import-star, lowering, TypeScript, package-json,
 tsconfig, loader, CSS, code-splitting, Yarn PnP, and entry-point glob suites that use
 `AbsOutputFile` or `AbsOutputDir`, with all eligible DCE cases and selected
@@ -89,8 +89,8 @@ combinations of `Mode`, `OutputFormat`, `Platform`, legal-comment settings,
 `TreeShaking`. This includes dynamic `require()` and `import()` glob modules in
 both single-file and code-splitting builds, glob import attributes, empty-glob
 warnings, and entry-point glob expansion. The missing-glob-directory
-diagnostic-only case is also covered. So 4,866 concrete upstream cases are
-currently active in `cargo test`; the remaining 496 captured bundler cases are
+diagnostic-only case is also covered. So 4,868 concrete upstream cases are
+currently active in `cargo test`; the remaining 494 captured bundler cases are
 the parity backlog, not claimed as passing coverage.
 
 The generated JSON is checked in so `cargo test` does not require Go or a

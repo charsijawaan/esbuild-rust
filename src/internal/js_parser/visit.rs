@@ -3717,6 +3717,42 @@ fn visit_class(
     lower_type_script_experimental_decorators(core, class, outer_class_name, &decorator_keys);
     lower_type_script_static_field_assignments(core, class, outer_class_name, class_post_start);
     lower_type_script_class_field_assignments(core, class);
+    if let Some(constructor_index) = class_constructor_index(class) {
+        let parameter_field_count = class.properties[constructor_index]
+            .value_or_nil
+            .data
+            .as_deref()
+            .and_then(|data| match data {
+                ExprData::Function(function) => Some(
+                    function
+                        .function
+                        .args
+                        .iter()
+                        .filter(|argument| argument.is_typescript_ctor_field)
+                        .count(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if constructor_index != 0 && parameter_field_count != 0 {
+            let generated_field_count = if class.use_define_for_class_fields {
+                parameter_field_count
+            } else {
+                0
+            };
+            let end = (constructor_index + 1 + generated_field_count).min(class.properties.len());
+            let constructor_and_fields: Vec<_> =
+                class.properties.drain(constructor_index..end).collect();
+            class.properties.splice(0..0, constructor_and_fields);
+        }
+        if let Some(ExprData::Function(function)) =
+            class.properties[0].value_or_nil.data.as_deref_mut()
+        {
+            for argument in &mut function.function.args {
+                argument.is_typescript_ctor_field = false;
+            }
+        }
+    }
     core.pop_scope();
     core.pop_scope();
     let used_inner_name = inner_class_name.filter(|inner| {
@@ -4451,12 +4487,18 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
                 &assignments,
             );
         } else {
+            let parameter_field_count = function
+                .function
+                .args
+                .iter()
+                .filter(|argument| argument.is_typescript_ctor_field)
+                .count();
             function
                 .function
                 .body
                 .block
                 .statements
-                .splice(0..0, assignments);
+                .splice(parameter_field_count..parameter_field_count, assignments);
         }
         if core.options.ts.config.experimental_decorators
             == crate::internal::config::MaybeBool::True
@@ -5849,11 +5891,11 @@ fn lower_type_script_constructor_parameter_fields(core: &ParserCore, class: &mut
         } else {
             statements.splice(0..0, assignments);
         }
-        for argument in &mut function.function.args {
-            argument.is_typescript_ctor_field = false;
-        }
     }
-    class.properties.extend(field_properties);
+    class.properties.splice(
+        constructor_index + 1..constructor_index + 1,
+        field_properties,
+    );
 }
 
 fn insert_parameter_fields_after_super(statements: &mut Vec<Stmt>, assignments: &[Stmt]) -> bool {

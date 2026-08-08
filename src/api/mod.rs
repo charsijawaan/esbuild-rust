@@ -10359,10 +10359,10 @@ mod tests {
             },
         ));
         assert!(
-            ordered
-                .find("this.initialized = 1")
-                .expect("field assignment")
-                < ordered.find("this.id = id").expect("parameter property"),
+            ordered.find("this.id = id").expect("parameter property")
+                < ordered
+                    .find("this.initialized = 1")
+                    .expect("field assignment"),
             "{ordered}"
         );
 

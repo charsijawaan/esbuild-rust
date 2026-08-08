@@ -3826,6 +3826,8 @@ mod tests {
                             Some(
                                 "TestThisInsideFunctionTS"
                                     | "TestThisInsideFunctionTSUseDefineForClassFields"
+                                    | "TestParameterPropsUseDefineForClassFieldsTrue"
+                                    | "TestParameterPropsUseDefineForClassFieldsFalse"
                             )
                         ))
                     && !(option_names == ["AbsOutputFile", "TS"]
@@ -4129,7 +4131,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 574 },
+            if selected_test.is_some() { 1 } else { 576 },
             "upstream basic bundler corpus case count"
         );
     }

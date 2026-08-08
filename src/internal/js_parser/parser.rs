@@ -4176,15 +4176,15 @@ mod tests {
         };
         assert_eq!(class.class.properties.len(), 5);
         assert_eq!(
-            class.class.properties[1].kind,
+            class.class.properties[2].kind,
             crate::internal::js_ast::PropertyKind::Method
         );
         assert_eq!(
-            class.class.properties[2].kind,
+            class.class.properties[3].kind,
             crate::internal::js_ast::PropertyKind::AutoAccessor
         );
         assert!(
-            class.class.properties[2]
+            class.class.properties[3]
                 .flags
                 .contains(crate::internal::js_ast::PropertyFlags::IS_STATIC)
         );
@@ -4199,12 +4199,12 @@ mod tests {
             crate::internal::ast::SymbolKind::PrivateGetSetPair
         );
         let Some(ExprData::Function(constructor)) =
-            class.class.properties[4].value_or_nil.data.as_deref()
+            class.class.properties[0].value_or_nil.data.as_deref()
         else {
             panic!("expected constructor");
         };
-        assert!(constructor.function.args[0].is_typescript_ctor_field);
-        assert!(constructor.function.args[1].is_typescript_ctor_field);
+        assert!(!constructor.function.args[0].is_typescript_ctor_field);
+        assert!(!constructor.function.args[1].is_typescript_ctor_field);
         assert!(!constructor.function.args[2].is_typescript_ctor_field);
     }
 
