@@ -3716,6 +3716,7 @@ fn visit_class(
     lower_standard_decorators(core, class, outer_class_name);
     let decorator_keys = prepare_type_script_computed_property_keys(core, class);
     lower_type_script_experimental_decorators(core, class, outer_class_name, &decorator_keys);
+    lower_unsupported_type_script_define_class_fields(core, class);
     lower_type_script_static_field_assignments(core, class, outer_class_name, class_post_start);
     lower_type_script_class_field_assignments(core, class);
     if let Some(constructor_index) = class_constructor_index(class) {
@@ -4309,6 +4310,11 @@ fn prepare_type_script_computed_property_keys(
             property.flags.contains(PropertyFlags::IS_COMPUTED)
                 && if class.use_define_for_class_fields {
                     !property.decorators.is_empty()
+                        || (property.kind == PropertyKind::Field
+                            && core
+                                .options
+                                .unsupported_js_features
+                                .contains(JsFeature::CLASS_FIELD))
                 } else {
                     !property.decorators.is_empty()
                         || property.initializer_or_nil.data.is_some()
@@ -4452,6 +4458,122 @@ fn prepare_type_script_computed_property_keys(
     }
 
     decorator_keys
+}
+
+fn lower_unsupported_type_script_define_class_fields(core: &mut ParserCore, class: &mut Class) {
+    if !core.options.ts.parse
+        || !class.use_define_for_class_fields
+        || !core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::CLASS_FIELD)
+    {
+        return;
+    }
+
+    let mut computed_key_effects = Expr::default();
+    let mut initializers = Vec::new();
+    class.properties.retain_mut(|property| {
+        if property.kind != PropertyKind::Field
+            || property.flags.contains(PropertyFlags::IS_STATIC)
+            || matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::PrivateIdentifier(_))
+            )
+        {
+            return true;
+        }
+
+        let loc = property.loc;
+        let key = if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+            let original = std::mem::take(&mut property.key);
+            if let Some(ExprData::Binary(binary)) = original.data.as_deref()
+                && binary.op == OpCode::BinaryAssign
+                && matches!(binary.left.data.as_deref(), Some(ExprData::Identifier(_)))
+            {
+                let key = binary.left.clone();
+                computed_key_effects =
+                    join_with_comma(std::mem::take(&mut computed_key_effects), original);
+                key
+            } else {
+                let reference = generate_class_computed_key_temp(core, loc);
+                let key = computed_key_temp(core, loc, reference);
+                computed_key_effects = join_with_comma(
+                    std::mem::take(&mut computed_key_effects),
+                    assign(computed_key_temp(core, loc, reference), original),
+                );
+                key
+            }
+        } else {
+            property.key.clone()
+        };
+        let mut args = vec![Expr::new(loc, ExprData::This), key];
+        if property.initializer_or_nil.data.is_some() {
+            args.push(std::mem::take(&mut property.initializer_or_nil));
+        } else if property.value_or_nil.data.is_some() {
+            args.push(std::mem::take(&mut property.value_or_nil));
+        }
+        initializers.push(Stmt::new(
+            loc,
+            StmtData::Expr(ExprStmt {
+                value: core.call_runtime(loc, "__publicField", args),
+                ..ExprStmt::default()
+            }),
+        ));
+        false
+    });
+
+    if computed_key_effects.data.is_some() {
+        if class.extends_or_nil.data.is_some() {
+            let loc = class.extends_or_nil.loc;
+            let reference = generate_class_computed_key_temp(core, loc);
+            let extends = std::mem::take(&mut class.extends_or_nil);
+            class.extends_or_nil = join_with_comma(
+                join_with_comma(
+                    assign(computed_key_temp(core, loc, reference), extends),
+                    computed_key_effects,
+                ),
+                computed_key_temp(core, loc, reference),
+            );
+        } else {
+            core.class_pre_statements.push(Stmt::new(
+                class.body_loc,
+                StmtData::Expr(ExprStmt {
+                    value: computed_key_effects,
+                    ..ExprStmt::default()
+                }),
+            ));
+        }
+    }
+
+    if !initializers.is_empty() {
+        if let Some(index) = class_constructor_index(class) {
+            if let Some(ExprData::Function(function)) =
+                class.properties[index].value_or_nil.data.as_deref_mut()
+            {
+                if class.extends_or_nil.data.is_some() {
+                    insert_parameter_fields_after_super(
+                        &mut function.function.body.block.statements,
+                        &initializers,
+                    );
+                } else {
+                    function
+                        .function
+                        .body
+                        .block
+                        .statements
+                        .splice(0..0, initializers);
+                }
+            }
+        } else {
+            append_class_field_constructor(
+                core,
+                class,
+                initializers,
+                class.extends_or_nil.data.is_some(),
+            );
+        }
+    }
 }
 
 fn lower_type_script_experimental_decorators(
