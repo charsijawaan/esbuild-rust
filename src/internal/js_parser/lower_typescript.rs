@@ -2,12 +2,14 @@ use std::collections::HashSet;
 
 use crate::internal::{
     ast::{INVALID_REF, NamespaceAlias, Ref, SymbolKind},
+    compat::JsFeature,
     js_ast::{
-        Arg, ArrowExpr, BinaryExpr, Binding, BindingData, BlockStmt, Decl, DotExpr, EnumStmt, Expr,
-        ExprData, ExprStmt, FunctionBody, IdentifierBinding, IdentifierExpr, IndexExpr, LocalKind,
-        LocalStmt, NamespaceStmt, ObjectExpr, OpCode, PrimitiveType, ReturnStmt, Stmt, StmtData,
-        StringExpr, convert_binding_to_expr, for_each_identifier_binding, is_identifier,
-        join_with_comma, known_primitive_type, make_helper_context,
+        Arg, ArrowExpr, BinaryExpr, Binding, BindingData, BlockStmt, ClassExpr, ClassStmt, Decl,
+        DeclaredSymbol, DotExpr, EnumStmt, Expr, ExprData, ExprStmt, FunctionBody,
+        IdentifierBinding, IdentifierExpr, IndexExpr, LocalKind, LocalStmt, NamespaceStmt,
+        ObjectExpr, OpCode, PrimitiveType, PropertyKind, ReturnStmt, Stmt, StmtData, StringExpr,
+        convert_binding_to_expr, for_each_identifier_binding, is_identifier, join_with_comma,
+        known_primitive_type, make_helper_context,
     },
     logger::Loc,
 };
@@ -230,16 +232,27 @@ fn lower_namespace_body(
                 }
             }
             StmtData::Class(mut class) if class.is_export => {
-                class.is_export = false;
-                let name = class.class.name;
-                result.push(Stmt::new(loc, StmtData::Class(class)));
-                if let Some(name) = name {
-                    result.push(namespace_export_assignment(
+                if let Some(block_index) = namespace_keep_name_static_block(core, &class) {
+                    lower_namespace_keep_name_class(
                         core,
                         argument,
-                        name.loc,
-                        name.reference,
-                    ));
+                        loc,
+                        class,
+                        block_index,
+                        &mut result,
+                    );
+                } else {
+                    class.is_export = false;
+                    let name = class.class.name;
+                    result.push(Stmt::new(loc, StmtData::Class(class)));
+                    if let Some(name) = name {
+                        result.push(namespace_export_assignment(
+                            core,
+                            argument,
+                            name.loc,
+                            name.reference,
+                        ));
+                    }
                 }
             }
             StmtData::Namespace(namespace) => {
@@ -268,6 +281,135 @@ fn lower_namespace_body(
         }
     }
     result
+}
+
+fn namespace_keep_name_static_block(core: &ParserCore, class: &ClassStmt) -> Option<usize> {
+    if !core.options.keep_names
+        || !core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::CLASS_STATIC_BLOCKS)
+    {
+        return None;
+    }
+    class.class.properties.iter().position(|property| {
+        if property.kind != PropertyKind::ClassStaticBlock {
+            return false;
+        }
+        let Some(block) = &property.class_static_block else {
+            return false;
+        };
+        let [statement] = block.block.statements.as_slice() else {
+            return false;
+        };
+        let Some(StmtData::Expr(statement)) = statement.data.as_deref() else {
+            return false;
+        };
+        let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
+            return false;
+        };
+        statement.is_from_class_or_fn_that_can_be_removed_if_unused
+            && matches!(
+                call.args.first().and_then(|arg| arg.data.as_deref()),
+                Some(ExprData::This)
+            )
+    })
+}
+
+fn lower_namespace_keep_name_class(
+    core: &mut ParserCore,
+    argument: Ref,
+    loc: Loc,
+    mut class: ClassStmt,
+    block_index: usize,
+    result: &mut Vec<Stmt>,
+) {
+    let outer_name = class
+        .class
+        .name
+        .expect("exported namespace class must have a name");
+    let capture_ref = core.new_symbol(
+        SymbolKind::Const,
+        format!("_{}", symbol_name(core, outer_name.reference)),
+    );
+    let generated_scope = core.scopes_for_current_part.iter().find_map(|scope| {
+        let contains_outer_name = scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .members
+            .values()
+            .any(|member| member.reference == outer_name.reference);
+        contains_outer_name.then(|| scope.clone())
+    });
+    generated_scope
+        .or_else(|| core.module_scope.clone())
+        .expect("generated class capture requires a scope")
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .generated
+        .push(capture_ref);
+    core.declared_symbols.push(DeclaredSymbol {
+        reference: capture_ref,
+        is_top_level: false,
+    });
+
+    let static_block = class.class.properties.remove(block_index);
+    let mut static_statements = static_block
+        .class_static_block
+        .expect("class static block property")
+        .block
+        .statements;
+    let Some(StmtData::Expr(statement)) = static_statements[0].data.as_deref_mut() else {
+        unreachable!("keep-name static block must contain an expression statement");
+    };
+    let Some(ExprData::Call(call)) = statement.value.data.as_deref_mut() else {
+        unreachable!("keep-name static block must contain a call");
+    };
+    call.args[0] = identifier(call.args[0].loc, capture_ref);
+    core.record_usage(capture_ref);
+
+    let mut inner_name = outer_name;
+    inner_name.reference = capture_ref;
+    class.class.name = Some(inner_name);
+    class.is_export = false;
+    result.push(Stmt::new(
+        loc,
+        StmtData::Local(LocalStmt {
+            declarations: vec![Decl {
+                binding: identifier_binding(outer_name.loc, capture_ref),
+                value_or_nil: Expr::new(
+                    loc,
+                    ExprData::Class(ClassExpr {
+                        class: class.class,
+                        ..ClassExpr::default()
+                    }),
+                ),
+            }],
+            kind: LocalKind::Const,
+            ..LocalStmt::default()
+        }),
+    ));
+    result.extend(static_statements);
+
+    core.record_usage(capture_ref);
+    result.push(Stmt::new(
+        loc,
+        StmtData::Local(LocalStmt {
+            declarations: vec![Decl {
+                binding: identifier_binding(outer_name.loc, outer_name.reference),
+                value_or_nil: identifier(outer_name.loc, capture_ref),
+            }],
+            kind: LocalKind::Let,
+            ..LocalStmt::default()
+        }),
+    ));
+    result.push(namespace_export_assignment_with_value(
+        core,
+        argument,
+        outer_name.loc,
+        outer_name.reference,
+        capture_ref,
+    ));
 }
 
 fn namespace_has_runtime_value(statements: &[Stmt]) -> bool {
@@ -317,15 +459,25 @@ fn namespace_export_assignment(
     loc: Loc,
     reference: Ref,
 ) -> Stmt {
-    let name = symbol_name(core, reference);
-    core.record_usage(reference);
+    namespace_export_assignment_with_value(core, argument, loc, reference, reference)
+}
+
+fn namespace_export_assignment_with_value(
+    core: &mut ParserCore,
+    argument: Ref,
+    loc: Loc,
+    property_reference: Ref,
+    value_reference: Ref,
+) -> Stmt {
+    let name = symbol_name(core, property_reference);
+    core.record_usage(value_reference);
     Stmt::new(
         loc,
         StmtData::Expr(ExprStmt {
             value: assign(
                 loc,
                 dot(loc, identifier(loc, argument), name),
-                identifier(loc, reference),
+                identifier(loc, value_reference),
             ),
             ..ExprStmt::default()
         }),

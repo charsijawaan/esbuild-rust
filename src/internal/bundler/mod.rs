@@ -3845,6 +3845,14 @@ mod tests {
                     && !(option_names == ["AbsOutputFile", "Mode", "TS", "UnsupportedJSFeatures"]
                         && case["upstream_test"]
                             == "TestParameterPropsUseDefineForClassFieldsTrueLowered")
+                    && !(option_names
+                        == [
+                            "AbsOutputFile",
+                            "KeepNames",
+                            "Mode",
+                            "UnsupportedJSFeatures",
+                        ]
+                        && case["upstream_test"] == "TestTSNamespaceKeepNamesTargetES2015")
                     && !(option_names == ["AbsOutputFile", "Mode", "UnsupportedJSFeatures"]
                         && case["upstream_test"] == "TestTSDeclareClassFields")
                     && !(option_names
@@ -4153,7 +4161,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 587 },
+            if selected_test.is_some() { 1 } else { 588 },
             "upstream basic bundler corpus case count"
         );
     }
