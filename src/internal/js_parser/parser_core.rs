@@ -90,6 +90,7 @@ pub(crate) struct ParserCore {
     pub(crate) promise_ref: Ref,
     pub(crate) reg_exp_ref: Ref,
     pub(crate) big_int_ref: Ref,
+    pub(crate) import_meta_ref: Ref,
     pub(crate) require_ref: Ref,
     pub(crate) exports_ref: Ref,
     pub(crate) module_ref: Ref,
@@ -168,6 +169,7 @@ impl ParserCore {
             promise_ref: INVALID_REF,
             reg_exp_ref: INVALID_REF,
             big_int_ref: INVALID_REF,
+            import_meta_ref: INVALID_REF,
             require_ref: INVALID_REF,
             exports_ref: INVALID_REF,
             module_ref: INVALID_REF,
@@ -1349,6 +1351,21 @@ impl ParserCore {
                 .push(self.big_int_ref);
         }
         self.big_int_ref
+    }
+
+    pub(crate) fn make_import_meta_ref(&mut self) -> Ref {
+        if self.import_meta_ref == INVALID_REF {
+            let reference = self.new_symbol(SymbolKind::Other, "import_meta");
+            self.module_scope
+                .as_ref()
+                .expect("import.meta replacement requires a module scope")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generated
+                .push(reference);
+            self.import_meta_ref = reference;
+        }
+        self.import_meta_ref
     }
 
     pub(crate) fn store_name_in_ref(&mut self, name: MaybeSubstring) -> Ref {

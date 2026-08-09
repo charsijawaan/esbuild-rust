@@ -13,9 +13,9 @@ use crate::internal::{
     js_ast::{
         Ast, Binding, BindingData, CallExpr, CallKind, ClauseItem, Decl, DeclaredSymbol, DotExpr,
         ExportsKind, Expr, ExprData, ExprStmt, IdentifierBinding, IdentifierExpr, ImportStmt,
-        LazyExportStmt, LocalKind, LocalStmt, NamedExport, NamedImport, Part, Scope, ScopeKind,
-        ScopeRef, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr,
-        for_each_identifier_binding, make_helper_context,
+        LazyExportStmt, LocalKind, LocalStmt, NamedExport, NamedImport, ObjectExpr, Part, Scope,
+        ScopeKind, ScopeRef, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind,
+        StringExpr, for_each_identifier_binding, make_helper_context,
     },
     js_lexer::{Lexer, LexerPanic, Token},
     logger::{Loc, Log, Path, Source},
@@ -451,6 +451,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         insert_runtime_import_part(&mut core, &mut module_metadata, &mut parts);
         insert_generated_import_parts(&core, &module_metadata, &mut parts);
         insert_generated_define_parts(&core, &mut parts);
+        insert_import_meta_part(&core, &mut parts);
         insert_top_level_temp_part(&core, &mut parts);
         assert_eq!(
             core.remaining_scope_count(),
@@ -798,6 +799,44 @@ fn insert_top_level_temp_part(core: &ParserCore, parts: &mut Vec<Part>) {
                 }),
             )],
             declared_symbols,
+            ..Part::default()
+        },
+    );
+}
+
+fn insert_import_meta_part(core: &ParserCore, parts: &mut Vec<Part>) {
+    if core.import_meta_ref == INVALID_REF {
+        return;
+    }
+    let reference = core.import_meta_ref;
+    let kind = super::symbols::select_local_kind(LocalKind::Const, &core.options, true, false);
+    parts.insert(
+        1,
+        Part {
+            statements: vec![Stmt::new(
+                Loc::default(),
+                StmtData::Local(LocalStmt {
+                    declarations: vec![Decl {
+                        binding: Binding {
+                            data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
+                                reference,
+                            }))),
+                            ..Binding::default()
+                        },
+                        value_or_nil: Expr::new(
+                            Loc::default(),
+                            ExprData::Object(ObjectExpr::default()),
+                        ),
+                    }],
+                    kind,
+                    ..LocalStmt::default()
+                }),
+            )],
+            declared_symbols: vec![DeclaredSymbol {
+                reference,
+                is_top_level: true,
+            }],
+            can_be_removed_if_unused: true,
             ..Part::default()
         },
     );

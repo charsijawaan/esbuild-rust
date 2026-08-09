@@ -23,7 +23,7 @@ use crate::internal::{
         is_identifier_es5_and_es_next, is_primitive_literal, join_with_comma, known_primitive_type,
         make_helper_context, mangle_object_spread,
     },
-    logger::{MsgId, MsgKind},
+    logger::{MsgData, MsgId, MsgKind},
 };
 
 use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properties};
@@ -9212,11 +9212,70 @@ fn visit_expr_with_target_and_context(
                 });
             }
         }
+        ExprData::ImportMeta(import_meta) => {
+            let unsupported = core
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::IMPORT_META);
+            let unsupported_output_format = core.options.mode
+                != crate::internal::config::Mode::PassThrough
+                && !core.options.output_format.keep_esm_import_export_syntax();
+            if unsupported || unsupported_output_format {
+                let range = Range {
+                    loc: expression.loc,
+                    len: import_meta.range_len,
+                };
+                let kind = if core.visit_try_body_depth > 0
+                    || is_inside_node_modules(&core.source.key_path.text)
+                {
+                    MsgKind::Debug
+                } else {
+                    MsgKind::Warning
+                };
+                if let Some(log) = core.log.clone() {
+                    if unsupported {
+                        let environment = pretty_print_target_environment(
+                            &core.options.original_target_env,
+                            core.options.unsupported_js_feature_overrides_mask,
+                        );
+                        log.add_id(
+                            MsgId::JsEmptyImportMeta,
+                            kind,
+                            Some(&mut core.tracker),
+                            range,
+                            format!(
+                                "\"import.meta\" is not available in {environment} and will be empty"
+                            ),
+                        );
+                    } else {
+                        log.add_id_with_notes(
+                            MsgId::JsEmptyImportMeta,
+                            kind,
+                            Some(&mut core.tracker),
+                            range,
+                            format!(
+                                "\"import.meta\" is not available with the {:?} output format and will be empty",
+                                core.options.output_format.as_str()
+                            ),
+                            vec![MsgData {
+                                text: "You need to set the output format to \"esm\" for \"import.meta\" to work correctly.".into(),
+                                ..MsgData::default()
+                            }],
+                        );
+                    }
+                }
+                let reference = core.make_import_meta_ref();
+                core.record_usage(reference);
+                *data = ExprData::Identifier(IdentifierExpr {
+                    reference,
+                    ..IdentifierExpr::default()
+                });
+            }
+        }
         ExprData::Boolean(_)
         | ExprData::Super
         | ExprData::Null
         | ExprData::Undefined
-        | ExprData::ImportMeta(_)
         | ExprData::NameOfSymbol(_)
         | ExprData::JsxText(_)
         | ExprData::Missing
