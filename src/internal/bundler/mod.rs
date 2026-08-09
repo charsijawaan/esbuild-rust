@@ -3854,7 +3854,10 @@ mod tests {
                         ]
                         && case["upstream_test"] == "TestTSNamespaceKeepNamesTargetES2015")
                     && !(option_names == ["AbsOutputFile", "Mode", "UnsupportedJSFeatures"]
-                        && case["upstream_test"] == "TestTSDeclareClassFields")
+                        && matches!(
+                            case["upstream_test"].as_str(),
+                            Some("TestTSDeclareClassFields" | "TestStaticClassBlockES2021")
+                        ))
                     && !(option_names
                         == ["AbsOutputFile", "MinifySyntax", "UnsupportedJSFeatures"]
                         && case["upstream_test"] == "TestTSMinifyDerivedClass")
@@ -4161,7 +4164,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 588 },
+            if selected_test.is_some() { 1 } else { 589 },
             "upstream basic bundler corpus case count"
         );
     }

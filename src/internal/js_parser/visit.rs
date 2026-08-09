@@ -598,6 +598,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
         let mut remove_overwritten_function = false;
         let mut prepend_to_statements = Vec::new();
         let mut append_to_statement = Vec::new();
+        let class_pre_start = core.class_pre_statements.len();
         match statement.data.as_deref_mut() {
             Some(StmtData::Block(block)) => {
                 visit_block(core, statement.loc, block, resolve_identifiers);
@@ -803,6 +804,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
             Some(StmtData::Class(class)) => {
                 let pre_start = core.class_pre_statements.len();
                 let post_start = core.class_post_statements.len();
+                let lower_static_blocks = class_static_blocks_can_be_lowered(core, &class.class);
                 let has_experimental_class_decorators =
                     core.options.ts.config.experimental_decorators
                         == crate::internal::config::MaybeBool::True
@@ -818,8 +820,41 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     !convert_to_expression,
                 );
                 if convert_to_expression && let Some(name) = class.class.name {
+                    let is_export = class.is_export;
+                    let local_kind = if is_top_level_scope
+                        && core.options.mode == crate::internal::config::Mode::Bundle
+                    {
+                        LocalKind::Var
+                    } else {
+                        LocalKind::Let
+                    };
+                    let capture_ref = lower_static_blocks.then(|| {
+                        inner_name
+                            .unwrap_or_else(|| generate_class_capture_ref(core, name.reference))
+                    });
+                    if let Some(capture_ref) = capture_ref {
+                        if let Some(scope) = &core.current_scope {
+                            let mut scope = scope
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if !scope.generated.contains(&capture_ref) {
+                                scope.generated.push(capture_ref);
+                            }
+                        }
+                        core.record_declared_symbol(capture_ref);
+                    }
+                    let lowered_static_statements =
+                        capture_ref.map_or_else(Vec::new, |capture_ref| {
+                            lower_class_static_blocks(core, &mut class.class, capture_ref)
+                        });
                     let mut class_expression = class.class.clone();
-                    if let Some(inner_name) = inner_name {
+                    if let Some(capture_ref) = capture_ref {
+                        class_expression
+                            .name
+                            .as_mut()
+                            .expect("named class expression")
+                            .reference = capture_ref;
+                    } else if let Some(inner_name) = inner_name {
                         class_expression
                             .name
                             .as_mut()
@@ -828,11 +863,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     } else {
                         class_expression.name = None;
                     }
+                    let binding_ref = capture_ref.unwrap_or(name.reference);
                     statement.data = Some(Box::new(StmtData::Local(LocalStmt {
                         declarations: vec![Decl {
                             binding: Binding {
                                 data: Some(Box::new(BindingData::Identifier(IdentifierBinding {
-                                    reference: name.reference,
+                                    reference: binding_ref,
                                 }))),
                                 loc: name.loc,
                             },
@@ -844,16 +880,29 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                                 }),
                             ),
                         }],
-                        kind: if is_top_level_scope
-                            && core.options.mode == crate::internal::config::Mode::Bundle
-                        {
-                            LocalKind::Var
-                        } else {
-                            LocalKind::Let
-                        },
-                        is_export: class.is_export,
+                        kind: local_kind,
+                        is_export: capture_ref.is_none() && is_export,
                         ..LocalStmt::default()
                     })));
+                    if let Some(capture_ref) = capture_ref {
+                        append_to_statement.extend(lowered_static_statements);
+                        append_to_statement.push(Stmt::new(
+                            name.loc,
+                            StmtData::Local(LocalStmt {
+                                declarations: vec![Decl {
+                                    binding: identifier_binding(name.loc, name.reference),
+                                    value_or_nil: class_capture_identifier(
+                                        core,
+                                        name.loc,
+                                        capture_ref,
+                                    ),
+                                }],
+                                kind: local_kind,
+                                is_export,
+                                ..LocalStmt::default()
+                            }),
+                        ));
+                    }
                 }
                 prepend_to_statements.extend(core.class_pre_statements.drain(pre_start..));
                 append_to_statement.extend(core.class_post_statements.drain(post_start..));
@@ -1484,6 +1533,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
             }
             _ => {}
         }
+        prepend_to_statements.extend(core.class_pre_statements.drain(class_pre_start..));
         if !prepend_to_statements.is_empty() || !append_to_statement.is_empty() {
             let loc = statement.loc;
             let original = std::mem::take(statement);
@@ -4025,6 +4075,220 @@ fn visit_class(
         None
     } else {
         used_inner_name
+    }
+}
+
+fn class_static_blocks_can_be_lowered(core: &ParserCore, class: &Class) -> bool {
+    core.options
+        .unsupported_js_features
+        .contains(JsFeature::CLASS_STATIC_BLOCKS)
+        && class.properties.iter().any(|property| {
+            property.kind == PropertyKind::ClassStaticBlock
+                && property.class_static_block.as_ref().is_some_and(|block| {
+                    block.block.statements.iter().all(|statement| {
+                        matches!(
+                            statement.data.as_deref(),
+                            None | Some(StmtData::Empty | StmtData::Expr(_))
+                        )
+                    })
+                })
+        })
+        && class.properties.iter().all(|property| {
+            property.kind != PropertyKind::ClassStaticBlock
+                || property.class_static_block.as_ref().is_some_and(|block| {
+                    block.block.statements.iter().all(|statement| {
+                        matches!(
+                            statement.data.as_deref(),
+                            None | Some(StmtData::Empty | StmtData::Expr(_))
+                        )
+                    })
+                })
+        })
+}
+
+fn generate_class_capture_ref(core: &mut ParserCore, outer_ref: Ref) -> Ref {
+    core.new_symbol(
+        SymbolKind::Other,
+        format!("_{}", symbol_name(core, outer_ref)),
+    )
+}
+
+fn generate_class_expression_capture_ref(core: &mut ParserCore, loc: Loc) -> Ref {
+    let reference = core.generate_temp_ref(false);
+    core.record_declared_symbol(reference);
+    core.class_pre_statements.push(Stmt::new(
+        loc,
+        StmtData::Local(LocalStmt {
+            declarations: vec![Decl {
+                binding: identifier_binding(loc, reference),
+                ..Decl::default()
+            }],
+            kind: LocalKind::Var,
+            ..LocalStmt::default()
+        }),
+    ));
+    reference
+}
+
+fn lower_class_static_blocks(
+    core: &mut ParserCore,
+    class: &mut Class,
+    class_ref: Ref,
+) -> Vec<Stmt> {
+    let mut lowered = Vec::new();
+    class.properties.retain_mut(|property| {
+        if property.kind != PropertyKind::ClassStaticBlock {
+            return true;
+        }
+        let block = property
+            .class_static_block
+            .take()
+            .expect("class static block property");
+        for mut statement in block.block.statements {
+            if let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() {
+                rewrite_lowered_class_static_expression(core, &mut expression.value, class_ref);
+                lowered.push(statement);
+            }
+        }
+        false
+    });
+    lowered
+}
+
+fn class_capture_identifier(core: &mut ParserCore, loc: Loc, class_ref: Ref) -> Expr {
+    core.record_usage(class_ref);
+    Expr::new(
+        loc,
+        ExprData::Identifier(IdentifierExpr {
+            reference: class_ref,
+            ..IdentifierExpr::default()
+        }),
+    )
+}
+
+fn super_property_key(expression: &Expr) -> Option<Expr> {
+    match expression.data.as_deref()? {
+        ExprData::Dot(dot) if matches!(dot.target.data.as_deref(), Some(ExprData::Super)) => {
+            Some(Expr::new(
+                dot.name_loc,
+                ExprData::String(StringExpr {
+                    value: string_to_utf16(dot.name.as_bytes()),
+                    ..StringExpr::default()
+                }),
+            ))
+        }
+        ExprData::Index(index) if matches!(index.target.data.as_deref(), Some(ExprData::Super)) => {
+            Some(index.index.clone())
+        }
+        _ => None,
+    }
+}
+
+fn rewrite_lowered_class_static_expression(
+    core: &mut ParserCore,
+    expression: &mut Expr,
+    class_ref: Ref,
+) {
+    if let Some(ExprData::Binary(binary)) = expression.data.as_deref_mut()
+        && binary.op == OpCode::BinaryAssign
+        && let Some(key) = super_property_key(&binary.left)
+    {
+        rewrite_lowered_class_static_expression(core, &mut binary.right, class_ref);
+        let value = std::mem::take(&mut binary.right);
+        let loc = expression.loc;
+        let class = class_capture_identifier(core, loc, class_ref);
+        let receiver = class_capture_identifier(core, loc, class_ref);
+        *expression = core.call_runtime(loc, "__superSet", vec![class, receiver, key, value]);
+        return;
+    }
+    if let Some(ExprData::Unary(unary)) = expression.data.as_deref_mut()
+        && matches!(
+            unary.op,
+            OpCode::UnaryPreDecrement
+                | OpCode::UnaryPreIncrement
+                | OpCode::UnaryPostDecrement
+                | OpCode::UnaryPostIncrement
+        )
+        && let Some(key) = super_property_key(&unary.value)
+    {
+        let loc = unary.value.loc;
+        let class = class_capture_identifier(core, loc, class_ref);
+        let receiver = class_capture_identifier(core, loc, class_ref);
+        let wrapper = core.call_runtime(loc, "__superWrapper", vec![class, receiver, key]);
+        unary.value = Expr::new(
+            loc,
+            ExprData::Dot(DotExpr {
+                target: wrapper,
+                name: "_".into(),
+                name_loc: loc,
+                ..DotExpr::default()
+            }),
+        );
+        return;
+    }
+    match expression.data.as_deref_mut() {
+        Some(ExprData::This) => {
+            *expression = class_capture_identifier(core, expression.loc, class_ref);
+        }
+        Some(ExprData::Dot(dot)) if matches!(dot.target.data.as_deref(), Some(ExprData::Super)) => {
+            let loc = expression.loc;
+            let key = Expr::new(
+                dot.name_loc,
+                ExprData::String(StringExpr {
+                    value: string_to_utf16(dot.name.as_bytes()),
+                    ..StringExpr::default()
+                }),
+            );
+            let class = class_capture_identifier(core, loc, class_ref);
+            let receiver = class_capture_identifier(core, loc, class_ref);
+            *expression = core.call_runtime(loc, "__superGet", vec![class, receiver, key]);
+        }
+        Some(ExprData::Index(index))
+            if matches!(index.target.data.as_deref(), Some(ExprData::Super)) =>
+        {
+            let loc = expression.loc;
+            let key = std::mem::take(&mut index.index);
+            let class = class_capture_identifier(core, loc, class_ref);
+            let receiver = class_capture_identifier(core, loc, class_ref);
+            *expression = core.call_runtime(loc, "__superGet", vec![class, receiver, key]);
+        }
+        Some(ExprData::Unary(unary)) => {
+            rewrite_lowered_class_static_expression(core, &mut unary.value, class_ref);
+        }
+        Some(ExprData::Binary(binary)) => {
+            rewrite_lowered_class_static_expression(core, &mut binary.left, class_ref);
+            rewrite_lowered_class_static_expression(core, &mut binary.right, class_ref);
+        }
+        Some(ExprData::Dot(dot)) => {
+            rewrite_lowered_class_static_expression(core, &mut dot.target, class_ref);
+        }
+        Some(ExprData::Index(index)) => {
+            rewrite_lowered_class_static_expression(core, &mut index.target, class_ref);
+            rewrite_lowered_class_static_expression(core, &mut index.index, class_ref);
+        }
+        Some(ExprData::Call(call)) => {
+            rewrite_lowered_class_static_expression(core, &mut call.target, class_ref);
+            for argument in &mut call.args {
+                rewrite_lowered_class_static_expression(core, argument, class_ref);
+            }
+        }
+        Some(ExprData::New(new_expression)) => {
+            rewrite_lowered_class_static_expression(core, &mut new_expression.target, class_ref);
+            for argument in &mut new_expression.args {
+                rewrite_lowered_class_static_expression(core, argument, class_ref);
+            }
+        }
+        Some(ExprData::Array(array)) => {
+            for item in &mut array.items {
+                rewrite_lowered_class_static_expression(core, item, class_ref);
+            }
+        }
+        Some(ExprData::If(if_expression)) => {
+            rewrite_lowered_class_static_expression(core, &mut if_expression.test, class_ref);
+            rewrite_lowered_class_static_expression(core, &mut if_expression.yes, class_ref);
+            rewrite_lowered_class_static_expression(core, &mut if_expression.no, class_ref);
+        }
+        _ => {}
     }
 }
 
@@ -8851,6 +9115,7 @@ fn visit_expr_with_target_and_context(
             keep_name = name_to_keep;
         }
         ExprData::Class(class) => {
+            let lower_static_blocks = class_static_blocks_can_be_lowered(core, &class.class);
             let name_to_keep = if core.options.keep_names {
                 class
                     .class
@@ -8859,9 +9124,30 @@ fn visit_expr_with_target_and_context(
             } else {
                 None
             };
-            visit_class(core, &mut class.class, resolve_identifiers, true);
+            let inner_name = visit_class(core, &mut class.class, resolve_identifiers, true);
             if let Some(name) = name_to_keep {
                 insert_class_name_static_block(core, &mut class.class, &name);
+            }
+            if lower_static_blocks {
+                let capture_ref = inner_name
+                    .unwrap_or_else(|| generate_class_expression_capture_ref(core, expression.loc));
+                let lowered = lower_class_static_blocks(core, &mut class.class, capture_ref);
+                let class_expression =
+                    Expr::new(expression.loc, ExprData::Class(std::mem::take(class)));
+                let mut value = assign(
+                    class_capture_identifier(core, expression.loc, capture_ref),
+                    class_expression,
+                );
+                for statement in lowered {
+                    if let Some(StmtData::Expr(statement)) = statement.data.as_deref() {
+                        value = join_with_comma(value, statement.value.clone());
+                    }
+                }
+                value = join_with_comma(
+                    value,
+                    class_capture_identifier(core, expression.loc, capture_ref),
+                );
+                *data = *value.data.expect("lowered class expression");
             }
         }
         ExprData::Arrow(arrow) => {
