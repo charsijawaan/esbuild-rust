@@ -1011,6 +1011,48 @@ fn resolve_file_or_package_core(
     }
 
     let (package_name, package_subpath) = parse_esm_package_name(import_path)?;
+
+    // A package can import itself by name when its nearest package scope has a
+    // matching "name" field and an "exports" map. This check must happen
+    // before searching node_modules so the package's own exports take priority.
+    let mut package_scope = source_dir.to_string();
+    loop {
+        if let Some(package) = read_package_json(
+            log,
+            file_system,
+            &package_scope,
+            platform,
+            configured_main_fields,
+        ) {
+            if package.name == package_name
+                && let Some(exports) = &package.exports_map
+            {
+                let resolution = handle_package_map_post_conditions(resolve_package_exports(
+                    "/",
+                    &package_subpath,
+                    &exports.root,
+                    &package_conditions(platform, is_require, context.conditions),
+                ));
+                return finalize_package_map_resolution(
+                    log,
+                    file_system,
+                    &package_scope,
+                    &resolution,
+                    extension_order,
+                    platform,
+                    configured_main_fields,
+                    is_require,
+                );
+            }
+            break;
+        }
+        let parent = file_system.dir(&package_scope);
+        if parent == package_scope {
+            break;
+        }
+        package_scope = parent;
+    }
+
     let mut current = source_dir.to_string();
     loop {
         if file_system.base(&current) != "node_modules" {

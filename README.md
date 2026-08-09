@@ -49,8 +49,8 @@ cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-The test suite includes 4,976 concrete cases extracted from the pinned upstream
-esbuild revision: 4,291 parser/printer cases, 684 bundler output snapshots, and
+The test suite includes 4,989 concrete cases extracted from the pinned upstream
+esbuild revision: 4,291 parser/printer cases, 697 bundler output snapshots, and
 one bundler diagnostic case. The checked-in fixtures make these tests
 independent of Go; see [tests/upstream/README.md](tests/upstream/README.md) for
 reproducible regeneration instructions.

@@ -3995,6 +3995,8 @@ mod tests {
                             "OutputFormat",
                             "Platform",
                         ]
+                    && option_names != ["AbsOutputFile", "MainFields", "Mode"]
+                    && option_names != ["AbsOutputFile", "MainFields", "Mode", "Platform"]
                     && option_names != ["AbsOutputDir", "Mode"]
                     && option_names != ["AbsOutputDir", "ExternalSettings", "Mode"]
                     && option_names != ["AbsOutputDir", "ExternalSettings", "Mode", "OutputFormat"]
@@ -4365,6 +4367,20 @@ mod tests {
             if let Some(settings) = options_json.get("ExternalSettings") {
                 options.external_settings = upstream_external_settings(settings);
             }
+            if let Some(main_fields) = options_json
+                .get("MainFields")
+                .and_then(serde_json::Value::as_array)
+            {
+                options.main_fields = main_fields
+                    .iter()
+                    .map(|field| {
+                        field
+                            .as_str()
+                            .expect("upstream package main field")
+                            .to_string()
+                    })
+                    .collect();
+            }
             if let Some(value) = options_json
                 .pointer("/TS/Config/UseDefineForClassFields")
                 .and_then(serde_json::Value::as_u64)
@@ -4498,7 +4514,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 684 },
+            if selected_test.is_some() { 1 } else { 697 },
             "upstream basic bundler corpus case count"
         );
     }
