@@ -556,6 +556,20 @@ fn insert_generated_import_parts(
     metadata: &ModuleMetadata,
     parts: &mut Vec<Part>,
 ) {
+    let insertion_index = 1 + parts[1..]
+        .iter()
+        .take_while(|part| {
+            !part.statements.is_empty()
+                && part.statements.iter().all(|statement| {
+                    matches!(
+                        statement.data.as_deref(),
+                        Some(
+                            StmtData::Import(_) | StmtData::ExportFrom(_) | StmtData::ExportStar(_)
+                        )
+                    )
+                })
+        })
+        .count();
     let mut generated_imports = core
         .jsx_import_records
         .values()
@@ -605,7 +619,7 @@ fn insert_generated_import_parts(
         .range
         .loc;
         parts.insert(
-            1 + offset,
+            insertion_index + offset,
             Part {
                 statements: vec![Stmt::new(
                     loc,

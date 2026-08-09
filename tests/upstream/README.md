@@ -82,7 +82,7 @@ instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 Files containing invalid UTF-8 are additionally stored in a base64 sidecar so
 binary-loader snapshots retain the exact upstream bytes.
 
-The active bundler tranche exact-compares 702 Unix snapshots from the default,
+The active bundler tranche exact-compares 718 Unix snapshots from the default,
 DCE, import-star, TypeScript import-star, lowering, TypeScript, package-json,
 tsconfig, loader, CSS, code-splitting, Yarn PnP, and entry-point glob suites that use
 `AbsOutputFile` or `AbsOutputDir`, with all eligible DCE cases and selected
@@ -91,7 +91,11 @@ combinations of `Mode`, `OutputFormat`, `Platform`, legal-comment settings,
 `TreeShaking`. This includes pre- and post-resolution external matching,
 conditional `require()`, `require.resolve()`, and `import()` paths, external
 namespace imports and re-exports, import-assertion comment preservation, and
-automatic JSX runtime settings from tsconfig. It also includes dynamic `require()` and `import()` glob modules in
+automatic JSX runtime settings from tsconfig. Explicit JSX factory, fragment,
+automatic-runtime, development, side-effect, import-source, and preserve settings
+are covered too, including generated-import name collisions, top-level `this`
+rewrites, and comments attached to preserved JSX expression containers. It also
+includes dynamic `require()` and `import()` glob modules in
 both single-file and code-splitting builds, glob import attributes, empty-glob
 warnings, entry-point glob expansion, and advanced entry points with explicit
 output paths. Package resolution coverage includes configured main-field
@@ -101,8 +105,8 @@ and absolute node search paths with browser remapping. It also checks
 output-base and public-path asset layouts plus
 metafile input/output accounting for JS, CSS, JSON attributes, copied files,
 and code-split long paths. The missing-glob-directory diagnostic-only case is
-also covered. So 4,994 concrete upstream cases are currently active in
-`cargo test`; the remaining 368 captured bundler cases are the parity backlog,
+also covered. So 5,010 concrete upstream cases are currently active in
+`cargo test`; the remaining 352 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
 The generated JSON is checked in so `cargo test` does not require Go or a

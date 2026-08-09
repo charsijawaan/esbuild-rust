@@ -19,9 +19,10 @@ use crate::internal::{
         PrimitiveType, Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind, Stmt,
         StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, ThrowStmt, UnaryExpr,
         assign, convert_binding_to_expr, for_each_identifier_binding,
-        inline_primitives_into_template, inline_spreads_of_array_literals, is_identifier,
-        is_identifier_es5_and_es_next, is_primitive_literal, join_with_comma, known_primitive_type,
-        make_helper_context, mangle_object_spread,
+        generate_non_unique_name_from_path, inline_primitives_into_template,
+        inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
+        is_primitive_literal, join_with_comma, known_primitive_type, make_helper_context,
+        mangle_object_spread,
     },
     logger::{MsgData, MsgId, MsgKind},
 };
@@ -10099,7 +10100,7 @@ fn import_jsx_symbol(
             );
             let namespace_ref = core.new_symbol(
                 crate::internal::ast::SymbolKind::Other,
-                format!("import_{alias}"),
+                format!("import_{}", generate_non_unique_name_from_path(&path)),
             );
             core.jsx_import_records
                 .insert(path, (import_record_index, namespace_ref));
@@ -10148,17 +10149,21 @@ fn instantiate_jsx_define(
     let Some(first) = define.parts.first() else {
         return Expr::new(loc, ExprData::Undefined);
     };
-    let reference = core.store_name_in_ref(
-        crate::internal::js_lexer::MaybeSubstring::from_allocated(first.as_bytes().to_vec()),
-    );
-    let mut value = Expr::new(
-        loc,
-        ExprData::Identifier(IdentifierExpr {
-            reference,
-            can_be_removed_if_unused: true,
-            ..IdentifierExpr::default()
-        }),
-    );
+    let mut value = if first == "this" {
+        Expr::new(loc, ExprData::This)
+    } else {
+        let reference = core.store_name_in_ref(
+            crate::internal::js_lexer::MaybeSubstring::from_allocated(first.as_bytes().to_vec()),
+        );
+        Expr::new(
+            loc,
+            ExprData::Identifier(IdentifierExpr {
+                reference,
+                can_be_removed_if_unused: true,
+                ..IdentifierExpr::default()
+            }),
+        )
+    };
     for part in &define.parts[1..] {
         value = Expr::new(
             loc,

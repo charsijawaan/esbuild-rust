@@ -2908,6 +2908,27 @@ impl Printer<'_> {
                         ExprData::String(key) => Some(String::from_utf16_lossy(&key.value)),
                         _ => None,
                     });
+                    let shorthand_value_name = match property.value_or_nil.data.as_deref() {
+                        Some(ExprData::Identifier(value)) => {
+                            Some(self.renamer.name_for_symbol(value.reference))
+                        }
+                        Some(ExprData::ImportIdentifier(value)) => {
+                            let reference = self.renamer.canonical_ref_for_symbol(value.reference);
+                            let is_constant = self
+                                .linker_options
+                                .and_then(|options| options.const_values)
+                                .and_then(|values| values.get(&reference))
+                                .is_some_and(|value| value.kind != ConstValueKind::None);
+                            if self.renamer.namespace_alias_for_symbol(reference).is_none()
+                                && !is_constant
+                            {
+                                Some(self.renamer.name_for_symbol(reference))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
                     let is_shorthand = property.value_or_nil.data.is_none()
                         || (!property.flags.contains(PropertyFlags::IS_COMPUTED)
                             && !property.flags.contains(PropertyFlags::PREFER_QUOTED_KEY)
@@ -2916,17 +2937,7 @@ impl Printer<'_> {
                                 .unsupported_features
                                 .contains(JsFeature::OBJECT_EXTENSIONS)
                             && !self.will_print_expr_comments_at_loc(property.value_or_nil.loc)
-                            && matches!(
-                                (
-                                    property.key.data.as_deref(),
-                                    property.value_or_nil.data.as_deref()
-                                ),
-                                (
-                                    Some(ExprData::String(key)),
-                                    Some(ExprData::Identifier(value))
-                                ) if String::from_utf16_lossy(&key.value)
-                                    == self.renamer.name_for_symbol(value.reference)
-                            )
+                            && key_name == shorthand_value_name
                             && key_name.as_deref().is_some_and(|name| {
                                 name != "__proto__"
                                     || property.flags.contains(PropertyFlags::WAS_SHORTHAND)
@@ -3963,9 +3974,23 @@ impl Printer<'_> {
                 self.print_indent();
             }
             if property.kind == PropertyKind::Spread {
-                self.output.extend_from_slice(b"{...");
-                self.print_expr_at(&property.value_or_nil, Precedence::Spread);
-                self.output.push(b'}');
+                if self.will_print_expr_comments_at_loc(property.loc) {
+                    self.output.push(b'{');
+                    self.print_newline();
+                    self.indent += 1;
+                    self.print_indent();
+                    self.print_expr_comments_at_loc(property.loc);
+                    self.output.extend_from_slice(b"...");
+                    self.print_expr_at(&property.value_or_nil, Precedence::Spread);
+                    self.print_newline();
+                    self.indent -= 1;
+                    self.print_indent();
+                    self.output.push(b'}');
+                } else {
+                    self.output.extend_from_slice(b"{...");
+                    self.print_expr_at(&property.value_or_nil, Precedence::Spread);
+                    self.output.push(b'}');
+                }
                 continue;
             }
             if property.flags.contains(PropertyFlags::IS_COMPUTED) {
@@ -3978,6 +4003,7 @@ impl Printer<'_> {
                 continue;
             }
             self.print_jsx_attribute_name(&property.key);
+            let is_multi_line = self.will_print_expr_comments_at_loc(property.value_or_nil.loc);
             if property.flags.contains(PropertyFlags::WAS_SHORTHAND)
                 && matches!(
                     property.value_or_nil.data.as_deref(),
@@ -3998,7 +4024,17 @@ impl Printer<'_> {
                 }
                 _ => {
                     self.output.push(b'{');
+                    if is_multi_line {
+                        self.print_newline();
+                        self.indent += 1;
+                        self.print_indent();
+                    }
                     self.print_expr_at(&property.value_or_nil, Precedence::Spread);
+                    if is_multi_line {
+                        self.print_newline();
+                        self.indent -= 1;
+                        self.print_indent();
+                    }
                     self.output.push(b'}');
                 }
             }
@@ -4020,7 +4056,17 @@ impl Printer<'_> {
         self.output.push(b'>');
         for child in &element.nullable_children {
             match child.data.as_deref() {
-                None => self.output.extend_from_slice(b"{}"),
+                None => {
+                    self.output.push(b'{');
+                    if self.will_print_expr_comments_at_loc(child.loc) {
+                        self.print_newline();
+                        self.indent += 1;
+                        self.print_expr_comments_after_close_token_at_loc(child.loc);
+                        self.indent -= 1;
+                        self.print_indent();
+                    }
+                    self.output.push(b'}');
+                }
                 Some(ExprData::JsxText(text)) => {
                     self.output.extend_from_slice(text.raw.as_bytes());
                 }
@@ -4028,8 +4074,19 @@ impl Printer<'_> {
                     self.print_expr_at(child, Precedence::Lowest);
                 }
                 _ => {
+                    let is_multi_line = self.will_print_expr_comments_at_loc(child.loc);
                     self.output.push(b'{');
+                    if is_multi_line {
+                        self.print_newline();
+                        self.indent += 1;
+                        self.print_indent();
+                    }
                     self.print_expr_at(child, Precedence::Spread);
+                    if is_multi_line {
+                        self.print_newline();
+                        self.indent -= 1;
+                        self.print_indent();
+                    }
                     self.output.push(b'}');
                 }
             }

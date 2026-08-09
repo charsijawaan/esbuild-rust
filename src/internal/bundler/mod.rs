@@ -3874,6 +3874,60 @@ mod tests {
         }
     }
 
+    fn upstream_define_expr(value: &serde_json::Value) -> config::DefineExpr {
+        let constant = value.get("Constant").and_then(|constant| {
+            constant
+                .get("Value")
+                .and_then(serde_json::Value::as_array)
+                .map(|code_units| {
+                    crate::internal::js_ast::Expr::new(
+                        crate::internal::logger::Loc::default(),
+                        crate::internal::js_ast::ExprData::String(
+                            crate::internal::js_ast::StringExpr {
+                                value: code_units
+                                    .iter()
+                                    .map(|unit| {
+                                        u16::try_from(
+                                            unit.as_u64().expect("upstream UTF-16 code unit"),
+                                        )
+                                        .expect("upstream UTF-16 code unit fits in u16")
+                                    })
+                                    .collect(),
+                                ..crate::internal::js_ast::StringExpr::default()
+                            },
+                        ),
+                    )
+                })
+        });
+        config::DefineExpr {
+            constant: constant.unwrap_or_default(),
+            parts: value
+                .get("Parts")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|part| part.as_str().expect("upstream JSX define part").to_string())
+                .collect(),
+            ..config::DefineExpr::default()
+        }
+    }
+
+    fn upstream_jsx_options(value: &serde_json::Value) -> config::JsxOptions {
+        config::JsxOptions {
+            factory: upstream_define_expr(&value["Factory"]),
+            fragment: upstream_define_expr(&value["Fragment"]),
+            parse: value["Parse"].as_bool().unwrap_or_default(),
+            preserve: value["Preserve"].as_bool().unwrap_or_default(),
+            automatic_runtime: value["AutomaticRuntime"].as_bool().unwrap_or_default(),
+            import_source: value["ImportSource"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            development: value["Development"].as_bool().unwrap_or_default(),
+            side_effects: value["SideEffects"].as_bool().unwrap_or_default(),
+        }
+    }
+
     #[test]
     fn matches_upstream_missing_glob_directory_diagnostics() {
         let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
@@ -4008,6 +4062,7 @@ mod tests {
                     && option_names != ["AbsOutputFile", "Conditions", "Mode"]
                     && option_names != ["AbsOutputFile", "ExternalPackages", "Mode"]
                     && option_names != ["AbsOutputFile", "ExternalSettings", "Mode"]
+                    && option_names != ["AbsOutputFile", "ExternalSettings", "JSX", "Mode"]
                     && option_names
                         != [
                             "AbsOutputFile",
@@ -4027,7 +4082,13 @@ mod tests {
                         ]
                     && option_names != ["AbsOutputFile", "MainFields", "Mode"]
                     && option_names != ["AbsOutputFile", "MainFields", "Mode", "Platform"]
+                    && option_names != ["AbsOutputFile", "JSX"]
+                    && option_names != ["AbsOutputFile", "JSX", "Mode"]
+                    && option_names != ["AbsOutputFile", "JSX", "Mode", "OutputFormat"]
+                    && option_names != ["AbsOutputFile", "JSX", "MinifySyntax", "Mode"]
+                    && option_names != ["AbsOutputFile", "JSX", "MinifyIdentifiers", "Mode"]
                     && option_names != ["AbsOutputDir", "Mode"]
+                    && option_names != ["AbsOutputDir", "JSX", "Mode"]
                     && option_names != ["AbsOutputDir", "ExternalSettings", "Mode"]
                     && option_names != ["AbsOutputDir", "ExternalSettings", "Mode", "OutputFormat"]
                     && option_names != ["AbsOutputDir", "EntryPathTemplate"]
@@ -4397,6 +4458,9 @@ mod tests {
             if let Some(settings) = options_json.get("ExternalSettings") {
                 options.external_settings = upstream_external_settings(settings);
             }
+            if let Some(jsx) = options_json.get("JSX") {
+                options.jsx = upstream_jsx_options(jsx);
+            }
             if let Some(conditions) = upstream_string_array_option(options_json, "Conditions") {
                 options.conditions = conditions;
             }
@@ -4571,7 +4635,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 702 },
+            if selected_test.is_some() { 1 } else { 718 },
             "upstream basic bundler corpus case count"
         );
     }

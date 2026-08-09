@@ -305,11 +305,10 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                 lexer.next_jsx_element_child();
             }
             Token::OpenBrace => {
-                let child_loc = lexer.loc();
                 lexer.next();
                 if lexer.token == Token::CloseBrace {
                     nullable_children.push(Expr {
-                        loc: child_loc,
+                        loc: core.save_expr_comments_here(lexer),
                         ..Expr::default()
                     });
                 } else if lexer.token == Token::DotDotDot {
