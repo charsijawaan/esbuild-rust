@@ -3732,6 +3732,26 @@ mod tests {
             .map(str::to_string)
     }
 
+    fn upstream_string_array_option(
+        options: &serde_json::Value,
+        name: &str,
+    ) -> Option<Vec<String>> {
+        options
+            .get(name)
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .expect("upstream string array option")
+                            .to_string()
+                    })
+                    .collect()
+            })
+    }
+
     fn upstream_bool_option(options: &serde_json::Value, name: &str) -> Option<bool> {
         options.get(name).and_then(serde_json::Value::as_bool)
     }
@@ -3982,9 +4002,19 @@ mod tests {
                     .get("unsupported_options")
                     .and_then(serde_json::Value::as_array)
                     .is_some_and(|options| !options.is_empty())
-                || (option_names != ["AbsOutputFile", "Mode"]
+                || (option_names != ["AbsNodePaths", "AbsOutputFile", "Mode"]
+                    && option_names != ["AbsOutputFile", "Mode"]
                     && option_names != ["AbsOutputFile", "Mode", "OutputFormat"]
+                    && option_names != ["AbsOutputFile", "Conditions", "Mode"]
+                    && option_names != ["AbsOutputFile", "ExternalPackages", "Mode"]
                     && option_names != ["AbsOutputFile", "ExternalSettings", "Mode"]
+                    && option_names
+                        != [
+                            "AbsOutputFile",
+                            "ExternalSettings",
+                            "Mode",
+                            "PackageAliases",
+                        ]
                     && option_names
                         != ["AbsOutputFile", "ExternalSettings", "Mode", "OutputFormat"]
                     && option_names
@@ -4367,6 +4397,33 @@ mod tests {
             if let Some(settings) = options_json.get("ExternalSettings") {
                 options.external_settings = upstream_external_settings(settings);
             }
+            if let Some(conditions) = upstream_string_array_option(options_json, "Conditions") {
+                options.conditions = conditions;
+            }
+            if let Some(node_paths) = upstream_string_array_option(options_json, "AbsNodePaths") {
+                options.abs_node_paths = node_paths;
+            }
+            if let Some(external_packages) = upstream_bool_option(options_json, "ExternalPackages")
+            {
+                options.external_packages = external_packages;
+            }
+            if let Some(aliases) = options_json
+                .get("PackageAliases")
+                .and_then(serde_json::Value::as_object)
+            {
+                options.package_aliases = aliases
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            value
+                                .as_str()
+                                .expect("upstream package alias target")
+                                .to_string(),
+                        )
+                    })
+                    .collect();
+            }
             if let Some(main_fields) = options_json
                 .get("MainFields")
                 .and_then(serde_json::Value::as_array)
@@ -4514,7 +4571,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 697 },
+            if selected_test.is_some() { 1 } else { 702 },
             "upstream basic bundler corpus case count"
         );
     }

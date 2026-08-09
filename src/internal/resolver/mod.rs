@@ -290,6 +290,37 @@ fn load_package_main_candidate(
         .or_else(|| load_as_index(file_system, &absolute, extension_order))
 }
 
+fn browser_map_for_package_subpath<'a>(
+    package: &'a PackageJson,
+    subpath: &str,
+    extension_order: &[String],
+) -> Option<&'a Option<String>> {
+    if let Some(mapping) = package.browser_map.get(subpath) {
+        return Some(mapping);
+    }
+    for extension in extension_order {
+        if let Some(mapping) = package.browser_map.get(&format!("{subpath}{extension}")) {
+            return Some(mapping);
+        }
+    }
+    let index_path = if subpath.ends_with('/') {
+        format!("{subpath}index")
+    } else if subpath == "." {
+        "./index".to_string()
+    } else {
+        format!("{subpath}/index")
+    };
+    if let Some(mapping) = package.browser_map.get(&index_path) {
+        return Some(mapping);
+    }
+    for extension in extension_order {
+        if let Some(mapping) = package.browser_map.get(&format!("{index_path}{extension}")) {
+            return Some(mapping);
+        }
+    }
+    None
+}
+
 fn file_path(text: &str, disabled: bool) -> Path {
     Path {
         text: text.to_string(),
@@ -758,8 +789,7 @@ fn resolve_file_or_package_core(
 
     if context.external_settings.is_some_and(|settings| {
         is_external_match(&settings.pre_resolve, import_path, context.import_kind)
-    }) || (context.external_packages && is_package_path(import_path))
-        || (context.import_kind == ImportKind::Url && import_path.starts_with('#'))
+    }) || (context.import_kind == ImportKind::Url && import_path.starts_with('#'))
         || import_path.starts_with("http://")
         || import_path.starts_with("https://")
         || import_path.starts_with("//")
@@ -966,6 +996,22 @@ fn resolve_file_or_package_core(
         return None;
     }
 
+    // TypeScript path remapping and package.json "imports" maps take priority
+    // over the setting that marks all remaining package paths as external.
+    if context.external_packages && is_package_path(import_path) {
+        return Some(LoadedPathPair {
+            paths: PathPair {
+                primary: Path {
+                    text: import_path.to_string(),
+                    ..Path::default()
+                },
+                is_external: true,
+                ..PathPair::default()
+            },
+            different_case: None,
+        });
+    }
+
     if let Some(pnp) = context.pnp {
         let result = pnp.resolve_to_unqualified(import_path, source_dir, file_system);
         if result.status.is_error() {
@@ -1085,7 +1131,8 @@ fn resolve_file_or_package_core(
                     );
                 }
                 if platform == Platform::Browser
-                    && let Some(mapping) = package.browser_map.get(&package_subpath)
+                    && let Some(mapping) =
+                        browser_map_for_package_subpath(package, &package_subpath, extension_order)
                 {
                     if let Some(replacement) = mapping {
                         if replacement.starts_with('.') {
@@ -1114,19 +1161,10 @@ fn resolve_file_or_package_core(
                         );
                     }
                     let absolute = file_system.join(&[&node_modules, import_path]);
-                    let mut loaded = load_as_file_or_directory(
-                        log,
-                        file_system,
-                        &absolute,
-                        extension_order,
-                        platform,
-                        configured_main_fields,
-                        is_require,
-                    )?;
-                    for path in loaded.paths.iter_mut() {
-                        path.flags = PathFlags::DISABLED;
-                    }
-                    return Some(loaded);
+                    return Some(LoadedPathPair {
+                        paths: file_path_pair(&absolute, true),
+                        different_case: None,
+                    });
                 }
             }
 
@@ -1152,30 +1190,68 @@ fn resolve_file_or_package_core(
     if let Some(node_paths) = context.node_paths {
         for node_path in node_paths {
             let package_dir = file_system.join(&[node_path, package_name]);
-            if let Some(package) = read_package_json(
+            let package = read_package_json(
                 log,
                 file_system,
                 &package_dir,
                 platform,
                 configured_main_fields,
-            ) && let Some(exports) = &package.exports_map
-            {
-                let resolution = handle_package_map_post_conditions(resolve_package_exports(
-                    "/",
-                    &package_subpath,
-                    &exports.root,
-                    &package_conditions(platform, is_require, context.conditions),
-                ));
-                return finalize_package_map_resolution(
-                    log,
-                    file_system,
-                    &package_dir,
-                    &resolution,
-                    extension_order,
-                    platform,
-                    configured_main_fields,
-                    is_require,
-                );
+            );
+            if let Some(package) = &package {
+                if let Some(exports) = &package.exports_map {
+                    let resolution = handle_package_map_post_conditions(resolve_package_exports(
+                        "/",
+                        &package_subpath,
+                        &exports.root,
+                        &package_conditions(platform, is_require, context.conditions),
+                    ));
+                    return finalize_package_map_resolution(
+                        log,
+                        file_system,
+                        &package_dir,
+                        &resolution,
+                        extension_order,
+                        platform,
+                        configured_main_fields,
+                        is_require,
+                    );
+                }
+                if platform == Platform::Browser
+                    && let Some(mapping) =
+                        browser_map_for_package_subpath(package, &package_subpath, extension_order)
+                {
+                    if let Some(replacement) = mapping {
+                        if replacement.starts_with('.') {
+                            let absolute = file_system.join(&[&package_dir, replacement]);
+                            return load_as_file_or_directory(
+                                log,
+                                file_system,
+                                &absolute,
+                                extension_order,
+                                platform,
+                                configured_main_fields,
+                                is_require,
+                            );
+                        }
+                        return resolve_file_or_package_core(
+                            log,
+                            file_system,
+                            &package_dir,
+                            replacement,
+                            extension_order,
+                            platform,
+                            configured_main_fields,
+                            is_require,
+                            context,
+                            false,
+                        );
+                    }
+                    let absolute = file_system.join(&[node_path, import_path]);
+                    return Some(LoadedPathPair {
+                        paths: file_path_pair(&absolute, true),
+                        different_case: None,
+                    });
+                }
             }
             let absolute = file_system.join(&[node_path, import_path]);
             if let Some(result) = load_as_file_or_directory(
