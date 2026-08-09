@@ -12,16 +12,16 @@ use crate::internal::{
     config::pretty_print_target_environment,
     helpers::{GlobPart, GlobWildcard, is_inside_node_modules, string_to_utf16, utf16_to_string},
     js_ast::{
-        AnnotationExpr, AnnotationFlags, Arg, AssignTarget, BinaryExpr, Binding, BindingData,
-        BlockStmt, CallExpr, CallKind, Class, Decl, DotExpr, Expr, ExprData, ExprStmt, ForStmt,
-        Function, FunctionBody, FunctionExpr, IdentifierBinding, IdentifierExpr, IfExpr, IfStmt,
-        LabelStmt, LocalKind, LocalStmt, NewExpr, ObjectExpr, OpCode, OptionalChain, PrimitiveType,
-        Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind, Stmt, StmtData,
-        StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, ThrowStmt, UnaryExpr, assign,
-        convert_binding_to_expr, for_each_identifier_binding, inline_primitives_into_template,
-        inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
-        is_primitive_literal, join_with_comma, known_primitive_type, make_helper_context,
-        mangle_object_spread,
+        AnnotationExpr, AnnotationFlags, Arg, ArrowExpr, AssignTarget, BinaryExpr, Binding,
+        BindingData, BlockStmt, CallExpr, CallKind, Class, Decl, DotExpr, Expr, ExprData, ExprStmt,
+        ForStmt, Function, FunctionBody, FunctionExpr, IdentifierBinding, IdentifierExpr, IfExpr,
+        IfStmt, LabelStmt, LocalKind, LocalStmt, NewExpr, ObjectExpr, OpCode, OptionalChain,
+        PrimitiveType, Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind, Stmt,
+        StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, ThrowStmt, UnaryExpr,
+        assign, convert_binding_to_expr, for_each_identifier_binding,
+        inline_primitives_into_template, inline_spreads_of_array_literals, is_identifier,
+        is_identifier_es5_and_es_next, is_primitive_literal, join_with_comma, known_primitive_type,
+        make_helper_context, mangle_object_spread,
     },
     logger::{MsgId, MsgKind},
 };
@@ -48,6 +48,174 @@ fn contains_closing_script_tag(text: &str) -> bool {
     text.as_bytes()
         .windows(8)
         .any(|window| window.eq_ignore_ascii_case(b"</script"))
+}
+
+#[derive(Clone, Copy, Default)]
+struct CaptureValueWrapper {
+    argument_ref: Option<Ref>,
+    loc: Loc,
+}
+
+impl CaptureValueWrapper {
+    fn wrap(self, expression: Expr) -> Expr {
+        let Some(reference) = self.argument_ref else {
+            return expression;
+        };
+        Expr::new(
+            self.loc,
+            ExprData::Call(CallExpr {
+                target: Expr::new(
+                    self.loc,
+                    ExprData::Arrow(ArrowExpr {
+                        args: vec![Arg {
+                            binding: identifier_binding(self.loc, reference),
+                            ..Arg::default()
+                        }],
+                        prefer_expr: true,
+                        body: FunctionBody {
+                            loc: self.loc,
+                            block: BlockStmt {
+                                statements: vec![Stmt::new(
+                                    self.loc,
+                                    StmtData::Return(ReturnStmt {
+                                        value_or_nil: expression,
+                                    }),
+                                )],
+                                ..BlockStmt::default()
+                            },
+                        },
+                        ..ArrowExpr::default()
+                    }),
+                ),
+                ..CallExpr::default()
+            }),
+        )
+    }
+}
+
+fn temp_identifier(loc: Loc, reference: Ref) -> Expr {
+    Expr::new(
+        loc,
+        ExprData::Identifier(IdentifierExpr {
+            reference,
+            ..IdentifierExpr::default()
+        }),
+    )
+}
+
+fn capture_value_with_possible_side_effects(
+    core: &mut ParserCore,
+    loc: Loc,
+    value: Expr,
+) -> ([Expr; 2], CaptureValueWrapper) {
+    match value.data.as_deref() {
+        Some(ExprData::Identifier(identifier)) => {
+            let reference = identifier.reference;
+            core.record_usage(reference);
+            return (
+                [value, temp_identifier(loc, reference)],
+                CaptureValueWrapper::default(),
+            );
+        }
+        Some(ExprData::PrivateIdentifier(private)) => {
+            let reference = private.reference;
+            core.record_usage(reference);
+            return ([value.clone(), value], CaptureValueWrapper::default());
+        }
+        Some(
+            ExprData::Null
+            | ExprData::Undefined
+            | ExprData::This
+            | ExprData::Boolean(_)
+            | ExprData::Number(_)
+            | ExprData::BigInt(_)
+            | ExprData::String(_),
+        ) => {
+            return ([value.clone(), value], CaptureValueWrapper::default());
+        }
+        _ => {}
+    }
+
+    let is_function_argument_scope = core.current_scope.as_ref().is_some_and(|scope| {
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .kind
+            == ScopeKind::FunctionArgs
+    });
+    let reference = core.generate_temp_ref(!is_function_argument_scope);
+    core.record_usage(reference);
+    core.record_usage(reference);
+    (
+        [
+            assign(temp_identifier(loc, reference), value),
+            temp_identifier(loc, reference),
+        ],
+        CaptureValueWrapper {
+            argument_ref: is_function_argument_scope.then_some(reference),
+            loc,
+        },
+    )
+}
+
+fn lower_exponentiation_assignment_operator(
+    core: &mut ParserCore,
+    loc: Loc,
+    binary: &mut BinaryExpr,
+) -> Option<ExprData> {
+    let left = std::mem::take(&mut binary.left);
+    let right = std::mem::take(&mut binary.right);
+    match left.data.as_deref() {
+        Some(ExprData::Identifier(identifier)) => {
+            let reference = identifier.reference;
+            core.record_usage(reference);
+            let value = core.call_runtime(
+                loc,
+                "__pow",
+                vec![temp_identifier(left.loc, reference), right],
+            );
+            assign(left, value).data.map(|data| *data)
+        }
+        Some(ExprData::Dot(dot)) if dot.optional_chain == OptionalChain::None => {
+            let ([target_for_set, target_for_get], wrapper) =
+                capture_value_with_possible_side_effects(core, left.loc, dot.target.clone());
+            let mut set = dot.clone();
+            set.target = target_for_set;
+            let mut get = dot.clone();
+            get.target = target_for_get;
+            let value = core.call_runtime(
+                loc,
+                "__pow",
+                vec![Expr::new(left.loc, ExprData::Dot(get)), right],
+            );
+            wrapper
+                .wrap(assign(Expr::new(left.loc, ExprData::Dot(set)), value))
+                .data
+                .map(|data| *data)
+        }
+        Some(ExprData::Index(index)) if index.optional_chain == OptionalChain::None => {
+            let ([target_for_set, target_for_get], target_wrapper) =
+                capture_value_with_possible_side_effects(core, left.loc, index.target.clone());
+            let ([index_for_set, index_for_get], index_wrapper) =
+                capture_value_with_possible_side_effects(core, left.loc, index.index.clone());
+            let mut set = index.clone();
+            set.target = target_for_set;
+            set.index = index_for_set;
+            let mut get = index.clone();
+            get.target = target_for_get;
+            get.index = index_for_get;
+            let value = core.call_runtime(
+                loc,
+                "__pow",
+                vec![Expr::new(left.loc, ExprData::Index(get)), right],
+            );
+            target_wrapper
+                .wrap(index_wrapper.wrap(assign(Expr::new(left.loc, ExprData::Index(set)), value)))
+                .data
+                .map(|data| *data)
+        }
+        _ => left.data.map(|data| *data),
+    }
 }
 
 fn lower_template_literal(
@@ -3510,7 +3678,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     }
     core.push_scope_for_visit_pass(ScopeKind::FunctionBody, function.body.loc);
     preserve_directive_prologue(core, &mut function.body.block.statements);
-    visit_statements(
+    visit_function_body_statements(
         core,
         &mut function.body.block.statements,
         resolve_identifiers,
@@ -3541,6 +3709,62 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     core.visit_is_async_generator = old_is_async_generator;
     core.visit_this_is_nested = old_this_is_nested;
     core.visit_is_outside_fn_or_arrow = old_is_outside_fn_or_arrow;
+}
+
+fn visit_function_body_statements(
+    core: &mut ParserCore,
+    statements: &mut Vec<Stmt>,
+    resolve_identifiers: bool,
+) -> bool {
+    let old_temp_refs = std::mem::take(&mut core.temp_refs_to_declare);
+    let old_temp_ref_count = std::mem::take(&mut core.temp_ref_count);
+    visit_statements(core, statements, resolve_identifiers);
+    let temp_refs = std::mem::take(&mut core.temp_refs_to_declare);
+    core.temp_refs_to_declare = old_temp_refs;
+    core.temp_ref_count = old_temp_ref_count;
+
+    let references = temp_refs
+        .into_iter()
+        .filter(|reference| {
+            core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+                .use_count_estimate
+                > 0
+        })
+        .collect::<Vec<_>>();
+    if references.is_empty() {
+        return false;
+    }
+    for &reference in &references {
+        core.record_declared_symbol(reference);
+    }
+    let declarations = references
+        .into_iter()
+        .map(|reference| Decl {
+            binding: identifier_binding(Loc::default(), reference),
+            ..Decl::default()
+        })
+        .collect();
+    let insert_at = statements
+        .iter()
+        .position(|statement| {
+            !matches!(
+                statement.data.as_deref(),
+                Some(StmtData::Comment(_) | StmtData::Directive(_))
+            )
+        })
+        .unwrap_or(statements.len());
+    statements.insert(
+        insert_at,
+        Stmt::new(
+            Loc::default(),
+            StmtData::Local(LocalStmt {
+                declarations,
+                kind: LocalKind::Var,
+                ..LocalStmt::default()
+            }),
+        ),
+    );
+    true
 }
 
 fn preserve_directive_prologue(core: &ParserCore, statements: &mut [Stmt]) {
@@ -7621,6 +7845,19 @@ fn visit_expr_with_target_and_context(
             visit_expr(core, &mut binary.right, resolve_identifiers);
             core.is_control_flow_dead = old_control_flow_dead;
             keep_inferred_name(core, &mut binary.right, inferred_name);
+            if binary.op == OpCode::BinaryPowerAssign
+                && core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::EXPONENT_OPERATOR)
+            {
+                if let Some(lowered) =
+                    lower_exponentiation_assignment_operator(core, expression.loc, binary)
+                {
+                    *data = lowered;
+                }
+                return;
+            }
             if core.options.minify_syntax
                 && matches!(
                     binary.op,
@@ -8663,7 +8900,11 @@ fn visit_expr_with_target_and_context(
                 visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
             }
             core.push_scope_for_visit_pass(ScopeKind::FunctionBody, arrow.body.loc);
-            visit_statements(core, &mut arrow.body.block.statements, resolve_identifiers);
+            let generated_temps = visit_function_body_statements(
+                core,
+                &mut arrow.body.block.statements,
+                resolve_identifiers,
+            );
             if core.options.keep_names && core.source.key_path.text != "<runtime>" {
                 apply_keep_names_to_type_script_namespaces(core, &mut arrow.body.block.statements);
             }
@@ -8693,6 +8934,9 @@ fn visit_expr_with_target_and_context(
             core.visit_try_catch_loc = old_try_catch_loc;
             core.visit_is_async_generator = old_is_async_generator;
             core.visit_is_outside_fn_or_arrow = old_is_outside_fn_or_arrow;
+            if generated_temps {
+                arrow.prefer_expr = false;
+            }
             if core.options.minify_syntax
                 && collapse_expression_statements_into_return(&mut arrow.body.block.statements)
             {

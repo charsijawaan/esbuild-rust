@@ -3774,7 +3774,8 @@ mod tests {
                     && case["upstream_test"] != "TestPackageJsonSideEffectsArrayGlob"
                     && case["upstream_test"] != "TestTSSideEffectsFalseWarningTypeDeclarations"
                     && case["upstream_test"] != "TestDeadCodeInsideUnusedCases"
-                    && case["upstream_test"] != "TestDuplicatePropertyWarning")
+                    && case["upstream_test"] != "TestDuplicatePropertyWarning"
+                    && case["upstream_test"] != "TestLowerExponentiationOperatorNoBundle")
                 || case.get("expected_snapshot").is_none()
                 || !case["entry_paths"].is_array()
                 || case["entry_paths"]
@@ -3853,8 +3854,10 @@ mod tests {
                             Some(
                                 "TestLowerOptionalCatchNameCollisionNoBundle"
                                     | "TestLowerObjectSpreadNoBundle"
+                                    | "TestLowerExponentiationOperatorNoBundle"
                                     | "TestLowerAsync2017NoBundle"
                                     | "TestLowerTemplateObject"
+                                    | "TestTSLowerObjectRest2018NoBundle"
                                     | "TestTSComputedClassFieldUseDefineTrueLower"
                             )
                         ))
@@ -4147,7 +4150,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 583 },
+            if selected_test.is_some() { 1 } else { 585 },
             "upstream basic bundler corpus case count"
         );
     }

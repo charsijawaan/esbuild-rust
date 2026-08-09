@@ -67,6 +67,8 @@ pub(crate) struct ParserCore {
     pub(crate) local_type_names: HashSet<String>,
     pub(crate) generated_injected_defines: HashMap<u32, Ref>,
     pub(crate) top_level_temp_refs: Vec<Ref>,
+    pub(crate) temp_refs_to_declare: Vec<Ref>,
+    pub(crate) temp_ref_count: usize,
     pub(crate) auto_accessor_storage_counts: HashMap<String, u32>,
     pub(crate) named_top_level_temp_counts: HashMap<String, u32>,
     pub(crate) class_pre_statements: Vec<crate::internal::js_ast::Stmt>,
@@ -143,6 +145,8 @@ impl ParserCore {
             local_type_names: HashSet::new(),
             generated_injected_defines: HashMap::new(),
             top_level_temp_refs: Vec::new(),
+            temp_refs_to_declare: Vec::new(),
+            temp_ref_count: 0,
             auto_accessor_storage_counts: HashMap::new(),
             named_top_level_temp_counts: HashMap::new(),
             class_pre_statements: Vec::new(),
@@ -1198,6 +1202,53 @@ impl ParserCore {
             .generated
             .push(reference);
         self.top_level_temp_refs.push(reference);
+        reference
+    }
+
+    pub(crate) fn generate_temp_ref(&mut self, needs_declaration: bool) -> Ref {
+        let mut scope = self
+            .current_scope
+            .clone()
+            .expect("temporary references require a current scope");
+        if needs_declaration {
+            loop {
+                let (kind, parent) = {
+                    let scope = scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (
+                        scope.kind,
+                        scope.parent.as_ref().and_then(std::sync::Weak::upgrade),
+                    )
+                };
+                if matches!(kind, ScopeKind::Entry | ScopeKind::FunctionBody) {
+                    break;
+                }
+                scope = parent.expect("temporary reference must have a hoist scope");
+            }
+            if self
+                .module_scope
+                .as_ref()
+                .is_some_and(|module| Arc::ptr_eq(module, &scope))
+            {
+                return self.generate_top_level_temp_ref();
+            }
+        }
+
+        let suffix = char::from_u32(
+            u32::from(b'a') + u32::try_from(self.temp_ref_count).unwrap_or(25).min(25),
+        )
+        .unwrap_or('z');
+        self.temp_ref_count += 1;
+        let reference = self.new_symbol(SymbolKind::Other, format!("_{suffix}"));
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(reference);
+        if needs_declaration {
+            self.temp_refs_to_declare.push(reference);
+        }
         reference
     }
 

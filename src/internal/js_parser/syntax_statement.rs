@@ -175,6 +175,9 @@ fn parse_statement_without_no_side_effects_comment(
     lexer: &mut Lexer,
 ) -> Stmt {
     let loc = lexer.loc();
+    // Leading ordinary comments belong to the statement boundary. Only legal
+    // comments are preserved there; don't attach the rest to a nested expression.
+    lexer.comments_before_token.clear();
     if let Some(statement) =
         super::syntax_typescript::parse_type_script_statement(core, lexer, false)
     {

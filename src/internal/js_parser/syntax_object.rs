@@ -36,6 +36,7 @@ pub(crate) fn parse_object_literal_prefix(
     let mut comma_after_spread = Loc::default();
 
     while lexer.token != Token::CloseBrace {
+        core.save_expr_comments_here(lexer);
         if lexer.token == Token::DotDotDot {
             let dot_loc = lexer.loc();
             lexer.next();

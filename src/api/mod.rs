@@ -8266,21 +8266,17 @@ mod tests {
     }
 
     #[test]
-    fn guards_unlowered_exponentiation_assignment_at_target_and_override_boundaries() {
+    fn lowers_exponentiation_assignment_at_target_and_override_boundaries() {
         let source = "base **= power";
-        let message = "Transforming exponentiation assignment operators to the configured target \
-                       environment (\"es2015\") is not supported yet";
-        assert_transform_error(
-            &transform(
+        assert_eq!(
+            transform_code(
                 source,
                 TransformOptions {
                     target: Target::Es2015,
                     ..TransformOptions::default()
                 },
             ),
-            message,
-            5,
-            3,
+            "var __pow = Math.pow;\nbase = __pow(base, power);\n"
         );
 
         assert_eq!(
@@ -8304,8 +8300,8 @@ mod tests {
             ),
             "base **= power;\n"
         );
-        assert_transform_error(
-            &transform(
+        assert_eq!(
+            transform_code(
                 source,
                 TransformOptions {
                     target: Target::EsNext,
@@ -8313,10 +8309,7 @@ mod tests {
                     ..TransformOptions::default()
                 },
             ),
-            "Transforming exponentiation assignment operators to the configured target \
-             environment (\"esnext\" + 1 override) is not supported yet",
-            5,
-            3,
+            "var __pow = Math.pow;\nbase = __pow(base, power);\n"
         );
 
         assert_eq!(
@@ -8328,6 +8321,37 @@ mod tests {
                 },
             ),
             "var __pow = Math.pow;\n__pow(base, power);\n"
+        );
+        assert_eq!(
+            transform_code(
+                "function f(){ obj()[key()] **= value }",
+                TransformOptions {
+                    target: Target::Es2015,
+                    ..TransformOptions::default()
+                },
+            ),
+            concat!(
+                "var __pow = Math.pow;\n",
+                "function f() {\n",
+                "  var _a, _b;\n",
+                "  (_a = obj())[_b = key()] = __pow(_a[_b], value);\n",
+                "}\n",
+            )
+        );
+        assert_eq!(
+            transform_code(
+                "function f(x = obj()[key()] **= value) {}",
+                TransformOptions {
+                    target: Target::Es2015,
+                    ..TransformOptions::default()
+                },
+            ),
+            concat!(
+                "var __pow = Math.pow;\n",
+                "function f(x = ((_a) => ((_b) => (_a = obj())[_b = key()] = ",
+                "__pow(_a[_b], value))())()) {\n",
+                "}\n",
+            )
         );
     }
 

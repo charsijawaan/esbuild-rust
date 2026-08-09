@@ -2527,8 +2527,8 @@ mod tests {
     }
 
     #[test]
-    fn guards_unlowered_exponentiation_assignment_at_the_operator() {
-        let (_, ok, log) = parse_source_with_options(
+    fn lowers_exponentiation_assignment_for_unsupported_targets() {
+        let (ast, ok, log) = parse_source_with_options(
             "let lowered = a ** b;\nbase **= /* decoy **= */ power;",
             Options {
                 unsupported_js_features: JsFeature::EXPONENT_OPERATOR,
@@ -2537,16 +2537,21 @@ mod tests {
             },
         );
         assert!(ok);
-        let messages = log.done();
-        assert_eq!(messages.len(), 1);
-        assert_syntax_guard_message(
-            &messages[0],
-            "Transforming exponentiation assignment operators to the configured target \
-             environment (\"es2015\") is not supported yet",
-            2,
-            5,
-            3,
-        );
+        assert!(log.done().is_empty());
+        let Some(StmtData::Expr(assignment)) = ast.parts.last().expect("user code part").statements
+            [1]
+        .data
+        .as_deref() else {
+            panic!("expected lowered exponentiation assignment expression");
+        };
+        let Some(ExprData::Binary(assignment)) = assignment.value.data.as_deref() else {
+            panic!("expected assignment expression");
+        };
+        assert_eq!(assignment.op, OpCode::BinaryAssign);
+        assert!(matches!(
+            assignment.right.data.as_deref(),
+            Some(ExprData::Call(_))
+        ));
 
         let (ast, ok, log) = parse_source("base **= power;");
         assert!(ok);
