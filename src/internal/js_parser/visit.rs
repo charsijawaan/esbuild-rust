@@ -7262,6 +7262,16 @@ fn function_body_use_strict(core: &ParserCore, statements: &[Stmt]) -> Option<Lo
     None
 }
 
+fn transpose_if_expr_chain(mut expression: Expr, visit: &mut impl FnMut(Expr) -> Expr) -> Expr {
+    if let Some(ExprData::If(if_expression)) = expression.data.as_deref_mut() {
+        if_expression.yes = transpose_if_expr_chain(std::mem::take(&mut if_expression.yes), visit);
+        if_expression.no = transpose_if_expr_chain(std::mem::take(&mut if_expression.no), visit);
+        expression
+    } else {
+        visit(expression)
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers: bool) {
     stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || {
@@ -8468,15 +8478,11 @@ fn visit_expr_with_target_and_context(
                 None
             };
             if let Some(kind) = kind {
-                if kind == crate::internal::ast::ImportKind::Require {
-                    ignore_usage_if_recorded(core, core.require_ref);
-                }
+                ignore_usage_if_recorded(core, core.require_ref);
                 if call.args.len() == 1
                     && let Some(ExprData::String(path)) = call.args[0].data.as_deref()
                 {
-                    if kind == crate::internal::ast::ImportKind::Require
-                        && core.is_control_flow_dead
-                    {
+                    if core.is_control_flow_dead {
                         *data = ExprData::Null;
                         return;
                     }
@@ -8490,9 +8496,7 @@ fn visit_expr_with_target_and_context(
                         .into_owned(),
                         crate::internal::ast::ImportRecordFlags::default(),
                     );
-                    if kind == crate::internal::ast::ImportKind::Require
-                        && core.visit_try_body_depth > 0
-                    {
+                    if core.visit_try_body_depth > 0 {
                         let record = &mut core.import_records[import_record_index as usize];
                         record.flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
                         record.error_handler_loc = core.visit_try_catch_loc;
@@ -8512,6 +8516,51 @@ fn visit_expr_with_target_and_context(
                     };
                 } else if kind == crate::internal::ast::ImportKind::Require {
                     if call.args.len() == 1
+                        && matches!(call.args[0].data.as_deref(), Some(ExprData::If(_)))
+                    {
+                        let argument = std::mem::take(&mut call.args[0]);
+                        let mut template = call.clone();
+                        template.target =
+                            value_to_substitute_for_require(core, template.target.loc);
+                        template.args.clear();
+                        let replacement = transpose_if_expr_chain(argument, &mut |argument| {
+                            let Some(ExprData::String(path)) = argument.data.as_deref() else {
+                                let mut call = template.clone();
+                                call.args.push(argument);
+                                return Expr::new(expression_loc, ExprData::Call(call));
+                            };
+                            if core.is_control_flow_dead {
+                                return Expr::new(expression_loc, ExprData::Null);
+                            }
+                            let import_record_index = core.add_import_record(
+                                crate::internal::ast::ImportKind::Require,
+                                crate::internal::ast::ImportPhase::Evaluation,
+                                core.source.range_of_string(argument.loc),
+                                String::from_utf8_lossy(
+                                    &crate::internal::helpers::utf16_to_string(&path.value),
+                                )
+                                .into_owned(),
+                                crate::internal::ast::ImportRecordFlags::default(),
+                            );
+                            if core.visit_try_body_depth > 0 {
+                                let record = &mut core.import_records[import_record_index as usize];
+                                record.flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
+                                record.error_handler_loc = core.visit_try_catch_loc;
+                            }
+                            Expr::new(
+                                expression_loc,
+                                ExprData::RequireString(
+                                    crate::internal::js_ast::RequireStringExpr {
+                                        import_record_index,
+                                        close_paren_loc: template.close_paren_loc,
+                                    },
+                                ),
+                            )
+                        });
+                        if let Some(replacement) = replacement.data {
+                            *data = *replacement;
+                        }
+                    } else if call.args.len() == 1
                         && let Some(replacement) = handle_glob_pattern(
                             core,
                             call.args[0].clone(),
@@ -8525,6 +8574,23 @@ fn visit_expr_with_target_and_context(
                         *data = *replacement;
                     } else {
                         call.target = value_to_substitute_for_require(core, call.target.loc);
+                    }
+                } else if call.args.len() == 1
+                    && matches!(call.args[0].data.as_deref(), Some(ExprData::If(_)))
+                {
+                    let argument = std::mem::take(&mut call.args[0]);
+                    let mut template = call.clone();
+                    if let Some(ExprData::Dot(dot)) = template.target.data.as_deref_mut() {
+                        dot.target = value_to_substitute_for_require(core, dot.target.loc);
+                    }
+                    template.args.clear();
+                    let replacement = transpose_if_expr_chain(argument, &mut |argument| {
+                        let mut call = template.clone();
+                        call.args.push(argument);
+                        Expr::new(expression_loc, ExprData::Call(call))
+                    });
+                    if let Some(replacement) = replacement.data {
+                        *data = *replacement;
                     }
                 }
             }
@@ -9062,6 +9128,45 @@ fn visit_expr_with_target_and_context(
             visit_expr(core, &mut import.options_or_nil, resolve_identifiers);
             let options = import_options(&import.options_or_nil);
             if (import.options_or_nil.data.is_none() || options.is_some())
+                && matches!(import.expr.data.as_deref(), Some(ExprData::If(_)))
+            {
+                let argument = std::mem::take(&mut import.expr);
+                let mut template = import.clone();
+                template.expr = Expr::default();
+                let (assert_or_with, flags) = options.clone().unwrap_or_default();
+                let replacement = transpose_if_expr_chain(argument, &mut |argument| {
+                    let Some(ExprData::String(path)) = argument.data.as_deref() else {
+                        let mut import = template.clone();
+                        import.expr = argument;
+                        return Expr::new(expression_loc, ExprData::ImportCall(import));
+                    };
+                    if core.is_control_flow_dead {
+                        return Expr::new(argument.loc, ExprData::Null);
+                    }
+                    let import_record_index = core.add_import_record(
+                        crate::internal::ast::ImportKind::Dynamic,
+                        template.phase,
+                        core.source.range_of_string(argument.loc),
+                        String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
+                            &path.value,
+                        ))
+                        .into_owned(),
+                        flags,
+                    );
+                    core.import_records[import_record_index as usize].assert_or_with =
+                        assert_or_with.clone();
+                    Expr::new(
+                        argument.loc,
+                        ExprData::ImportString(crate::internal::js_ast::ImportStringExpr {
+                            import_record_index,
+                            close_paren_loc: template.close_paren_loc,
+                        }),
+                    )
+                });
+                if let Some(replacement) = replacement.data {
+                    *data = *replacement;
+                }
+            } else if (import.options_or_nil.data.is_none() || options.is_some())
                 && let Some(ExprData::String(path)) = import.expr.data.as_deref()
             {
                 let (assert_or_with, flags) = options.clone().unwrap_or_default();
@@ -9471,7 +9576,11 @@ fn visit_expr_with_target_and_context(
                                 ..ObjectExpr::default()
                             }),
                         ));
-                        args.push(Expr::new(expression.loc, ExprData::This));
+                        if core.visit_this_is_nested
+                            || core.options.mode == crate::internal::config::Mode::PassThrough
+                        {
+                            args.push(Expr::new(expression.loc, ExprData::This));
+                        }
                     } else if let Some(key) = key_or_nil {
                         args.push(key);
                     }

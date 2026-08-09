@@ -1779,6 +1779,36 @@ fn resolve_import_records_from_directory(
                 resolution_cache.insert(cache_key.clone(), resolved.clone());
                 resolved
             };
+        if record.kind == ImportKind::RequireResolve {
+            if let Some(resolve_result) = resolve_result
+                && resolve_result.path_pair.is_external
+            {
+                record.path = rewrite_external_path(
+                    file_system,
+                    options,
+                    resolve_result.path_pair.primary.clone(),
+                );
+                if resolve_result.primary_side_effects_data.is_some() {
+                    record.flags |= ImportRecordFlags::IS_EXTERNAL_WITHOUT_SIDE_EFFECTS;
+                }
+                result.resolve_results[record_index] = Some(resolve_result);
+            } else if !record
+                .flags
+                .contains(ImportRecordFlags::HANDLES_IMPORT_ERRORS)
+            {
+                log.add_id(
+                    logger::MsgId::BundlerRequireResolveNotExternal,
+                    MsgKind::Warning,
+                    Some(&mut tracker),
+                    record.range,
+                    format!(
+                        "{:?} should be marked as external for use with \"require.resolve\"",
+                        record.path.text
+                    ),
+                );
+            }
+            continue;
+        }
         let Some(resolve_result) = resolve_result else {
             if !did_log_plugin_error
                 && !record
@@ -1796,20 +1826,6 @@ fn resolve_import_records_from_directory(
             }
             continue;
         };
-        if record.kind == ImportKind::RequireResolve {
-            if resolve_result.path_pair.is_external {
-                record.path = rewrite_external_path(
-                    file_system,
-                    options,
-                    resolve_result.path_pair.primary.clone(),
-                );
-                if resolve_result.primary_side_effects_data.is_some() {
-                    record.flags |= ImportRecordFlags::IS_EXTERNAL_WITHOUT_SIDE_EFFECTS;
-                }
-                result.resolve_results[record_index] = Some(resolve_result);
-            }
-            continue;
-        }
         if resolve_result.path_pair.is_external {
             record.path = rewrite_external_path(
                 file_system,
@@ -3802,6 +3818,42 @@ mod tests {
             .collect()
     }
 
+    fn upstream_external_matchers(value: &serde_json::Value) -> config::ExternalMatchers {
+        config::ExternalMatchers {
+            exact: value
+                .get("Exact")
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flatten()
+                .map(|(path, is_external)| {
+                    (
+                        path.clone(),
+                        is_external
+                            .as_bool()
+                            .expect("upstream external exact match"),
+                    )
+                })
+                .collect(),
+            patterns: value
+                .get("Patterns")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|pattern| config::WildcardPattern {
+                    prefix: pattern["Prefix"].as_str().unwrap_or_default().to_string(),
+                    suffix: pattern["Suffix"].as_str().unwrap_or_default().to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn upstream_external_settings(value: &serde_json::Value) -> config::ExternalSettings {
+        config::ExternalSettings {
+            pre_resolve: upstream_external_matchers(&value["PreResolve"]),
+            post_resolve: upstream_external_matchers(&value["PostResolve"]),
+        }
+    }
+
     #[test]
     fn matches_upstream_missing_glob_directory_diagnostics() {
         let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
@@ -3919,7 +3971,8 @@ mod tests {
                     && case["upstream_test"] != "TestDuplicatePropertyWarning"
                     && case["upstream_test"] != "TestLowerExponentiationOperatorNoBundle"
                     && case["upstream_test"] != "TestLowerConstIssue4448"
-                    && case["upstream_test"] != "TestImportMetaCommonJS")
+                    && case["upstream_test"] != "TestImportMetaCommonJS"
+                    && case["upstream_test"] != "TestRequireResolve")
                 || case.get("expected_snapshot").is_none()
                 || (!case["entry_paths"].is_array() && !case["entry_paths_advanced"].is_array())
                 || case["entry_paths"]
@@ -3931,7 +3984,20 @@ mod tests {
                     .is_some_and(|options| !options.is_empty())
                 || (option_names != ["AbsOutputFile", "Mode"]
                     && option_names != ["AbsOutputFile", "Mode", "OutputFormat"]
+                    && option_names != ["AbsOutputFile", "ExternalSettings", "Mode"]
+                    && option_names
+                        != ["AbsOutputFile", "ExternalSettings", "Mode", "OutputFormat"]
+                    && option_names
+                        != [
+                            "AbsOutputFile",
+                            "ExternalSettings",
+                            "Mode",
+                            "OutputFormat",
+                            "Platform",
+                        ]
                     && option_names != ["AbsOutputDir", "Mode"]
+                    && option_names != ["AbsOutputDir", "ExternalSettings", "Mode"]
+                    && option_names != ["AbsOutputDir", "ExternalSettings", "Mode", "OutputFormat"]
                     && option_names != ["AbsOutputDir", "EntryPathTemplate"]
                     && option_names != ["AbsOutputDir", "Mode", "NeedsMetafile"]
                     && option_names
@@ -4296,6 +4362,9 @@ mod tests {
                     })
                     .collect();
             }
+            if let Some(settings) = options_json.get("ExternalSettings") {
+                options.external_settings = upstream_external_settings(settings);
+            }
             if let Some(value) = options_json
                 .pointer("/TS/Config/UseDefineForClassFields")
                 .and_then(serde_json::Value::as_u64)
@@ -4429,7 +4498,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 652 },
+            if selected_test.is_some() { 1 } else { 684 },
             "upstream basic bundler corpus case count"
         );
     }

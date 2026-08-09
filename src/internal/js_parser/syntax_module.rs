@@ -720,14 +720,14 @@ fn parse_path(
         } else {
             AssertOrWithKeyword::Assert
         };
-        let keyword_loc = lexer.loc();
+        let keyword_loc = core.save_expr_comments_here(lexer);
         lexer.next();
-        let inner_open_brace_loc = lexer.loc();
+        let inner_open_brace_loc = core.save_expr_comments_here(lexer);
         lexer.expect(Token::OpenBrace);
         let mut entries = Vec::new();
         let mut duplicates = HashMap::new();
         while lexer.token != Token::CloseBrace {
-            let key_loc = lexer.loc();
+            let key_loc = core.save_expr_comments_here(lexer);
             let key_range = lexer.range();
             let (key, key_text, prefer_quoted_key) = if lexer.is_identifier_or_keyword() {
                 let key_text = String::from_utf8_lossy(lexer.raw()).into_owned();
@@ -754,7 +754,7 @@ fn parse_path(
             }
             lexer.next();
             lexer.expect(Token::Colon);
-            let value_loc = lexer.loc();
+            let value_loc = core.save_expr_comments_here(lexer);
             let value = lexer.string_literal().to_vec();
             lexer.expect(Token::StringLiteral);
             if keyword == AssertOrWithKeyword::Assert
@@ -775,7 +775,7 @@ fn parse_path(
             }
             lexer.next();
         }
-        let inner_close_brace_loc = lexer.loc();
+        let inner_close_brace_loc = core.save_expr_comments_here(lexer);
         lexer.expect(Token::CloseBrace);
         assert_or_with = Some(ImportAssertOrWith {
             entries,

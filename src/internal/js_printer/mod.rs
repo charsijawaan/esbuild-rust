@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::internal::ast::{
-    INVALID_REF, ImportKind, ImportPhase, ImportRecord, ImportRecordFlags, Ref, SymbolFlags,
-    SymbolKind,
+    AssertOrWithKeyword, INVALID_REF, ImportKind, ImportPhase, ImportRecord, ImportRecordFlags,
+    Ref, SymbolFlags, SymbolKind,
 };
 use crate::internal::compat::JsFeature;
 use crate::internal::config::{LegalComments, MetafileFormat};
@@ -2168,11 +2168,30 @@ impl Printer<'_> {
     }
 
     fn print_import_attributes(&mut self, index: u32, is_dynamic: bool, is_multi_line: bool) {
-        let record = &self.import_records[usize::try_from(index).expect("import record index")];
-        let Some(attributes) = &record.assert_or_with else {
+        let Some(attributes) = self.import_records
+            [usize::try_from(index).expect("import record index")]
+        .assert_or_with
+        .clone() else {
             return;
         };
+
         if is_dynamic {
+            if self
+                .options
+                .unsupported_features
+                .contains(JsFeature::IMPORT_ASSERTIONS)
+                && self
+                    .options
+                    .unsupported_features
+                    .contains(JsFeature::IMPORT_ATTRIBUTES)
+            {
+                return;
+            }
+
+            let attributes_are_multi_line = self
+                .will_print_expr_comments_at_loc(attributes.keyword_loc)
+                || self.will_print_expr_comments_at_loc(attributes.inner_open_brace_loc)
+                || self.will_print_expr_comments_at_loc(attributes.outer_close_brace_loc);
             self.output.push(b',');
             if is_multi_line {
                 self.print_newline();
@@ -2180,28 +2199,85 @@ impl Printer<'_> {
             } else {
                 self.print_optional_space();
             }
+            self.print_expr_comments_at_loc(attributes.outer_open_brace_loc);
             self.output.push(b'{');
-            self.print_optional_space();
-        } else {
-            self.print_optional_space();
-        }
-        self.output
-            .extend_from_slice(attributes.keyword.as_str().as_bytes());
-        if is_dynamic {
+            if attributes_are_multi_line {
+                self.print_newline();
+                self.indent += 1;
+                self.print_indent();
+            } else {
+                self.print_optional_space();
+            }
+
+            self.print_expr_comments_at_loc(attributes.keyword_loc);
+            self.output
+                .extend_from_slice(attributes.keyword.as_str().as_bytes());
             self.output.push(b':');
-            self.print_optional_space();
+            if self.will_print_expr_comments_at_loc(attributes.inner_open_brace_loc) {
+                self.print_newline();
+                self.indent += 1;
+                self.print_indent();
+                self.print_expr_comments_at_loc(attributes.inner_open_brace_loc);
+                self.print_import_assert_or_with_clause(&attributes);
+                self.indent -= 1;
+            } else {
+                self.print_optional_space();
+                self.print_import_assert_or_with_clause(&attributes);
+            }
+
+            if attributes_are_multi_line {
+                self.print_newline();
+                self.print_expr_comments_after_close_token_at_loc(attributes.outer_close_brace_loc);
+                self.indent -= 1;
+                self.print_indent();
+            } else {
+                self.print_optional_space();
+            }
+            self.output.push(b'}');
         } else {
+            let feature = if attributes.keyword == AssertOrWithKeyword::Assert {
+                JsFeature::IMPORT_ASSERTIONS
+            } else {
+                JsFeature::IMPORT_ATTRIBUTES
+            };
+            if self.options.unsupported_features.contains(feature) {
+                return;
+            }
+
             self.print_optional_space();
+            self.output
+                .extend_from_slice(attributes.keyword.as_str().as_bytes());
+            self.print_optional_space();
+            self.print_import_assert_or_with_clause(&attributes);
         }
+    }
+
+    fn print_import_assert_or_with_clause(
+        &mut self,
+        attributes: &crate::internal::ast::ImportAssertOrWith,
+    ) {
+        let is_multi_line = self.will_print_expr_comments_at_loc(attributes.inner_close_brace_loc)
+            || attributes.entries.iter().any(|entry| {
+                self.will_print_expr_comments_at_loc(entry.key_loc)
+                    || self.will_print_expr_comments_at_loc(entry.value_loc)
+            });
+
         self.output.push(b'{');
-        if !attributes.entries.is_empty() {
-            self.print_optional_space();
+        if is_multi_line {
+            self.indent += 1;
         }
         for (entry_index, entry) in attributes.entries.iter().enumerate() {
             if entry_index > 0 {
                 self.output.push(b',');
+            }
+            if is_multi_line {
+                self.print_newline();
+                self.print_indent();
+            } else {
                 self.print_optional_space();
             }
+
+            self.print_expr_comments_at_loc(entry.key_loc);
             let key = String::from_utf16_lossy(&entry.key);
             if !entry.prefer_quoted_key && is_identifier_es5_and_es_next(&key) {
                 self.print_identifier(&key);
@@ -2210,18 +2286,30 @@ impl Printer<'_> {
                     .extend(quote_utf16(&entry.key, self.options, false));
             }
             self.output.push(b':');
-            self.print_optional_space();
-            self.output
-                .extend(quote_utf16(&entry.value, self.options, false));
+            if self.will_print_expr_comments_at_loc(entry.value_loc) {
+                self.print_newline();
+                self.indent += 1;
+                self.print_indent();
+                self.print_expr_comments_at_loc(entry.value_loc);
+                self.output
+                    .extend(quote_utf16(&entry.value, self.options, false));
+                self.indent -= 1;
+            } else {
+                self.print_optional_space();
+                self.output
+                    .extend(quote_utf16(&entry.value, self.options, false));
+            }
         }
-        if !attributes.entries.is_empty() {
+
+        if is_multi_line {
+            self.print_newline();
+            self.print_expr_comments_after_close_token_at_loc(attributes.inner_close_brace_loc);
+            self.indent -= 1;
+            self.print_indent();
+        } else if !attributes.entries.is_empty() {
             self.print_optional_space();
         }
         self.output.push(b'}');
-        if is_dynamic {
-            self.print_optional_space();
-            self.output.push(b'}');
-        }
     }
 
     fn print_function(&mut self, function: &crate::internal::js_ast::Function) {
@@ -2697,7 +2785,10 @@ impl Printer<'_> {
                         level,
                     );
                 } else {
-                    self.print_symbol_expr(identifier.reference);
+                    self.print_import_symbol_expr(
+                        identifier.reference,
+                        identifier.prefer_quoted_key,
+                    );
                 }
             }
             ExprData::PrivateIdentifier(identifier) => {
@@ -4004,9 +4095,17 @@ impl Printer<'_> {
     }
 
     fn print_symbol_expr(&mut self, reference: crate::internal::ast::Ref) {
+        self.print_import_symbol_expr(reference, false);
+    }
+
+    fn print_import_symbol_expr(
+        &mut self,
+        reference: crate::internal::ast::Ref,
+        prefer_quoted_key: bool,
+    ) {
         if let Some(alias) = self.renamer.namespace_alias_for_symbol(reference) {
             self.print_symbol_expr(alias.namespace_ref);
-            if is_identifier_es5_and_es_next(&alias.alias) {
+            if !prefer_quoted_key && is_identifier_es5_and_es_next(&alias.alias) {
                 self.output.push(b'.');
                 self.print_identifier(&alias.alias);
             } else {

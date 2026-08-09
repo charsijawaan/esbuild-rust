@@ -409,12 +409,12 @@ pub struct ResolverContext<'a> {
     pub strip_node_prefix_for_require: bool,
 }
 
-fn is_external_match(matchers: &ExternalMatchers, path: &str) -> bool {
-    matchers.exact.contains_key(path)
-        || matchers
-            .patterns
-            .iter()
-            .any(|pattern| path.starts_with(&pattern.prefix) && path.ends_with(&pattern.suffix))
+fn is_external_match(matchers: &ExternalMatchers, path: &str, kind: ImportKind) -> bool {
+    kind != ImportKind::EntryPoint
+        && (matchers.exact.contains_key(path)
+            || matchers.patterns.iter().any(|pattern| {
+                path.starts_with(&pattern.prefix) && path.ends_with(&pattern.suffix)
+            }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -756,10 +756,9 @@ fn resolve_file_or_package_core(
         });
     }
 
-    if context
-        .external_settings
-        .is_some_and(|settings| is_external_match(&settings.pre_resolve, import_path))
-        || (context.external_packages && is_package_path(import_path))
+    if context.external_settings.is_some_and(|settings| {
+        is_external_match(&settings.pre_resolve, import_path, context.import_kind)
+    }) || (context.external_packages && is_package_path(import_path))
         || (context.import_kind == ImportKind::Url && import_path.starts_with('#'))
         || import_path.starts_with("http://")
         || import_path.starts_with("https://")
@@ -856,6 +855,25 @@ fn resolve_file_or_package_core(
             configured_main_fields,
             is_require,
         );
+    }
+    if (!is_package_path(import_path) || context.import_kind.is_from_css())
+        && let Some(settings) = context.external_settings
+    {
+        let absolute = file_system.join(&[source_dir, import_path]);
+        if is_external_match(&settings.post_resolve, &absolute, context.import_kind) {
+            return Some(LoadedPathPair {
+                paths: PathPair {
+                    primary: Path {
+                        text: absolute,
+                        namespace: "file".into(),
+                        ..Path::default()
+                    },
+                    is_external: true,
+                    ..PathPair::default()
+                },
+                different_case: None,
+            });
+        }
     }
     // CSS paths use URL semantics. Like upstream (and webpack), try a path
     // relative to the importing stylesheet before treating a bare path as a
@@ -1188,7 +1206,11 @@ pub fn resolve_with_metadata(
     };
     if !result.path_pair.is_external
         && context.external_settings.is_some_and(|settings| {
-            is_external_match(&settings.post_resolve, &result.path_pair.primary.text)
+            is_external_match(
+                &settings.post_resolve,
+                &result.path_pair.primary.text,
+                context.import_kind,
+            )
         })
     {
         result.path_pair.is_external = true;
