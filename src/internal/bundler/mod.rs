@@ -2331,14 +2331,15 @@ pub fn scan_bundle(
             .source_index_cache
             .get(path.clone(), SourceIndexKind::Normal);
         let output_path_was_auto_generated = entry_point.output_path.is_empty();
-        if output_path_was_auto_generated {
-            automatically_generated_entry_paths.push(path.text.clone());
-        }
-        let output_path = if output_path_was_auto_generated && path.namespace != "file" {
-            let mut output_path =
-                sanitize_file_path_for_virtual_module_path(&entry_point.input_path);
-            let (_, _, extension) = logger::platform_independent_path_dir_base_ext(&output_path);
-            output_path.truncate(output_path.len() - extension.len());
+        let output_path = if output_path_was_auto_generated {
+            let generated_input_path = if path.namespace == "file" {
+                &path.text
+            } else {
+                &entry_point.input_path
+            };
+            let output_path =
+                automatically_generated_entry_point_path(file_system, generated_input_path);
+            automatically_generated_entry_paths.push(output_path.clone());
             output_path
         } else {
             entry_point.output_path.clone()
@@ -2364,6 +2365,30 @@ pub fn scan_bundle(
             lowest_common_ancestor_directory(file_system, &automatically_generated_entry_paths);
         if options.abs_output_base.is_empty() {
             options.abs_output_base = file_system.cwd().to_string();
+        }
+    }
+
+    for entry_point in &mut bundle.entry_points {
+        if !file_system.is_abs(&entry_point.output_path) {
+            continue;
+        }
+        if entry_point.output_path_was_auto_generated {
+            if let Some(relative_path) =
+                file_system.rel(&options.abs_output_base, &entry_point.output_path)
+            {
+                entry_point.output_path = relative_path;
+            }
+            if let Some(index) = entry_point
+                .output_path
+                .rfind(|character| matches!(character, '/' | '.' | '\\'))
+                && entry_point.output_path.as_bytes()[index] == b'.'
+            {
+                entry_point.output_path.truncate(index);
+            }
+        } else if let Some(relative_path) =
+            file_system.rel(&options.abs_output_dir, &entry_point.output_path)
+        {
+            entry_point.output_path = relative_path;
         }
     }
 
@@ -3579,13 +3604,37 @@ pub fn sanitize_file_path_for_virtual_module_path(path: &str) -> String {
     }
 }
 
+fn automatically_generated_entry_point_path(file_system: &dyn Fs, path: &str) -> String {
+    let bytes = path.as_bytes();
+    let windows_volume_label = if file_system.is_abs(path)
+        && bytes.len() >= 3
+        && bytes[1] == b':'
+        && bytes[0].is_ascii_alphabetic()
+        && matches!(bytes[2], b'/' | b'\\')
+    {
+        Some(&path[..3])
+    } else {
+        None
+    };
+    let path_without_volume = windows_volume_label.map_or(path, |_| &path[3..]);
+    let mut output_path = sanitize_file_path_for_virtual_module_path(path_without_volume);
+    if let Some(volume) = windows_volume_label {
+        output_path.insert_str(0, volume);
+    }
+    if file_system.is_abs(&output_path) {
+        output_path
+    } else {
+        file_system.join(&[file_system.cwd(), &output_path])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_option_defaults, bundle_javascript, default_extension_to_loader_map,
-        find_reachable_files, guess_mime_type, hash_for_file_name, is_ascii_only, parse_file,
-        parse_file_with_unique_key_prefix, path_relative_to_outbase, resolve_import_records,
-        sanitize_file_path_for_virtual_module_path, scan_bundle,
+        apply_option_defaults, automatically_generated_entry_point_path, bundle_javascript,
+        default_extension_to_loader_map, find_reachable_files, guess_mime_type, hash_for_file_name,
+        is_ascii_only, parse_file, parse_file_with_unique_key_prefix, path_relative_to_outbase,
+        resolve_import_records, sanitize_file_path_for_virtual_module_path, scan_bundle,
     };
     use crate::internal::{
         ast::{ImportKind, ImportRecord, ImportRecordFlags, Index32},
@@ -3695,6 +3744,24 @@ mod tests {
             18 => Loader::Tsx,
             _ => panic!("unknown upstream loader {value}"),
         }
+    }
+
+    fn upstream_path_template(value: &serde_json::Value) -> Vec<config::PathTemplate> {
+        value
+            .as_array()
+            .expect("upstream path template")
+            .iter()
+            .map(|part| config::PathTemplate {
+                data: part["Data"].as_str().unwrap_or_default().to_string(),
+                placeholder: match part["Placeholder"].as_u64().unwrap_or_default() {
+                    1 => config::PathPlaceholder::Dir,
+                    2 => config::PathPlaceholder::Name,
+                    3 => config::PathPlaceholder::Hash,
+                    4 => config::PathPlaceholder::Ext,
+                    _ => config::PathPlaceholder::None,
+                },
+            })
+            .collect()
     }
 
     #[test]
@@ -3816,7 +3883,7 @@ mod tests {
                     && case["upstream_test"] != "TestLowerConstIssue4448"
                     && case["upstream_test"] != "TestImportMetaCommonJS")
                 || case.get("expected_snapshot").is_none()
-                || !case["entry_paths"].is_array()
+                || (!case["entry_paths"].is_array() && !case["entry_paths_advanced"].is_array())
                 || case["entry_paths"]
                     .as_array()
                     .is_some_and(|paths| paths.iter().any(|path| path == "*"))
@@ -3827,6 +3894,7 @@ mod tests {
                 || (option_names != ["AbsOutputFile", "Mode"]
                     && option_names != ["AbsOutputFile", "Mode", "OutputFormat"]
                     && option_names != ["AbsOutputDir", "Mode"]
+                    && option_names != ["AbsOutputDir", "EntryPathTemplate"]
                     && !((option_names == ["AbsOutputFile", "ExtensionToLoader", "Mode"]
                         || option_names == ["AbsOutputDir", "ExtensionToLoader", "Mode"])
                         && !matches!(
@@ -4126,33 +4194,40 @@ mod tests {
             if let Some(public_path) = upstream_string_option(options_json, "PublicPath") {
                 options.public_path = public_path;
             }
-            if let Some(template) = options_json
-                .get("ChunkPathTemplate")
-                .and_then(serde_json::Value::as_array)
-            {
-                options.chunk_path_template = template
-                    .iter()
-                    .map(|part| config::PathTemplate {
-                        data: part["Data"].as_str().unwrap_or_default().to_string(),
-                        placeholder: match part["Placeholder"].as_u64().unwrap_or_default() {
-                            1 => config::PathPlaceholder::Dir,
-                            2 => config::PathPlaceholder::Name,
-                            3 => config::PathPlaceholder::Hash,
-                            4 => config::PathPlaceholder::Ext,
-                            _ => config::PathPlaceholder::None,
-                        },
-                    })
-                    .collect();
+            if let Some(template) = options_json.get("ChunkPathTemplate") {
+                options.chunk_path_template = upstream_path_template(template);
             }
-            let entry_points: Vec<super::EntryPoint> = case["entry_paths"]
+            if let Some(template) = options_json.get("EntryPathTemplate") {
+                options.entry_path_template = upstream_path_template(template);
+            }
+            let mut entry_points: Vec<super::EntryPoint> = case["entry_paths"]
                 .as_array()
-                .expect("upstream bundler entry paths")
-                .iter()
+                .into_iter()
+                .flatten()
                 .map(|path| super::EntryPoint {
                     input_path: path.as_str().expect("upstream entry path").to_string(),
                     ..super::EntryPoint::default()
                 })
                 .collect();
+            entry_points.extend(
+                case["entry_paths_advanced"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| super::EntryPoint {
+                        input_path: entry["InputPath"]
+                            .as_str()
+                            .expect("upstream advanced entry input path")
+                            .to_string(),
+                        output_path: entry["OutputPath"]
+                            .as_str()
+                            .expect("upstream advanced entry output path")
+                            .to_string(),
+                        input_path_in_file_namespace: entry["InputPathInFileNamespace"]
+                            .as_bool()
+                            .expect("upstream advanced entry file namespace"),
+                    }),
+            );
             let log = Log::new_defer(
                 if case["debug_logs"].as_bool().unwrap_or_default() {
                     DeferLogKind::All
@@ -4236,7 +4311,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 626 },
+            if selected_test.is_some() { 1 } else { 629 },
             "upstream basic bundler corpus case count"
         );
     }
@@ -4330,6 +4405,16 @@ mod tests {
         assert!(is_ascii_only("hello ~"));
         assert!(!is_ascii_only("line\nbreak"));
         assert!(!is_ascii_only("λ"));
+
+        let windows = mock_fs(
+            &HashMap::<String, String>::new(),
+            MockKind::Windows,
+            "C:\\project",
+        );
+        assert_eq!(
+            automatically_generated_entry_point_path(&windows, "C:\\entry-:.ts"),
+            "C:\\entry-_.ts"
+        );
     }
 
     #[test]
