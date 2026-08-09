@@ -808,6 +808,7 @@ pub struct TemplatePart {
     pub value: Expr,
     pub tail_raw: String,
     pub tail_cooked: Vec<u16>,
+    pub tail_cooked_is_none: bool,
     pub tail_loc: Loc,
 }
 
@@ -816,6 +817,7 @@ pub struct TemplateExpr {
     pub tag_or_nil: Expr,
     pub head_raw: String,
     pub head_cooked: Vec<u16>,
+    pub head_cooked_is_none: bool,
     pub parts: Vec<TemplatePart>,
     pub head_loc: Loc,
     pub legacy_octal_loc: Loc,

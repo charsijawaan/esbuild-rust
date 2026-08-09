@@ -244,6 +244,7 @@ pub(crate) fn parse_tagged_template_suffix(
             let (tail_cooked, tail_raw) = lexer.cooked_and_raw_template_contents();
             parts.push(TemplatePart {
                 value,
+                tail_cooked_is_none: tail_cooked.is_none(),
                 tail_cooked: tail_cooked.unwrap_or_default(),
                 tail_raw: String::from_utf8(tail_raw)
                     .expect("template source text must be valid UTF-8"),
@@ -262,6 +263,7 @@ pub(crate) fn parse_tagged_template_suffix(
         ExprData::Template(TemplateExpr {
             tag_or_nil: tag,
             tag_was_originally_property_access,
+            head_cooked_is_none: head_cooked.is_none(),
             head_cooked: head_cooked.unwrap_or_default(),
             head_raw,
             parts,
@@ -711,7 +713,9 @@ mod tests {
             panic!("expected template expression");
         };
         assert_eq!(template.head_raw, r"\xZ");
+        assert!(template.head_cooked_is_none);
         assert_eq!(template.parts[0].tail_raw, r"\r");
+        assert!(!template.parts[0].tail_cooked_is_none);
         assert!(template.tag_or_nil.data.is_some());
         assert_eq!(lexer.token, Token::Plus);
     }

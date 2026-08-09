@@ -50,18 +50,66 @@ fn contains_closing_script_tag(text: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(b"</script"))
 }
 
-fn lower_tagged_template(
+fn lower_template_literal(
     core: &mut ParserCore,
     loc: Loc,
     template: &mut crate::internal::js_ast::TemplateExpr,
 ) -> Expr {
-    let mut cooked = vec![Expr::new(
-        template.head_loc,
-        ExprData::String(StringExpr {
-            value: template.head_cooked.clone(),
-            ..StringExpr::default()
-        }),
-    )];
+    if template.tag_or_nil.data.is_none() {
+        let mut value = Expr::new(
+            loc,
+            ExprData::String(StringExpr {
+                value: template.head_cooked.clone(),
+                legacy_octal_loc: template.legacy_octal_loc,
+                ..StringExpr::default()
+            }),
+        );
+        for part in &mut template.parts {
+            let value_loc = part.value.loc;
+            let mut args = vec![std::mem::take(&mut part.value)];
+            if !part.tail_cooked.is_empty() {
+                args.push(Expr::new(
+                    part.tail_loc,
+                    ExprData::String(StringExpr {
+                        value: part.tail_cooked.clone(),
+                        ..StringExpr::default()
+                    }),
+                ));
+            }
+            value = Expr::new(
+                loc,
+                ExprData::Call(CallExpr {
+                    target: Expr::new(
+                        loc,
+                        ExprData::Dot(DotExpr {
+                            target: value,
+                            name: "concat".into(),
+                            name_loc: value_loc,
+                            ..DotExpr::default()
+                        }),
+                    ),
+                    args,
+                    kind: CallKind::TargetWasOriginallyPropertyAccess,
+                    ..CallExpr::default()
+                }),
+            );
+        }
+        return value;
+    }
+
+    let mut needs_raw = template.head_cooked_is_none
+        || String::from_utf16_lossy(&template.head_cooked) != template.head_raw;
+    let mut cooked = vec![if template.head_cooked_is_none {
+        Expr::new(template.head_loc, ExprData::Undefined)
+    } else {
+        Expr::new(
+            template.head_loc,
+            ExprData::String(StringExpr {
+                value: template.head_cooked.clone(),
+                ..StringExpr::default()
+            }),
+        )
+    }];
     let mut raw = vec![Expr::new(
         template.head_loc,
         ExprData::String(StringExpr {
@@ -69,17 +117,20 @@ fn lower_tagged_template(
             ..StringExpr::default()
         }),
     )];
-    let mut needs_raw = String::from_utf16_lossy(&template.head_cooked) != template.head_raw;
     let mut args = vec![Expr::default()];
     for part in &template.parts {
         args.push(part.value.clone());
-        cooked.push(Expr::new(
-            part.tail_loc,
-            ExprData::String(StringExpr {
-                value: part.tail_cooked.clone(),
-                ..StringExpr::default()
-            }),
-        ));
+        cooked.push(if part.tail_cooked_is_none {
+            Expr::new(part.tail_loc, ExprData::Undefined)
+        } else {
+            Expr::new(
+                part.tail_loc,
+                ExprData::String(StringExpr {
+                    value: part.tail_cooked.clone(),
+                    ..StringExpr::default()
+                }),
+            )
+        });
         raw.push(Expr::new(
             part.tail_loc,
             ExprData::String(StringExpr {
@@ -87,7 +138,8 @@ fn lower_tagged_template(
                 ..StringExpr::default()
             }),
         ));
-        needs_raw |= String::from_utf16_lossy(&part.tail_cooked) != part.tail_raw;
+        needs_raw |= part.tail_cooked_is_none
+            || String::from_utf16_lossy(&part.tail_cooked) != part.tail_raw;
     }
 
     let cooked = Expr::new(
@@ -8365,18 +8417,22 @@ fn visit_expr_with_target_and_context(
                     return;
                 }
             }
-            if template.tag_or_nil.data.is_some()
-                && !core
-                    .options
-                    .unsupported_js_features
-                    .contains(JsFeature::INLINE_SCRIPT)
-                && (contains_closing_script_tag(&template.head_raw)
-                    || template
-                        .parts
-                        .iter()
-                        .any(|part| contains_closing_script_tag(&part.tail_raw)))
-            {
-                let replacement = lower_tagged_template(core, expression.loc, template);
+            let should_lower = core
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::TEMPLATE_LITERAL)
+                || (template.tag_or_nil.data.is_some()
+                    && !core
+                        .options
+                        .unsupported_js_features
+                        .contains(JsFeature::INLINE_SCRIPT)
+                    && (contains_closing_script_tag(&template.head_raw)
+                        || template
+                            .parts
+                            .iter()
+                            .any(|part| contains_closing_script_tag(&part.tail_raw))));
+            if should_lower {
+                let replacement = lower_template_literal(core, expression.loc, template);
                 if let Some(replacement) = replacement.data {
                     *data = *replacement;
                     return;

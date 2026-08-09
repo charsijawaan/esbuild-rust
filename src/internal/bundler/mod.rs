@@ -3854,6 +3854,7 @@ mod tests {
                                 "TestLowerOptionalCatchNameCollisionNoBundle"
                                     | "TestLowerObjectSpreadNoBundle"
                                     | "TestLowerAsync2017NoBundle"
+                                    | "TestLowerTemplateObject"
                                     | "TestTSComputedClassFieldUseDefineTrueLower"
                             )
                         ))
@@ -4146,7 +4147,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 582 },
+            if selected_test.is_some() { 1 } else { 583 },
             "upstream basic bundler corpus case count"
         );
     }
