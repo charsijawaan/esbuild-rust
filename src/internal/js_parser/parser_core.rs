@@ -40,6 +40,14 @@ pub(crate) struct NamespaceImportItems {
     pub(crate) import_record_index: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LoweredPrivateStorage {
+    pub(crate) storage: Ref,
+    pub(crate) getter: Option<Ref>,
+    pub(crate) setter: Option<Ref>,
+    pub(crate) method: Option<Ref>,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ParserCore {
     pub(crate) options: Options,
@@ -101,6 +109,8 @@ pub(crate) struct ParserCore {
     pub(crate) live_top_level_await_keyword: Range,
     pub(crate) fn_or_arrow_data_parse: FnOrArrowDataParse,
     pub(crate) lower_all_of_these_private_names: HashMap<String, bool>,
+    pub(crate) lowered_private_storage: HashMap<Ref, LoweredPrivateStorage>,
+    pub(crate) class_name_hint: Option<String>,
     pub(crate) hoisted_ref_for_sloppy_mode_block_fn: HashMap<Ref, Ref>,
     pub(crate) visit_loop_depth: usize,
     pub(crate) visit_switch_depth: usize,
@@ -111,6 +121,15 @@ pub(crate) struct ParserCore {
     pub(crate) visit_is_async_generator: bool,
     pub(crate) visit_this_is_nested: bool,
     pub(crate) visit_is_outside_fn_or_arrow: bool,
+    pub(crate) lower_await_to_yield: bool,
+    pub(crate) visit_arguments_ref: Option<Ref>,
+    pub(crate) visit_arguments_capture_ref: Option<Ref>,
+    pub(crate) visit_inside_async_arrow: bool,
+    pub(crate) async_arrow_this_usage: Vec<bool>,
+    pub(crate) visit_super_home_ref: Option<Ref>,
+    pub(crate) visit_super_home_is_class_instance: bool,
+    pub(crate) visit_super_receiver_is_home: bool,
+    pub(crate) lower_super_property_access: bool,
     pub(crate) has_top_level_return: bool,
     pub(crate) has_jsx_element: bool,
     pub(crate) has_type_script_export: bool,
@@ -180,6 +199,8 @@ impl ParserCore {
             live_top_level_await_keyword: Range::default(),
             fn_or_arrow_data_parse: FnOrArrowDataParse::default(),
             lower_all_of_these_private_names: HashMap::new(),
+            lowered_private_storage: HashMap::new(),
+            class_name_hint: None,
             hoisted_ref_for_sloppy_mode_block_fn: HashMap::new(),
             visit_loop_depth: 0,
             visit_switch_depth: 0,
@@ -190,6 +211,15 @@ impl ParserCore {
             visit_is_async_generator: false,
             visit_this_is_nested: false,
             visit_is_outside_fn_or_arrow: true,
+            lower_await_to_yield: false,
+            visit_arguments_ref: None,
+            visit_arguments_capture_ref: None,
+            visit_inside_async_arrow: false,
+            async_arrow_this_usage: Vec::new(),
+            visit_super_home_ref: None,
+            visit_super_home_is_class_instance: false,
+            visit_super_receiver_is_home: false,
+            lower_super_property_access: false,
             has_top_level_return: false,
             has_jsx_element: false,
             has_type_script_export: false,

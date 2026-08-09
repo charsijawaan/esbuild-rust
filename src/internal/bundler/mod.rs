@@ -4237,10 +4237,7 @@ mod tests {
                         ]
                         && case["upstream_test"] == "TestTSNamespaceKeepNamesTargetES2015")
                     && !(option_names == ["AbsOutputFile", "Mode", "UnsupportedJSFeatures"]
-                        && matches!(
-                            case["upstream_test"].as_str(),
-                            Some("TestTSDeclareClassFields" | "TestStaticClassBlockES2021")
-                        ))
+                        && case["upstream_test"] == "TestStaticClassBlockES2021")
                     && !(option_names
                         == ["AbsOutputFile", "MinifySyntax", "UnsupportedJSFeatures"]
                         && case["upstream_test"] == "TestTSMinifyDerivedClass")
@@ -4251,11 +4248,27 @@ mod tests {
                                 "TestLowerOptionalCatchNameCollisionNoBundle"
                                     | "TestLowerObjectSpreadNoBundle"
                                     | "TestLowerExponentiationOperatorNoBundle"
+                                    | "TestLowerPrivateFieldAssignments2015NoBundle"
+                                    | "TestLowerPrivateFieldAssignments2019NoBundle"
+                                    | "TestLowerPrivateFieldAssignments2020NoBundle"
+                                    | "TestLowerPrivateFieldOptionalChain2019NoBundle"
+                                    | "TestLowerPrivateFieldOptionalChain2020NoBundle"
+                                    | "TestTSLowerPrivateFieldOptionalChain2015NoBundle"
+                                    | "TestTSLowerPrivateStaticMembers2015NoBundle"
+                                    | "TestLowerPrivateClassExpr2020NoBundle"
+                                    | "TestLowerAsync2016NoBundle"
                                     | "TestLowerAsync2017NoBundle"
+                                    | "TestLowerAsyncSuperES2017NoBundle"
+                                    | "TestLowerAsyncSuperES2016NoBundle"
+                                    | "TestLowerStaticAsyncSuperES2021NoBundle"
+                                    | "TestLowerStaticAsyncSuperES2016NoBundle"
+                                    | "TestLowerStaticSuperES2021NoBundle"
+                                    | "TestLowerStaticSuperES2016NoBundle"
+                                    | "TestLowerClassField2020NoBundle"
+                                    | "TestTSLowerClassField2020NoBundle"
+                                    | "TestTSLowerObjectRest2018NoBundle"
                                     | "TestLowerTemplateObject"
                                     | "TestLowerConstIssue4448"
-                                    | "TestTSLowerObjectRest2018NoBundle"
-                                    | "TestTSComputedClassFieldUseDefineTrueLower"
                             )
                         ))
                     && option_names != ["AbsOutputDir", "MinifyIdentifiers"]
@@ -4635,7 +4648,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 718 },
+            if selected_test.is_some() { 1 } else { 733 },
             "upstream basic bundler corpus case count"
         );
     }

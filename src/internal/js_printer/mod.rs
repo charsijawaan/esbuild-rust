@@ -3445,9 +3445,7 @@ impl Printer<'_> {
                 }
             }
             ExprData::Class(class) => {
-                let print_parentheses = (class.is_parenthesized
-                    && !self.suppress_parenthesized_object_or_class)
-                    || self.stmt_start == Some(self.output.len())
+                let print_parentheses = self.stmt_start == Some(self.output.len())
                     || self.export_default_start == Some(self.output.len());
                 if print_parentheses {
                     self.output.push(b'(');

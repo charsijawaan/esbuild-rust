@@ -16,9 +16,9 @@ use crate::internal::{
         BindingData, BlockStmt, CallExpr, CallKind, Class, Decl, DotExpr, Expr, ExprData, ExprStmt,
         ForStmt, Function, FunctionBody, FunctionExpr, IdentifierBinding, IdentifierExpr, IfExpr,
         IfStmt, LabelStmt, LocalKind, LocalStmt, NewExpr, ObjectExpr, OpCode, OptionalChain,
-        PrimitiveType, Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind, Stmt,
-        StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, ThrowStmt, UnaryExpr,
-        assign, convert_binding_to_expr, for_each_identifier_binding,
+        PrimitiveType, Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind, ScopeRef,
+        Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, ThrowStmt,
+        UnaryExpr, assign, convert_binding_to_expr, for_each_identifier_binding,
         generate_non_unique_name_from_path, inline_primitives_into_template,
         inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
         is_primitive_literal, join_with_comma, known_primitive_type, make_helper_context,
@@ -31,7 +31,7 @@ use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properti
 use super::{
     lower_typescript::lower_nested_type_script_statements,
     parser::{apply_keep_names_to_statements, apply_keep_names_to_type_script_namespaces},
-    parser_core::ParserCore,
+    parser_core::{LoweredPrivateStorage, ParserCore},
     standalone_helpers::{is_simple_parameter_list, is_unsightly_primitive},
     symbols::select_local_kind,
 };
@@ -157,6 +157,378 @@ fn capture_value_with_possible_side_effects(
             loc,
         },
     )
+}
+
+fn lowered_private_index(
+    core: &ParserCore,
+    index: &crate::internal::js_ast::IndexExpr,
+) -> Option<(Expr, LoweredPrivateStorage)> {
+    if index.optional_chain != OptionalChain::None {
+        return None;
+    }
+    let ExprData::PrivateIdentifier(private) = index.index.data.as_deref()? else {
+        return None;
+    };
+    let storage = lowered_private_storage_ref(core, private.reference)?;
+    Some((index.target.clone(), storage))
+}
+
+fn lowered_private_storage_ref(core: &ParserCore, reference: Ref) -> Option<LoweredPrivateStorage> {
+    let canonical = core.follow_symbol_link(reference);
+    core.lowered_private_storage
+        .get(&canonical)
+        .or_else(|| core.lowered_private_storage.get(&reference))
+        .copied()
+}
+
+fn lowered_private_access(
+    core: &ParserCore,
+    expression: &Expr,
+) -> Option<(Expr, LoweredPrivateStorage)> {
+    let ExprData::Index(index) = expression.data.as_deref()? else {
+        return None;
+    };
+    lowered_private_index(core, index)
+}
+
+fn private_storage_identifier(core: &mut ParserCore, loc: Loc, storage: Ref) -> Expr {
+    core.record_usage(storage);
+    temp_identifier(loc, storage)
+}
+
+fn lower_private_get(
+    core: &mut ParserCore,
+    loc: Loc,
+    target: Expr,
+    private: LoweredPrivateStorage,
+) -> Expr {
+    let storage = private_storage_identifier(core, loc, private.storage);
+    if let Some(method) = private.method {
+        let method = private_storage_identifier(core, loc, method);
+        return core.call_runtime(loc, "__privateMethod", vec![target, storage, method]);
+    }
+    let mut args = vec![target, storage];
+    if let Some(getter) = private.getter {
+        args.push(private_storage_identifier(core, loc, getter));
+    }
+    core.call_runtime(loc, "__privateGet", args)
+}
+
+fn lower_private_set(
+    core: &mut ParserCore,
+    loc: Loc,
+    target: Expr,
+    private: LoweredPrivateStorage,
+    value: Expr,
+) -> Expr {
+    let storage = private_storage_identifier(core, loc, private.storage);
+    let mut args = vec![target, storage, value];
+    if let Some(setter) = private.setter {
+        args.push(private_storage_identifier(core, loc, setter));
+    }
+    core.call_runtime(loc, "__privateSet", args)
+}
+
+fn lower_private_wrapper(
+    core: &mut ParserCore,
+    loc: Loc,
+    target: Expr,
+    private: LoweredPrivateStorage,
+) -> Expr {
+    let storage = private_storage_identifier(core, loc, private.storage);
+    let mut args = vec![target, storage];
+    if private.setter.is_some() || private.getter.is_some() {
+        args.push(private.setter.map_or_else(
+            || Expr::new(loc, ExprData::Undefined),
+            |setter| private_storage_identifier(core, loc, setter),
+        ));
+        args.push(private.getter.map_or_else(
+            || Expr::new(loc, ExprData::Undefined),
+            |getter| private_storage_identifier(core, loc, getter),
+        ));
+    }
+    let wrapper = core.call_runtime(loc, "__privateWrapper", args);
+    Expr::new(
+        loc,
+        ExprData::Dot(DotExpr {
+            target: wrapper,
+            name: "_".into(),
+            name_loc: loc,
+            ..DotExpr::default()
+        }),
+    )
+}
+
+fn compound_assignment_operator(op: OpCode) -> Option<OpCode> {
+    Some(match op {
+        OpCode::BinaryAddAssign => OpCode::BinaryAdd,
+        OpCode::BinarySubtractAssign => OpCode::BinarySubtract,
+        OpCode::BinaryMultiplyAssign => OpCode::BinaryMultiply,
+        OpCode::BinaryDivideAssign => OpCode::BinaryDivide,
+        OpCode::BinaryRemainderAssign => OpCode::BinaryRemainder,
+        OpCode::BinaryPowerAssign => OpCode::BinaryPower,
+        OpCode::BinaryShiftLeftAssign => OpCode::BinaryShiftLeft,
+        OpCode::BinaryShiftRightAssign => OpCode::BinaryShiftRight,
+        OpCode::BinaryUnsignedShiftRightAssign => OpCode::BinaryUnsignedShiftRight,
+        OpCode::BinaryBitwiseOrAssign => OpCode::BinaryBitwiseOr,
+        OpCode::BinaryBitwiseAndAssign => OpCode::BinaryBitwiseAnd,
+        OpCode::BinaryBitwiseXorAssign => OpCode::BinaryBitwiseXor,
+        _ => return None,
+    })
+}
+
+fn lower_private_assignment(
+    core: &mut ParserCore,
+    loc: Loc,
+    binary: &mut BinaryExpr,
+) -> Option<ExprData> {
+    let (target, storage) = lowered_private_access(core, &binary.left)?;
+    let right = std::mem::take(&mut binary.right);
+    let lowered = match binary.op {
+        OpCode::BinaryAssign => lower_private_set(core, loc, target, storage, right),
+        OpCode::BinaryLogicalAndAssign | OpCode::BinaryLogicalOrAssign => {
+            let ([target_for_get, target_for_set], wrapper) =
+                capture_value_with_possible_side_effects(core, loc, target);
+            let get = lower_private_get(core, loc, target_for_get, storage);
+            let set = lower_private_set(core, loc, target_for_set, storage, right);
+            wrapper.wrap(Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: get,
+                    right: set,
+                    op: if binary.op == OpCode::BinaryLogicalAndAssign {
+                        OpCode::BinaryLogicalAnd
+                    } else {
+                        OpCode::BinaryLogicalOr
+                    },
+                }),
+            ))
+        }
+        OpCode::BinaryNullishCoalescingAssign => {
+            let ([target_for_get, target_for_set], target_wrapper) =
+                capture_value_with_possible_side_effects(core, loc, target);
+            let get = lower_private_get(core, loc, target_for_get, storage);
+            let set = lower_private_set(core, loc, target_for_set, storage, right);
+            if !core
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::NULLISH_COALESCING)
+            {
+                return target_wrapper
+                    .wrap(Expr::new(
+                        loc,
+                        ExprData::Binary(BinaryExpr {
+                            left: get,
+                            right: set,
+                            op: OpCode::BinaryNullishCoalescing,
+                        }),
+                    ))
+                    .data
+                    .map(|data| *data);
+            }
+            let ([get_for_test, get_for_result], get_wrapper) =
+                capture_value_with_possible_side_effects(core, loc, get);
+            let test = Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: get_for_test,
+                    right: Expr::new(loc, ExprData::Null),
+                    op: OpCode::BinaryLooseNotEqual,
+                }),
+            );
+            target_wrapper.wrap(get_wrapper.wrap(Expr::new(
+                loc,
+                ExprData::If(IfExpr {
+                    test,
+                    yes: get_for_result,
+                    no: set,
+                }),
+            )))
+        }
+        op => {
+            let value_op = compound_assignment_operator(op)?;
+            let ([target_for_set, target_for_get], wrapper) =
+                capture_value_with_possible_side_effects(core, loc, target);
+            let get = lower_private_get(core, loc, target_for_get, storage);
+            let value = if value_op == OpCode::BinaryPower
+                && core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::EXPONENT_OPERATOR)
+            {
+                core.call_runtime(loc, "__pow", vec![get, right])
+            } else {
+                Expr::new(
+                    loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: get,
+                        right,
+                        op: value_op,
+                    }),
+                )
+            };
+            wrapper.wrap(lower_private_set(core, loc, target_for_set, storage, value))
+        }
+    };
+    lowered.data.map(|data| *data)
+}
+
+fn lower_optional_chain(core: &mut ParserCore, expression: Expr) -> Option<ExprData> {
+    let loc = expression.loc;
+    let mut current = expression;
+    let mut chain = Vec::new();
+    let mut contains_lowered_private_name = false;
+
+    loop {
+        match current.data.as_deref()? {
+            ExprData::Dot(dot) => {
+                let is_start = dot.optional_chain == OptionalChain::Start;
+                chain.push(ExprData::Dot(dot.clone()));
+                current = dot.target.clone();
+                if is_start {
+                    break;
+                }
+            }
+            ExprData::Index(index) => {
+                let is_start = index.optional_chain == OptionalChain::Start;
+                if let Some(ExprData::PrivateIdentifier(private)) = index.index.data.as_deref()
+                    && lowered_private_storage_ref(core, private.reference).is_some()
+                {
+                    contains_lowered_private_name = true;
+                }
+                chain.push(ExprData::Index(index.clone()));
+                current = index.target.clone();
+                if is_start {
+                    break;
+                }
+            }
+            ExprData::Call(call) => {
+                let is_start = call.optional_chain == OptionalChain::Start;
+                chain.push(ExprData::Call(call.clone()));
+                current = call.target.clone();
+                if is_start {
+                    break;
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    if !contains_lowered_private_name
+        && !core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::OPTIONAL_CHAIN)
+    {
+        return None;
+    }
+
+    let starts_with_call = matches!(chain.last(), Some(ExprData::Call(_)));
+    let mut this_arg = None;
+    let mut receiver_wrapper = CaptureValueWrapper::default();
+    if starts_with_call {
+        let current_is_super_get = is_runtime_helper_call(core, &current, "__superGet");
+        match current.data.as_deref_mut() {
+            Some(ExprData::Dot(dot)) => {
+                if matches!(dot.target.data.as_deref(), Some(ExprData::Super)) {
+                    this_arg = Some(Expr::new(loc, ExprData::This));
+                } else {
+                    let ([target_for_access, target_for_call], wrapper) =
+                        capture_value_with_possible_side_effects(
+                            core,
+                            dot.target.loc,
+                            std::mem::take(&mut dot.target),
+                        );
+                    dot.target = target_for_access;
+                    this_arg = Some(target_for_call);
+                    receiver_wrapper = wrapper;
+                }
+            }
+            Some(ExprData::Index(index)) => {
+                if matches!(index.target.data.as_deref(), Some(ExprData::Super)) {
+                    this_arg = Some(Expr::new(loc, ExprData::This));
+                } else {
+                    let ([target_for_access, target_for_call], wrapper) =
+                        capture_value_with_possible_side_effects(
+                            core,
+                            index.target.loc,
+                            std::mem::take(&mut index.target),
+                        );
+                    index.target = target_for_access;
+                    this_arg = Some(target_for_call);
+                    receiver_wrapper = wrapper;
+                }
+            }
+            Some(ExprData::Call(_)) if current_is_super_get => {
+                this_arg = Some(Expr::new(loc, ExprData::This));
+            }
+            _ => {}
+        }
+    }
+
+    let ([value_for_test, mut result], wrapper) =
+        capture_value_with_possible_side_effects(core, loc, current);
+    let mut is_first_link = true;
+    for link in chain.into_iter().rev() {
+        result = match link {
+            ExprData::Dot(mut dot) => {
+                dot.target = result;
+                dot.optional_chain = OptionalChain::None;
+                Expr::new(loc, ExprData::Dot(dot))
+            }
+            ExprData::Index(mut index) => {
+                if let Some(ExprData::PrivateIdentifier(private)) = index.index.data.as_deref()
+                    && let Some(storage) = lowered_private_storage_ref(core, private.reference)
+                {
+                    lower_private_get(core, loc, result, storage)
+                } else {
+                    index.target = result;
+                    index.optional_chain = OptionalChain::None;
+                    Expr::new(loc, ExprData::Index(index))
+                }
+            }
+            ExprData::Call(mut call) => {
+                if is_first_link && let Some(this_arg) = this_arg.take() {
+                    call.args.insert(0, this_arg);
+                    call.target = Expr::new(
+                        loc,
+                        ExprData::Dot(DotExpr {
+                            target: result,
+                            name: "call".into(),
+                            name_loc: loc,
+                            ..DotExpr::default()
+                        }),
+                    );
+                    call.kind = CallKind::TargetWasOriginallyPropertyAccess;
+                } else {
+                    call.target = result;
+                }
+                call.optional_chain = OptionalChain::None;
+                Expr::new(loc, ExprData::Call(call))
+            }
+            _ => unreachable!("optional chain contains only property accesses and calls"),
+        };
+        is_first_link = false;
+    }
+
+    receiver_wrapper
+        .wrap(wrapper.wrap(Expr::new(
+            loc,
+            ExprData::If(IfExpr {
+                test: Expr::new(
+                    loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: value_for_test,
+                        right: Expr::new(loc, ExprData::Null),
+                        op: OpCode::BinaryLooseEqual,
+                    }),
+                ),
+                yes: Expr::new(loc, ExprData::Undefined),
+                no: result,
+            }),
+        )))
+        .data
+        .map(|data| *data)
 }
 
 fn lower_exponentiation_assignment_operator(
@@ -693,7 +1065,11 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         }
                     }
                     visit_binding_initializers(core, &mut declaration.binding, resolve_identifiers);
+                    let class_name_hint = inferred_name_from_binding(core, &declaration.binding);
+                    let old_class_name_hint =
+                        std::mem::replace(&mut core.class_name_hint, class_name_hint);
                     visit_expr(core, &mut declaration.value_or_nil, resolve_identifiers);
+                    core.class_name_hint = old_class_name_hint;
                     if core.options.minify_syntax
                         && local.kind == LocalKind::Let
                         && matches!(
@@ -806,6 +1182,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 let pre_start = core.class_pre_statements.len();
                 let post_start = core.class_post_statements.len();
                 let lower_static_blocks = class_static_blocks_can_be_lowered(core, &class.class);
+                let lower_private_static = (class.class.extends_or_nil.data.is_some()
+                    || class_has_non_constructor_method(&class.class))
+                    && class_private_static_members_need_lowering(core, &class.class);
+                let lower_public_static = class.class.extends_or_nil.data.is_some()
+                    && class_public_static_fields_need_lowering(core, &class.class);
+                let lower_static_members = lower_private_static || lower_public_static;
                 let has_experimental_class_decorators =
                     core.options.ts.config.experimental_decorators
                         == crate::internal::config::MaybeBool::True
@@ -813,12 +1195,14 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 let convert_to_expression = (is_top_level_scope
                     && core.options.mode == crate::internal::config::Mode::Bundle)
                     || has_experimental_class_decorators
-                    || class.class.should_lower_standard_decorators;
-                let inner_name = visit_class(
+                    || class.class.should_lower_standard_decorators
+                    || lower_static_members;
+                let (inner_name, _) = visit_class(
                     core,
                     &mut class.class,
                     resolve_identifiers,
                     !convert_to_expression,
+                    false,
                 );
                 if convert_to_expression && let Some(name) = class.class.name {
                     let is_export = class.is_export;
@@ -829,7 +1213,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     } else {
                         LocalKind::Let
                     };
-                    let capture_ref = lower_static_blocks.then(|| {
+                    let capture_ref = (lower_static_blocks || lower_static_members).then(|| {
                         inner_name
                             .unwrap_or_else(|| generate_class_capture_ref(core, name.reference))
                     });
@@ -881,13 +1265,17 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                                 }),
                             ),
                         }],
-                        kind: local_kind,
+                        kind: if lower_static_members && capture_ref.is_some() {
+                            LocalKind::Const
+                        } else {
+                            local_kind
+                        },
                         is_export: capture_ref.is_none() && is_export,
                         ..LocalStmt::default()
                     })));
                     if let Some(capture_ref) = capture_ref {
                         append_to_statement.extend(lowered_static_statements);
-                        append_to_statement.push(Stmt::new(
+                        let outer_declaration = Stmt::new(
                             name.loc,
                             StmtData::Local(LocalStmt {
                                 declarations: vec![Decl {
@@ -902,7 +1290,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                                 is_export,
                                 ..LocalStmt::default()
                             }),
-                        ));
+                        );
+                        if lower_static_members {
+                            core.class_post_statements.push(outer_declaration);
+                        } else {
+                            append_to_statement.push(outer_declaration);
+                        }
                     }
                 }
                 prepend_to_statements.extend(core.class_pre_statements.drain(pre_start..));
@@ -1036,11 +1429,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         let post_start = core.class_post_statements.len();
                         let convert_to_expression = is_top_level_scope
                             && core.options.mode == crate::internal::config::Mode::Bundle;
-                        let inner_name = visit_class(
+                        let (inner_name, _) = visit_class(
                             core,
                             &mut class.class,
                             resolve_identifiers,
                             !convert_to_expression,
+                            false,
                         );
                         if convert_to_expression {
                             let mut class_expression = class.class.clone();
@@ -3632,7 +4026,177 @@ fn visit_block(
     core.pop_scope();
 }
 
+fn async_this_value(core: &mut ParserCore, loc: Loc, is_arrow: bool, uses_this: bool) -> Expr {
+    if is_arrow && !uses_this {
+        return Expr::new(loc, ExprData::Null);
+    }
+    if is_arrow
+        && !core.visit_this_is_nested
+        && core.options.mode != crate::internal::config::Mode::PassThrough
+    {
+        if core.is_file_considered_esm {
+            return Expr::new(loc, ExprData::Undefined);
+        }
+        core.record_usage(core.exports_ref);
+        return Expr::new(
+            loc,
+            ExprData::Identifier(IdentifierExpr {
+                reference: core.exports_ref,
+                ..IdentifierExpr::default()
+            }),
+        );
+    }
+    Expr::new(loc, ExprData::This)
+}
+
+fn lower_async_function(core: &mut ParserCore, function: &mut Function, argument_scope: &ScopeRef) {
+    if !function.is_async
+        || function.is_generator
+        || !core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::ASYNC_AWAIT)
+    {
+        return;
+    }
+
+    let body_loc = function.body.loc;
+    let uses_arguments = function.arguments_ref != crate::internal::ast::INVALID_REF
+        && core
+            .symbol_uses
+            .get(&function.arguments_ref)
+            .is_some_and(|usage| usage.count_estimate > 0);
+    let mut generator_args = Vec::new();
+    let mut generator_has_rest_arg = false;
+    let forwarded_arguments = if uses_arguments {
+        generator_args = std::mem::take(&mut function.args);
+        generator_has_rest_arg = std::mem::take(&mut function.has_rest_arg);
+        for (index, argument) in generator_args.iter().enumerate() {
+            if argument.default_or_nil.data.is_some()
+                || (generator_has_rest_arg && index + 1 == generator_args.len())
+            {
+                break;
+            }
+            let reference = core.new_symbol(SymbolKind::Other, format!("_{index}"));
+            argument_scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generated
+                .push(reference);
+            core.record_declared_symbol(reference);
+            function.args.push(Arg {
+                binding: identifier_binding(argument.binding.loc, reference),
+                ..Arg::default()
+            });
+        }
+        core.record_usage(function.arguments_ref);
+        Expr::new(
+            body_loc,
+            ExprData::Identifier(IdentifierExpr {
+                reference: function.arguments_ref,
+                ..IdentifierExpr::default()
+            }),
+        )
+    } else {
+        Expr::new(body_loc, ExprData::Null)
+    };
+
+    let generator = Function {
+        args: generator_args,
+        body: std::mem::take(&mut function.body),
+        arguments_ref: crate::internal::ast::INVALID_REF,
+        open_paren_loc: body_loc,
+        is_generator: true,
+        has_rest_arg: generator_has_rest_arg,
+        has_body: true,
+        is_unique_formal_parameters: true,
+        ..Function::default()
+    };
+    let this_value = async_this_value(core, body_loc, false, true);
+    let call = core.call_runtime(
+        body_loc,
+        "__async",
+        vec![
+            this_value,
+            forwarded_arguments,
+            Expr::new(
+                body_loc,
+                ExprData::Function(FunctionExpr {
+                    function: generator,
+                    ..FunctionExpr::default()
+                }),
+            ),
+        ],
+    );
+    function.body = FunctionBody {
+        loc: body_loc,
+        block: BlockStmt {
+            statements: vec![Stmt::new(
+                body_loc,
+                StmtData::Return(ReturnStmt { value_or_nil: call }),
+            )],
+            ..BlockStmt::default()
+        },
+    };
+    function.is_async = false;
+}
+
+fn lower_async_arrow(core: &mut ParserCore, loc: Loc, arrow: &mut ArrowExpr, uses_this: bool) {
+    if !arrow.is_async
+        || !core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::ASYNC_AWAIT)
+    {
+        return;
+    }
+    let body_loc = arrow.body.loc;
+    let generator = Function {
+        body: std::mem::take(&mut arrow.body),
+        arguments_ref: crate::internal::ast::INVALID_REF,
+        open_paren_loc: loc,
+        is_generator: true,
+        has_body: true,
+        is_unique_formal_parameters: true,
+        ..Function::default()
+    };
+    let this_value = async_this_value(core, body_loc, true, uses_this);
+    let call = core.call_runtime(
+        body_loc,
+        "__async",
+        vec![
+            this_value,
+            Expr::new(body_loc, ExprData::Null),
+            Expr::new(
+                body_loc,
+                ExprData::Function(FunctionExpr {
+                    function: generator,
+                    ..FunctionExpr::default()
+                }),
+            ),
+        ],
+    );
+    arrow.body = FunctionBody {
+        loc: body_loc,
+        block: BlockStmt {
+            statements: vec![Stmt::new(
+                body_loc,
+                StmtData::Return(ReturnStmt { value_or_nil: call }),
+            )],
+            ..BlockStmt::default()
+        },
+    };
+    arrow.is_async = false;
+    arrow.prefer_expr = true;
+}
+
 fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identifiers: bool) {
+    let should_lower_async = function.is_async
+        && !function.is_generator
+        && core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::ASYNC_AWAIT);
     let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
     let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
     let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);
@@ -3645,6 +4209,20 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     let old_this_is_nested = std::mem::replace(&mut core.visit_this_is_nested, true);
     let old_is_outside_fn_or_arrow =
         std::mem::replace(&mut core.visit_is_outside_fn_or_arrow, false);
+    let old_lower_await_to_yield =
+        std::mem::replace(&mut core.lower_await_to_yield, should_lower_async);
+    let old_arguments_ref = std::mem::replace(
+        &mut core.visit_arguments_ref,
+        (function.arguments_ref != crate::internal::ast::INVALID_REF)
+            .then_some(function.arguments_ref),
+    );
+    let old_arguments_capture_ref = core.visit_arguments_capture_ref.take();
+    let old_inside_async_arrow = std::mem::take(&mut core.visit_inside_async_arrow);
+    let old_async_arrow_this_usage = std::mem::take(&mut core.async_arrow_this_usage);
+    let should_lower_super = should_lower_async && core.visit_super_home_ref.is_some();
+    let old_lower_super_property_access =
+        std::mem::replace(&mut core.lower_super_property_access, should_lower_super);
+    let old_super_receiver_is_home = std::mem::take(&mut core.visit_super_receiver_is_home);
     if let Some(name) = function.name {
         core.record_declared_symbol(name.reference);
     }
@@ -3750,6 +4328,52 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         merge_adjacent_returns(core, &mut function.body.block.statements);
         cleanup_function_body_tail(core, &mut function.body.block.statements);
     }
+    if let Some(capture_ref) = core.visit_arguments_capture_ref {
+        core.current_scope
+            .as_ref()
+            .expect("function body scope")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(capture_ref);
+        core.record_declared_symbol(capture_ref);
+        core.record_usage(function.arguments_ref);
+        let declaration = Stmt::new(
+            function.body.loc,
+            StmtData::Local(LocalStmt {
+                declarations: vec![Decl {
+                    binding: identifier_binding(function.body.loc, capture_ref),
+                    value_or_nil: Expr::new(
+                        function.body.loc,
+                        ExprData::Identifier(IdentifierExpr {
+                            reference: function.arguments_ref,
+                            ..IdentifierExpr::default()
+                        }),
+                    ),
+                }],
+                kind: LocalKind::Var,
+                ..LocalStmt::default()
+            }),
+        );
+        let insert_at = function
+            .body
+            .block
+            .statements
+            .iter()
+            .position(|statement| {
+                !matches!(
+                    statement.data.as_deref(),
+                    Some(StmtData::Comment(_) | StmtData::Directive(_))
+                )
+            })
+            .unwrap_or(function.body.block.statements.len());
+        function
+            .body
+            .block
+            .statements
+            .insert(insert_at, declaration);
+    }
+    lower_async_function(core, function, &argument_scope);
     core.pop_scope();
     core.pop_scope();
     core.visit_loop_depth = old_loop_depth;
@@ -3760,6 +4384,13 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     core.visit_is_async_generator = old_is_async_generator;
     core.visit_this_is_nested = old_this_is_nested;
     core.visit_is_outside_fn_or_arrow = old_is_outside_fn_or_arrow;
+    core.lower_await_to_yield = old_lower_await_to_yield;
+    core.visit_arguments_ref = old_arguments_ref;
+    core.visit_arguments_capture_ref = old_arguments_capture_ref;
+    core.visit_inside_async_arrow = old_inside_async_arrow;
+    core.async_arrow_this_usage = old_async_arrow_this_usage;
+    core.lower_super_property_access = old_lower_super_property_access;
+    core.visit_super_receiver_is_home = old_super_receiver_is_home;
 }
 
 fn visit_function_body_statements(
@@ -3889,7 +4520,8 @@ fn visit_class(
     class: &mut Class,
     resolve_identifiers: bool,
     merge_inner_name: bool,
-) -> Option<Ref> {
+    capture_private_class_expression: bool,
+) -> (Option<Ref>, Option<Ref>) {
     let class_post_start = core.class_post_statements.len();
     lower_type_script_constructor_parameter_fields(core, class);
     let outer_class_name = class.name.and_then(|name| {
@@ -3962,22 +4594,161 @@ fn visit_class(
                 )
         });
     }
-    for property in &mut class.properties {
-        if let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref_mut() {
+    let private_class_name = outer_class_name
+        .map(|reference| symbol_name(core, reference))
+        .or_else(|| core.class_name_hint.clone())
+        .unwrap_or_else(|| "class".into());
+    let private_static_brand_name = format!("{private_class_name}_static");
+    let private_instance_brand_name = format!("{private_class_name}_instances");
+    let mut private_static_brand = None;
+    let mut private_instance_brand = None;
+    let mut private_class_capture = None;
+    for property in &class.properties {
+        if let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() {
             core.record_declared_symbol(private.reference);
             let symbol_index =
                 usize::try_from(private.reference.inner_index).expect("symbol index");
             let name = core.symbols[symbol_index].original_name.clone();
+            let kind = core.symbols[symbol_index].kind;
             if core
-                .lower_all_of_these_private_names
-                .get(&name)
-                .copied()
-                .unwrap_or(false)
+                .options
+                .unsupported_js_features
+                .contains(crate::internal::compat::symbol_feature(kind))
+                || core
+                    .lower_all_of_these_private_names
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(false)
             {
                 core.symbols[symbol_index].flags |=
                     crate::internal::ast::SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED;
+                if capture_private_class_expression
+                    && property.flags.contains(PropertyFlags::IS_STATIC)
+                    && private_class_capture.is_none()
+                {
+                    let reference = core.generate_named_top_level_temp_ref("_a".into());
+                    core.top_level_temp_refs.push(reference);
+                    private_class_capture = Some(reference);
+                }
+                match kind {
+                    SymbolKind::PrivateField | SymbolKind::PrivateStaticField => {
+                        let storage = core.generate_auto_accessor_storage_ref(&name);
+                        core.lowered_private_storage.insert(
+                            private.reference,
+                            LoweredPrivateStorage {
+                                storage,
+                                getter: None,
+                                setter: None,
+                                method: None,
+                            },
+                        );
+                    }
+                    SymbolKind::PrivateStaticMethod
+                    | SymbolKind::PrivateStaticGet
+                    | SymbolKind::PrivateStaticSet
+                    | SymbolKind::PrivateStaticGetSetPair => {
+                        let storage = *private_static_brand.get_or_insert_with(|| {
+                            core.generate_auto_accessor_storage_ref(&private_static_brand_name)
+                        });
+                        let mut lowered = core
+                            .lowered_private_storage
+                            .get(&private.reference)
+                            .copied()
+                            .unwrap_or(LoweredPrivateStorage {
+                                storage,
+                                getter: None,
+                                setter: None,
+                                method: None,
+                            });
+                        let base = name.strip_prefix('#').unwrap_or(&name);
+                        match property.kind {
+                            PropertyKind::Getter => {
+                                if lowered.getter.is_none() {
+                                    let reference = core
+                                        .generate_named_top_level_temp_ref(format!("{base}_get"));
+                                    core.top_level_temp_refs.push(reference);
+                                    lowered.getter = Some(reference);
+                                }
+                            }
+                            PropertyKind::Setter => {
+                                if lowered.setter.is_none() {
+                                    let reference = core
+                                        .generate_named_top_level_temp_ref(format!("{base}_set"));
+                                    core.top_level_temp_refs.push(reference);
+                                    lowered.setter = Some(reference);
+                                }
+                            }
+                            PropertyKind::Method => {
+                                if lowered.method.is_none() {
+                                    let reference = core
+                                        .generate_named_top_level_temp_ref(format!("{base}_fn"));
+                                    core.top_level_temp_refs.push(reference);
+                                    lowered.method = Some(reference);
+                                }
+                            }
+                            _ => {}
+                        }
+                        core.lowered_private_storage
+                            .insert(private.reference, lowered);
+                    }
+                    SymbolKind::PrivateMethod
+                    | SymbolKind::PrivateGet
+                    | SymbolKind::PrivateSet
+                    | SymbolKind::PrivateGetSetPair => {
+                        let storage = *private_instance_brand.get_or_insert_with(|| {
+                            core.generate_auto_accessor_storage_ref(&private_instance_brand_name)
+                        });
+                        let mut lowered = core
+                            .lowered_private_storage
+                            .get(&private.reference)
+                            .copied()
+                            .unwrap_or(LoweredPrivateStorage {
+                                storage,
+                                getter: None,
+                                setter: None,
+                                method: None,
+                            });
+                        let base = name.strip_prefix('#').unwrap_or(&name);
+                        let reference = match property.kind {
+                            PropertyKind::Getter if lowered.getter.is_none() => Some((
+                                core.generate_named_top_level_temp_ref(format!("{base}_get")),
+                                PropertyKind::Getter,
+                            )),
+                            PropertyKind::Setter if lowered.setter.is_none() => Some((
+                                core.generate_named_top_level_temp_ref(format!("{base}_set")),
+                                PropertyKind::Setter,
+                            )),
+                            PropertyKind::Method if lowered.method.is_none() => Some((
+                                core.generate_named_top_level_temp_ref(format!("{base}_fn")),
+                                PropertyKind::Method,
+                            )),
+                            _ => None,
+                        };
+                        if let Some((reference, kind)) = reference {
+                            core.top_level_temp_refs.push(reference);
+                            match kind {
+                                PropertyKind::Getter => lowered.getter = Some(reference),
+                                PropertyKind::Setter => lowered.setter = Some(reference),
+                                PropertyKind::Method => lowered.method = Some(reference),
+                                _ => unreachable!(),
+                            }
+                        }
+                        core.lowered_private_storage
+                            .insert(private.reference, lowered);
+                    }
+                    _ => {}
+                }
             }
         }
+    }
+    if capture_private_class_expression && private_class_capture.is_none() {
+        let reference = generate_class_computed_key_temp(core, class.body_loc);
+        private_class_capture = Some(reference);
+    }
+    let class_super_home_ref = private_class_capture
+        .or(inner_class_name)
+        .or(outer_class_name);
+    for property in &mut class.properties {
         if property.flags.contains(PropertyFlags::IS_COMPUTED) {
             visit_expr(core, &mut property.key, resolve_identifiers);
         }
@@ -3992,6 +4763,24 @@ fn visit_class(
             .forbid_arguments = true;
         let old_new_target_allowed = std::mem::replace(&mut core.visit_new_target_allowed, true);
         let old_this_is_nested = std::mem::replace(&mut core.visit_this_is_nested, true);
+        let old_super_home_ref =
+            std::mem::replace(&mut core.visit_super_home_ref, class_super_home_ref);
+        let old_super_home_is_class_instance = std::mem::replace(
+            &mut core.visit_super_home_is_class_instance,
+            !property.flags.contains(PropertyFlags::IS_STATIC),
+        );
+        let lower_static_field = property.kind == PropertyKind::Field
+            && property.flags.contains(PropertyFlags::IS_STATIC)
+            && core
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::CLASS_STATIC_FIELD);
+        let old_super_receiver_is_home =
+            std::mem::replace(&mut core.visit_super_receiver_is_home, lower_static_field);
+        let old_lower_super_property_access = std::mem::replace(
+            &mut core.lower_super_property_access,
+            lower_static_field && class_super_home_ref.is_some(),
+        );
         visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
         visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
         if matches!(
@@ -4003,6 +4792,10 @@ fn visit_class(
         }
         core.visit_new_target_allowed = old_new_target_allowed;
         core.visit_this_is_nested = old_this_is_nested;
+        core.visit_super_home_ref = old_super_home_ref;
+        core.visit_super_home_is_class_instance = old_super_home_is_class_instance;
+        core.visit_super_receiver_is_home = old_super_receiver_is_home;
+        core.lower_super_property_access = old_lower_super_property_access;
         core.current_scope
             .as_ref()
             .expect("class body scope")
@@ -4044,9 +4837,25 @@ fn visit_class(
     lower_standard_decorators(core, class, outer_class_name);
     let decorator_keys = prepare_type_script_computed_property_keys(core, class);
     lower_type_script_experimental_decorators(core, class, outer_class_name, &decorator_keys);
-    lower_unsupported_type_script_define_class_fields(core, class);
+    let constructor_was_present = class_constructor_index(class).is_some();
+    lower_private_members(
+        core,
+        class,
+        private_class_capture
+            .or(inner_class_name)
+            .or(outer_class_name),
+        constructor_was_present,
+    );
+    lower_unsupported_public_class_fields(
+        core,
+        class,
+        private_class_capture
+            .or(inner_class_name)
+            .or(outer_class_name),
+        constructor_was_present,
+    );
     lower_type_script_static_field_assignments(core, class, outer_class_name, class_post_start);
-    lower_type_script_class_field_assignments(core, class);
+    lower_type_script_class_field_assignments(core, class, constructor_was_present);
     if let Some(constructor_index) = class_constructor_index(class) {
         if let Some(ExprData::Function(function)) = class.properties[constructor_index]
             .value_or_nil
@@ -4071,12 +4880,336 @@ fn visit_class(
         || core.options.ts.config.experimental_decorators
             == crate::internal::config::MaybeBool::True
         || class.should_lower_standard_decorators;
-    if merge_inner_name && let (Some(inner), Some(outer)) = (used_inner_name, outer_class_name) {
+    let inner_name = if merge_inner_name
+        && let (Some(inner), Some(outer)) = (used_inner_name, outer_class_name)
+    {
         core.merge_symbols(inner, outer);
         None
     } else {
         used_inner_name
+    };
+    (inner_name, private_class_capture)
+}
+
+fn private_collection_initializer(
+    core: &mut ParserCore,
+    loc: Loc,
+    storage: Ref,
+    constructor_name: &str,
+) -> Stmt {
+    let constructor = core.find_symbol(loc, constructor_name).reference;
+    core.record_usage(constructor);
+    let constructor = Expr::new(
+        loc,
+        ExprData::Identifier(IdentifierExpr {
+            reference: constructor,
+            ..IdentifierExpr::default()
+        }),
+    );
+    let storage = private_storage_identifier(core, loc, storage);
+    Stmt::new(
+        loc,
+        StmtData::Expr(ExprStmt {
+            value: assign(
+                storage,
+                Expr::new(
+                    loc,
+                    ExprData::New(NewExpr {
+                        target: constructor,
+                        ..NewExpr::default()
+                    }),
+                ),
+            ),
+            ..ExprStmt::default()
+        }),
+    )
+}
+
+fn lower_private_members(
+    core: &mut ParserCore,
+    class: &mut Class,
+    class_ref: Option<Ref>,
+    constructor_was_present: bool,
+) {
+    let is_derived = class.extends_or_nil.data.is_some();
+    let mut instance_brand_initializers = Vec::new();
+    let mut instance_field_initializers = Vec::new();
+    let mut member_initializers = Vec::new();
+    let mut static_brands = Vec::new();
+    let mut static_fields = Vec::new();
+    let mut initialized_storage = HashSet::new();
+    class.properties.retain_mut(|property| {
+        let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
+            return true;
+        };
+        let reference = core.follow_symbol_link(private.reference);
+        let Some(private_storage) = core
+            .lowered_private_storage
+            .get(&reference)
+            .or_else(|| core.lowered_private_storage.get(&private.reference))
+            .copied()
+        else {
+            return true;
+        };
+        let symbol_index = usize::try_from(reference.inner_index).expect("symbol index");
+        let kind = core.symbols[symbol_index].kind;
+        let loc = property.loc;
+        match kind {
+            SymbolKind::PrivateField
+                if property.kind == PropertyKind::Field
+                    && !property.flags.contains(PropertyFlags::IS_STATIC) =>
+            {
+                let mut args = vec![
+                    Expr::new(loc, ExprData::This),
+                    private_storage_identifier(core, loc, private_storage.storage),
+                ];
+                if property.initializer_or_nil.data.is_some() {
+                    args.push(std::mem::take(&mut property.initializer_or_nil));
+                } else if property.value_or_nil.data.is_some() {
+                    args.push(std::mem::take(&mut property.value_or_nil));
+                }
+                instance_field_initializers.push(Stmt::new(
+                    loc,
+                    StmtData::Expr(ExprStmt {
+                        value: core.call_runtime(loc, "__privateAdd", args),
+                        ..ExprStmt::default()
+                    }),
+                ));
+                if initialized_storage.insert(private_storage.storage) {
+                    member_initializers.push(private_collection_initializer(
+                        core,
+                        loc,
+                        private_storage.storage,
+                        "WeakMap",
+                    ));
+                }
+                false
+            }
+            SymbolKind::PrivateMethod
+            | SymbolKind::PrivateGet
+            | SymbolKind::PrivateSet
+            | SymbolKind::PrivateGetSetPair
+                if !property.flags.contains(PropertyFlags::IS_STATIC) =>
+            {
+                if initialized_storage.insert(private_storage.storage) {
+                    member_initializers.push(private_collection_initializer(
+                        core,
+                        loc,
+                        private_storage.storage,
+                        "WeakSet",
+                    ));
+                    let storage = private_storage_identifier(core, loc, private_storage.storage);
+                    let value = core.call_runtime(
+                        loc,
+                        "__privateAdd",
+                        vec![Expr::new(loc, ExprData::This), storage],
+                    );
+                    instance_brand_initializers.push(Stmt::new(
+                        loc,
+                        StmtData::Expr(ExprStmt {
+                            value,
+                            ..ExprStmt::default()
+                        }),
+                    ));
+                }
+                let function_ref = match property.kind {
+                    PropertyKind::Getter => private_storage.getter,
+                    PropertyKind::Setter => private_storage.setter,
+                    PropertyKind::Method => private_storage.method,
+                    _ => None,
+                };
+                if let Some(function_ref) = function_ref {
+                    let target = private_storage_identifier(core, loc, function_ref);
+                    member_initializers.push(Stmt::new(
+                        loc,
+                        StmtData::Expr(ExprStmt {
+                            value: assign(target, std::mem::take(&mut property.value_or_nil)),
+                            ..ExprStmt::default()
+                        }),
+                    ));
+                }
+                false
+            }
+            SymbolKind::PrivateStaticField
+                if property.kind == PropertyKind::Field
+                    && property.flags.contains(PropertyFlags::IS_STATIC) =>
+            {
+                if initialized_storage.insert(private_storage.storage) {
+                    member_initializers.push(private_collection_initializer(
+                        core,
+                        loc,
+                        private_storage.storage,
+                        "WeakMap",
+                    ));
+                }
+                let initializer = if property.initializer_or_nil.data.is_some() {
+                    std::mem::take(&mut property.initializer_or_nil)
+                } else {
+                    std::mem::take(&mut property.value_or_nil)
+                };
+                static_fields.push((loc, private_storage.storage, initializer));
+                false
+            }
+            SymbolKind::PrivateStaticMethod
+            | SymbolKind::PrivateStaticGet
+            | SymbolKind::PrivateStaticSet
+            | SymbolKind::PrivateStaticGetSetPair
+                if property.flags.contains(PropertyFlags::IS_STATIC) =>
+            {
+                if initialized_storage.insert(private_storage.storage) {
+                    member_initializers.push(private_collection_initializer(
+                        core,
+                        loc,
+                        private_storage.storage,
+                        "WeakSet",
+                    ));
+                    static_brands.push((loc, private_storage.storage));
+                }
+                let function_ref = match property.kind {
+                    PropertyKind::Getter => private_storage.getter,
+                    PropertyKind::Setter => private_storage.setter,
+                    PropertyKind::Method => private_storage.method,
+                    _ => None,
+                };
+                if let Some(function_ref) = function_ref {
+                    let target = private_storage_identifier(core, loc, function_ref);
+                    member_initializers.push(Stmt::new(
+                        loc,
+                        StmtData::Expr(ExprStmt {
+                            value: assign(target, std::mem::take(&mut property.value_or_nil)),
+                            ..ExprStmt::default()
+                        }),
+                    ));
+                }
+                false
+            }
+            _ => true,
+        }
+    });
+    instance_brand_initializers.extend(instance_field_initializers);
+    if !instance_brand_initializers.is_empty() {
+        if constructor_was_present
+            && let Some(constructor_index) = class_constructor_index(class)
+            && let Some(ExprData::Function(function)) = class.properties[constructor_index]
+                .value_or_nil
+                .data
+                .as_deref_mut()
+        {
+            if is_derived {
+                insert_parameter_fields_after_super(
+                    &mut function.function.body.block.statements,
+                    &instance_brand_initializers,
+                );
+            } else {
+                function
+                    .function
+                    .body
+                    .block
+                    .statements
+                    .splice(0..0, instance_brand_initializers);
+            }
+        } else {
+            append_class_field_constructor(core, class, instance_brand_initializers, is_derived);
+        }
     }
+    core.class_post_statements.extend(member_initializers);
+    if let Some(class_ref) = class_ref {
+        for (loc, storage) in static_brands {
+            let class = class_capture_identifier(core, loc, class_ref);
+            let storage = private_storage_identifier(core, loc, storage);
+            let value = core.call_runtime(loc, "__privateAdd", vec![class, storage]);
+            core.class_post_statements.push(Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value,
+                    ..ExprStmt::default()
+                }),
+            ));
+        }
+        for (loc, storage, initializer) in static_fields {
+            let class = class_capture_identifier(core, loc, class_ref);
+            let storage = private_storage_identifier(core, loc, storage);
+            let mut args = vec![class, storage];
+            if initializer.data.is_some() {
+                args.push(initializer);
+            }
+            let value = core.call_runtime(loc, "__privateAdd", args);
+            core.class_post_statements.push(Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value,
+                    ..ExprStmt::default()
+                }),
+            ));
+        }
+    }
+}
+
+fn class_private_static_members_need_lowering(core: &ParserCore, class: &Class) -> bool {
+    class.properties.iter().any(|property| {
+        if !property.flags.contains(PropertyFlags::IS_STATIC) {
+            return false;
+        }
+        let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
+            return false;
+        };
+        let reference = core.follow_symbol_link(private.reference);
+        let Some(symbol) = core.symbols.get(reference.inner_index as usize) else {
+            return false;
+        };
+        core.options
+            .unsupported_js_features
+            .contains(crate::internal::compat::symbol_feature(symbol.kind))
+            || core
+                .lower_all_of_these_private_names
+                .get(&symbol.original_name)
+                .copied()
+                .unwrap_or(false)
+    })
+}
+
+fn class_public_static_fields_need_lowering(core: &ParserCore, class: &Class) -> bool {
+    core.options
+        .unsupported_js_features
+        .contains(JsFeature::CLASS_STATIC_FIELD)
+        && class.properties.iter().any(|property| {
+            property.kind == PropertyKind::Field
+                && property.flags.contains(PropertyFlags::IS_STATIC)
+                && !matches!(
+                    property.key.data.as_deref(),
+                    Some(ExprData::PrivateIdentifier(_))
+                )
+        })
+}
+
+fn class_has_non_constructor_method(class: &Class) -> bool {
+    class.properties.iter().any(|property| {
+        property.kind.is_method_definition()
+            && !matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::String(name)) if utf16_to_string(&name.value) == b"constructor"
+            )
+    })
+}
+
+fn class_private_members_need_lowering(core: &ParserCore, class: &Class) -> bool {
+    class.properties.iter().any(|property| {
+        let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
+            return false;
+        };
+        let reference = core.follow_symbol_link(private.reference);
+        let Some(symbol) = core.symbols.get(reference.inner_index as usize) else {
+            return false;
+        };
+        core.options
+            .unsupported_js_features
+            .contains(crate::internal::compat::symbol_feature(symbol.kind))
+            || core
+                .lower_all_of_these_private_names
+                .get(&symbol.original_name)
+                .copied()
+                .unwrap_or(false)
+    })
 }
 
 fn class_static_blocks_can_be_lowered(core: &ParserCore, class: &Class) -> bool {
@@ -4183,6 +5316,72 @@ fn super_property_key(expression: &Expr) -> Option<Expr> {
         }
         _ => None,
     }
+}
+
+fn current_super_home(core: &mut ParserCore, loc: Loc) -> Option<Expr> {
+    let reference = core.visit_super_home_ref?;
+    let class = class_capture_identifier(core, loc, reference);
+    if core.visit_super_home_is_class_instance {
+        Some(Expr::new(
+            loc,
+            ExprData::Dot(DotExpr {
+                target: class,
+                name: "prototype".into(),
+                name_loc: loc,
+                ..DotExpr::default()
+            }),
+        ))
+    } else {
+        Some(class)
+    }
+}
+
+fn current_super_receiver(core: &mut ParserCore, loc: Loc) -> Option<Expr> {
+    if core.visit_super_receiver_is_home {
+        let reference = core.visit_super_home_ref?;
+        Some(class_capture_identifier(core, loc, reference))
+    } else {
+        Some(Expr::new(loc, ExprData::This))
+    }
+}
+
+fn lower_current_super_get(core: &mut ParserCore, loc: Loc, key: Expr) -> Option<Expr> {
+    let home = current_super_home(core, loc)?;
+    let receiver = current_super_receiver(core, loc)?;
+    Some(core.call_runtime(loc, "__superGet", vec![home, receiver, key]))
+}
+
+fn lower_current_super_set(
+    core: &mut ParserCore,
+    loc: Loc,
+    key: Expr,
+    value: Expr,
+) -> Option<Expr> {
+    let home = current_super_home(core, loc)?;
+    let receiver = current_super_receiver(core, loc)?;
+    Some(core.call_runtime(loc, "__superSet", vec![home, receiver, key, value]))
+}
+
+fn lower_current_super_wrapper(core: &mut ParserCore, loc: Loc, key: Expr) -> Option<Expr> {
+    let home = current_super_home(core, loc)?;
+    let receiver = current_super_receiver(core, loc)?;
+    let wrapper = core.call_runtime(loc, "__superWrapper", vec![home, receiver, key]);
+    Some(Expr::new(
+        loc,
+        ExprData::Dot(DotExpr {
+            target: wrapper,
+            name: "_".into(),
+            name_loc: loc,
+            ..DotExpr::default()
+        }),
+    ))
+}
+
+fn is_runtime_helper_call(core: &ParserCore, expression: &Expr, name: &str) -> bool {
+    matches!(
+        expression.data.as_deref(),
+        Some(ExprData::Call(call)) if is_identifier_named(core, &call.target, name)
+    )
 }
 
 fn rewrite_lowered_class_static_expression(
@@ -5010,111 +6209,109 @@ fn prepare_type_script_computed_property_keys(
     decorator_keys
 }
 
-fn lower_unsupported_type_script_define_class_fields(core: &mut ParserCore, class: &mut Class) {
-    if !core.options.ts.parse
-        || !class.use_define_for_class_fields
-        || !core
-            .options
-            .unsupported_js_features
-            .contains(JsFeature::CLASS_FIELD)
-    {
+fn lower_unsupported_public_class_fields(
+    core: &mut ParserCore,
+    class: &mut Class,
+    class_ref: Option<Ref>,
+    constructor_was_present: bool,
+) {
+    if !class.use_define_for_class_fields {
         return;
     }
 
-    let mut computed_key_effects = Expr::default();
-    let mut initializers = Vec::new();
+    let lower_instance = core
+        .options
+        .unsupported_js_features
+        .contains(JsFeature::CLASS_FIELD);
+    let lower_static = core
+        .options
+        .unsupported_js_features
+        .contains(JsFeature::CLASS_STATIC_FIELD);
+    if !lower_instance && !lower_static {
+        return;
+    }
+
+    let mut instance_initializers = Vec::new();
+    let mut static_initializers = Vec::new();
     let mut retained = Vec::with_capacity(class.properties.len());
     for mut property in std::mem::take(&mut class.properties) {
+        let is_static = property.flags.contains(PropertyFlags::IS_STATIC);
         if property.kind != PropertyKind::Field
-            || property.flags.contains(PropertyFlags::IS_STATIC)
+            || (is_static && !lower_static)
+            || (!is_static && !lower_instance)
             || matches!(
                 property.key.data.as_deref(),
                 Some(ExprData::PrivateIdentifier(_))
             )
         {
-            if property.flags.contains(PropertyFlags::IS_COMPUTED)
-                && computed_key_effects.data.is_some()
-            {
-                property.key = join_with_comma(
-                    std::mem::take(&mut computed_key_effects),
-                    std::mem::take(&mut property.key),
-                );
-            }
             retained.push(property);
             continue;
         }
 
         let loc = property.loc;
         let key = if property.flags.contains(PropertyFlags::IS_COMPUTED) {
-            let original = std::mem::take(&mut property.key);
-            if let Some(ExprData::Binary(binary)) = original.data.as_deref()
-                && binary.op == OpCode::BinaryAssign
-                && matches!(binary.left.data.as_deref(), Some(ExprData::Identifier(_)))
-            {
-                let key = binary.left.clone();
-                computed_key_effects =
-                    join_with_comma(std::mem::take(&mut computed_key_effects), original);
-                key
-            } else {
-                let reference = generate_class_computed_key_temp(core, loc);
-                let key = computed_key_temp(core, loc, reference);
-                computed_key_effects = join_with_comma(
-                    std::mem::take(&mut computed_key_effects),
-                    assign(computed_key_temp(core, loc, reference), original),
-                );
-                key
-            }
+            let reference = generate_class_computed_key_temp(core, loc);
+            let assignment = assign(
+                computed_key_temp(core, loc, reference),
+                std::mem::take(&mut property.key),
+            );
+            core.class_pre_statements.push(Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value: assignment,
+                    ..ExprStmt::default()
+                }),
+            ));
+            computed_key_temp(core, loc, reference)
         } else {
             property.key.clone()
         };
-        let mut args = vec![Expr::new(loc, ExprData::This), key];
+        let target = if is_static {
+            let Some(class_ref) = class_ref else {
+                retained.push(property);
+                continue;
+            };
+            class_capture_identifier(core, loc, class_ref)
+        } else {
+            Expr::new(loc, ExprData::This)
+        };
+        let mut args = vec![target, key];
         if property.initializer_or_nil.data.is_some() {
             args.push(std::mem::take(&mut property.initializer_or_nil));
         } else if property.value_or_nil.data.is_some() {
             args.push(std::mem::take(&mut property.value_or_nil));
         }
-        initializers.push(Stmt::new(
+        let statement = Stmt::new(
             loc,
             StmtData::Expr(ExprStmt {
                 value: core.call_runtime(loc, "__publicField", args),
                 ..ExprStmt::default()
             }),
-        ));
+        );
+        if is_static {
+            static_initializers.push(statement);
+        } else {
+            instance_initializers.push(statement);
+        }
     }
     class.properties = retained;
 
-    if computed_key_effects.data.is_some() {
-        if class.extends_or_nil.data.is_some() {
-            let loc = class.extends_or_nil.loc;
-            let reference = generate_class_computed_key_temp(core, loc);
-            let extends = std::mem::take(&mut class.extends_or_nil);
-            class.extends_or_nil = join_with_comma(
-                join_with_comma(
-                    assign(computed_key_temp(core, loc, reference), extends),
-                    computed_key_effects,
-                ),
-                computed_key_temp(core, loc, reference),
-            );
-        } else {
-            core.class_pre_statements.push(Stmt::new(
-                class.body_loc,
-                StmtData::Expr(ExprStmt {
-                    value: computed_key_effects,
-                    ..ExprStmt::default()
-                }),
-            ));
-        }
-    }
-
-    if !initializers.is_empty() {
+    if !instance_initializers.is_empty() {
         if let Some(index) = class_constructor_index(class) {
             if let Some(ExprData::Function(function)) =
                 class.properties[index].value_or_nil.data.as_deref_mut()
             {
-                if class.extends_or_nil.data.is_some() {
+                if !constructor_was_present {
+                    function
+                        .function
+                        .body
+                        .block
+                        .statements
+                        .extend(instance_initializers);
+                } else if class.extends_or_nil.data.is_some() {
                     insert_parameter_fields_after_super(
                         &mut function.function.body.block.statements,
-                        &initializers,
+                        &instance_initializers,
                     );
                 } else {
                     function
@@ -5122,18 +6319,19 @@ fn lower_unsupported_type_script_define_class_fields(core: &mut ParserCore, clas
                         .body
                         .block
                         .statements
-                        .splice(0..0, initializers);
+                        .splice(0..0, instance_initializers);
                 }
             }
         } else {
             append_class_field_constructor(
                 core,
                 class,
-                initializers,
+                instance_initializers,
                 class.extends_or_nil.data.is_some(),
             );
         }
     }
+    core.class_post_statements.extend(static_initializers);
 }
 
 fn lower_type_script_experimental_decorators(
@@ -5252,7 +6450,11 @@ fn lower_type_script_experimental_decorators(
     }
 }
 
-fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut Class) {
+fn lower_type_script_class_field_assignments(
+    core: &mut ParserCore,
+    class: &mut Class,
+    constructor_was_present: bool,
+) {
     if class.use_define_for_class_fields {
         return;
     }
@@ -5313,7 +6515,9 @@ fn lower_type_script_class_field_assignments(core: &mut ParserCore, class: &mut 
         else {
             return;
         };
-        if is_derived {
+        if !constructor_was_present {
+            function.function.body.block.statements.extend(assignments);
+        } else if is_derived {
             insert_parameter_fields_after_super(
                 &mut function.function.body.block.statements,
                 &assignments,
@@ -5969,9 +7173,13 @@ fn lower_type_script_static_field_assignments(
                 Some(ExprData::PrivateIdentifier(_))
             )
     });
-    if core.options.mode != crate::internal::config::Mode::Bundle
-        || core.options.ts.config.experimental_decorators
-            != crate::internal::config::MaybeBool::True
+    if !core
+        .options
+        .unsupported_js_features
+        .contains(JsFeature::CLASS_STATIC_BLOCKS)
+        && (core.options.mode != crate::internal::config::Mode::Bundle
+            || core.options.ts.config.experimental_decorators
+                != crate::internal::config::MaybeBool::True)
     {
         for property in &mut class.properties {
             if property.kind != PropertyKind::Field
@@ -6078,8 +7286,14 @@ fn lower_type_script_static_field_assignments(
         false
     });
     if !assignments.is_empty() {
-        core.class_post_statements
-            .splice(insert_at..insert_at, assignments);
+        if core.options.ts.config.experimental_decorators
+            == crate::internal::config::MaybeBool::True
+        {
+            core.class_post_statements
+                .splice(insert_at..insert_at, assignments);
+        } else {
+            core.class_post_statements.extend(assignments);
+        }
     }
 }
 
@@ -7275,7 +8489,7 @@ fn transpose_if_expr_chain(mut expression: Expr, visit: &mut impl FnMut(Expr) ->
 
 #[allow(clippy::too_many_lines)]
 fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers: bool) {
-    stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || {
+    stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
         visit_expr_with_target(core, expression, resolve_identifiers, AssignTarget::None);
     });
 }
@@ -7719,7 +8933,7 @@ fn visit_expr_with_target(
     resolve_identifiers: bool,
     assign_target: AssignTarget,
 ) {
-    stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || {
+    stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
         visit_expr_with_target_and_context(
             core,
             expression,
@@ -7785,6 +8999,24 @@ fn visit_expr_with_target_and_context(
                 identifier.must_keep_due_to_with_stmt = result.is_inside_with_scope;
             } else {
                 core.record_usage(identifier.reference);
+            }
+            if core.visit_arguments_ref == Some(identifier.reference)
+                && core.visit_inside_async_arrow
+                && core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::ASYNC_AWAIT)
+            {
+                core.ignore_usage(identifier.reference);
+                let capture_ref = if let Some(reference) = core.visit_arguments_capture_ref {
+                    reference
+                } else {
+                    let reference = core.new_symbol(SymbolKind::Hoisted, "_arguments");
+                    core.visit_arguments_capture_ref = Some(reference);
+                    reference
+                };
+                core.record_usage(capture_ref);
+                identifier.reference = capture_ref;
             }
             if identifier.reference == core.require_ref
                 && !context.is_call_target
@@ -7968,12 +9200,43 @@ fn visit_expr_with_target_and_context(
                     "Delete of a bare identifier cannot be used in strict mode",
                 );
             }
-            visit_expr_with_target(
-                core,
-                &mut unary.value,
-                resolve_identifiers,
-                unary.op.unary_assign_target(),
-            );
+            let mut super_key = if core.lower_super_property_access
+                && matches!(
+                    unary.op,
+                    OpCode::UnaryPreDecrement
+                        | OpCode::UnaryPreIncrement
+                        | OpCode::UnaryPostDecrement
+                        | OpCode::UnaryPostIncrement
+                ) {
+                super_property_key(&unary.value)
+            } else {
+                None
+            };
+            if let Some(key) = &mut super_key {
+                visit_expr(core, key, resolve_identifiers);
+                if let Some(wrapper) =
+                    lower_current_super_wrapper(core, unary.value.loc, key.clone())
+                {
+                    unary.value = wrapper;
+                }
+            } else {
+                visit_expr_with_target(
+                    core,
+                    &mut unary.value,
+                    resolve_identifiers,
+                    unary.op.unary_assign_target(),
+                );
+            }
+            if matches!(
+                unary.op,
+                OpCode::UnaryPreDecrement
+                    | OpCode::UnaryPreIncrement
+                    | OpCode::UnaryPostDecrement
+                    | OpCode::UnaryPostIncrement
+            ) && let Some((target, storage)) = lowered_private_access(core, &unary.value)
+            {
+                unary.value = lower_private_wrapper(core, unary.value.loc, target, storage);
+            }
             match unary.op {
                 OpCode::UnaryTypeof => {
                     if let Some(value) = crate::internal::js_ast::typeof_without_side_effects(
@@ -8080,13 +9343,25 @@ fn visit_expr_with_target_and_context(
             }
         }
         ExprData::Binary(binary) => {
+            let mut super_key = if core.lower_super_property_access
+                && (binary.op == OpCode::BinaryAssign
+                    || compound_assignment_operator(binary.op).is_some())
+            {
+                super_property_key(&binary.left)
+            } else {
+                None
+            };
             let left_target =
                 if assign_target != AssignTarget::None && binary.op == OpCode::BinaryAssign {
                     AssignTarget::Replace
                 } else {
                     binary.op.binary_assign_target()
                 };
-            visit_expr_with_target(core, &mut binary.left, resolve_identifiers, left_target);
+            if let Some(key) = &mut super_key {
+                visit_expr(core, key, resolve_identifiers);
+            } else {
+                visit_expr_with_target(core, &mut binary.left, resolve_identifiers, left_target);
+            }
             let inferred_name = if matches!(
                 binary.op,
                 OpCode::BinaryAssign
@@ -8117,9 +9392,50 @@ fn visit_expr_with_target_and_context(
             };
             let old_control_flow_dead = core.is_control_flow_dead;
             core.is_control_flow_dead |= right_is_dead;
+            let old_class_name_hint =
+                std::mem::replace(&mut core.class_name_hint, inferred_name.clone());
             visit_expr(core, &mut binary.right, resolve_identifiers);
+            core.class_name_hint = old_class_name_hint;
             core.is_control_flow_dead = old_control_flow_dead;
             keep_inferred_name(core, &mut binary.right, inferred_name);
+            if let Some(key) = super_key {
+                let right = std::mem::take(&mut binary.right);
+                let lowered = if binary.op == OpCode::BinaryAssign {
+                    lower_current_super_set(core, expression.loc, key, right)
+                } else if let Some(value_op) = compound_assignment_operator(binary.op) {
+                    let get = lower_current_super_get(core, expression.loc, key.clone());
+                    get.and_then(|get| {
+                        let value = if value_op == OpCode::BinaryPower
+                            && core
+                                .options
+                                .unsupported_js_features
+                                .contains(JsFeature::EXPONENT_OPERATOR)
+                        {
+                            core.call_runtime(expression.loc, "__pow", vec![get, right])
+                        } else {
+                            Expr::new(
+                                expression.loc,
+                                ExprData::Binary(BinaryExpr {
+                                    left: get,
+                                    right,
+                                    op: value_op,
+                                }),
+                            )
+                        };
+                        lower_current_super_set(core, expression.loc, key, value)
+                    })
+                } else {
+                    None
+                };
+                if let Some(lowered) = lowered.and_then(|lowered| lowered.data) {
+                    *data = *lowered;
+                    return;
+                }
+            }
+            if let Some(lowered) = lower_private_assignment(core, expression.loc, binary) {
+                *data = lowered;
+                return;
+            }
             if binary.op == OpCode::BinaryPowerAssign
                 && core
                     .options
@@ -8330,6 +9646,15 @@ fn visit_expr_with_target_and_context(
         ExprData::Call(call) => {
             let target_was_identifier =
                 matches!(call.target.data.as_deref(), Some(ExprData::Identifier(_)));
+            let preserve_optional_super_call = call.optional_chain != OptionalChain::None
+                && !core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::OPTIONAL_CHAIN);
+            let old_lower_super_property_access = core.lower_super_property_access;
+            if preserve_optional_super_call {
+                core.lower_super_property_access = false;
+            }
             visit_expr_with_target_and_context(
                 core,
                 &mut call.target,
@@ -8340,6 +9665,7 @@ fn visit_expr_with_target_and_context(
                     ..ExprVisitContext::default()
                 },
             );
+            core.lower_super_property_access = old_lower_super_property_access;
             if core.options.minify_syntax {
                 let collapse_indirect_identifier = match call.target.data.as_deref() {
                     Some(ExprData::Binary(binary))
@@ -8390,6 +9716,74 @@ fn visit_expr_with_target_and_context(
             }
             if core.options.minify_syntax && has_spread {
                 call.args = inline_spreads_of_array_literals(&call.args);
+            }
+            if call.optional_chain != OptionalChain::None
+                && !context.is_property_access_target
+                && !context.is_call_target
+                && !context.is_template_tag
+                && let Some(lowered) = lower_optional_chain(
+                    core,
+                    Expr::new(expression.loc, ExprData::Call(call.clone())),
+                )
+            {
+                *data = lowered;
+                return;
+            }
+            if is_runtime_helper_call(core, &call.target, "__superGet") {
+                let target = std::mem::take(&mut call.target);
+                call.target = Expr::new(
+                    expression.loc,
+                    ExprData::Dot(DotExpr {
+                        target,
+                        name: "call".into(),
+                        name_loc: expression.loc,
+                        ..DotExpr::default()
+                    }),
+                );
+                call.args
+                    .insert(0, Expr::new(expression.loc, ExprData::This));
+                call.kind = CallKind::TargetWasOriginallyPropertyAccess;
+            }
+            let is_lowered_private_method = matches!(
+                call.target.data.as_deref(),
+                Some(ExprData::Call(private_method))
+                    if is_identifier_named(core, &private_method.target, "__privateMethod")
+                        && !private_method.args.is_empty()
+            );
+            if is_lowered_private_method {
+                let receiver = match call.target.data.as_deref_mut() {
+                    Some(ExprData::Call(private_method)) => {
+                        std::mem::take(&mut private_method.args[0])
+                    }
+                    _ => unreachable!(),
+                };
+                let (helper_receiver, this_arg) =
+                    if matches!(receiver.data.as_deref(), Some(ExprData::This)) {
+                        (receiver.clone(), receiver)
+                    } else {
+                        let reference = core.generate_temp_ref(true);
+                        core.record_usage(reference);
+                        core.record_usage(reference);
+                        (
+                            assign(temp_identifier(expression.loc, reference), receiver),
+                            temp_identifier(expression.loc, reference),
+                        )
+                    };
+                if let Some(ExprData::Call(private_method)) = call.target.data.as_deref_mut() {
+                    private_method.args[0] = helper_receiver;
+                }
+                let private_method = std::mem::take(&mut call.target);
+                call.target = Expr::new(
+                    expression.loc,
+                    ExprData::Dot(DotExpr {
+                        target: private_method,
+                        name: "call".into(),
+                        name_loc: expression.loc,
+                        ..DotExpr::default()
+                    }),
+                );
+                call.args.insert(0, this_arg);
+                call.kind = CallKind::TargetWasOriginallyPropertyAccess;
             }
             if core.options.minify_syntax && !core.is_control_flow_dead {
                 let reference = match call.target.data.as_deref() {
@@ -8607,6 +10001,26 @@ fn visit_expr_with_target_and_context(
                     ..ExprVisitContext::default()
                 },
             );
+            if core.lower_super_property_access
+                && matches!(dot.target.data.as_deref(), Some(ExprData::Super))
+            {
+                let key = Expr::new(
+                    dot.name_loc,
+                    ExprData::String(StringExpr {
+                        value: string_to_utf16(dot.name.as_bytes()),
+                        ..StringExpr::default()
+                    }),
+                );
+                let lowered = if assign_target == AssignTarget::None {
+                    lower_current_super_get(core, expression.loc, key)
+                } else {
+                    lower_current_super_wrapper(core, expression.loc, key)
+                };
+                if let Some(lowered) = lowered.and_then(|lowered| lowered.data) {
+                    *data = *lowered;
+                    return;
+                }
+            }
             if assign_target == AssignTarget::None
                 && dot.optional_chain == OptionalChain::None
                 && let Some(ExprData::ImportIdentifier(identifier)) = dot.target.data.as_deref()
@@ -8695,6 +10109,19 @@ fn visit_expr_with_target_and_context(
                 *data = replacement;
                 return;
             }
+            if assign_target == AssignTarget::None
+                && dot.optional_chain != OptionalChain::None
+                && !context.is_property_access_target
+                && !context.is_call_target
+                && !context.is_template_tag
+                && let Some(lowered) = lower_optional_chain(
+                    core,
+                    Expr::new(expression.loc, ExprData::Dot(dot.clone())),
+                )
+            {
+                *data = lowered;
+                return;
+            }
         }
         ExprData::Index(index) => {
             visit_expr_with_target_and_context(
@@ -8708,6 +10135,27 @@ fn visit_expr_with_target_and_context(
                 },
             );
             visit_expr(core, &mut index.index, resolve_identifiers);
+            if core.lower_super_property_access
+                && matches!(index.target.data.as_deref(), Some(ExprData::Super))
+            {
+                let key = std::mem::take(&mut index.index);
+                let lowered = if assign_target == AssignTarget::None {
+                    lower_current_super_get(core, expression.loc, key)
+                } else {
+                    lower_current_super_wrapper(core, expression.loc, key)
+                };
+                if let Some(lowered) = lowered.and_then(|lowered| lowered.data) {
+                    *data = *lowered;
+                    return;
+                }
+            }
+            if assign_target == AssignTarget::None
+                && let Some((target, storage)) = lowered_private_index(core, index)
+                && let Some(lowered) = lower_private_get(core, expression.loc, target, storage).data
+            {
+                *data = *lowered;
+                return;
+            }
             if assign_target == AssignTarget::None
                 && index.optional_chain == OptionalChain::None
                 && let Some(ExprData::ImportIdentifier(identifier)) = index.target.data.as_deref()
@@ -8816,6 +10264,19 @@ fn visit_expr_with_target_and_context(
                 *data = replacement;
                 return;
             }
+            if assign_target == AssignTarget::None
+                && index.optional_chain != OptionalChain::None
+                && !context.is_property_access_target
+                && !context.is_call_target
+                && !context.is_template_tag
+                && let Some(lowered) = lower_optional_chain(
+                    core,
+                    Expr::new(expression.loc, ExprData::Index(index.clone())),
+                )
+            {
+                *data = lowered;
+                return;
+            }
             if core.options.minify_syntax
                 && assign_target == AssignTarget::None
                 && index.optional_chain == OptionalChain::None
@@ -8868,6 +10329,12 @@ fn visit_expr_with_target_and_context(
             if assign_target == AssignTarget::None {
                 report_duplicate_proto_properties(core, &object.properties);
             }
+            let object_super_ref = (assign_target == AssignTarget::None
+                && object
+                    .properties
+                    .iter()
+                    .any(|property| property.kind.is_method_definition()))
+            .then(|| core.new_symbol(SymbolKind::Other, "_a"));
             let mut has_spread = false;
             for property in &mut object.properties {
                 has_spread |= property.kind == PropertyKind::Spread;
@@ -8912,6 +10379,14 @@ fn visit_expr_with_target_and_context(
                         }
                     }
                 }
+                let old_super_home_ref = core.visit_super_home_ref;
+                let old_super_home_is_class_instance = core.visit_super_home_is_class_instance;
+                let old_lower_super_property_access = core.lower_super_property_access;
+                if property.kind.is_method_definition() {
+                    core.visit_super_home_ref = object_super_ref;
+                    core.visit_super_home_is_class_instance = false;
+                    core.lower_super_property_access = false;
+                }
                 visit_expr_with_target(
                     core,
                     &mut property.value_or_nil,
@@ -8923,6 +10398,9 @@ fn visit_expr_with_target_and_context(
                     },
                 );
                 visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
+                core.visit_super_home_ref = old_super_home_ref;
+                core.visit_super_home_is_class_instance = old_super_home_is_class_instance;
+                core.lower_super_property_access = old_lower_super_property_access;
                 if property.kind == PropertyKind::Field {
                     let name = inferred_name_from_expression(core, &property.key);
                     keep_inferred_name(core, &mut property.value_or_nil, name.clone());
@@ -8935,9 +10413,41 @@ fn visit_expr_with_target_and_context(
             if core.options.minify_syntax && has_spread && assign_target == AssignTarget::None {
                 object.properties = mangle_object_spread(&object.properties);
             }
-            if assign_target == AssignTarget::None
-                && let Some(replacement) = lower_object_spread(core, expression_loc, object)
+            let spread_replacement = if assign_target == AssignTarget::None {
+                lower_object_spread(core, expression_loc, object)
+            } else {
+                None
+            };
+            if let Some(reference) = object_super_ref
+                && core.symbols[reference.inner_index as usize].use_count_estimate > 0
             {
+                core.current_scope
+                    .as_ref()
+                    .expect("object literal scope")
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .generated
+                    .push(reference);
+                core.record_declared_symbol(reference);
+                core.class_pre_statements.push(Stmt::new(
+                    expression.loc,
+                    StmtData::Local(LocalStmt {
+                        declarations: vec![Decl {
+                            binding: identifier_binding(expression.loc, reference),
+                            ..Decl::default()
+                        }],
+                        kind: LocalKind::Let,
+                        ..LocalStmt::default()
+                    }),
+                ));
+                core.record_usage(reference);
+                let object_value = spread_replacement.map_or_else(
+                    || Expr::new(expression.loc, ExprData::Object(std::mem::take(object))),
+                    |replacement| Expr::new(expression.loc, replacement),
+                );
+                let replacement = assign(temp_identifier(expression.loc, reference), object_value);
+                *data = *replacement.data.expect("captured object literal");
+            } else if let Some(replacement) = spread_replacement {
                 *data = replacement;
             }
         }
@@ -8970,6 +10480,27 @@ fn visit_expr_with_target_and_context(
                     ..ExprVisitContext::default()
                 },
             );
+            if is_runtime_helper_call(core, &template.tag_or_nil, "__superGet") {
+                let target = std::mem::take(&mut template.tag_or_nil);
+                template.tag_or_nil = Expr::new(
+                    expression.loc,
+                    ExprData::Call(CallExpr {
+                        target: Expr::new(
+                            expression.loc,
+                            ExprData::Dot(DotExpr {
+                                target,
+                                name: "bind".into(),
+                                name_loc: expression.loc,
+                                ..DotExpr::default()
+                            }),
+                        ),
+                        args: vec![Expr::new(expression.loc, ExprData::This)],
+                        kind: CallKind::TargetWasOriginallyPropertyAccess,
+                        ..CallExpr::default()
+                    }),
+                );
+                template.tag_was_originally_property_access = true;
+            }
             if let Some(ExprData::Identifier(identifier)) = template.tag_or_nil.data.as_deref()
                 && identifier.call_can_be_unwrapped_if_unused
             {
@@ -9042,6 +10573,12 @@ fn visit_expr_with_target_and_context(
                 let record = &mut core.import_records[import.import_record_index as usize];
                 record.flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
                 record.error_handler_loc = core.visit_try_catch_loc;
+            }
+            if core.lower_await_to_yield {
+                *data = ExprData::Yield(crate::internal::js_ast::YieldExpr {
+                    value_or_nil: std::mem::take(&mut await_expression.value),
+                    is_star: false,
+                });
             }
         }
         ExprData::Yield(yield_expression) => {
@@ -9221,7 +10758,11 @@ fn visit_expr_with_target_and_context(
             keep_name = name_to_keep;
         }
         ExprData::Class(class) => {
+            let pre_start = core.class_pre_statements.len();
+            let post_start = core.class_post_statements.len();
             let lower_static_blocks = class_static_blocks_can_be_lowered(core, &class.class);
+            let lower_private_members = class_private_members_need_lowering(core, &class.class);
+            let lower_public_static = class_public_static_fields_need_lowering(core, &class.class);
             let name_to_keep = if core.options.keep_names {
                 class
                     .class
@@ -9230,12 +10771,35 @@ fn visit_expr_with_target_and_context(
             } else {
                 None
             };
-            let inner_name = visit_class(core, &mut class.class, resolve_identifiers, true);
+            let (inner_name, private_capture) = visit_class(
+                core,
+                &mut class.class,
+                resolve_identifiers,
+                true,
+                lower_private_members || lower_public_static,
+            );
             if let Some(name) = name_to_keep {
                 insert_class_name_static_block(core, &mut class.class, &name);
             }
-            if lower_static_blocks {
-                let capture_ref = inner_name
+            let mut prefix = Expr::default();
+            let generated_pre = core
+                .class_pre_statements
+                .drain(pre_start..)
+                .collect::<Vec<_>>();
+            for statement in generated_pre {
+                if let Some(StmtData::Expr(statement)) = statement.data.as_deref() {
+                    prefix = join_with_comma(prefix, statement.value.clone());
+                } else {
+                    core.class_pre_statements.push(statement);
+                }
+            }
+            let mut replacement = None;
+            if lower_static_blocks
+                || private_capture.is_some()
+                || core.class_post_statements.len() > post_start
+            {
+                let capture_ref = private_capture
+                    .or(inner_name)
                     .unwrap_or_else(|| generate_class_expression_capture_ref(core, expression.loc));
                 let lowered = lower_class_static_blocks(core, &mut class.class, capture_ref);
                 let class_expression =
@@ -9249,14 +10813,33 @@ fn visit_expr_with_target_and_context(
                         value = join_with_comma(value, statement.value.clone());
                     }
                 }
+                for statement in core.class_post_statements.drain(post_start..) {
+                    if let Some(StmtData::Expr(statement)) = statement.data.as_deref() {
+                        value = join_with_comma(value, statement.value.clone());
+                    }
+                }
                 value = join_with_comma(
                     value,
                     class_capture_identifier(core, expression.loc, capture_ref),
                 );
+                replacement = Some(value);
+            } else if prefix.data.is_some() {
+                replacement = Some(Expr::new(
+                    expression.loc,
+                    ExprData::Class(std::mem::take(class)),
+                ));
+            }
+            if let Some(value) = replacement {
+                let value = join_with_comma(prefix, value);
                 *data = *value.data.expect("lowered class expression");
             }
         }
         ExprData::Arrow(arrow) => {
+            let should_lower_async = arrow.is_async
+                && core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::ASYNC_AWAIT);
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
             let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);
@@ -9265,6 +10848,15 @@ fn visit_expr_with_target_and_context(
                 std::mem::replace(&mut core.visit_is_async_generator, false);
             let old_is_outside_fn_or_arrow =
                 std::mem::replace(&mut core.visit_is_outside_fn_or_arrow, false);
+            let old_lower_await_to_yield =
+                std::mem::replace(&mut core.lower_await_to_yield, should_lower_async);
+            let old_inside_async_arrow = core.visit_inside_async_arrow;
+            let old_lower_super_property_access = core.lower_super_property_access;
+            if should_lower_async {
+                core.visit_inside_async_arrow = true;
+                core.async_arrow_this_usage.push(false);
+                core.lower_super_property_access = core.visit_super_home_ref.is_some();
+            }
             core.push_next_scope_for_visit_pass(ScopeKind::FunctionArgs);
             let use_strict_loc = function_body_use_strict(core, &arrow.body.block.statements);
             if use_strict_loc.is_some() {
@@ -9318,6 +10910,14 @@ fn visit_expr_with_target_and_context(
                     .statements
                     .retain(|statement| statement.data.is_some());
             }
+            let uses_this = if should_lower_async {
+                core.async_arrow_this_usage
+                    .pop()
+                    .expect("async arrow this usage")
+            } else {
+                false
+            };
+            lower_async_arrow(core, expression.loc, arrow, uses_this);
             core.pop_scope();
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;
@@ -9326,7 +10926,10 @@ fn visit_expr_with_target_and_context(
             core.visit_try_catch_loc = old_try_catch_loc;
             core.visit_is_async_generator = old_is_async_generator;
             core.visit_is_outside_fn_or_arrow = old_is_outside_fn_or_arrow;
-            if generated_temps {
+            core.lower_await_to_yield = old_lower_await_to_yield;
+            core.visit_inside_async_arrow = old_inside_async_arrow;
+            core.lower_super_property_access = old_lower_super_property_access;
+            if generated_temps && !should_lower_async {
                 arrow.prefer_expr = false;
             }
             if core.options.minify_syntax
@@ -9680,6 +11283,9 @@ fn visit_expr_with_target_and_context(
         | ExprData::RequireResolveString(_)
         | ExprData::ImportString(_) => {}
         ExprData::This => {
+            for uses_this in &mut core.async_arrow_this_usage {
+                *uses_this = true;
+            }
             if !core.visit_this_is_nested
                 && core.options.mode != crate::internal::config::Mode::PassThrough
             {
