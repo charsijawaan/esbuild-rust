@@ -130,8 +130,7 @@ fn compile_javascript_bundle_with_css_names(
 ) -> CompiledBundle {
     if !options.code_splitting && bundle.entry_points.len() > 1 {
         let mut compiled = CompiledBundle::default();
-        let mut group_options = options.clone();
-        group_options.needs_metafile = false;
+        let group_options = options.clone();
         for entry_point in &bundle.entry_points {
             let group = compile_javascript_bundle_with_css_names(
                 file_system,
@@ -301,7 +300,13 @@ fn generate_metadata_json(
     let mut result = fragment("{\n  \"inputs\": {");
     let mut is_first = true;
     let mut input_paths = HashSet::new();
-    for file in &bundle.files {
+    let input_files: Vec<_> = bundle
+        .files
+        .iter()
+        .map(|file| file.input_file.clone())
+        .collect();
+    for source_index in find_reachable_files(&input_files, &bundle.entry_points) {
+        let file = &bundle.files[source_index as usize];
         if file.input_file.omit_from_source_maps_and_metafile || file.json_metadata_chunk.is_empty()
         {
             continue;
@@ -1359,13 +1364,16 @@ fn warn_about_ignored_bare_imports(log: &Log, options: &Options, files: &[Scanne
         {
             continue;
         }
-        let Some(records) = file
+        let records = file
             .input_file
             .repr
             .as_ref()
             .and_then(InputFileRepr::import_records)
-        else {
-            continue;
+            .unwrap_or_default();
+        let records = if options.mode == Mode::Bundle {
+            records
+        } else {
+            &[]
         };
         let mut tracker = LineColumnTracker::new(Some(importer));
         for record in records {
@@ -2653,20 +2661,23 @@ fn generate_scan_metadata_chunks(
         };
         let source = &file.input_file.source;
         let path = source.pretty_paths.select(options.metafile_path_style);
-        let Some(records) = file
+        let records = file
             .input_file
             .repr
             .as_ref()
             .and_then(InputFileRepr::import_records)
-        else {
-            continue;
-        };
+            .unwrap_or_default();
         let mut metadata = String::from_utf8(quote_for_json(path.as_bytes(), options.ascii_only))
             .expect("quoted JSON is UTF-8");
         metadata.push_str(&fragment(&format!(
             ": {{\n      \"bytes\": {},\n      \"imports\": [",
             source.contents.len()
         )));
+        let records = if options.mode == Mode::Bundle {
+            records
+        } else {
+            &[]
+        };
         for (record_index, record) in records.iter().enumerate() {
             if record_index != 0 {
                 metadata.push(',');
@@ -2760,6 +2771,33 @@ fn generate_scan_metadata_chunks(
             if let Some(format) = format {
                 metadata.push_str(&fragment(&format!(",\n      \"format\": {format:?}")));
             }
+        }
+        let attributes = source.key_path.import_attributes.decode_into_array();
+        if !attributes.is_empty() {
+            metadata.push_str(&fragment(",\n      \"with\": {"));
+            for (index, attribute) in attributes.iter().enumerate() {
+                metadata.push_str(&fragment(if index == 0 {
+                    "\n        "
+                } else {
+                    ",\n        "
+                }));
+                metadata.push_str(
+                    &String::from_utf8(quote_for_json(
+                        attribute.key.as_bytes(),
+                        options.ascii_only,
+                    ))
+                    .expect("quoted JSON is UTF-8"),
+                );
+                metadata.push_str(&fragment(": "));
+                metadata.push_str(
+                    &String::from_utf8(quote_for_json(
+                        attribute.value.as_bytes(),
+                        options.ascii_only,
+                    ))
+                    .expect("quoted JSON is UTF-8"),
+                );
+            }
+            metadata.push_str(&fragment("\n      }"));
         }
         metadata.push_str(&fragment("\n    }"));
         files[index].json_metadata_chunk = metadata;
@@ -3895,6 +3933,79 @@ mod tests {
                     && option_names != ["AbsOutputFile", "Mode", "OutputFormat"]
                     && option_names != ["AbsOutputDir", "Mode"]
                     && option_names != ["AbsOutputDir", "EntryPathTemplate"]
+                    && option_names != ["AbsOutputDir", "Mode", "NeedsMetafile"]
+                    && option_names
+                        != ["AbsOutputDir", "EntryPathTemplate", "Mode", "NeedsMetafile"]
+                    && option_names
+                        != [
+                            "AbsOutputDir",
+                            "CodeSplitting",
+                            "ExtensionToLoader",
+                            "Mode",
+                            "NeedsMetafile",
+                        ]
+                    && option_names != ["AbsOutputBase", "AbsOutputDir", "Mode"]
+                    && option_names
+                        != [
+                            "AbsOutputBase",
+                            "AbsOutputDir",
+                            "CodeSplitting",
+                            "Mode",
+                            "OutputFormat",
+                        ]
+                    && option_names
+                        != [
+                            "AbsOutputBase",
+                            "AbsOutputDir",
+                            "ChunkPathTemplate",
+                            "CodeSplitting",
+                            "EntryPathTemplate",
+                            "Mode",
+                        ]
+                    && option_names != ["AbsOutputBase", "AbsOutputDir", "ExtensionToLoader"]
+                    && option_names
+                        != ["AbsOutputBase", "AbsOutputDir", "ExtensionToLoader", "Mode"]
+                    && option_names
+                        != [
+                            "AbsOutputBase",
+                            "AbsOutputDir",
+                            "ExtensionToLoader",
+                            "Mode",
+                            "OutputFormat",
+                        ]
+                    && option_names
+                        != [
+                            "AbsOutputBase",
+                            "AbsOutputDir",
+                            "ExtensionToLoader",
+                            "Mode",
+                            "NeedsMetafile",
+                        ]
+                    && option_names
+                        != [
+                            "AbsOutputBase",
+                            "AbsOutputDir",
+                            "AssetPathTemplate",
+                            "ExtensionToLoader",
+                            "Mode",
+                        ]
+                    && option_names
+                        != [
+                            "AbsOutputBase",
+                            "AbsOutputDir",
+                            "ExtensionToLoader",
+                            "Mode",
+                            "PublicPath",
+                        ]
+                    && option_names
+                        != [
+                            "AbsOutputBase",
+                            "AbsOutputDir",
+                            "AssetPathTemplate",
+                            "ExtensionToLoader",
+                            "Mode",
+                            "PublicPath",
+                        ]
                     && !((option_names == ["AbsOutputFile", "ExtensionToLoader", "Mode"]
                         || option_names == ["AbsOutputDir", "ExtensionToLoader", "Mode"])
                         && !matches!(
@@ -4124,6 +4235,10 @@ mod tests {
                     .map_or(Mode::PassThrough, upstream_mode),
                 abs_output_file,
                 abs_output_dir,
+                abs_output_base: upstream_string_option(options_json, "AbsOutputBase")
+                    .unwrap_or_default(),
+                needs_metafile: upstream_bool_option(options_json, "NeedsMetafile")
+                    .unwrap_or_default(),
                 omit_runtime_for_tests: true,
                 ..Options::default()
             };
@@ -4199,6 +4314,9 @@ mod tests {
             }
             if let Some(template) = options_json.get("EntryPathTemplate") {
                 options.entry_path_template = upstream_path_template(template);
+            }
+            if let Some(template) = options_json.get("AssetPathTemplate") {
+                options.asset_path_template = upstream_path_template(template);
             }
             let mut entry_points: Vec<super::EntryPoint> = case["entry_paths"]
                 .as_array()
@@ -4311,7 +4429,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 629 },
+            if selected_test.is_some() { 1 } else { 652 },
             "upstream basic bundler corpus case count"
         );
     }

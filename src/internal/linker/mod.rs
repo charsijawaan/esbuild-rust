@@ -7052,6 +7052,18 @@ pub fn compile_part_range_for_chunk(
     {
         printed.source_map_chunk.should_ignore = true;
     }
+    if file.input_file.loader == Loader::File {
+        let path = String::from_utf8(quote_for_json(
+            file.input_file.unique_key_for_additional_file.as_bytes(),
+            options.ascii_only,
+        ))
+        .expect("quoted file-loader path is UTF-8");
+        printed.json_metadata_imports.push(
+            options.metafile_format.maybe_remove_whitespace(&format!(
+                "\n        {{\n          \"path\": {path},\n          \"kind\": \"file-loader\"\n        }}"
+            )),
+        );
+    }
     CompiledPartRange {
         source_index: part_range.source_index,
         js: printed.js,
@@ -8652,38 +8664,42 @@ fn generate_javascript_metadata_chunk(
         joiner.add_string(fragment("\n      "));
     }
 
-    joiner.add_string(fragment("],\n      \"exports\": ["));
-    let mut exports = Vec::new();
-    if options.output_format.keep_esm_import_export_syntax() {
-        if chunk.is_entry_point {
-            if let Some(InputFileRepr::Js(repr)) = graph.files[chunk.source_index as usize]
-                .input_file
-                .repr
-                .as_ref()
-            {
-                if repr.meta.wrap == WrapKind::Cjs {
-                    exports.push("default".to_string());
-                } else {
-                    exports.extend(repr.meta.resolved_exports.keys().cloned());
+    if chunk.is_css {
+        joiner.add_string(fragment("],\n"));
+    } else {
+        joiner.add_string(fragment("],\n      \"exports\": ["));
+        let mut exports = Vec::new();
+        if options.output_format.keep_esm_import_export_syntax() {
+            if chunk.is_entry_point {
+                if let Some(InputFileRepr::Js(repr)) = graph.files[chunk.source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                {
+                    if repr.meta.wrap == WrapKind::Cjs {
+                        exports.push("default".to_string());
+                    } else {
+                        exports.extend(repr.meta.resolved_exports.keys().cloned());
+                    }
                 }
+            } else {
+                exports.extend(chunk.exports_to_other_chunks.values().cloned());
             }
-        } else {
-            exports.extend(chunk.exports_to_other_chunks.values().cloned());
         }
-    }
-    exports.sort();
-    exports.dedup();
-    for (index, alias) in exports.iter().enumerate() {
-        if index != 0 {
-            joiner.add_string(",");
+        exports.sort();
+        exports.dedup();
+        for (index, alias) in exports.iter().enumerate() {
+            if index != 0 {
+                joiner.add_string(",");
+            }
+            joiner.add_string(fragment("\n        "));
+            joiner.add_bytes(quote_for_json(alias.as_bytes(), options.ascii_only));
         }
-        joiner.add_string(fragment("\n        "));
-        joiner.add_bytes(quote_for_json(alias.as_bytes(), options.ascii_only));
+        if !exports.is_empty() {
+            joiner.add_string(fragment("\n      "));
+        }
+        joiner.add_string(fragment("],\n"));
     }
-    if !exports.is_empty() {
-        joiner.add_string(fragment("\n      "));
-    }
-    joiner.add_string(fragment("],\n"));
 
     let include_entry_point = chunk.is_entry_point
         && (!chunk.is_css
