@@ -15,7 +15,7 @@ pub enum MockKind {
 #[derive(Debug)]
 pub struct MockFs {
     dirs: HashMap<String, DirEntries>,
-    files: HashMap<String, String>,
+    files: HashMap<String, Vec<u8>>,
     abs_working_dir: String,
     default_volume: String,
     kind: MockKind,
@@ -27,19 +27,42 @@ pub fn mock_fs<S: BuildHasher>(
     kind: MockKind,
     abs_working_dir: impl Into<String>,
 ) -> MockFs {
-    let abs_working_dir = abs_working_dir.into();
+    let files = input
+        .iter()
+        .map(|(path, contents)| (path.clone(), contents.as_bytes().to_vec()))
+        .collect();
+    mock_fs_from_bytes(files, kind, abs_working_dir.into())
+}
+
+#[must_use]
+pub fn mock_fs_bytes<S: BuildHasher>(
+    input: &HashMap<String, Vec<u8>, S>,
+    kind: MockKind,
+    abs_working_dir: impl Into<String>,
+) -> MockFs {
+    mock_fs_from_bytes(
+        input
+            .iter()
+            .map(|(path, contents)| (path.clone(), contents.clone()))
+            .collect(),
+        kind,
+        abs_working_dir.into(),
+    )
+}
+
+fn mock_fs_from_bytes(
+    files: HashMap<String, Vec<u8>>,
+    kind: MockKind,
+    abs_working_dir: String,
+) -> MockFs {
     let default_volume = if kind == MockKind::Windows {
         win_to_unix(&abs_working_dir).1
     } else {
         String::new()
     };
-    let files = input
-        .iter()
-        .map(|(path, contents)| (path.clone(), contents.clone()))
-        .collect();
     let mut dirs: HashMap<String, DirEntries> = HashMap::new();
 
-    for original_path in input.keys() {
+    for original_path in files.keys() {
         let (mut path, volume) = if kind == MockKind::Windows {
             win_to_unix(original_path)
         } else {
@@ -105,7 +128,7 @@ impl Fs for MockFs {
     fn read_file(&self, path: &str) -> ReadFileResult {
         let path = self.normalize_slashes(path);
         if let Some(contents) = self.files.get(&path) {
-            return (contents.as_bytes().to_vec(), None, None);
+            return (contents.clone(), None, None);
         }
         let error = FsError::not_found(&path);
         (Vec::new(), Some(error.clone()), Some(error))
@@ -116,7 +139,7 @@ impl Fs for MockFs {
         if let Some(contents) = self.files.get(&path) {
             return (
                 Some(Box::new(super::InMemoryOpenedFile {
-                    contents: contents.as_bytes().to_vec(),
+                    contents: contents.clone(),
                 })),
                 None,
                 None,
@@ -394,7 +417,7 @@ fn split_on_slash(path: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MockKind, mock_fs};
+    use super::{MockKind, mock_fs, mock_fs_bytes};
     use crate::internal::fs::{EntryKind, Fs};
     use std::collections::HashMap;
 
@@ -436,6 +459,16 @@ mod tests {
         let root = fs.read_directory("/").0;
         assert_eq!(root.peek_entry_count(), 3);
         assert_eq!(root.get("src").0.expect("src").kind(&fs), EntryKind::Dir);
+    }
+
+    #[test]
+    fn preserves_non_utf8_file_contents() {
+        let fs = mock_fs_bytes(
+            &HashMap::from([("/binary.bin".into(), vec![0, 0xff, 1])]),
+            MockKind::Unix,
+            "/",
+        );
+        assert_eq!(fs.read_file("/binary.bin").0, [0, 0xff, 1]);
     }
 
     #[test]

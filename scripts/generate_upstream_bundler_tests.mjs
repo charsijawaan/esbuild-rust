@@ -35,7 +35,7 @@ try {
   let source = fs.readFileSync(testPath, "utf8");
   source = source.replace(
     'import (\n',
-    'import (\n\t"encoding/json"\n\t"reflect"\n\t"runtime"\n\t"strconv"\n',
+    'import (\n\t"encoding/base64"\n\t"encoding/json"\n\t"reflect"\n\t"runtime"\n\t"strconv"\n\t"unicode/utf8"\n',
   );
 
   source = replaceFunctionBody(
@@ -73,6 +73,7 @@ type bundlerCorpusCase struct {
 	Suite string                            ` + "`json:\"suite\"`" + String.raw`
 	FileSystem string                       ` + "`json:\"file_system\"`" + String.raw`
 	Files map[string]string                 ` + "`json:\"files\"`" + String.raw`
+	FilesBase64 map[string]string           ` + "`json:\"files_base64,omitempty\"`" + String.raw`
 	EntryPaths []string                     ` + "`json:\"entry_paths\"`" + String.raw`
 	EntryPathsAdvanced []bundler.EntryPoint ` + "`json:\"entry_paths_advanced\"`" + String.raw`
 	ExpectedScanLog string                  ` + "`json:\"expected_scan_log\"`" + String.raw`
@@ -115,12 +116,19 @@ func captureBundledCase(t *testing.T, s *suite, args bundled, fileSystem string)
 		options[typeOfValue.Field(i).Name] = data
 	}
 	sort.Strings(unsupported)
+	filesBase64 := make(map[string]string)
+	for path, contents := range args.files {
+		if !utf8.ValidString(contents) {
+			filesBase64[path] = base64.StdEncoding.EncodeToString([]byte(contents))
+		}
+	}
 	bundlerCorpus = append(bundlerCorpus, bundlerCorpusCase{
 		UpstreamTest: t.Name(),
 		Line: line,
 		Suite: s.name,
 		FileSystem: fileSystem,
 		Files: args.files,
+		FilesBase64: filesBase64,
 		EntryPaths: args.entryPaths,
 		EntryPathsAdvanced: args.entryPathsAdvanced,
 		ExpectedScanLog: args.expectedScanLog,

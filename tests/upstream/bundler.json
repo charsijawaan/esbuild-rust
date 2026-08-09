@@ -828,6 +828,9 @@
       "/entry.css": "\n\t\t\t\ta {\n\t\t\t\t\tbackground: url(./example.png);\n\t\t\t\t}\n\t\t\t",
       "/example.png": "�PNG\r\n\u001a\n"
     },
+    "files_base64": {
+      "/example.png": "iVBORw0KGgo="
+    },
     "entry_paths": [
       "/entry.css"
     ],
@@ -855,6 +858,9 @@
       "/entry.css": "\n\t\t\t\ta {\n\t\t\t\t\tbackground: url(./example.png);\n\t\t\t\t}\n\t\t\t",
       "/example.png": "�PNG\r\n\u001a\n"
     },
+    "files_base64": {
+      "/example.png": "iVBORw0KGgo="
+    },
     "entry_paths": [
       "/entry.css"
     ],
@@ -881,6 +887,9 @@
     "files": {
       "/entry.css": "\n\t\t\t\ta {\n\t\t\t\t\tbackground: url(./example.png);\n\t\t\t\t}\n\t\t\t",
       "/example.png": "�PNG\r\n\u001a\n"
+    },
+    "files_base64": {
+      "/example.png": "iVBORw0KGgo="
     },
     "entry_paths": [
       "/entry.css"
@@ -17399,6 +17408,9 @@
       "/entry.js": "\n\t\t\t\tconsole.log(require('./test.custom'))\n\t\t\t",
       "/test.custom": "a\u0000b�c�d"
     },
+    "files_base64": {
+      "/test.custom": "YQBigGP/ZA=="
+    },
     "entry_paths": [
       "/entry.js"
     ],
@@ -17425,6 +17437,9 @@
     "files": {
       "/entry.js": "\n\t\t\t\tconsole.log(require('./test.custom'))\n\t\t\t",
       "/test.custom": "a\u0000b�c�d"
+    },
+    "files_base64": {
+      "/test.custom": "YQBigGP/ZA=="
     },
     "entry_paths": [
       "/entry.js"
@@ -17481,6 +17496,9 @@
     "files": {
       "/entry.js": "\n\t\t\t\tconsole.log(require('./test.svg'))\n\t\t\t",
       "/test.svg": "a\u0000b�c�d"
+    },
+    "files_base64": {
+      "/test.svg": "YQBigGP/ZA=="
     },
     "entry_paths": [
       "/entry.js"
@@ -18523,6 +18541,9 @@
     "files": {
       "/binary.txt": "�",
       "/entry.js": "\n\t\t\t\timport a from './binary.txt'\n\t\t\t\tconsole.log(a)\n\t\t\t"
+    },
+    "files_base64": {
+      "/binary.txt": "/w=="
     },
     "entry_paths": [
       "/entry.js"

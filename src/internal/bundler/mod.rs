@@ -157,17 +157,7 @@ fn compile_javascript_bundle_with_css_names(
                 .arbitrary_namespace_issues
                 .extend(group.scan_result.arbitrary_namespace_issues);
         }
-        let mut outputs_by_path = HashMap::<String, Vec<u8>>::new();
-        compiled.output_files.retain(|output| {
-            if outputs_by_path
-                .get(&output.abs_path)
-                .is_some_and(|contents| contents == &output.contents)
-            {
-                return false;
-            }
-            outputs_by_path.insert(output.abs_path.clone(), output.contents.clone());
-            true
-        });
+        deduplicate_identical_output_files(&mut compiled.output_files);
         compiled.metafile =
             generate_metadata_json(file_system, bundle, &compiled.output_files, options);
         return compiled;
@@ -261,19 +251,41 @@ fn compile_javascript_bundle_with_css_names(
             &output_paths,
         );
     }
-    let output_files = linker::finalize_generated_javascript_chunks(
+    let mut output_files = linker::finalize_generated_javascript_chunks(
         file_system,
         &prepared.graph,
         &mut prepared.chunks,
         &assets,
         options,
     );
+    for file in &prepared.graph.files {
+        if file.is_user_specified_entry_point()
+            && matches!(file.input_file.repr, Some(InputFileRepr::Copy(_)))
+        {
+            output_files.extend(file.input_file.additional_files.iter().cloned());
+        }
+    }
+    deduplicate_identical_output_files(&mut output_files);
     let metafile = generate_metadata_json(file_system, bundle, &output_files, options);
     CompiledBundle {
         metafile,
         output_files,
         scan_result: prepared.scan_result,
     }
+}
+
+fn deduplicate_identical_output_files(output_files: &mut Vec<OutputFile>) {
+    let mut outputs_by_path = HashMap::<String, Vec<u8>>::new();
+    output_files.retain(|output| {
+        if outputs_by_path
+            .get(&output.abs_path)
+            .is_some_and(|contents| contents == &output.contents)
+        {
+            return false;
+        }
+        outputs_by_path.insert(output.abs_path.clone(), output.contents.clone());
+        true
+    });
 }
 
 fn generate_metadata_json(
@@ -3265,10 +3277,9 @@ fn detect_content_type(contents: &[u8]) -> &'static str {
         "application/wasm"
     } else if contents.starts_with(b"PK\x03\x04") {
         "application/zip"
-    } else if std::str::from_utf8(contents).is_ok()
-        && !contents
-            .iter()
-            .any(|byte| *byte < 0x20 && !matches!(*byte, b'\t' | b'\n' | b'\r' | b'\x0c'))
+    } else if !contents
+        .iter()
+        .any(|byte| *byte < 0x20 && !matches!(*byte, b'\t' | b'\n' | b'\r' | b'\x0c'))
     {
         "text/plain; charset=utf-8"
     } else {
@@ -3584,12 +3595,13 @@ mod tests {
             self, Format, Loader, Mode, OnLoad, OnLoadResult, OnResolve, OnResolveResult, Options,
             PathPlaceholder, Platform, Plugin, compile_filter_for_plugin,
         },
-        fs::{MockKind, mock_fs},
+        fs::{MockKind, mock_fs, mock_fs_bytes},
         graph::{EntryPoint, InputFile, InputFileRepr, JsRepr, SideEffectsKind},
         js_ast::ExportsKind,
         logger::{DeferLogKind, Log, Msg, MsgKind, Path, Source},
         runtime,
     };
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use std::{
         collections::{HashMap, HashSet},
         sync::{
@@ -3657,6 +3669,31 @@ mod tests {
             3 => config::LegalComments::LinkedWithComment,
             4 => config::LegalComments::ExternalWithoutComment,
             _ => panic!("unknown upstream legal-comments mode {value}"),
+        }
+    }
+
+    fn upstream_loader(value: u64) -> Loader {
+        match value {
+            0 => Loader::None,
+            1 => Loader::Base64,
+            2 => Loader::Binary,
+            3 => Loader::Copy,
+            4 => Loader::Css,
+            5 => Loader::DataUrl,
+            6 => Loader::Default,
+            7 => Loader::Empty,
+            8 => Loader::File,
+            9 => Loader::GlobalCss,
+            10 => Loader::Js,
+            11 => Loader::Json,
+            12 => Loader::WithTypeJson,
+            13 => Loader::Jsx,
+            14 => Loader::LocalCss,
+            15 => Loader::Text,
+            16 => Loader::Ts,
+            17 => Loader::TsNoAmbiguousLessThan,
+            18 => Loader::Tsx,
+            _ => panic!("unknown upstream loader {value}"),
         }
     }
 
@@ -3790,6 +3827,14 @@ mod tests {
                 || (option_names != ["AbsOutputFile", "Mode"]
                     && option_names != ["AbsOutputFile", "Mode", "OutputFormat"]
                     && option_names != ["AbsOutputDir", "Mode"]
+                    && !((option_names == ["AbsOutputFile", "ExtensionToLoader", "Mode"]
+                        || option_names == ["AbsOutputDir", "ExtensionToLoader", "Mode"])
+                        && !matches!(
+                            case["upstream_test"].as_str(),
+                            Some(
+                                "TestImportCSSFromJSLocalVsGlobal" | "TestImportCSSFromJSComposes"
+                            )
+                        ))
                     && option_names != ["AbsOutputFile"]
                     && option_names != ["AbsOutputDir"]
                     && option_names != ["AbsOutputFile", "Mode", "Platform"]
@@ -3957,7 +4002,7 @@ mod tests {
             let test_name = case["upstream_test"]
                 .as_str()
                 .expect("upstream bundler test name");
-            let files: HashMap<String, String> = case["files"]
+            let mut files: HashMap<String, Vec<u8>> = case["files"]
                 .as_object()
                 .expect("upstream bundler files")
                 .iter()
@@ -3967,15 +4012,30 @@ mod tests {
                         contents
                             .as_str()
                             .expect("upstream bundler file contents")
-                            .to_string(),
+                            .as_bytes()
+                            .to_vec(),
                     )
                 })
                 .collect();
+            if let Some(encoded_files) = case
+                .get("files_base64")
+                .and_then(serde_json::Value::as_object)
+            {
+                for (path, contents) in encoded_files {
+                    let contents = contents.as_str().expect("upstream base64 file contents");
+                    files.insert(
+                        path.clone(),
+                        STANDARD
+                            .decode(contents)
+                            .expect("valid upstream base64 file contents"),
+                    );
+                }
+            }
             let abs_working_dir = case["abs_working_dir"]
                 .as_str()
                 .filter(|path| !path.is_empty())
                 .unwrap_or("/");
-            let file_system = mock_fs(&files, MockKind::Unix, abs_working_dir);
+            let file_system = mock_fs_bytes(&files, MockKind::Unix, abs_working_dir);
             let abs_output_file =
                 upstream_string_option(options_json, "AbsOutputFile").unwrap_or_default();
             let abs_output_dir = upstream_string_option(options_json, "AbsOutputDir")
@@ -4040,6 +4100,18 @@ mod tests {
             if let Some(features) = upstream_u64_option(options_json, "UnsupportedJSFeatures") {
                 options.unsupported_js_features =
                     crate::internal::compat::JsFeature::from_bits(features);
+            }
+            if let Some(loaders) = options_json
+                .get("ExtensionToLoader")
+                .and_then(serde_json::Value::as_object)
+            {
+                options.extension_to_loader = loaders
+                    .iter()
+                    .map(|(extension, loader)| {
+                        let loader = loader.as_u64().expect("upstream loader enum");
+                        (extension.clone(), upstream_loader(loader))
+                    })
+                    .collect();
             }
             if let Some(value) = options_json
                 .pointer("/TS/Config/UseDefineForClassFields")
@@ -4164,7 +4236,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 589 },
+            if selected_test.is_some() { 1 } else { 626 },
             "upstream basic bundler corpus case count"
         );
     }
@@ -4568,6 +4640,7 @@ mod tests {
             guess_mime_type("", b"plain text"),
             "text/plain;charset=utf-8"
         );
+        assert_eq!(guess_mime_type("", &[0xff]), "text/plain;charset=utf-8");
         assert_eq!(
             guess_mime_type("", &[0xff, 0x00]),
             "application/octet-stream"

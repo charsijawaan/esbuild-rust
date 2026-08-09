@@ -713,7 +713,17 @@ impl Printer<'_> {
             TokenKind::Url => {
                 let record = &self.import_records[token.payload_index as usize];
                 self.css.extend_from_slice(b"url(");
-                self.print_url_value(&record.path.text);
+                if record
+                    .flags
+                    .contains(ImportRecordFlags::CONTAINS_UNIQUE_KEY)
+                {
+                    self.print_quoted_with_quote(
+                        &record.path.text,
+                        best_quote_char(&record.path.text, false),
+                    );
+                } else {
+                    self.print_url_value(&record.path.text);
+                }
                 self.css.push(b')');
                 self.record_import_path_for_metafile(token.payload_index);
             }
