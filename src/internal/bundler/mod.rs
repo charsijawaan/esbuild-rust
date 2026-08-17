@@ -15,8 +15,8 @@ use crate::internal::{
     cache::{CacheSet, SourceIndexKind},
     compat::{CssFeature, JsFeature},
     config::{
-        self, Loader, Mode, Options, PathPlaceholder, PathPlaceholders, PathTemplate, Platform,
-        PluginData, has_placeholder, substitute_template, template_to_string,
+        self, Format, Loader, Mode, Options, PathPlaceholder, PathPlaceholders, PathTemplate,
+        Platform, PluginData, has_placeholder, substitute_template, template_to_string,
     },
     css_parser,
     fs::{EntryKind, Fs},
@@ -1900,6 +1900,37 @@ fn relative_path_suggestion(
         })
 }
 
+fn report_explicit_phase_import(
+    log: &Log,
+    tracker: &mut LineColumnTracker,
+    range: Range,
+    phase: crate::internal::ast::ImportPhase,
+    is_external: bool,
+    format: Format,
+) {
+    let phase_text = match phase {
+        crate::internal::ast::ImportPhase::Defer => "deferred",
+        crate::internal::ast::ImportPhase::Source => "source phase",
+        crate::internal::ast::ImportPhase::Evaluation => return,
+    };
+    if format != Format::EsModule {
+        log.add_error(
+            Some(tracker),
+            range,
+            format!(
+                "Bundling {phase_text} imports with the {:?} output format is not supported",
+                format.as_str()
+            ),
+        );
+    } else if !is_external {
+        log.add_error(
+            Some(tracker),
+            range,
+            format!("Bundling with {phase_text} imports is not supported unless they are external"),
+        );
+    }
+}
+
 pub fn resolve_import_records(
     log: &Log,
     file_system: &dyn Fs,
@@ -1961,6 +1992,14 @@ fn resolve_import_records_from_directory(
             continue;
         }
         if let Some(pattern) = &record.glob_pattern {
+            report_explicit_phase_import(
+                log,
+                &mut tracker,
+                record.range,
+                record.phase,
+                false,
+                options.output_format,
+            );
             let pattern_text = crate::internal::helpers::glob_pattern_to_string(&pattern.parts);
             let call = match pattern.kind {
                 ImportKind::Require => "require",
@@ -2163,6 +2202,14 @@ fn resolve_import_records_from_directory(
             }
             continue;
         };
+        report_explicit_phase_import(
+            log,
+            &mut tracker,
+            record.range,
+            record.phase,
+            resolve_result.path_pair.is_external,
+            options.output_format,
+        );
         if resolve_result.path_pair.is_external {
             record.path = rewrite_external_path(
                 file_system,
@@ -4484,6 +4531,17 @@ mod tests {
                         | "TestNoOverwriteInputFileError"
                         | "TestBadImportErrorMessageWithHandlesImportErrorsFlag"
                         | "TestErrorMessageCrashStdinIssue2913"
+                        | "TestTopLevelAwaitForbiddenRequire"
+                        | "TestImportDeferExternalCommonJS"
+                        | "TestImportDeferExternalIIFE"
+                        | "TestImportDeferInternalESM"
+                        | "TestImportDeferInternalCommonJS"
+                        | "TestImportDeferInternalIIFE"
+                        | "TestImportSourceExternalCommonJS"
+                        | "TestImportSourceExternalIIFE"
+                        | "TestImportSourceInternalESM"
+                        | "TestImportSourceInternalCommonJS"
+                        | "TestImportSourceInternalIIFE"
                         | "TestTSImportMissingES6"
                 )
             );
@@ -4500,7 +4558,8 @@ mod tests {
                     && case["suite"] != "css"
                     && case["suite"] != "splitting"
                     && case["suite"] != "yarnpnp"
-                    && case["suite"] != "glob")
+                    && case["suite"] != "glob"
+                    && !(case["suite"] == "importphase" && is_supported_diagnostic_only_case))
                 || ((!case["expected_scan_log"]
                     .as_str()
                     .unwrap_or_default()
@@ -5235,7 +5294,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 802 },
+            if selected_test.is_some() { 1 } else { 813 },
             "upstream basic bundler corpus case count"
         );
     }
