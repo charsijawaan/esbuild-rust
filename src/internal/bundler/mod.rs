@@ -399,6 +399,32 @@ pub fn bundle_javascript(
         return CompiledBundle::default();
     }
     let compiled = compile_javascript_bundle(file_system, &scanned, options, unique_key_prefix);
+    if !options.write_to_stdout && !options.allow_overwrite {
+        for output in &compiled.output_files {
+            if let Some(input) = scanned.files.iter().find(|file| {
+                file.input_file.source.key_path.namespace == "file"
+                    && file.input_file.source.key_path.text == output.abs_path
+            }) {
+                let hint = match logger::api_kind() {
+                    logger::ApiKind::Cli => " (use \"--allow-overwrite\" to allow this)",
+                    logger::ApiKind::Js => " (use \"allowOverwrite: true\" to allow this)",
+                    logger::ApiKind::Go => " (use \"AllowOverwrite: true\" to allow this)",
+                };
+                log.add_error(
+                    None,
+                    Range::default(),
+                    format!(
+                        "Refusing to overwrite input file {:?}{hint}",
+                        input
+                            .input_file
+                            .source
+                            .pretty_paths
+                            .select(options.log_path_style)
+                    ),
+                );
+            }
+        }
+    }
     for (source_index, issue) in &compiled.scan_result.import_issues {
         let diagnostic_source_index = if issue.result.kind == linker::MatchImportKind::NoMatch {
             issue.result.diagnostic_source_index
@@ -4455,6 +4481,7 @@ mod tests {
                         | "TestExternalModuleExclusionScopedPackage"
                         | "TestRelativeEntryPointError"
                         | "TestImportRelativeAsPackage"
+                        | "TestNoOverwriteInputFileError"
                         | "TestTSImportMissingES6"
                 )
             );
@@ -5177,7 +5204,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 799 },
+            if selected_test.is_some() { 1 } else { 800 },
             "upstream basic bundler corpus case count"
         );
     }
