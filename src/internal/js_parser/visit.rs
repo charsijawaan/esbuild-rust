@@ -15,10 +15,10 @@ use crate::internal::{
         AnnotationExpr, AnnotationFlags, Arg, ArrowExpr, AssignTarget, BinaryExpr, Binding,
         BindingData, BlockStmt, CallExpr, CallKind, Class, Decl, DotExpr, Expr, ExprData, ExprStmt,
         ForStmt, Function, FunctionBody, FunctionExpr, IdentifierBinding, IdentifierExpr, IfExpr,
-        IfStmt, LabelStmt, LocalKind, LocalStmt, NewExpr, ObjectExpr, OpCode, OptionalChain,
-        PrimitiveType, Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind, ScopeRef,
-        Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr, ThrowStmt,
-        UnaryExpr, assign, convert_binding_to_expr, for_each_identifier_binding,
+        IfStmt, IndexExpr, LabelStmt, LocalKind, LocalStmt, NewExpr, ObjectExpr, OpCode,
+        OptionalChain, PrimitiveType, Property, PropertyFlags, PropertyKind, ReturnStmt, ScopeKind,
+        ScopeRef, Stmt, StmtData, StmtsCanBeRemovedIfUnusedFlags, StrictModeKind, StringExpr,
+        ThrowStmt, UnaryExpr, assign, convert_binding_to_expr, for_each_identifier_binding,
         generate_non_unique_name_from_path, inline_primitives_into_template,
         inline_spreads_of_array_literals, is_identifier, is_identifier_es5_and_es_next,
         is_primitive_literal, join_with_comma, known_primitive_type, make_helper_context,
@@ -157,6 +157,26 @@ fn capture_value_with_possible_side_effects(
             loc,
         },
     )
+}
+
+fn lower_nullish_coalescing(core: &mut ParserCore, loc: Loc, left: Expr, right: Expr) -> Expr {
+    let ([left_for_test, left_for_result], wrapper) =
+        capture_value_with_possible_side_effects(core, loc, left);
+    wrapper.wrap(Expr::new(
+        loc,
+        ExprData::If(IfExpr {
+            test: Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: left_for_test,
+                    right: Expr::new(loc, ExprData::Null),
+                    op: OpCode::BinaryLooseNotEqual,
+                }),
+            ),
+            yes: left_for_result,
+            no: right,
+        }),
+    ))
 }
 
 fn lowered_private_index(
@@ -591,6 +611,94 @@ fn lower_exponentiation_assignment_operator(
     }
 }
 
+fn lower_logical_assignment_operator(
+    core: &mut ParserCore,
+    loc: Loc,
+    binary: &mut BinaryExpr,
+) -> Option<ExprData> {
+    if !core
+        .options
+        .unsupported_js_features
+        .contains(JsFeature::LOGICAL_ASSIGNMENT)
+    {
+        return None;
+    }
+    let op = match binary.op {
+        OpCode::BinaryLogicalAndAssign => OpCode::BinaryLogicalAnd,
+        OpCode::BinaryLogicalOrAssign => OpCode::BinaryLogicalOr,
+        OpCode::BinaryNullishCoalescingAssign => OpCode::BinaryNullishCoalescing,
+        _ => return None,
+    };
+    let left = std::mem::take(&mut binary.left);
+    let right = std::mem::take(&mut binary.right);
+    let (get, set, target_wrapper, index_wrapper) = match left.data.as_deref() {
+        Some(ExprData::Identifier(identifier)) => {
+            core.record_usage(identifier.reference);
+            (
+                temp_identifier(left.loc, identifier.reference),
+                left,
+                CaptureValueWrapper::default(),
+                CaptureValueWrapper::default(),
+            )
+        }
+        Some(ExprData::Dot(dot)) if dot.optional_chain == OptionalChain::None => {
+            let ([target_for_get, target_for_set], wrapper) =
+                capture_value_with_possible_side_effects(core, left.loc, dot.target.clone());
+            let mut get = dot.clone();
+            get.target = target_for_get;
+            let mut set = dot.clone();
+            set.target = target_for_set;
+            (
+                Expr::new(left.loc, ExprData::Dot(get)),
+                Expr::new(left.loc, ExprData::Dot(set)),
+                wrapper,
+                CaptureValueWrapper::default(),
+            )
+        }
+        Some(ExprData::Index(index)) if index.optional_chain == OptionalChain::None => {
+            let ([target_for_get, target_for_set], target_wrapper) =
+                capture_value_with_possible_side_effects(core, left.loc, index.target.clone());
+            let ([index_for_get, index_for_set], index_wrapper) =
+                capture_value_with_possible_side_effects(core, left.loc, index.index.clone());
+            let mut get = index.clone();
+            get.target = target_for_get;
+            get.index = index_for_get;
+            let mut set = index.clone();
+            set.target = target_for_set;
+            set.index = index_for_set;
+            (
+                Expr::new(left.loc, ExprData::Index(get)),
+                Expr::new(left.loc, ExprData::Index(set)),
+                target_wrapper,
+                index_wrapper,
+            )
+        }
+        _ => return left.data.map(|data| *data),
+    };
+    let right = assign(set, right);
+    let lowered = if op == OpCode::BinaryNullishCoalescing
+        && core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::NULLISH_COALESCING)
+    {
+        lower_nullish_coalescing(core, loc, get, right)
+    } else {
+        Expr::new(
+            loc,
+            ExprData::Binary(BinaryExpr {
+                left: get,
+                right,
+                op,
+            }),
+        )
+    };
+    target_wrapper
+        .wrap(index_wrapper.wrap(lowered))
+        .data
+        .map(|data| *data)
+}
+
 fn lower_template_literal(
     core: &mut ParserCore,
     loc: Loc,
@@ -1011,6 +1119,50 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     }
                 }
             }
+            Some(StmtData::ExportStar(export)) => {
+                core.record_declared_symbol(export.namespace_ref);
+                if let Some(scope) = &core.current_scope {
+                    let mut scope = scope
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !scope.generated.contains(&export.namespace_ref) {
+                        scope.generated.push(export.namespace_ref);
+                    }
+                }
+                if core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::EXPORT_STAR_AS)
+                    && let Some(alias) = export.alias.clone()
+                {
+                    core.record_usage(export.namespace_ref);
+                    let namespace_ref = export.namespace_ref;
+                    let import_record_index = export.import_record_index;
+                    statement.data = Some(Box::new(StmtData::Import(
+                        crate::internal::js_ast::ImportStmt {
+                            star_name_loc: Some(alias.loc),
+                            namespace_ref,
+                            import_record_index,
+                            ..crate::internal::js_ast::ImportStmt::default()
+                        },
+                    )));
+                    append_to_statement.push(Stmt::new(
+                        statement.loc,
+                        StmtData::ExportClause(crate::internal::js_ast::ExportClauseStmt {
+                            items: vec![crate::internal::js_ast::ClauseItem {
+                                alias: alias.original_name.clone(),
+                                original_name: alias.original_name,
+                                alias_loc: alias.loc,
+                                name: crate::internal::ast::LocRef {
+                                    loc: alias.loc,
+                                    reference: namespace_ref,
+                                },
+                            }],
+                            is_single_line: true,
+                        }),
+                    ));
+                }
+            }
             Some(StmtData::ExportEquals(export)) => {
                 core.record_usage(core.module_ref);
                 visit_expr(core, &mut export.value, resolve_identifiers);
@@ -1187,23 +1339,40 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     && class_private_static_members_need_lowering(core, &class.class);
                 let lower_public_static = class.class.extends_or_nil.data.is_some()
                     && class_public_static_fields_need_lowering(core, &class.class);
-                let lower_static_members = lower_private_static || lower_public_static;
+                let (_, lower_static_due_to_private_members) =
+                    class_private_member_lowering_flags(core, &class.class);
+                let lower_public_static_due_to_private_members = lower_static_due_to_private_members
+                    && class.class.properties.iter().any(|property| {
+                        property.kind == PropertyKind::Field
+                            && property.flags.contains(PropertyFlags::IS_STATIC)
+                            && !matches!(
+                                property.key.data.as_deref(),
+                                Some(ExprData::PrivateIdentifier(_))
+                            )
+                    });
+                let lower_static_members = lower_private_static
+                    || lower_public_static
+                    || lower_public_static_due_to_private_members;
                 let has_experimental_class_decorators =
                     core.options.ts.config.experimental_decorators
                         == crate::internal::config::MaybeBool::True
                         && !class.class.decorators.is_empty();
-                let convert_to_expression = (is_top_level_scope
+                let convert_to_expression_before_visit = (is_top_level_scope
                     && core.options.mode == crate::internal::config::Mode::Bundle)
                     || has_experimental_class_decorators
                     || class.class.should_lower_standard_decorators
-                    || lower_static_members;
+                    || lower_private_static
+                    || lower_public_static;
                 let (inner_name, _) = visit_class(
                     core,
                     &mut class.class,
                     resolve_identifiers,
-                    !convert_to_expression,
+                    !(convert_to_expression_before_visit
+                        || lower_public_static_due_to_private_members),
                     false,
                 );
+                let convert_to_expression = convert_to_expression_before_visit
+                    || (lower_public_static_due_to_private_members && inner_name.is_some());
                 if convert_to_expression && let Some(name) = class.class.name {
                     let is_export = class.is_export;
                     let local_kind = if is_top_level_scope
@@ -4523,6 +4692,7 @@ fn visit_class(
     capture_private_class_expression: bool,
 ) -> (Option<Ref>, Option<Ref>) {
     let class_post_start = core.class_post_statements.len();
+    let top_level_temp_start = core.top_level_temp_refs.len();
     lower_type_script_constructor_parameter_fields(core, class);
     let outer_class_name = class.name.and_then(|name| {
         (!ParserCore::is_stored_name_ref(name.reference)).then_some(name.reference)
@@ -4748,6 +4918,8 @@ fn visit_class(
     let class_super_home_ref = private_class_capture
         .or(inner_class_name)
         .or(outer_class_name);
+    let (_, lower_all_static_fields_due_to_private_members) =
+        class_private_member_lowering_flags(core, class);
     for property in &mut class.properties {
         if property.flags.contains(PropertyFlags::IS_COMPUTED) {
             visit_expr(core, &mut property.key, resolve_identifiers);
@@ -4771,10 +4943,11 @@ fn visit_class(
         );
         let lower_static_field = property.kind == PropertyKind::Field
             && property.flags.contains(PropertyFlags::IS_STATIC)
-            && core
-                .options
-                .unsupported_js_features
-                .contains(JsFeature::CLASS_STATIC_FIELD);
+            && (lower_all_static_fields_due_to_private_members
+                || core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::CLASS_STATIC_FIELD));
         let old_super_receiver_is_home =
             std::mem::replace(&mut core.visit_super_receiver_is_home, lower_static_field);
         let old_lower_super_property_access = std::mem::replace(
@@ -4832,17 +5005,38 @@ fn visit_class(
             core.visit_this_is_nested = old_this_is_nested;
         }
     }
+    let used_inner_name = inner_class_name.filter(|inner| {
+        core.symbols[usize::try_from(inner.inner_index).expect("symbol index")].use_count_estimate
+            != 0
+    });
     move_type_script_parameter_property_constructor_to_front(class);
     preserve_type_script_omitted_computed_field_keys(core, class, resolve_identifiers);
     lower_standard_decorators(core, class, outer_class_name);
-    let decorator_keys = prepare_type_script_computed_property_keys(core, class);
+    let (lower_public_instance_fields, lower_public_static_fields) =
+        class_private_member_lowering_flags(core, class);
+    let lower_public_instance_fields = lower_public_instance_fields
+        || core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::CLASS_FIELD);
+    let lower_public_static_fields = lower_public_static_fields
+        || core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::CLASS_STATIC_FIELD);
+    let decorator_keys = prepare_type_script_computed_property_keys(
+        core,
+        class,
+        lower_public_instance_fields,
+        lower_public_static_fields,
+    );
     lower_type_script_experimental_decorators(core, class, outer_class_name, &decorator_keys);
     let constructor_was_present = class_constructor_index(class).is_some();
     lower_private_members(
         core,
         class,
         private_class_capture
-            .or(inner_class_name)
+            .or(used_inner_name)
             .or(outer_class_name),
         constructor_was_present,
     );
@@ -4850,9 +5044,11 @@ fn visit_class(
         core,
         class,
         private_class_capture
-            .or(inner_class_name)
+            .or(used_inner_name)
             .or(outer_class_name),
         constructor_was_present,
+        lower_public_instance_fields,
+        lower_public_static_fields,
     );
     lower_type_script_static_field_assignments(core, class, outer_class_name, class_post_start);
     lower_type_script_class_field_assignments(core, class, constructor_was_present);
@@ -4869,10 +5065,6 @@ fn visit_class(
     }
     core.pop_scope();
     core.pop_scope();
-    let used_inner_name = inner_class_name.filter(|inner| {
-        core.symbols[usize::try_from(inner.inner_index).expect("symbol index")].use_count_estimate
-            != 0
-    });
     if core.options.minify_syntax && outer_class_name.is_none() && used_inner_name.is_none() {
         class.name = None;
     }
@@ -4888,6 +5080,8 @@ fn visit_class(
     } else {
         used_inner_name
     };
+    core.top_level_temp_refs[top_level_temp_start..]
+        .sort_by_key(|reference| !core.generated_top_level_temp_refs.contains(reference));
     (inner_name, private_class_capture)
 }
 
@@ -5212,6 +5406,37 @@ fn class_private_members_need_lowering(core: &ParserCore, class: &Class) -> bool
     })
 }
 
+fn class_private_member_lowering_flags(core: &ParserCore, class: &Class) -> (bool, bool) {
+    let mut lower_instance_fields = false;
+    let mut lower_static_fields = false;
+    for property in &class.properties {
+        let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
+            continue;
+        };
+        let reference = core.follow_symbol_link(private.reference);
+        let Some(symbol) = core.symbols.get(reference.inner_index as usize) else {
+            continue;
+        };
+        let needs_lowering = core
+            .options
+            .unsupported_js_features
+            .contains(crate::internal::compat::symbol_feature(symbol.kind))
+            || core
+                .lower_all_of_these_private_names
+                .get(&symbol.original_name)
+                .copied()
+                .unwrap_or(false);
+        if !needs_lowering {
+            continue;
+        }
+        lower_static_fields = true;
+        if !property.flags.contains(PropertyFlags::IS_STATIC) {
+            lower_instance_fields = true;
+        }
+    }
+    (lower_instance_fields, lower_static_fields)
+}
+
 fn class_static_blocks_can_be_lowered(core: &ParserCore, class: &Class) -> bool {
     core.options
         .unsupported_js_features
@@ -5467,6 +5692,30 @@ fn rewrite_lowered_class_static_expression(
             rewrite_lowered_class_static_expression(core, &mut index.index, class_ref);
         }
         Some(ExprData::Call(call)) => {
+            // Private method calls preserve their receiver with a temporary. If the
+            // receiver was `this`, that temporary wasn't needed while the call was
+            // still inside the class. It is needed after a static field initializer
+            // is moved outside and `this` becomes the captured class reference.
+            if let Some(ExprData::Dot(dot)) = call.target.data.as_deref_mut()
+                && dot.name == "call"
+                && let Some(ExprData::Call(private_method)) = dot.target.data.as_deref_mut()
+                && is_identifier_named(core, &private_method.target, "__privateMethod")
+                && private_method.args.first().is_some_and(|argument| {
+                    matches!(argument.data.as_deref(), Some(ExprData::This))
+                })
+                && call.args.first().is_some_and(|argument| {
+                    matches!(argument.data.as_deref(), Some(ExprData::This))
+                })
+            {
+                let reference = core.generate_temp_ref(true);
+                core.record_usage(reference);
+                core.record_usage(reference);
+                private_method.args[0] = assign(
+                    temp_identifier(expression.loc, reference),
+                    class_capture_identifier(core, expression.loc, class_ref),
+                );
+                call.args[0] = temp_identifier(expression.loc, reference);
+            }
             rewrite_lowered_class_static_expression(core, &mut call.target, class_ref);
             for argument in &mut call.args {
                 rewrite_lowered_class_static_expression(core, argument, class_ref);
@@ -6047,8 +6296,14 @@ fn computed_key_temp(core: &mut ParserCore, loc: Loc, reference: Ref) -> Expr {
 fn prepare_type_script_computed_property_keys(
     core: &mut ParserCore,
     class: &mut Class,
+    lower_instance_fields: bool,
+    lower_static_fields: bool,
 ) -> Vec<Option<Expr>> {
-    if core.options.ts.config.experimental_decorators != crate::internal::config::MaybeBool::True {
+    let experimental_decorators =
+        core.options.ts.config.experimental_decorators == crate::internal::config::MaybeBool::True;
+    if !experimental_decorators
+        && !(class.use_define_for_class_fields && (lower_instance_fields || lower_static_fields))
+    {
         return vec![None; class.properties.len()];
     }
 
@@ -6058,12 +6313,18 @@ fn prepare_type_script_computed_property_keys(
         .map(|property| {
             property.flags.contains(PropertyFlags::IS_COMPUTED)
                 && if class.use_define_for_class_fields {
+                    let is_static = property.flags.contains(PropertyFlags::IS_STATIC);
                     !property.decorators.is_empty()
                         || (property.kind == PropertyKind::Field
-                            && core
-                                .options
-                                .unsupported_js_features
-                                .contains(JsFeature::CLASS_FIELD))
+                            && !matches!(
+                                property.key.data.as_deref(),
+                                Some(ExprData::PrivateIdentifier(_))
+                            )
+                            && if is_static {
+                                lower_static_fields
+                            } else {
+                                lower_instance_fields
+                            })
                 } else {
                     !property.decorators.is_empty()
                         || property.initializer_or_nil.data.is_some()
@@ -6142,18 +6403,113 @@ fn prepare_type_script_computed_property_keys(
     let mut next_temp = 0usize;
     let mut decorator_keys = vec![None; class.properties.len()];
     if class.use_define_for_class_fields {
-        for (index, property) in class.properties.iter_mut().enumerate() {
-            if !needs_temp[index] {
+        let mut property_temp_refs = vec![None; class.properties.len()];
+        for (index, &needs_temp) in needs_temp.iter().enumerate() {
+            if needs_temp {
+                property_temp_refs[index] = Some(temp_refs[next_temp]);
+                next_temp += 1;
+            }
+        }
+
+        let mut pending = Expr::default();
+        let mut next_retained_computed: Option<usize> = None;
+        for index in (0..class.properties.len()).rev() {
+            if !class.properties[index]
+                .flags
+                .contains(PropertyFlags::IS_COMPUTED)
+                || class.properties[index].kind == PropertyKind::DeclareOrAbstract
+            {
                 continue;
             }
-            let reference = temp_refs[next_temp];
-            next_temp += 1;
-            let loc = property.key.loc;
-            property.key = assign(
+
+            let is_static = class.properties[index]
+                .flags
+                .contains(PropertyFlags::IS_STATIC);
+            let must_move = class.properties[index].kind == PropertyKind::Field
+                && !matches!(
+                    class.properties[index].key.data.as_deref(),
+                    Some(ExprData::PrivateIdentifier(_))
+                )
+                && if is_static {
+                    lower_static_fields
+                } else {
+                    lower_instance_fields
+                };
+
+            if must_move {
+                let reference = property_temp_refs[index].expect("moved computed field temp");
+                let property = &mut class.properties[index];
+                let loc = property.key.loc;
+                let evaluation = assign(
+                    computed_key_temp(core, loc, reference),
+                    std::mem::take(&mut property.key),
+                );
+                property.key = computed_key_temp(core, loc, reference);
+                if !property.decorators.is_empty() {
+                    decorator_keys[index] = Some(computed_key_temp(core, loc, reference));
+                }
+                if let Some(next_index) = next_retained_computed {
+                    let next_property = &mut class.properties[next_index];
+                    next_property.key =
+                        join_with_comma(evaluation, std::mem::take(&mut next_property.key));
+                } else {
+                    pending = join_with_comma(evaluation, pending);
+                }
+                continue;
+            }
+
+            let mut key_reference = None;
+            if let Some(reference) = property_temp_refs[index] {
+                let property = &mut class.properties[index];
+                let loc = property.key.loc;
+                property.key = assign(
+                    computed_key_temp(core, loc, reference),
+                    std::mem::take(&mut property.key),
+                );
+                decorator_keys[index] = Some(computed_key_temp(core, loc, reference));
+                key_reference = Some(reference);
+            }
+            if pending.data.is_some() {
+                let property = &mut class.properties[index];
+                let loc = property.key.loc;
+                let reference = key_reference.unwrap_or_else(|| {
+                    let reference = generate_class_computed_key_temp(core, loc);
+                    property.key = assign(
+                        computed_key_temp(core, loc, reference),
+                        std::mem::take(&mut property.key),
+                    );
+                    reference
+                });
+                property.key = join_with_comma(
+                    join_with_comma(
+                        std::mem::take(&mut property.key),
+                        std::mem::take(&mut pending),
+                    ),
+                    computed_key_temp(core, loc, reference),
+                );
+            }
+            next_retained_computed = Some(index);
+        }
+
+        if pending.data.is_some() && class.extends_or_nil.data.is_some() {
+            let loc = class.extends_or_nil.loc;
+            let reference = generate_class_computed_key_temp(core, loc);
+            let extends = std::mem::take(&mut class.extends_or_nil);
+            class.extends_or_nil = join_with_comma(
+                join_with_comma(
+                    assign(computed_key_temp(core, loc, reference), extends),
+                    pending,
+                ),
                 computed_key_temp(core, loc, reference),
-                std::mem::take(&mut property.key),
             );
-            decorator_keys[index] = Some(computed_key_temp(core, loc, reference));
+        } else if pending.data.is_some() {
+            core.class_pre_statements.push(Stmt::new(
+                class.body_loc,
+                StmtData::Expr(ExprStmt {
+                    value: pending,
+                    ..ExprStmt::default()
+                }),
+            ));
         }
         return decorator_keys;
     }
@@ -6214,19 +6570,13 @@ fn lower_unsupported_public_class_fields(
     class: &mut Class,
     class_ref: Option<Ref>,
     constructor_was_present: bool,
+    lower_instance: bool,
+    lower_static: bool,
 ) {
     if !class.use_define_for_class_fields {
         return;
     }
 
-    let lower_instance = core
-        .options
-        .unsupported_js_features
-        .contains(JsFeature::CLASS_FIELD);
-    let lower_static = core
-        .options
-        .unsupported_js_features
-        .contains(JsFeature::CLASS_STATIC_FIELD);
     if !lower_instance && !lower_static {
         return;
     }
@@ -6236,13 +6586,13 @@ fn lower_unsupported_public_class_fields(
     let mut retained = Vec::with_capacity(class.properties.len());
     for mut property in std::mem::take(&mut class.properties) {
         let is_static = property.flags.contains(PropertyFlags::IS_STATIC);
+        let is_private = matches!(
+            property.key.data.as_deref(),
+            Some(ExprData::PrivateIdentifier(_))
+        );
         if property.kind != PropertyKind::Field
             || (is_static && !lower_static)
             || (!is_static && !lower_instance)
-            || matches!(
-                property.key.data.as_deref(),
-                Some(ExprData::PrivateIdentifier(_))
-            )
         {
             retained.push(property);
             continue;
@@ -6250,19 +6600,7 @@ fn lower_unsupported_public_class_fields(
 
         let loc = property.loc;
         let key = if property.flags.contains(PropertyFlags::IS_COMPUTED) {
-            let reference = generate_class_computed_key_temp(core, loc);
-            let assignment = assign(
-                computed_key_temp(core, loc, reference),
-                std::mem::take(&mut property.key),
-            );
-            core.class_pre_statements.push(Stmt::new(
-                loc,
-                StmtData::Expr(ExprStmt {
-                    value: assignment,
-                    ..ExprStmt::default()
-                }),
-            ));
-            computed_key_temp(core, loc, reference)
+            std::mem::take(&mut property.key)
         } else {
             property.key.clone()
         };
@@ -6275,11 +6613,59 @@ fn lower_unsupported_public_class_fields(
         } else {
             Expr::new(loc, ExprData::This)
         };
+        if is_private {
+            let mut initializer = if property.initializer_or_nil.data.is_some() {
+                std::mem::take(&mut property.initializer_or_nil)
+            } else if property.value_or_nil.data.is_some() {
+                std::mem::take(&mut property.value_or_nil)
+            } else {
+                Expr::new(loc, ExprData::Undefined)
+            };
+            if is_static && let Some(class_ref) = class_ref {
+                rewrite_lowered_class_static_expression(core, &mut initializer, class_ref);
+            }
+            let assignment = assign(
+                Expr::new(
+                    loc,
+                    ExprData::Index(IndexExpr {
+                        target,
+                        index: key,
+                        ..IndexExpr::default()
+                    }),
+                ),
+                initializer,
+            );
+            let statement = Stmt::new(
+                loc,
+                StmtData::Expr(ExprStmt {
+                    value: assignment,
+                    ..ExprStmt::default()
+                }),
+            );
+            retained.push(property);
+            if is_static {
+                static_initializers.push(statement);
+            } else {
+                instance_initializers.push(statement);
+            }
+            continue;
+        }
         let mut args = vec![target, key];
-        if property.initializer_or_nil.data.is_some() {
-            args.push(std::mem::take(&mut property.initializer_or_nil));
+        let mut initializer = if property.initializer_or_nil.data.is_some() {
+            std::mem::take(&mut property.initializer_or_nil)
         } else if property.value_or_nil.data.is_some() {
-            args.push(std::mem::take(&mut property.value_or_nil));
+            std::mem::take(&mut property.value_or_nil)
+        } else {
+            Expr::default()
+        };
+        if is_static
+            && initializer.data.is_some()
+            && let Some(class_ref) = class_ref
+        {
+            rewrite_lowered_class_static_expression(core, &mut initializer, class_ref);
+        }
+        if initializer.data.is_some() {
+            args.push(initializer);
         }
         let statement = Stmt::new(
             loc,
@@ -6562,7 +6948,10 @@ fn rewrite_type_script_auto_accessors(core: &mut ParserCore, class: &mut Class) 
 
         let storage_name = match property.key.data.as_deref() {
             Some(ExprData::String(name)) => String::from_utf16_lossy(&name.value),
-            Some(ExprData::PrivateIdentifier(private)) => symbol_name(core, private.reference),
+            Some(ExprData::PrivateIdentifier(private)) => {
+                let name = symbol_name(core, private.reference);
+                format!("_{}", name.strip_prefix('#').unwrap_or(&name))
+            }
             _ => {
                 properties.push(property);
                 continue;
@@ -9398,6 +9787,20 @@ fn visit_expr_with_target_and_context(
             core.class_name_hint = old_class_name_hint;
             core.is_control_flow_dead = old_control_flow_dead;
             keep_inferred_name(core, &mut binary.right, inferred_name);
+            if binary.op == OpCode::BinaryIn
+                && let Some(ExprData::PrivateIdentifier(private)) = binary.left.data.as_deref()
+                && let Some(storage) = lowered_private_storage_ref(core, private.reference)
+            {
+                let storage = private_storage_identifier(core, expression.loc, storage.storage);
+                let target = std::mem::take(&mut binary.right);
+                if let Some(lowered) = core
+                    .call_runtime(expression.loc, "__privateIn", vec![storage, target])
+                    .data
+                {
+                    *data = *lowered;
+                }
+                return;
+            }
             if let Some(key) = super_key {
                 let right = std::mem::take(&mut binary.right);
                 let lowered = if binary.op == OpCode::BinaryAssign {
@@ -9434,6 +9837,24 @@ fn visit_expr_with_target_and_context(
             }
             if let Some(lowered) = lower_private_assignment(core, expression.loc, binary) {
                 *data = lowered;
+                return;
+            }
+            if let Some(lowered) = lower_logical_assignment_operator(core, expression.loc, binary) {
+                *data = lowered;
+                return;
+            }
+            if binary.op == OpCode::BinaryNullishCoalescing
+                && core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::NULLISH_COALESCING)
+            {
+                let left = std::mem::take(&mut binary.left);
+                let right = std::mem::take(&mut binary.right);
+                let lowered = lower_nullish_coalescing(core, expression.loc, left, right);
+                if let Some(lowered) = lowered.data {
+                    *data = *lowered;
+                }
                 return;
             }
             if binary.op == OpCode::BinaryPowerAssign
@@ -11283,6 +11704,16 @@ fn visit_expr_with_target_and_context(
         | ExprData::RequireResolveString(_)
         | ExprData::ImportString(_) => {}
         ExprData::This => {
+            if core.visit_super_receiver_is_home
+                && let Some(reference) = core.visit_super_home_ref
+            {
+                core.record_usage(reference);
+                *data = ExprData::Identifier(IdentifierExpr {
+                    reference,
+                    ..IdentifierExpr::default()
+                });
+                return;
+            }
             for uses_this in &mut core.async_arrow_this_usage {
                 *uses_this = true;
             }

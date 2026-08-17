@@ -4237,7 +4237,14 @@ mod tests {
                         ]
                         && case["upstream_test"] == "TestTSNamespaceKeepNamesTargetES2015")
                     && !(option_names == ["AbsOutputFile", "Mode", "UnsupportedJSFeatures"]
-                        && case["upstream_test"] == "TestStaticClassBlockES2021")
+                        && matches!(
+                            case["upstream_test"].as_str(),
+                            Some(
+                                "TestTSDeclareClassFields"
+                                    | "TestStaticClassBlockES2021"
+                                    | "TestLowerNullishCoalescingAssignmentIssue1493"
+                            )
+                        ))
                     && !(option_names
                         == ["AbsOutputFile", "MinifySyntax", "UnsupportedJSFeatures"]
                         && case["upstream_test"] == "TestTSMinifyDerivedClass")
@@ -4269,6 +4276,39 @@ mod tests {
                                     | "TestTSLowerObjectRest2018NoBundle"
                                     | "TestLowerTemplateObject"
                                     | "TestLowerConstIssue4448"
+                                    | "TestTSComputedClassFieldUseDefineTrueLower"
+                                    | "TestLowerPrivateClassFieldOrder"
+                                    | "TestLowerPrivateClassMethodOrder"
+                                    | "TestLowerPrivateClassAccessorOrder"
+                                    | "TestLowerPrivateClassStaticFieldOrder"
+                                    | "TestLowerPrivateClassStaticMethodOrder"
+                                    | "TestLowerPrivateClassStaticAccessorOrder"
+                                    | "TestLowerPrivateClassBrandCheckUnsupported"
+                                    | "TestClassSuperThisIssue242NoBundle"
+                                    | "TestLowerExportStarAsNameCollisionNoBundle"
+                            )
+                        ))
+                    && !(option_names
+                        == [
+                            "AbsOutputFile",
+                            "ExternalSettings",
+                            "Mode",
+                            "UnsupportedJSFeatures",
+                        ]
+                        && case["upstream_test"] == "TestLowerExportStarAsNameCollision")
+                    && !(option_names
+                        == [
+                            "AbsOutputDir",
+                            "MinifyIdentifiers",
+                            "MinifySyntax",
+                            "MinifyWhitespace",
+                            "UnsupportedJSFeatures",
+                        ]
+                        && matches!(
+                            case["upstream_test"].as_str(),
+                            Some(
+                                "TestTSMinifyNamespaceNoLogicalAssignment"
+                                    | "TestTSMinifyNestedEnumNoLogicalAssignment"
                             )
                         ))
                     && option_names != ["AbsOutputDir", "MinifyIdentifiers"]
@@ -4346,7 +4386,9 @@ mod tests {
                             "OutputFormat",
                         ])
             {
-                continue;
+                if selected_test.is_none() {
+                    continue;
+                }
             }
             matched += 1;
 
@@ -4648,7 +4690,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 733 },
+            if selected_test.is_some() { 1 } else { 748 },
             "upstream basic bundler corpus case count"
         );
     }

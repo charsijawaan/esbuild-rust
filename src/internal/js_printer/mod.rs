@@ -2427,6 +2427,7 @@ impl Printer<'_> {
             if needs_indent {
                 self.print_indent();
             }
+            self.print_expr_comments_at_loc(property.loc);
             if self.options.minify_whitespace && !property.decorators.is_empty() {
                 self.output.push(b' ');
             }
@@ -2484,6 +2485,7 @@ impl Printer<'_> {
             self.output.push(b';');
             self.print_newline();
         }
+        self.print_expr_comments_after_close_token_at_loc(class.close_brace_loc);
         self.indent -= 1;
         if self.options.minify_whitespace && self.output.last() == Some(&b';') {
             self.output.pop();

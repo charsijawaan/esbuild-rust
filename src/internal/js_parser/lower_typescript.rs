@@ -509,7 +509,12 @@ fn namespace_initial_value(
             identifier(loc, enclosing_namespace),
             symbol_name(core, name_ref),
         );
-        if core.options.minify_syntax {
+        if core.options.minify_syntax
+            && !core
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::LOGICAL_ASSIGNMENT)
+        {
             core.record_usage(enclosing_namespace);
             core.record_usage(name_ref);
             assign(
@@ -545,7 +550,12 @@ fn namespace_initial_value(
                 ),
             )
         }
-    } else if core.options.minify_syntax {
+    } else if core.options.minify_syntax
+        && !core
+            .options
+            .unsupported_js_features
+            .contains(JsFeature::LOGICAL_ASSIGNMENT)
+    {
         core.record_usage(name_ref);
         Expr::new(
             loc,

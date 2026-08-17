@@ -104,7 +104,7 @@ pub(crate) fn parse_class_prefix(core: &mut ParserCore, lexer: &mut Lexer) -> Op
             has_constructor = true;
         }
     }
-    let close_brace_loc = lexer.loc();
+    let close_brace_loc = core.save_expr_comments_here(lexer);
     lexer.expect(Token::CloseBrace);
     core.pop_scope();
     core.pop_scope();
@@ -176,7 +176,7 @@ fn parse_class_property(
     class_has_extends: bool,
     has_decorators: bool,
 ) -> Option<Property> {
-    let start_loc = lexer.loc();
+    let start_loc = core.save_expr_comments_here(lexer);
     let mut is_static = false;
     let mut preconsumed_static = None;
     if lexer.is_contextual_keyword(b"static") {

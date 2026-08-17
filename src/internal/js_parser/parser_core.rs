@@ -75,9 +75,10 @@ pub(crate) struct ParserCore {
     pub(crate) local_type_names: HashSet<String>,
     pub(crate) generated_injected_defines: HashMap<u32, Ref>,
     pub(crate) top_level_temp_refs: Vec<Ref>,
+    pub(crate) generated_top_level_temp_refs: HashSet<Ref>,
+    pub(crate) top_level_temp_ref_count: usize,
     pub(crate) temp_refs_to_declare: Vec<Ref>,
     pub(crate) temp_ref_count: usize,
-    pub(crate) auto_accessor_storage_counts: HashMap<String, u32>,
     pub(crate) named_top_level_temp_counts: HashMap<String, u32>,
     pub(crate) class_pre_statements: Vec<crate::internal::js_ast::Stmt>,
     pub(crate) class_post_statements: Vec<crate::internal::js_ast::Stmt>,
@@ -165,9 +166,10 @@ impl ParserCore {
             local_type_names: HashSet::new(),
             generated_injected_defines: HashMap::new(),
             top_level_temp_refs: Vec::new(),
+            generated_top_level_temp_refs: HashSet::new(),
+            top_level_temp_ref_count: 0,
             temp_refs_to_declare: Vec::new(),
             temp_ref_count: 0,
-            auto_accessor_storage_counts: HashMap::new(),
             named_top_level_temp_counts: HashMap::new(),
             class_pre_statements: Vec::new(),
             class_post_statements: Vec::new(),
@@ -1222,9 +1224,14 @@ impl ParserCore {
     }
 
     pub(crate) fn generate_top_level_temp_ref(&mut self) -> Ref {
-        let index = self.top_level_temp_refs.len();
-        let suffix = char::from_u32(u32::from(b'a') + u32::try_from(index).unwrap_or(25).min(25))
-            .unwrap_or('z');
+        let suffix = char::from_u32(
+            u32::from(b'a')
+                + u32::try_from(self.top_level_temp_ref_count)
+                    .unwrap_or(25)
+                    .min(25),
+        )
+        .unwrap_or('z');
+        self.top_level_temp_ref_count += 1;
         let reference = self.new_symbol(SymbolKind::Other, format!("_{suffix}"));
         self.module_scope
             .as_ref()
@@ -1233,6 +1240,7 @@ impl ParserCore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generated
             .push(reference);
+        self.generated_top_level_temp_refs.insert(reference);
         self.top_level_temp_refs.push(reference);
         reference
     }
@@ -1309,18 +1317,7 @@ impl ParserCore {
 
     pub(crate) fn generate_auto_accessor_storage_ref(&mut self, name: &str) -> Ref {
         let name = name.strip_prefix('#').unwrap_or(name);
-        let count = {
-            let count = self
-                .auto_accessor_storage_counts
-                .entry(name.to_string())
-                .or_default();
-            *count += 1;
-            *count
-        };
-        let reference = self.new_symbol(
-            SymbolKind::Other,
-            format!("{}{}", "_".repeat(count as usize), name),
-        );
+        let reference = self.new_symbol(SymbolKind::Other, format!("_{name}"));
         self.module_scope
             .as_ref()
             .expect("auto-accessor storage requires a module scope")
