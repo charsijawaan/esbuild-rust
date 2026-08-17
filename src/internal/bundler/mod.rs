@@ -4049,6 +4049,10 @@ mod tests {
                         | "TestForbidStringExportNamesBundle"
                         | "TestForbidConstAssignWhenBundling"
                         | "TestForbidConstAssignWhenLoweringUsing"
+                        | "TestConstValueInliningAssign"
+                        | "TestTopLevelReturnForbiddenImport"
+                        | "TestTopLevelReturnForbiddenExport"
+                        | "TestTopLevelReturnForbiddenTLA"
                 )
             );
             if case["file_system"] != "unix"
@@ -4756,7 +4760,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 756 },
+            if selected_test.is_some() { 1 } else { 760 },
             "upstream basic bundler corpus case count"
         );
     }

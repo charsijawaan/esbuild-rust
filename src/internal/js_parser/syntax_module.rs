@@ -45,6 +45,9 @@ pub(crate) fn parse_import_statement(core: &mut ParserCore, lexer: &mut Lexer) -
             }),
         );
     }
+    if core.is_current_scope_module_scope() && core.esm_import_statement_keyword.len == 0 {
+        core.esm_import_statement_keyword = crate::internal::logger::Range { loc, len: 6 };
+    }
     if core.options.ts.parse && lexer.is_contextual_keyword(b"type") {
         lexer.next();
         let mut delimiters = Vec::new();

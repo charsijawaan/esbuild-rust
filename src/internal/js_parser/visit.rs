@@ -51,6 +51,34 @@ fn contains_closing_script_tag(text: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(b"</script"))
 }
 
+fn why_es_module_note(core: &mut ParserCore) -> Option<MsgData> {
+    let because = "This file is considered to be an ECMAScript module because";
+    let (range, text) = if core.esm_export_keyword.len > 0 {
+        (
+            core.esm_export_keyword,
+            format!("{because} of the \"export\" keyword here:"),
+        )
+    } else if core.esm_import_meta.len > 0 {
+        (
+            core.esm_import_meta,
+            format!("{because} of the use of \"import.meta\" here:"),
+        )
+    } else if core.top_level_await_keyword.len > 0 {
+        (
+            core.top_level_await_keyword,
+            format!("{because} of the top-level \"await\" keyword here:"),
+        )
+    } else if core.esm_import_statement_keyword.len > 0 {
+        (
+            core.esm_import_statement_keyword,
+            format!("{because} of the \"import\" keyword here:"),
+        )
+    } else {
+        return None;
+    };
+    Some(core.tracker.msg_data(range, text))
+}
+
 #[derive(Clone, Copy, Default)]
 struct CaptureValueWrapper {
     argument_ref: Option<Ref>,
@@ -2015,13 +2043,18 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
             Some(StmtData::Return(return_statement)) => {
                 if !core.is_inside_function_scope() && !core.is_inside_class_static_block() {
                     if core.is_file_considered_esm {
-                        core.add_error_range(
-                            crate::internal::js_lexer::range_of_identifier(
-                                &core.source,
-                                statement.loc,
-                            ),
-                            "Top-level return cannot be used inside an ECMAScript module",
-                        );
+                        let note = why_es_module_note(core).into_iter().collect();
+                        if let Some(log) = core.log.clone() {
+                            log.add_error_with_notes(
+                                Some(&mut core.tracker),
+                                crate::internal::js_lexer::range_of_identifier(
+                                    &core.source,
+                                    statement.loc,
+                                ),
+                                "Top-level return cannot be used inside an ECMAScript module",
+                                note,
+                            );
+                        }
                     } else {
                         core.has_top_level_return = true;
                     }
