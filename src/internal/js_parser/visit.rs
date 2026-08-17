@@ -1565,8 +1565,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         }
                     }
                 }
-                local.kind =
-                    select_local_kind(local.kind, &core.options, is_top_level_scope, false);
+                local.kind = select_local_kind(
+                    local.kind,
+                    &core.options,
+                    is_top_level_scope,
+                    core.will_wrap_module_in_try_catch_for_using,
+                );
                 if local.kind == LocalKind::Var && should_relocate_vars_to_top_level(core) {
                     let mut value = Expr::default();
                     for mut declaration in std::mem::take(&mut local.declarations) {
@@ -9691,6 +9695,7 @@ fn visit_expr_with_target_and_context(
             if !resolve_identifiers {
                 return;
             }
+            let mut declare_loc = expression.loc;
             if ParserCore::is_stored_name_ref(identifier.reference) {
                 let name = String::from_utf8_lossy(core.load_name_from_ref(identifier.reference))
                     .into_owned();
@@ -9708,6 +9713,7 @@ fn visit_expr_with_target_and_context(
                 let result = core.find_symbol(expression.loc, &name);
                 identifier.reference = result.reference;
                 identifier.must_keep_due_to_with_stmt = result.is_inside_with_scope;
+                declare_loc = result.declare_loc;
             } else {
                 core.record_usage(identifier.reference);
             }
@@ -9801,12 +9807,39 @@ fn visit_expr_with_target_and_context(
                     crate::internal::js_lexer::range_of_identifier(&core.source, expression.loc);
                 match symbol_kind {
                     crate::internal::ast::SymbolKind::Const => {
-                        let text =
-                            format!("Cannot assign to {symbol_name:?} because it is a constant");
-                        if core.options.mode == crate::internal::config::Mode::Bundle {
-                            core.add_error_range(range, text);
-                        } else {
-                            core.add_warning_range(range, text);
+                        let note = core.tracker.msg_data(
+                            crate::internal::js_lexer::range_of_identifier(
+                                &core.source,
+                                declare_loc,
+                            ),
+                            format!("The symbol {symbol_name:?} was declared a constant here:"),
+                        );
+                        if let Some(log) = core.log.clone() {
+                            if core.const_values.contains_key(&identifier.reference)
+                                || core.options.mode == crate::internal::config::Mode::Bundle
+                                || core.is_current_scope_module_scope()
+                                    && core.will_wrap_module_in_try_catch_for_using
+                            {
+                                log.add_error_with_notes(
+                                    Some(&mut core.tracker),
+                                    range,
+                                    format!(
+                                        "Cannot assign to {symbol_name:?} because it is a constant"
+                                    ),
+                                    vec![note],
+                                );
+                            } else {
+                                log.add_id_with_notes(
+                                    MsgId::JsAssignToConstant,
+                                    MsgKind::Warning,
+                                    Some(&mut core.tracker),
+                                    range,
+                                    format!(
+                                        "This assignment will throw because {symbol_name:?} is a constant"
+                                    ),
+                                    vec![note],
+                                );
+                            }
                         }
                     }
                     crate::internal::ast::SymbolKind::Import => {

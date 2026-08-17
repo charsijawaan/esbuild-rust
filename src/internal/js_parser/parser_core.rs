@@ -135,6 +135,7 @@ pub(crate) struct ParserCore {
     pub(crate) has_jsx_element: bool,
     pub(crate) has_type_script_export: bool,
     pub(crate) should_fold_type_script_constant_expressions: bool,
+    pub(crate) will_wrap_module_in_try_catch_for_using: bool,
 }
 
 impl ParserCore {
@@ -226,6 +227,7 @@ impl ParserCore {
             has_jsx_element: false,
             has_type_script_export: false,
             should_fold_type_script_constant_expressions: false,
+            will_wrap_module_in_try_catch_for_using: false,
         }
     }
 

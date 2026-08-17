@@ -9,6 +9,7 @@ use crate::internal::{
         CharFreq, INVALID_REF, ImportKind, ImportRecord, ImportRecordFlags, Index32, LocRef, Ref,
         SlotNamespace, Symbol, SymbolKind,
     },
+    compat::JsFeature,
     helpers::{string_to_utf16, utf16_to_string},
     js_ast::{
         Ast, Binding, BindingData, CallExpr, CallKind, ClauseItem, Decl, DeclaredSymbol, DotExpr,
@@ -379,7 +380,18 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
                 );
             }
         }
-        if core.options.tree_shaking {
+        core.will_wrap_module_in_try_catch_for_using = statements.iter().any(|statement| {
+            matches!(
+                statement.data.as_deref(),
+                Some(StmtData::Local(local))
+                    if local.kind == LocalKind::Using
+                        && core.options.unsupported_js_features.contains(JsFeature::USING)
+                    || local.kind == LocalKind::AwaitUsing
+                        && (core.options.unsupported_js_features.contains(JsFeature::USING)
+                            || core.options.unsupported_js_features.contains(JsFeature::ASYNC_AWAIT))
+            )
+        });
+        if core.options.tree_shaking && !core.will_wrap_module_in_try_catch_for_using {
             statements = split_top_level_local_statements(statements);
         }
         let mut declared_symbols_by_statement = Vec::with_capacity(statements.len());
@@ -395,7 +407,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         core.hoist_symbols();
         precompute_type_script_enum_constants(&mut core, &statements);
         let (mut parts, mut module_metadata, uses_exports_ref, uses_module_ref) =
-            if core.options.tree_shaking {
+            if core.options.tree_shaking && !core.will_wrap_module_in_try_catch_for_using {
                 build_tree_shaking_parts(&mut core, statements, declared_symbols_by_statement)
             } else {
                 core.declared_symbols.clear();

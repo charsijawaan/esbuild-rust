@@ -4047,6 +4047,8 @@ mod tests {
                         | "TestForbidStringExportNamesNoBundle"
                         | "TestForbidStringImportNamesBundle"
                         | "TestForbidStringExportNamesBundle"
+                        | "TestForbidConstAssignWhenBundling"
+                        | "TestForbidConstAssignWhenLoweringUsing"
                 )
             );
             if case["file_system"] != "unix"
@@ -4339,6 +4341,7 @@ mod tests {
                                     | "TestLowerForAwait2015"
                                     | "TestForbidStringImportNamesNoBundle"
                                     | "TestForbidStringExportNamesNoBundle"
+                                    | "TestForbidConstAssignWhenLoweringUsing"
                             )
                         ))
                     && !(option_names
@@ -4753,7 +4756,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 754 },
+            if selected_test.is_some() { 1 } else { 756 },
             "upstream basic bundler corpus case count"
         );
     }
