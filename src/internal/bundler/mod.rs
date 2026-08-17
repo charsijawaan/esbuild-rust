@@ -2371,6 +2371,47 @@ pub fn scan_bundle(
     run_on_start_plugins(log, file_system, &options.plugins);
     let mut bundle = ScannedBundle::default();
 
+    for inject_path in &options.inject_paths {
+        let absolute_inject_path = if file_system.is_abs(inject_path) {
+            inject_path.clone()
+        } else {
+            file_system.join(&[file_system.cwd(), inject_path])
+        };
+        let (_, read_error, _) = file_system.read_file(&absolute_inject_path);
+        if read_error.is_some() {
+            log.add_error(
+                None,
+                Range::default(),
+                format!("Could not resolve {inject_path:?}"),
+            );
+            continue;
+        }
+        if options.mode != Mode::Bundle {
+            let (_, base, extension) =
+                logger::platform_independent_path_dir_base_ext(&absolute_inject_path);
+            let loader = crate::internal::config::loader_from_file_extension(
+                &options.extension_to_loader,
+                &format!("{base}{extension}"),
+            );
+            if loader == Loader::Copy {
+                let pretty_paths = logger::PrettyPaths {
+                    abs: inject_path.clone(),
+                    rel: file_system
+                        .rel(file_system.cwd(), inject_path)
+                        .unwrap_or_else(|| inject_path.clone()),
+                };
+                log.add_error(
+                    None,
+                    Range::default(),
+                    format!(
+                        "Cannot inject {:?} with the \"copy\" loader without bundling enabled",
+                        pretty_paths.select(options.log_path_style)
+                    ),
+                );
+            }
+        }
+    }
+
     let runtime_source = runtime::source(options.unsupported_js_features);
     let runtime_options = Options {
         defines: Some(Arc::new(config::process_defines(&[]))),
@@ -4307,6 +4348,8 @@ mod tests {
                         | "TestWithBadAttribute"
                         | "TestLoaderBundleWithUnknownImportAttributesAndJSLoader"
                         | "TestLoaderBundleWithTypeJSONOnlyDefaultExport"
+                        | "TestLoaderCopyWithInjectedFileNoBundle"
+                        | "TestInjectMissing"
                         | "TestTSImportMissingES6"
                 )
             );
@@ -4713,6 +4756,8 @@ mod tests {
                             "TestAssertTypeJSONWrongLoader"
                                 | "TestWithBadType"
                                 | "TestWithBadAttribute"
+                                | "TestLoaderCopyWithInjectedFileNoBundle"
+                                | "TestInjectMissing"
                         )
                     ))
             {
@@ -4851,6 +4896,9 @@ mod tests {
             }
             if let Some(node_paths) = upstream_string_array_option(options_json, "AbsNodePaths") {
                 options.abs_node_paths = node_paths;
+            }
+            if let Some(inject_paths) = upstream_string_array_option(options_json, "InjectPaths") {
+                options.inject_paths = inject_paths;
             }
             if let Some(external_packages) = upstream_bool_option(options_json, "ExternalPackages")
             {
@@ -5024,7 +5072,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 789 },
+            if selected_test.is_some() { 1 } else { 791 },
             "upstream basic bundler corpus case count"
         );
     }
