@@ -2060,9 +2060,6 @@ fn declare_top_level_symbols(
                     }
                 }
                 let mut entries = HashMap::new();
-                if let Some(name) = import.default_name {
-                    entries.insert("default".into(), name);
-                }
                 if let Some(items) = &import.items {
                     for item in items {
                         entries.insert(

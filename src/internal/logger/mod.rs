@@ -131,7 +131,7 @@ struct DeferLogState {
     has_errors: bool,
 }
 
-fn messages_are_duplicates(left: &Msg, right: &Msg) -> bool {
+pub(crate) fn messages_are_duplicates(left: &Msg, right: &Msg) -> bool {
     fn data_is_duplicate(left: &MsgData, right: &MsgData) -> bool {
         let user_detail_matches = match (&left.user_detail, &right.user_detail) {
             (None, None) => true,
@@ -177,13 +177,6 @@ impl Log {
                     return;
                 }
                 let mut state = add_state.lock().expect("deferred log mutex was poisoned");
-                if state
-                    .messages
-                    .iter()
-                    .any(|existing| messages_are_duplicates(existing, &message))
-                {
-                    return;
-                }
                 if message.kind == MsgKind::Error {
                     state.has_errors = true;
                 }
@@ -2613,6 +2606,8 @@ mod tests {
             ..MsgLocation::default()
         });
         log.add_msg(later);
+        log.add_msg(Msg::new(MsgKind::Warning, "duplicate"));
+        log.add_msg(Msg::new(MsgKind::Warning, "duplicate"));
         let mut earlier = Msg::new(MsgKind::Error, "earlier");
         earlier.data.location = Some(MsgLocation {
             file: PrettyPaths {
@@ -2625,10 +2620,12 @@ mod tests {
         log.add_msg(earlier);
 
         assert!(log.has_errors());
-        assert_eq!(log.peek().len(), 2);
+        assert_eq!(log.peek().len(), 4);
         let messages = log.done();
-        assert_eq!(messages[0].data.text, "earlier");
-        assert_eq!(messages[1].data.text, "later");
+        assert_eq!(messages[0].data.text, "duplicate");
+        assert_eq!(messages[1].data.text, "duplicate");
+        assert_eq!(messages[2].data.text, "earlier");
+        assert_eq!(messages[3].data.text, "later");
     }
 
     #[test]

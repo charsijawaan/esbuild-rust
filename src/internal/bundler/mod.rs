@@ -8,7 +8,10 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
-    ast::{AssertOrWithKeyword, ImportKind, ImportRecordFlags, Index32},
+    ast::{
+        AssertOrWithKeyword, ImportAssertOrWith, ImportKind, ImportRecordFlags, Index32,
+        find_assert_or_with_entry,
+    },
     cache::{CacheSet, SourceIndexKind},
     compat::{CssFeature, JsFeature},
     config::{
@@ -26,9 +29,10 @@ use crate::internal::{
         string_to_utf16, utf16_to_string,
     },
     js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
+    js_lexer::KeyOrValue,
     js_parser::{self, HelperCall},
     linker,
-    logger::{self, LineColumnTracker, Log, Msg, MsgKind, Path, Range, Source},
+    logger::{self, LineColumnTracker, Log, Msg, MsgData, MsgKind, Path, Range, Source},
     resolver::{self, ResolveResult, ResolverContext},
     runtime,
     sourcemap::LineOffsetTable,
@@ -799,7 +803,18 @@ pub fn parse_file_with_unique_key_prefix(
     options: &Options,
     unique_key_prefix: &str,
 ) -> ParseResult {
-    parse_file_with_cache(log, source, loader, options, unique_key_prefix, "", None)
+    parse_file_with_cache(
+        log,
+        source,
+        loader,
+        options,
+        unique_key_prefix,
+        "",
+        None,
+        None,
+        Range::default(),
+        None,
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -811,6 +826,9 @@ fn parse_file_with_cache(
     unique_key_prefix: &str,
     plugin_name: &str,
     caches: Option<&CacheSet>,
+    import_source: Option<&Source>,
+    import_path_range: Range,
+    import_assert_or_with: Option<&ImportAssertOrWith>,
 ) -> ParseResult {
     let (_, base, extension) =
         logger::platform_independent_path_dir_base_ext(&source.key_path.text);
@@ -823,9 +841,22 @@ fn parse_file_with_cache(
     if loader != Loader::Copy && plugin_name.is_empty() {
         for attribute in source.key_path.import_attributes.decode_into_array() {
             if attribute.key != "type" {
+                let range = import_source
+                    .zip(import_assert_or_with)
+                    .and_then(|(source, clause)| {
+                        find_assert_or_with_entry(&clause.entries, &attribute.key).map(|entry| {
+                            crate::internal::js_lexer::range_of_import_assert_or_with(
+                                source,
+                                entry,
+                                KeyOrValue::KeyRange,
+                            )
+                        })
+                    })
+                    .unwrap_or(import_path_range);
+                let mut tracker = LineColumnTracker::new(import_source);
                 log.add_error(
-                    None,
-                    Range::default(),
+                    Some(&mut tracker),
+                    range,
                     format!(
                         "Importing with the {:?} attribute is not supported",
                         attribute.key
@@ -838,9 +869,24 @@ fn parse_file_with_cache(
                 "bytes" => Loader::Binary,
                 "text" => Loader::Text,
                 value => {
+                    let range = import_source
+                        .zip(import_assert_or_with)
+                        .and_then(|(source, clause)| {
+                            find_assert_or_with_entry(&clause.entries, &attribute.key).map(
+                                |entry| {
+                                    crate::internal::js_lexer::range_of_import_assert_or_with(
+                                        source,
+                                        entry,
+                                        KeyOrValue::ValueRange,
+                                    )
+                                },
+                            )
+                        })
+                        .unwrap_or(import_path_range);
+                    let mut tracker = LineColumnTracker::new(import_source);
                     log.add_error(
-                        None,
-                        Range::default(),
+                        Some(&mut tracker),
+                        range,
                         format!("Importing with a type attribute of {value:?} is not supported"),
                     );
                     return ParseResult::default();
@@ -1390,8 +1436,12 @@ fn resolve_with_plugins(
         }
     }
 
+    // Upstream caches parsed package metadata during one resolution. This
+    // stateless resolver may visit the same package file along several lookup
+    // paths, so collect and replay its diagnostics once per resolution.
+    let resolver_log = Log::new_defer(logger::DeferLogKind::All, log.overrides.as_ref().clone());
     let mut result = resolver::resolve_with_metadata(
-        log,
+        &resolver_log,
         file_system,
         abs_resolve_dir,
         path,
@@ -1411,6 +1461,17 @@ fn resolve_with_plugins(
             ..ResolverContext::default()
         },
     );
+    let mut replayed = Vec::new();
+    for message in resolver_log.done() {
+        if replayed
+            .iter()
+            .any(|existing| logger::messages_are_duplicates(existing, &message))
+        {
+            continue;
+        }
+        replayed.push(message.clone());
+        log.add_msg(message);
+    }
     if let Some(result) = &mut result {
         let is_external = result.path_pair.is_external;
         for path in result.path_pair.iter_mut() {
@@ -1481,6 +1542,7 @@ struct PendingFile {
     resolve_metadata: ResolveResult,
     import_source: Option<Source>,
     import_path_range: Range,
+    import_assert_or_with: Option<ImportAssertOrWith>,
 }
 
 fn enqueue_dependencies(
@@ -1515,6 +1577,9 @@ fn enqueue_dependencies(
                 import_path_range: records
                     .and_then(|records| records.get(record_index))
                     .map_or_else(Range::default, |record| record.range),
+                import_assert_or_with: records
+                    .and_then(|records| records.get(record_index))
+                    .and_then(|record| record.assert_or_with.clone()),
             });
         }
     }
@@ -2325,6 +2390,9 @@ pub fn scan_bundle(
         unique_key_prefix,
         "",
         Some(caches),
+        None,
+        Range::default(),
+        None,
     );
     if runtime_result.ok {
         let mut runtime_file = runtime_result.file;
@@ -2414,6 +2482,9 @@ pub fn scan_bundle(
             unique_key_prefix,
             "",
             Some(caches),
+            None,
+            Range::default(),
+            None,
         );
         resolve_import_records_from_directory(
             log,
@@ -2547,6 +2618,7 @@ pub fn scan_bundle(
                 resolve_metadata: resolved,
                 import_source: None,
                 import_path_range: Range::default(),
+                import_assert_or_with: None,
             });
         }
     }
@@ -2591,6 +2663,7 @@ pub fn scan_bundle(
             resolve_metadata,
             import_source,
             import_path_range,
+            import_assert_or_with,
         } = pending[cursor].clone();
         cursor += 1;
         let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
@@ -2726,6 +2799,9 @@ pub fn scan_bundle(
             unique_key_prefix,
             &loaded.plugin_name,
             Some(caches),
+            import_source.as_ref(),
+            import_path_range,
+            import_assert_or_with.as_ref(),
         );
         if is_glob_module {
             result.file.input_file.omit_from_source_maps_and_metafile = true;
@@ -3289,6 +3365,7 @@ fn finalize_scan_import_records(
 
 fn validate_scan_imports(log: &Log, options: &Options, files: &[ScannerFile]) {
     for file in files {
+        let mut tracker = LineColumnTracker::new(Some(&file.input_file.source));
         let Some(records) = file
             .input_file
             .repr
@@ -3316,10 +3393,30 @@ fn validate_scan_imports(log: &Log, options: &Options, files: &[ScannerFile]) {
             {
                 let loader_name =
                     crate::internal::config::LOADER_TO_STRING[target.input_file.loader as usize];
-                log.add_error(
-                    None,
+                let mut notes = Vec::new();
+                if let Some(entry) = record
+                    .assert_or_with
+                    .as_ref()
+                    .and_then(|clause| find_assert_or_with_entry(&clause.entries, "type"))
+                {
+                    notes.push(tracker.msg_data(
+                        crate::internal::js_lexer::range_of_import_assert_or_with(
+                            &file.input_file.source,
+                            entry,
+                            KeyOrValue::KeyAndValueRange,
+                        ),
+                        "This import assertion requires the loader to be \"json\" instead:",
+                    ));
+                }
+                notes.push(MsgData {
+                    text: "You need to either reconfigure esbuild to ensure that the loader for this file is \"json\" or you need to remove this import assertion.".into(),
+                    ..MsgData::default()
+                });
+                log.add_error_with_notes(
+                    Some(&mut tracker),
                     record.range,
                     format!("The file {target_path:?} was loaded with the {loader_name:?} loader"),
+                    notes,
                 );
             }
             match record.kind {
@@ -4199,7 +4296,17 @@ mod tests {
                         | "TestImportMissingUnusedES6"
                         | "TestExportMissingES6"
                         | "TestImportExportStarAmbiguousError"
+                        | "TestNamespaceImportReExportMissingES6"
+                        | "TestNamespaceImportReExportUnusedMissingES6"
+                        | "TestImportDefaultNamespaceComboNoDefault"
                         | "TestLoaderJSONMissingES6"
+                        | "TestLoaderDataURLTextCSSCannotImport"
+                        | "TestLoaderDataURLTextJavaScriptCannotImport"
+                        | "TestAssertTypeJSONWrongLoader"
+                        | "TestWithBadType"
+                        | "TestWithBadAttribute"
+                        | "TestLoaderBundleWithUnknownImportAttributesAndJSLoader"
+                        | "TestLoaderBundleWithTypeJSONOnlyDefaultExport"
                         | "TestTSImportMissingES6"
                 )
             );
@@ -4599,7 +4706,15 @@ mod tests {
                             "CodeSplitting",
                             "Mode",
                             "OutputFormat",
-                        ])
+                        ]
+                    && !matches!(
+                        case["upstream_test"].as_str(),
+                        Some(
+                            "TestAssertTypeJSONWrongLoader"
+                                | "TestWithBadType"
+                                | "TestWithBadAttribute"
+                        )
+                    ))
             {
                 if selected_test.is_none() {
                     continue;
@@ -4909,7 +5024,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 779 },
+            if selected_test.is_some() { 1 } else { 789 },
             "upstream basic bundler corpus case count"
         );
     }
