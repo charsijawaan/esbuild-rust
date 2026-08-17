@@ -1068,6 +1068,7 @@ fn build_tree_shaking_parts(
         }
     }
     metadata.named_imports.extend(generated_named_imports);
+    mark_imports_used_by_exports(&mut metadata);
 
     let mut ordered_parts = vec![Part {
         symbol_uses: HashMap::new(),
@@ -1573,7 +1574,21 @@ fn scan_module_metadata(core: &mut ParserCore, statements: &mut [Stmt]) -> Modul
     metadata
         .named_imports
         .extend(std::mem::take(&mut core.generated_named_imports));
+    mark_imports_used_by_exports(&mut metadata);
     metadata
+}
+
+fn mark_imports_used_by_exports(metadata: &mut ModuleMetadata) {
+    let exported_refs: Vec<_> = metadata
+        .named_exports
+        .values()
+        .map(|export| export.reference)
+        .collect();
+    for reference in exported_refs {
+        if let Some(named_import) = metadata.named_imports.get_mut(&reference) {
+            named_import.is_exported = true;
+        }
+    }
 }
 
 fn trim_unused_imports(core: &ParserCore, import: &mut ImportStmt) -> bool {
@@ -1766,6 +1781,12 @@ fn scan_module_metadata_into(
                         &item.alias,
                         item.name.reference,
                     );
+                    if core.symbols[symbol_index].kind == SymbolKind::Import
+                        && let Some(named_import) =
+                            metadata.named_imports.get_mut(&item.name.reference)
+                    {
+                        named_import.is_exported = true;
+                    }
                     valid_items.push(item);
                 }
                 export.items = valid_items;
@@ -3914,7 +3935,7 @@ mod tests {
         assert!(
             ast.named_imports
                 .values()
-                .any(|import| import.alias == "x" && !import.is_exported)
+                .any(|import| import.alias == "x" && import.is_exported)
         );
         assert!(
             ast.named_imports

@@ -395,6 +395,135 @@ pub fn bundle_javascript(
         return CompiledBundle::default();
     }
     let compiled = compile_javascript_bundle(file_system, &scanned, options, unique_key_prefix);
+    for (source_index, issue) in &compiled.scan_result.import_issues {
+        let diagnostic_source_index = if issue.result.kind == linker::MatchImportKind::NoMatch {
+            issue.result.diagnostic_source_index
+        } else {
+            *source_index
+        };
+        let Some(importer) = scanned.files.get(diagnostic_source_index as usize) else {
+            continue;
+        };
+        let Some(InputFileRepr::Js(importer_repr)) = importer.input_file.repr.as_ref() else {
+            continue;
+        };
+        let diagnostic_import_ref = if issue.result.kind == linker::MatchImportKind::NoMatch {
+            issue.result.diagnostic_import_ref
+        } else {
+            issue.import_ref
+        };
+        let Some(named_import) = importer_repr.ast.named_imports.get(&diagnostic_import_ref) else {
+            continue;
+        };
+        let alias_loc = if issue.result.kind == linker::MatchImportKind::NoMatch {
+            issue.result.diagnostic_name_loc
+        } else {
+            named_import.alias_loc
+        };
+        let range =
+            crate::internal::js_lexer::range_of_identifier(&importer.input_file.source, alias_loc);
+        let mut tracker = LineColumnTracker::new(Some(&importer.input_file.source));
+        match issue.result.kind {
+            linker::MatchImportKind::Cycle => log.add_error(
+                Some(&mut tracker),
+                range,
+                format!(
+                    "Detected cycle while resolving import {:?}",
+                    named_import.alias
+                ),
+            ),
+            linker::MatchImportKind::NoMatch => {
+                let Some(target) = scanned.files.get(issue.result.source_index as usize) else {
+                    continue;
+                };
+                let mut notes = Vec::new();
+                if let Some(suggestion) = &issue.suggestion
+                    && let Some(suggestion_file) =
+                        scanned.files.get(issue.suggestion_source_index as usize)
+                {
+                    let mut suggestion_tracker =
+                        LineColumnTracker::new(Some(&suggestion_file.input_file.source));
+                    notes.push(suggestion_tracker.msg_data(
+                        crate::internal::js_lexer::range_of_identifier(
+                            &suggestion_file.input_file.source,
+                            issue.suggestion_loc,
+                        ),
+                        format!("Did you mean to import {suggestion:?} instead?"),
+                    ));
+                }
+                let target_path = target
+                    .input_file
+                    .source
+                    .pretty_paths
+                    .select(options.log_path_style);
+                if issue.was_generated {
+                    if issue.use_count_estimate > 0 {
+                        log.add_id_with_notes(
+                            crate::internal::logger::MsgId::BundlerImportIsUndefined,
+                            MsgKind::Warning,
+                            Some(&mut tracker),
+                            range,
+                            format!(
+                                "Import {:?} will always be undefined because there is no matching export in {:?}",
+                                named_import.alias, target_path
+                            ),
+                            notes,
+                        );
+                    }
+                } else {
+                    log.add_error_with_notes(
+                        Some(&mut tracker),
+                        range,
+                        format!(
+                            "No matching export in {:?} for import {:?}",
+                            target_path, named_import.alias
+                        ),
+                        notes,
+                    );
+                }
+            }
+            linker::MatchImportKind::Ambiguous => {
+                let mut notes = Vec::new();
+                for (source_index, loc, text) in [
+                    (
+                        issue.result.source_index,
+                        issue.result.name_loc,
+                        "One matching export is here:",
+                    ),
+                    (
+                        issue.result.other_source_index,
+                        issue.result.other_name_loc,
+                        "Another matching export is here:",
+                    ),
+                ] {
+                    if loc.start == 0 {
+                        continue;
+                    }
+                    let Some(file) = scanned.files.get(source_index as usize) else {
+                        continue;
+                    };
+                    let mut note_tracker = LineColumnTracker::new(Some(&file.input_file.source));
+                    notes.push(note_tracker.msg_data(
+                        crate::internal::js_lexer::range_of_identifier(
+                            &file.input_file.source,
+                            loc,
+                        ),
+                        text,
+                    ));
+                }
+                log.add_error_with_notes(
+                    Some(&mut tracker),
+                    range,
+                    format!(
+                        "Ambiguous import {:?} has multiple matching exports",
+                        named_import.alias
+                    ),
+                    notes,
+                );
+            }
+            _ => {}
+        }
+    }
     for issue in &compiled.scan_result.arbitrary_namespace_issues {
         let Some(file) = scanned.files.get(issue.source_index as usize) else {
             continue;
@@ -4064,6 +4193,14 @@ mod tests {
                         | "TestPackageJsonSyntaxErrorComment"
                         | "TestPackageJsonSyntaxErrorTrailingComma"
                         | "TestTSImportMissingFile"
+                        | "TestExportInfiniteCycle1"
+                        | "TestExportInfiniteCycle2"
+                        | "TestImportMissingES6"
+                        | "TestImportMissingUnusedES6"
+                        | "TestExportMissingES6"
+                        | "TestImportExportStarAmbiguousError"
+                        | "TestLoaderJSONMissingES6"
+                        | "TestTSImportMissingES6"
                 )
             );
             if case["file_system"] != "unix"
@@ -4772,7 +4909,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 771 },
+            if selected_test.is_some() { 1 } else { 779 },
             "upstream basic bundler corpus case count"
         );
     }

@@ -192,6 +192,9 @@ pub struct MatchImportResult {
     pub other_name_loc: crate::internal::logger::Loc,
     pub reference: Ref,
     pub is_missing: bool,
+    pub diagnostic_source_index: u32,
+    pub diagnostic_import_ref: Ref,
+    pub diagnostic_name_loc: crate::internal::logger::Loc,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -199,6 +202,10 @@ pub struct ImportMatchIssue {
     pub import_ref: Ref,
     pub result: MatchImportResult,
     pub suggestion: Option<String>,
+    pub suggestion_source_index: u32,
+    pub suggestion_loc: crate::internal::logger::Loc,
+    pub was_generated: bool,
+    pub use_count_estimate: u32,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1275,9 +1282,20 @@ pub fn match_import_with_export(
             }
 
             ImportStatus::NoMatch => {
+                let InputFileRepr::Js(repr) = graph.files[tracker.source_index as usize]
+                    .input_file
+                    .repr
+                    .as_ref()
+                    .expect("import tracker source must have a representation")
+                else {
+                    panic!("import tracker source must be JavaScript");
+                };
                 result = MatchImportResult {
                     kind: MatchImportKind::NoMatch,
                     source_index: next_tracker.source_index,
+                    diagnostic_source_index: tracker.source_index,
+                    diagnostic_import_ref: tracker.import_ref,
+                    diagnostic_name_loc: repr.ast.named_imports[&tracker.import_ref].alias_loc,
                     ..MatchImportResult::default()
                 };
             }
@@ -1499,6 +1517,14 @@ pub fn bind_imports_to_exports_for_file(
 
     let mut issues = Vec::new();
     for import_ref in import_refs {
+        let symbol = graph
+            .symbols
+            .symbols_for_source
+            .get(import_ref.source_index as usize)
+            .and_then(|symbols| symbols.get(import_ref.inner_index as usize));
+        let was_generated =
+            symbol.is_some_and(|symbol| symbol.import_item_status == ImportItemStatus::Generated);
+        let use_count_estimate = symbol.map_or(0, |symbol| symbol.use_count_estimate);
         let (result, re_exports) = match_import_with_export(
             graph,
             ImportTracker {
@@ -1517,6 +1543,10 @@ pub fn bind_imports_to_exports_for_file(
                 import_ref,
                 result: result.clone(),
                 suggestion: None,
+                suggestion_source_index: 0,
+                suggestion_loc: crate::internal::logger::Loc::default(),
+                was_generated,
+                use_count_estimate,
             });
         }
 
@@ -1568,8 +1598,13 @@ pub fn bind_imports_to_exports_for_file(
                     .insert(import_ref, true);
             }
             MatchImportKind::NoMatch => {
-                if graph.symbols.get(import_ref).import_item_status == ImportItemStatus::Generated {
-                    graph.symbols.get_mut(import_ref).import_item_status =
+                let diagnostic_ref = result.diagnostic_import_ref;
+                let diagnostic_symbol = graph.symbols.get(diagnostic_ref);
+                let was_generated =
+                    diagnostic_symbol.import_item_status == ImportItemStatus::Generated;
+                let use_count_estimate = diagnostic_symbol.use_count_estimate;
+                if was_generated {
+                    graph.symbols.get_mut(diagnostic_ref).import_item_status =
                         ImportItemStatus::Missing;
                 }
                 let alias = {
@@ -1581,10 +1616,32 @@ pub fn bind_imports_to_exports_for_file(
                     repr.ast.named_imports[&import_ref].alias.clone()
                 };
                 let suggestion = maybe_correct_export_typo(graph, result.source_index, &alias);
+                let (suggestion_source_index, suggestion_loc) = suggestion
+                    .as_ref()
+                    .and_then(|suggestion| {
+                        let Some(InputFileRepr::Js(target)) = graph.files
+                            [result.source_index as usize]
+                            .input_file
+                            .repr
+                            .as_ref()
+                        else {
+                            return None;
+                        };
+                        target
+                            .meta
+                            .resolved_exports
+                            .get(suggestion)
+                            .map(|export| (export.source_index, export.name_loc))
+                    })
+                    .unwrap_or_default();
                 issues.push(ImportMatchIssue {
                     import_ref,
                     result,
                     suggestion,
+                    suggestion_source_index,
+                    suggestion_loc,
+                    was_generated,
+                    use_count_estimate,
                 });
             }
             MatchImportKind::Cycle | MatchImportKind::Ambiguous => {
@@ -1592,6 +1649,10 @@ pub fn bind_imports_to_exports_for_file(
                     import_ref,
                     result,
                     suggestion: None,
+                    suggestion_source_index: 0,
+                    suggestion_loc: crate::internal::logger::Loc::default(),
+                    was_generated,
+                    use_count_estimate,
                 });
             }
             _ => {}
