@@ -4053,6 +4053,17 @@ mod tests {
                         | "TestTopLevelReturnForbiddenImport"
                         | "TestTopLevelReturnForbiddenExport"
                         | "TestTopLevelReturnForbiddenTLA"
+                        | "TestCSSAtImportMissing"
+                        | "TestMissingImportURLInCSS"
+                        | "TestTopLevelAwaitIIFE"
+                        | "TestTopLevelAwaitCJS"
+                        | "TestTopLevelAwaitNoBundleCommonJS"
+                        | "TestTopLevelAwaitNoBundleIIFE"
+                        | "TestLoaderJSONWithBigInt"
+                        | "TestLowerAsyncES5"
+                        | "TestPackageJsonSyntaxErrorComment"
+                        | "TestPackageJsonSyntaxErrorTrailingComma"
+                        | "TestTSImportMissingFile"
                 )
             );
             if case["file_system"] != "unix"
@@ -4298,6 +4309,7 @@ mod tests {
                                     | "TestStaticClassBlockES2021"
                                     | "TestLowerNullishCoalescingAssignmentIssue1493"
                                     | "TestForbidStringExportNamesBundle"
+                                    | "TestLowerAsyncES5"
                             )
                         ))
                     && !(option_names
@@ -4760,7 +4772,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 760 },
+            if selected_test.is_some() { 1 } else { 771 },
             "upstream basic bundler corpus case count"
         );
     }

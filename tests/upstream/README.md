@@ -82,7 +82,7 @@ instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 Files containing invalid UTF-8 are additionally stored in a base64 sidecar so
 binary-loader snapshots retain the exact upstream bytes.
 
-The active bundler tranche exact-compares 750 Unix snapshots and ten
+The active bundler tranche exact-compares 750 Unix snapshots and 21
 diagnostic-only cases from the default, DCE, import-star, TypeScript import-star,
 lowering, TypeScript, package-json,
 tsconfig, loader, CSS, code-splitting, Yarn PnP, and entry-point glob suites that use
@@ -110,8 +110,8 @@ and absolute node search paths with browser remapping. It also checks
 output-base and public-path asset layouts plus
 metafile input/output accounting for JS, CSS, JSON attributes, copied files,
 and code-split long paths. The missing-glob-directory diagnostic-only case is
-also covered. So 5,052 concrete upstream cases are currently active in
-`cargo test`; the remaining 310 captured bundler cases are the parity backlog,
+also covered. So 5,063 concrete upstream cases are currently active in
+`cargo test`; the remaining 299 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
 The generated JSON is checked in so `cargo test` does not require Go or a
