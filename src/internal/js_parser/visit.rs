@@ -1050,6 +1050,299 @@ pub(crate) fn precompute_type_script_enum_constants(core: &mut ParserCore, state
     }
 }
 
+fn lower_for_await_value(core: &ParserCore, loc: Loc, value: Expr) -> Expr {
+    if core.lower_await_to_yield {
+        Expr::new(
+            loc,
+            ExprData::Yield(crate::internal::js_ast::YieldExpr {
+                value_or_nil: value,
+                ..crate::internal::js_ast::YieldExpr::default()
+            }),
+        )
+    } else {
+        Expr::new(
+            loc,
+            ExprData::Await(crate::internal::js_ast::AwaitExpr { value }),
+        )
+    }
+}
+
+fn lower_for_await_loop(
+    core: &mut ParserCore,
+    loc: Loc,
+    loop_statement: &mut crate::internal::js_ast::ForOfStmt,
+) -> Stmt {
+    let generated_ref = |core: &mut ParserCore, name: &str| {
+        let reference = core.new_symbol(SymbolKind::Other, name);
+        core.record_declared_symbol(reference);
+        if let Some(scope) = &core.current_scope {
+            scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .generated
+                .push(reference);
+        }
+        reference
+    };
+    let iter_ref = generated_ref(core, "iter");
+    let more_ref = generated_ref(core, "more");
+    let temp_ref = generated_ref(core, "temp");
+    let error_ref = generated_ref(core, "error");
+    for (reference, count) in [(iter_ref, 3), (more_ref, 3), (temp_ref, 6), (error_ref, 3)] {
+        for _ in 0..count {
+            core.record_usage(reference);
+        }
+    }
+
+    let temp_value = || {
+        Expr::new(
+            loc,
+            ExprData::Dot(DotExpr {
+                target: temp_identifier(loc, temp_ref),
+                name: "value".into(),
+                name_loc: loc,
+                ..DotExpr::default()
+            }),
+        )
+    };
+    let mut init = std::mem::take(&mut loop_statement.init);
+    match init.data.as_deref_mut() {
+        Some(StmtData::Local(local)) if local.declarations.len() == 1 => {
+            local.declarations[0].value_or_nil = temp_value();
+        }
+        Some(StmtData::Expr(expression)) => {
+            expression.value = assign(std::mem::take(&mut expression.value), temp_value());
+        }
+        _ => {}
+    }
+
+    let mut body = vec![init];
+    let mut close_brace_loc = Loc::default();
+    let mut original_body = std::mem::take(&mut loop_statement.body);
+    if let Some(StmtData::Block(block)) = original_body.data.as_deref_mut() {
+        close_brace_loc = block.close_brace_loc;
+        body.append(&mut block.statements);
+    } else {
+        body.push(original_body);
+    }
+
+    let iter_next = Expr::new(
+        loc,
+        ExprData::Call(CallExpr {
+            target: Expr::new(
+                loc,
+                ExprData::Dot(DotExpr {
+                    target: temp_identifier(loc, iter_ref),
+                    name: "next".into(),
+                    name_loc: loc,
+                    ..DotExpr::default()
+                }),
+            ),
+            kind: CallKind::TargetWasOriginallyPropertyAccess,
+            ..CallExpr::default()
+        }),
+    );
+    let await_iter_next = lower_for_await_value(core, loc, iter_next);
+    let temp_call_iter = Expr::new(
+        loc,
+        ExprData::Call(CallExpr {
+            target: Expr::new(
+                loc,
+                ExprData::Dot(DotExpr {
+                    target: temp_identifier(loc, temp_ref),
+                    name: "call".into(),
+                    name_loc: loc,
+                    ..DotExpr::default()
+                }),
+            ),
+            args: vec![temp_identifier(loc, iter_ref)],
+            kind: CallKind::TargetWasOriginallyPropertyAccess,
+            ..CallExpr::default()
+        }),
+    );
+    let await_temp_call_iter = lower_for_await_value(core, loc, temp_call_iter);
+
+    let for_statement = Stmt::new(
+        loc,
+        StmtData::For(ForStmt {
+            init_or_nil: Stmt::new(
+                loc,
+                StmtData::Local(LocalStmt {
+                    declarations: vec![
+                        Decl {
+                            binding: identifier_binding(loc, iter_ref),
+                            value_or_nil: core.call_runtime(
+                                loc,
+                                "__forAwait",
+                                vec![std::mem::take(&mut loop_statement.value)],
+                            ),
+                        },
+                        Decl {
+                            binding: identifier_binding(loc, more_ref),
+                            ..Decl::default()
+                        },
+                        Decl {
+                            binding: identifier_binding(loc, temp_ref),
+                            ..Decl::default()
+                        },
+                        Decl {
+                            binding: identifier_binding(loc, error_ref),
+                            ..Decl::default()
+                        },
+                    ],
+                    kind: LocalKind::Var,
+                    ..LocalStmt::default()
+                }),
+            ),
+            test_or_nil: assign(
+                temp_identifier(loc, more_ref),
+                Expr::new(
+                    loc,
+                    ExprData::Unary(UnaryExpr {
+                        op: OpCode::UnaryNot,
+                        value: Expr::new(
+                            loc,
+                            ExprData::Dot(DotExpr {
+                                target: assign(temp_identifier(loc, temp_ref), await_iter_next),
+                                name: "done".into(),
+                                name_loc: loc,
+                                ..DotExpr::default()
+                            }),
+                        ),
+                        ..UnaryExpr::default()
+                    }),
+                ),
+            ),
+            update_or_nil: assign(
+                temp_identifier(loc, more_ref),
+                Expr::new(loc, ExprData::Boolean(false)),
+            ),
+            body: Stmt::new(
+                loc,
+                StmtData::Block(BlockStmt {
+                    statements: body,
+                    close_brace_loc,
+                }),
+            ),
+            is_lowered_for_await: true,
+            ..ForStmt::default()
+        }),
+    );
+
+    let catch_assignment = assign(
+        temp_identifier(loc, error_ref),
+        Expr::new(
+            loc,
+            ExprData::Array(crate::internal::js_ast::ArrayExpr {
+                items: vec![temp_identifier(loc, temp_ref)],
+                is_single_line: true,
+                ..crate::internal::js_ast::ArrayExpr::default()
+            }),
+        ),
+    );
+    let close_iterator = Expr::new(
+        loc,
+        ExprData::Binary(BinaryExpr {
+            left: Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: temp_identifier(loc, more_ref),
+                    right: assign(
+                        temp_identifier(loc, temp_ref),
+                        Expr::new(
+                            loc,
+                            ExprData::Dot(DotExpr {
+                                target: temp_identifier(loc, iter_ref),
+                                name: "return".into(),
+                                name_loc: loc,
+                                ..DotExpr::default()
+                            }),
+                        ),
+                    ),
+                    op: OpCode::BinaryLogicalAnd,
+                }),
+            ),
+            right: await_temp_call_iter,
+            op: OpCode::BinaryLogicalAnd,
+        }),
+    );
+    let rethrow = Stmt::new(
+        loc,
+        StmtData::If(IfStmt {
+            test: temp_identifier(loc, error_ref),
+            yes: Stmt::new(
+                loc,
+                StmtData::Throw(ThrowStmt {
+                    value: Expr::new(
+                        loc,
+                        ExprData::Index(IndexExpr {
+                            target: temp_identifier(loc, error_ref),
+                            index: Expr::new(loc, ExprData::Number(0.0)),
+                            ..IndexExpr::default()
+                        }),
+                    ),
+                }),
+            ),
+            ..IfStmt::default()
+        }),
+    );
+    Stmt::new(
+        loc,
+        StmtData::Try(crate::internal::js_ast::TryStmt {
+            block: BlockStmt {
+                statements: vec![for_statement],
+                ..BlockStmt::default()
+            },
+            block_loc: loc,
+            catch: Some(crate::internal::js_ast::Catch {
+                binding_or_nil: identifier_binding(loc, temp_ref),
+                block: BlockStmt {
+                    statements: vec![Stmt::new(
+                        loc,
+                        StmtData::Expr(ExprStmt {
+                            value: catch_assignment,
+                            ..ExprStmt::default()
+                        }),
+                    )],
+                    ..BlockStmt::default()
+                },
+                loc,
+                block_loc: loc,
+            }),
+            finally: Some(crate::internal::js_ast::Finally {
+                block: BlockStmt {
+                    statements: vec![Stmt::new(
+                        loc,
+                        StmtData::Try(crate::internal::js_ast::TryStmt {
+                            block: BlockStmt {
+                                statements: vec![Stmt::new(
+                                    loc,
+                                    StmtData::Expr(ExprStmt {
+                                        value: close_iterator,
+                                        ..ExprStmt::default()
+                                    }),
+                                )],
+                                ..BlockStmt::default()
+                            },
+                            block_loc: loc,
+                            finally: Some(crate::internal::js_ast::Finally {
+                                block: BlockStmt {
+                                    statements: vec![rethrow],
+                                    ..BlockStmt::default()
+                                },
+                                loc,
+                            }),
+                            ..crate::internal::js_ast::TryStmt::default()
+                        }),
+                    )],
+                    ..BlockStmt::default()
+                },
+                loc,
+            }),
+        }),
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_identifiers: bool) {
     let old_control_flow_dead = core.is_control_flow_dead;
@@ -1875,6 +2168,14 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 }
                 relocate_for_in_or_of_init(core, &mut loop_statement.init);
                 core.pop_scope();
+                if loop_statement.await_range.len > 0
+                    && core
+                        .options
+                        .unsupported_js_features
+                        .contains(JsFeature::FOR_AWAIT)
+                {
+                    *statement = lower_for_await_loop(core, statement.loc, loop_statement);
+                }
             }
             Some(StmtData::Label(_)) => {
                 visit_label_statement_chain(core, statement, resolve_identifiers);
@@ -3831,14 +4132,35 @@ fn visit_label_statement_chain(
                 };
             }
         } else {
-            current = Stmt::new(
-                frame.loc,
-                StmtData::Label(LabelStmt {
-                    statement: current,
-                    name: frame.name,
-                    is_single_line_stmt: frame.is_single_line_stmt,
-                }),
-            );
+            let mut moved_inside_lowered_for_await = false;
+            if let Some(StmtData::Try(try_statement)) = current.data.as_deref_mut()
+                && let Some(first) = try_statement.block.statements.first_mut()
+                && matches!(
+                    first.data.as_deref(),
+                    Some(StmtData::For(loop_statement)) if loop_statement.is_lowered_for_await
+                )
+            {
+                let loop_statement = std::mem::take(first);
+                *first = Stmt::new(
+                    frame.loc,
+                    StmtData::Label(LabelStmt {
+                        statement: loop_statement,
+                        name: frame.name,
+                        is_single_line_stmt: frame.is_single_line_stmt,
+                    }),
+                );
+                moved_inside_lowered_for_await = true;
+            }
+            if !moved_inside_lowered_for_await {
+                current = Stmt::new(
+                    frame.loc,
+                    StmtData::Label(LabelStmt {
+                        statement: current,
+                        name: frame.name,
+                        is_single_line_stmt: frame.is_single_line_stmt,
+                    }),
+                );
+            }
         }
     }
     *statement = current;

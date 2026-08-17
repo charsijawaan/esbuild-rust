@@ -475,6 +475,7 @@ pub fn print_expr(expr: &Expr, renamer: &dyn Renamer, options: Options) -> Vec<u
         printed_expr_comments: HashSet::new(),
         suppress_parenthesized_object_or_class: false,
         for_of_init_start: false,
+        suppress_next_indent: false,
         stmt_start: None,
         arrow_expr_start: None,
         export_default_start: None,
@@ -588,6 +589,7 @@ fn print_internal<'a>(
         printed_expr_comments: HashSet::new(),
         suppress_parenthesized_object_or_class: false,
         for_of_init_start: false,
+        suppress_next_indent: false,
         stmt_start: None,
         arrow_expr_start: None,
         export_default_start: None,
@@ -651,6 +653,7 @@ struct Printer<'a> {
     printed_expr_comments: HashSet<crate::internal::logger::Loc>,
     suppress_parenthesized_object_or_class: bool,
     for_of_init_start: bool,
+    suppress_next_indent: bool,
     stmt_start: Option<usize>,
     arrow_expr_start: Option<usize>,
     export_default_start: Option<usize>,
@@ -1467,7 +1470,19 @@ impl Printer<'_> {
                     }
                     self.print_loop_body(body, is_single_line);
                 } else {
-                    self.print_loop_body(&label.statement, label.is_single_line_stmt);
+                    if label.is_single_line_stmt
+                        && matches!(
+                            label.statement.data.as_deref(),
+                            Some(StmtData::For(loop_statement))
+                                if loop_statement.is_lowered_for_await
+                        )
+                    {
+                        self.print_optional_space();
+                        self.suppress_next_indent = true;
+                        self.print_stmt(&label.statement);
+                    } else {
+                        self.print_loop_body(&label.statement, label.is_single_line_stmt);
+                    }
                 }
             }
             StmtData::Try(try_statement) => {
@@ -2549,6 +2564,9 @@ impl Printer<'_> {
     }
 
     fn print_indent(&mut self) {
+        if std::mem::take(&mut self.suppress_next_indent) {
+            return;
+        }
         if !self.options.minify_whitespace {
             for _ in 0..self.indent {
                 self.output.extend_from_slice(b"  ");
@@ -3050,6 +3068,10 @@ impl Printer<'_> {
                     && matches!(binary.right.data.as_deref(), Some(ExprData::Binary(right)) if matches!(right.op, OpCode::BinaryLogicalOr | OpCode::BinaryLogicalAnd))
                 {
                     Precedence::Prefix
+                } else if binary.op.binary_assign_target() != AssignTarget::None
+                    && matches!(binary.right.data.as_deref(), Some(ExprData::Yield(_)))
+                {
+                    Precedence::Yield
                 } else if binary.op.is_right_associative() {
                     operator.level
                 } else if binary.op == OpCode::BinaryComma {

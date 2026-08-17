@@ -4286,6 +4286,8 @@ mod tests {
                                     | "TestLowerPrivateClassBrandCheckUnsupported"
                                     | "TestClassSuperThisIssue242NoBundle"
                                     | "TestLowerExportStarAsNameCollisionNoBundle"
+                                    | "TestLowerForAwait2017"
+                                    | "TestLowerForAwait2015"
                             )
                         ))
                     && !(option_names
@@ -4690,7 +4692,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 748 },
+            if selected_test.is_some() { 1 } else { 750 },
             "upstream basic bundler corpus case count"
         );
     }
