@@ -4482,6 +4482,8 @@ mod tests {
                         | "TestRelativeEntryPointError"
                         | "TestImportRelativeAsPackage"
                         | "TestNoOverwriteInputFileError"
+                        | "TestBadImportErrorMessageWithHandlesImportErrorsFlag"
+                        | "TestErrorMessageCrashStdinIssue2913"
                         | "TestTSImportMissingES6"
                 )
             );
@@ -4532,7 +4534,9 @@ mod tests {
                     && case["upstream_test"] != "TestRequireResolve"
                     && !is_supported_diagnostic_only_case)
                 || (case.get("expected_snapshot").is_none() && !is_supported_diagnostic_only_case)
-                || (!case["entry_paths"].is_array() && !case["entry_paths_advanced"].is_array())
+                || (!case["entry_paths"].is_array()
+                    && !case["entry_paths_advanced"].is_array()
+                    && case["upstream_test"] != "TestErrorMessageCrashStdinIssue2913")
                 || case["entry_paths"]
                     .as_array()
                     .is_some_and(|paths| paths.iter().any(|path| path == "*"))
@@ -4890,6 +4894,7 @@ mod tests {
                                 | "TestWithBadAttribute"
                                 | "TestLoaderCopyWithInjectedFileNoBundle"
                                 | "TestInjectMissing"
+                                | "TestErrorMessageCrashStdinIssue2913"
                         )
                     ))
             {
@@ -5031,6 +5036,32 @@ mod tests {
             }
             if let Some(inject_paths) = upstream_string_array_option(options_json, "InjectPaths") {
                 options.inject_paths = inject_paths;
+            }
+            if let Some(stdin) = options_json
+                .get("Stdin")
+                .and_then(serde_json::Value::as_object)
+            {
+                options.stdin = Some(config::StdinInfo {
+                    contents: stdin
+                        .get("Contents")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    source_file: stdin
+                        .get("SourceFile")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    abs_resolve_dir: stdin
+                        .get("AbsResolveDir")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    loader: stdin
+                        .get("Loader")
+                        .and_then(serde_json::Value::as_u64)
+                        .map_or(Loader::None, upstream_loader),
+                });
             }
             if let Some(external_packages) = upstream_bool_option(options_json, "ExternalPackages")
             {
@@ -5204,7 +5235,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 800 },
+            if selected_test.is_some() { 1 } else { 802 },
             "upstream basic bundler corpus case count"
         );
     }

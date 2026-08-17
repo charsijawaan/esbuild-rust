@@ -9242,6 +9242,19 @@ fn visit_expr(core: &mut ParserCore, expression: &mut Expr, resolve_identifiers:
     });
 }
 
+fn dynamic_import_record_in_promise_chain(expression: &Expr) -> Option<u32> {
+    match expression.data.as_deref()? {
+        ExprData::ImportString(import) => Some(import.import_record_index),
+        ExprData::Call(call) => match call.target.data.as_deref()? {
+            ExprData::Dot(dot) if matches!(dot.name.as_str(), "then" | "catch") => {
+                dynamic_import_record_in_promise_chain(&dot.target)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn maybe_rewrite_import_namespace_property(
     core: &mut ParserCore,
     target: &Expr,
@@ -10522,6 +10535,21 @@ fn visit_expr_with_target_and_context(
             for argument in &mut call.args {
                 has_spread |= matches!(argument.data.as_deref(), Some(ExprData::Spread(_)));
                 visit_expr(core, argument, resolve_identifiers);
+            }
+            if let Some(ExprData::Dot(dot)) = call.target.data.as_deref()
+                && let Some(error_handler_loc) = if dot.name == "catch" {
+                    Some(dot.name_loc)
+                } else if dot.name == "then" && call.args.len() >= 2 {
+                    Some(call.args[1].loc)
+                } else {
+                    None
+                }
+                && let Some(import_record_index) =
+                    dynamic_import_record_in_promise_chain(&dot.target)
+            {
+                let record = &mut core.import_records[import_record_index as usize];
+                record.flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
+                record.error_handler_loc = error_handler_loc;
             }
             if core.options.minify_syntax && has_spread {
                 call.args = inline_spreads_of_array_literals(&call.args);
