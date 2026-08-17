@@ -1102,7 +1102,8 @@ fn parse_file_with_cache(
             } else {
                 format!("Do not know how to load path: {display_path}")
             };
-            log.add_error(None, Range::default(), message);
+            let mut tracker = LineColumnTracker::new(import_source);
+            log.add_error(Some(&mut tracker), import_path_range, message);
         }
     }
 
@@ -1841,6 +1842,38 @@ fn rewrite_external_path(file_system: &dyn Fs, options: &Options, mut path: Path
     path
 }
 
+fn relative_path_suggestion(
+    file_system: &dyn Fs,
+    options: &Options,
+    directory: &str,
+    path: &str,
+) -> Option<String> {
+    if !resolver::is_package_path(path) {
+        return None;
+    }
+    let absolute = file_system.join(&[directory, path]);
+    std::iter::once(absolute.clone())
+        .chain(
+            options
+                .extension_order
+                .iter()
+                .map(|extension| format!("{absolute}{extension}")),
+        )
+        .find_map(|candidate| {
+            let (_, error, _) = file_system.read_file(&candidate);
+            error.is_none().then(|| {
+                logger::PrettyPaths {
+                    abs: candidate.clone(),
+                    rel: file_system
+                        .rel(file_system.cwd(), &candidate)
+                        .unwrap_or(candidate),
+                }
+                .select(options.log_path_style)
+                .to_string()
+            })
+        })
+}
+
 pub fn resolve_import_records(
     log: &Log,
     file_system: &dyn Fs,
@@ -2047,10 +2080,56 @@ fn resolve_import_records_from_directory(
                     .flags
                     .contains(ImportRecordFlags::HANDLES_IMPORT_ERRORS)
             {
-                log.add_error(
+                let mut notes = Vec::new();
+                if let Some(candidate) = relative_path_suggestion(
+                    file_system,
+                    options,
+                    &source_directory,
+                    &record.path.text,
+                ) {
+                    notes.push(MsgData {
+                        text: format!(
+                            "Use the relative path {:?} to reference the file {:?}. Without the leading \"./\", the path {:?} is being interpreted as a package path instead.",
+                            format!("./{}", record.path.text), candidate, record.path.text
+                        ),
+                        ..MsgData::default()
+                    });
+                } else if options.platform == Platform::Browser
+                    && resolver::is_node_builtin(
+                        record
+                            .path
+                            .text
+                            .strip_prefix("node:")
+                            .unwrap_or(&record.path.text),
+                    )
+                {
+                    notes.push(MsgData {
+                        text: format!(
+                            "The package {:?} wasn't found on the file system but is built into node. Are you trying to bundle for node? You can use \"Platform: api.PlatformNode\" to do that, which will remove this error.",
+                            record.path.text
+                        ),
+                        ..MsgData::default()
+                    });
+                } else if resolver::is_package_path(&record.path.text) {
+                    let mut text = format!(
+                        "You can mark the path {:?} as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.",
+                        record.path.text
+                    );
+                    if record.kind == ImportKind::Dynamic {
+                        text.push_str(
+                            " You can also add \".catch()\" here to handle this failure at run-time instead of bundle-time.",
+                        );
+                    }
+                    notes.push(MsgData {
+                        text,
+                        ..MsgData::default()
+                    });
+                }
+                log.add_error_with_notes(
                     Some(&mut tracker),
                     record.range,
                     format!("Could not resolve {:?}", record.path.text),
+                    notes,
                 );
                 if let Some(cached) = resolution_cache.get_mut(&cache_key) {
                     cached.1 = true;
@@ -2610,10 +2689,28 @@ pub fn scan_bundle(
         );
         let Some(resolved) = resolved else {
             if !did_log_plugin_error {
-                log.add_error(
+                let mut notes = Vec::new();
+                if let Some(candidate) = relative_path_suggestion(
+                    file_system,
+                    options,
+                    file_system.cwd(),
+                    &entry_point.input_path,
+                ) {
+                    notes.push(MsgData {
+                        text: format!(
+                            "Use the relative path {:?} to reference the file {:?}. Without the leading \"./\", the path {:?} is being interpreted as a package path instead.",
+                            format!("./{}", entry_point.input_path),
+                            candidate,
+                            entry_point.input_path
+                        ),
+                        ..MsgData::default()
+                    });
+                }
+                log.add_error_with_notes(
                     None,
                     Range::default(),
                     format!("Could not resolve {:?}", entry_point.input_path),
+                    notes,
                 );
             }
             continue;
@@ -4350,6 +4447,14 @@ mod tests {
                         | "TestLoaderBundleWithTypeJSONOnlyDefaultExport"
                         | "TestLoaderCopyWithInjectedFileNoBundle"
                         | "TestInjectMissing"
+                        | "TestRequireBadExtension"
+                        | "TestImportInsideTry"
+                        | "TestRequireFSBrowser"
+                        | "TestImportFSBrowser"
+                        | "TestExportFSBrowser"
+                        | "TestExternalModuleExclusionScopedPackage"
+                        | "TestRelativeEntryPointError"
+                        | "TestImportRelativeAsPackage"
                         | "TestTSImportMissingES6"
                 )
             );
@@ -5072,7 +5177,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 791 },
+            if selected_test.is_some() { 1 } else { 799 },
             "upstream basic bundler corpus case count"
         );
     }
