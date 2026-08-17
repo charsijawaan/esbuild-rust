@@ -119,6 +119,7 @@ pub struct ChunkInfo {
     pub is_css: bool,
     pub is_executable: bool,
     pub imports_in_css_order: Vec<CssImportOrder>,
+    pub arbitrary_namespace_issues: Vec<ArbitraryNamespaceIssue>,
 }
 
 #[derive(Debug, Default)]
@@ -6791,6 +6792,7 @@ pub struct CompiledPartRange {
     pub extracted_legal_comments: Vec<String>,
     pub json_metadata_imports: Vec<String>,
     pub source_map_chunk: SourceMapChunk,
+    pub arbitrary_namespace_issues: Vec<ArbitraryNamespaceIssue>,
 }
 
 /// Compile one ordered range of live parts into JavaScript for a chunk.
@@ -6846,6 +6848,9 @@ pub fn compile_part_range_for_chunk(
         converted
             .outside_wrapper_prefix
             .extend(namespace.outside_wrapper_prefix);
+        converted
+            .arbitrary_namespace_issues
+            .extend(namespace.arbitrary_namespace_issues);
         if repr.meta.wrap == WrapKind::Esm {
             converted
                 .outside_wrapper_prefix
@@ -6954,8 +6959,12 @@ pub fn compile_part_range_for_chunk(
         converted
             .outside_wrapper_prefix
             .extend(part_converted.outside_wrapper_prefix);
+        converted
+            .arbitrary_namespace_issues
+            .extend(part_converted.arbitrary_namespace_issues);
     }
 
+    let arbitrary_namespace_issues = std::mem::take(&mut converted.arbitrary_namespace_issues);
     let mut body = converted.inside_wrapper_prefix;
     body.extend(converted.inside_wrapper_suffix);
     if options.minify_syntax {
@@ -7070,6 +7079,7 @@ pub fn compile_part_range_for_chunk(
         extracted_legal_comments: printed.extracted_legal_comments,
         json_metadata_imports: printed.json_metadata_imports,
         source_map_chunk: printed.source_map_chunk,
+        arbitrary_namespace_issues,
     }
 }
 
@@ -8249,6 +8259,11 @@ pub fn generate_javascript_chunk(
     let bindings = print_cross_chunk_bindings(chunks, chunk_index, renamer, options);
     let compiled_parts =
         compile_part_ranges_for_chunk(graph, options, &chunks[chunk_index], runtime_refs, renamer);
+    chunks[chunk_index].arbitrary_namespace_issues.extend(
+        compiled_parts
+            .iter()
+            .flat_map(|part| part.arbitrary_namespace_issues.iter().cloned()),
+    );
     let entry_point_tail = if chunks[chunk_index].is_entry_point {
         generate_entry_point_tail(
             graph,
@@ -10707,6 +10722,7 @@ mod tests {
                 extracted_legal_comments: Vec::new(),
                 json_metadata_imports: Vec::new(),
                 source_map_chunk: super::SourceMapChunk::default(),
+                arbitrary_namespace_issues: Vec::new(),
             }],
             &super::PrintedCrossChunkBindings::default(),
             b"  return 1;\n",

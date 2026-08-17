@@ -250,6 +250,22 @@ fn compile_javascript_bundle_with_css_names(
             &output_paths,
         );
     }
+    let mut seen_arbitrary_namespace_issues = HashSet::new();
+    for issue in prepared
+        .chunks
+        .iter_mut()
+        .flat_map(|chunk| std::mem::take(&mut chunk.arbitrary_namespace_issues))
+    {
+        let key = (
+            issue.kind.clone(),
+            issue.source_index,
+            issue.name_loc,
+            issue.alias.clone(),
+        );
+        if seen_arbitrary_namespace_issues.insert(key) {
+            prepared.scan_result.arbitrary_namespace_issues.push(issue);
+        }
+    }
     let mut output_files = linker::finalize_generated_javascript_chunks(
         file_system,
         &prepared.graph,
@@ -378,7 +394,29 @@ pub fn bundle_javascript(
     if log.has_errors() {
         return CompiledBundle::default();
     }
-    compile_javascript_bundle(file_system, &scanned, options, unique_key_prefix)
+    let compiled = compile_javascript_bundle(file_system, &scanned, options, unique_key_prefix);
+    for issue in &compiled.scan_result.arbitrary_namespace_issues {
+        let Some(file) = scanned.files.get(issue.source_index as usize) else {
+            continue;
+        };
+        let mut tracker = LineColumnTracker::new(Some(&file.input_file.source));
+        log.add_error(
+            Some(&mut tracker),
+            Range {
+                loc: issue.name_loc,
+                len: i32::try_from(issue.alias.len() + 2).unwrap_or(i32::MAX),
+            },
+            format!(
+                "Using the string {:?} as an {} name is not supported in the configured target environment",
+                issue.alias, issue.kind
+            ),
+        );
+    }
+    if log.has_errors() {
+        CompiledBundle::default()
+    } else {
+        compiled
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -4002,6 +4040,15 @@ mod tests {
             }) else {
                 panic!("bundler case options must be an object");
             };
+            let is_supported_diagnostic_only_case = matches!(
+                case["upstream_test"].as_str(),
+                Some(
+                    "TestForbidStringImportNamesNoBundle"
+                        | "TestForbidStringExportNamesNoBundle"
+                        | "TestForbidStringImportNamesBundle"
+                        | "TestForbidStringExportNamesBundle"
+                )
+            );
             if case["file_system"] != "unix"
                 || (case["suite"] != "default"
                     && case["suite"] != "importstar"
@@ -4046,8 +4093,9 @@ mod tests {
                     && case["upstream_test"] != "TestLowerExponentiationOperatorNoBundle"
                     && case["upstream_test"] != "TestLowerConstIssue4448"
                     && case["upstream_test"] != "TestImportMetaCommonJS"
-                    && case["upstream_test"] != "TestRequireResolve")
-                || case.get("expected_snapshot").is_none()
+                    && case["upstream_test"] != "TestRequireResolve"
+                    && !is_supported_diagnostic_only_case)
+                || (case.get("expected_snapshot").is_none() && !is_supported_diagnostic_only_case)
                 || (!case["entry_paths"].is_array() && !case["entry_paths_advanced"].is_array())
                 || case["entry_paths"]
                     .as_array()
@@ -4243,6 +4291,7 @@ mod tests {
                                 "TestTSDeclareClassFields"
                                     | "TestStaticClassBlockES2021"
                                     | "TestLowerNullishCoalescingAssignmentIssue1493"
+                                    | "TestForbidStringExportNamesBundle"
                             )
                         ))
                     && !(option_names
@@ -4288,6 +4337,8 @@ mod tests {
                                     | "TestLowerExportStarAsNameCollisionNoBundle"
                                     | "TestLowerForAwait2017"
                                     | "TestLowerForAwait2015"
+                                    | "TestForbidStringImportNamesNoBundle"
+                                    | "TestForbidStringExportNamesNoBundle"
                             )
                         ))
                     && !(option_names
@@ -4297,7 +4348,13 @@ mod tests {
                             "Mode",
                             "UnsupportedJSFeatures",
                         ]
-                        && case["upstream_test"] == "TestLowerExportStarAsNameCollision")
+                        && matches!(
+                            case["upstream_test"].as_str(),
+                            Some(
+                                "TestLowerExportStarAsNameCollision"
+                                    | "TestForbidStringImportNamesBundle"
+                            )
+                        ))
                     && !(option_names
                         == [
                             "AbsOutputDir",
@@ -4681,18 +4738,22 @@ mod tests {
                     compiled.metafile
                 ));
             }
-            assert_eq!(
-                generated,
-                case["expected_snapshot"]
-                    .as_str()
-                    .expect("upstream expected bundler snapshot"),
-                "upstream bundler test {test_name}"
-            );
+            if let Some(expected_snapshot) = case["expected_snapshot"].as_str() {
+                assert_eq!(
+                    generated, expected_snapshot,
+                    "upstream bundler test {test_name}"
+                );
+            } else {
+                assert!(
+                    generated.is_empty(),
+                    "diagnostic-only upstream bundler test {test_name} emitted output"
+                );
+            }
         }
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 750 },
+            if selected_test.is_some() { 1 } else { 754 },
             "upstream basic bundler corpus case count"
         );
     }
