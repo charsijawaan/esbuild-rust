@@ -9,9 +9,9 @@ The captured corpus currently contains 14,005 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 6,861 | 1,782 | 8,643 |
+| JS/TS parser and parser lowering | 6,880 | 1,763 | 8,643 |
 | Bundler | 893 | 178 | 1,071 |
-| Total | 12,045 | 1,960 | 14,005 |
+| Total | 12,064 | 1,941 | 14,005 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility/API tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -42,6 +42,15 @@ Use `ESBUILD_RS_E2E_START` and `ESBUILD_RS_E2E_LIMIT` to select a contiguous ran
 or `ESBUILD_RS_E2E_TIMEOUT_MS` to adjust the 90-second per-test timeout. Executable
 startup has a separate preflight check. Reports include Node/platform details;
 compare with the pinned Go binary before attributing a failure to the port.
+
+The initial complete run at Rust commit `7f5bcce` on Node 24.15.0/macOS is recorded
+in `end_to_end_baseline.json`: Rust passed 1,214, failed 247, and timed out once;
+Go passed 1,461 and failed once. Case 80 fails with the same native async-generator
+behavior on both binaries. The remaining 247 Rust-only failures/timeouts are a
+separate runtime parity backlog, not included in the fixture table. No upstream
+assertion was changed to accept these results. Case 1415 (`--analyze` on a
+stdin-only transform) times out at that baseline because the Rust CLI waits for
+stdin instead of validating the flag combination first.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
@@ -121,7 +130,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 6,861 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 6,880 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -198,7 +207,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 67
-reviewed cases beyond the original option-based selection. So 12,045 concrete
+reviewed cases beyond the original option-based selection. So 12,064 concrete
 upstream cases are currently active in `cargo test`; the remaining 178 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

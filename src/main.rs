@@ -642,6 +642,23 @@ fn run_with_stdin_and_node_paths(
         return Err("\"loader\" without extension only applies when reading from stdin".into());
     }
 
+    if analyze != AnalyzeMode::Disabled && !bundle && input_paths.is_empty() {
+        let argument = arguments
+            .iter()
+            .find(|argument| {
+                argument.as_str() == "--analyze" || argument.as_str() == "--analyze=verbose"
+            })
+            .expect("analyze flag");
+        return Err(format_cli_messages(
+            arguments,
+            &[Message {
+                text: format!("Invalid transform flag: {argument:?}"),
+                ..Message::default()
+            }],
+            MessageKind::Error,
+        ));
+    }
+
     let use_build_api = bundle
         || !outdir.is_empty()
         || !outfile.is_empty()
@@ -1156,6 +1173,27 @@ mod tests {
                 assert_eq!(stderr.contains("[WARNING]"), level == "warning", "{stderr}");
                 assert!(!stderr.contains("1 warning"), "{stderr}");
             }
+        }
+    }
+
+    #[test]
+    fn rejects_analyze_on_stdin_transforms_before_reading_input() {
+        for flag in ["--analyze", "--analyze=verbose"] {
+            let error = match run_with_stdin(
+                &[
+                    flag.into(),
+                    "--log-level=warning".into(),
+                    "--color=false".into(),
+                ],
+                Some(b""),
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("analyze incorrectly enabled the build API"),
+            };
+            assert_eq!(
+                error,
+                format!("✘ [ERROR] Invalid transform flag: {flag:?}\n\n")
+            );
         }
     }
 

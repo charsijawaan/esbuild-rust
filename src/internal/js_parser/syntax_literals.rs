@@ -282,11 +282,13 @@ pub(crate) fn parse_big_int_or_string_if_unsupported(core: &ParserCore, lexer: &
         .unsupported_js_features
         .contains(JsFeature::BIGINT)
     {
-        let (digits, radix) = if let Some(digits) = text.strip_prefix("0b") {
+        let (digits, radix) = if let Some(digits) =
+            text.strip_prefix("0b").or_else(|| text.strip_prefix("0B"))
+        {
             (digits, 2)
-        } else if let Some(digits) = text.strip_prefix("0o") {
+        } else if let Some(digits) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
             (digits, 8)
-        } else if let Some(digits) = text.strip_prefix("0x") {
+        } else if let Some(digits) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
             (digits, 16)
         } else {
             (text, 10)
@@ -482,23 +484,32 @@ mod tests {
 
     #[test]
     fn normalizes_unsupported_bigints_to_decimal_strings() {
-        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
-        let source = Source {
-            contents: Arc::from(&b"0x1_0000_0000_0000_0001n"[..]),
-            ..Source::default()
-        };
-        let lexer = Lexer::new(log, source.clone(), TsOptions::default());
-        let options = Options {
-            unsupported_js_features: crate::internal::compat::JsFeature::BIGINT,
-            ..Options::default()
-        };
-        let core = super::ParserCore::new(source, options);
-        let expr = parse_big_int_or_string_if_unsupported(&core, &lexer);
-        assert!(matches!(
-            expr.data.as_deref(),
-            Some(ExprData::String(value))
-                if value.value == "18446744073709551617".encode_utf16().collect::<Vec<_>>()
-        ));
+        for (input, expected) in [
+            ("0x1_0000_0000_0000_0001n", "18446744073709551617"),
+            ("0X1_0000_0000_0000_0001n", "18446744073709551617"),
+            ("0b100101n", "37"),
+            ("0B100101n", "37"),
+            ("0o76543210n", "16434824"),
+            ("0O76543210n", "16434824"),
+        ] {
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let source = Source {
+                contents: Arc::from(input.as_bytes()),
+                ..Source::default()
+            };
+            let lexer = Lexer::new(log, source.clone(), TsOptions::default());
+            let options = Options {
+                unsupported_js_features: crate::internal::compat::JsFeature::BIGINT,
+                ..Options::default()
+            };
+            let core = super::ParserCore::new(source, options);
+            let expr = parse_big_int_or_string_if_unsupported(&core, &lexer);
+            assert!(matches!(
+                expr.data.as_deref(),
+                Some(ExprData::String(value))
+                    if value.value == expected.encode_utf16().collect::<Vec<_>>()
+            ));
+        }
     }
 
     #[test]

@@ -11408,6 +11408,16 @@ fn visit_expr_with_target_and_context(
                 for decorator in &mut property.decorators {
                     visit_expr(core, &mut decorator.value, resolve_identifiers);
                 }
+                // Do this after property mangling/name inference, as upstream
+                // does: a canonical non-negative integer key needs no quotes.
+                if core.options.minify_syntax
+                    && let Some(ExprData::String(key)) = property.key.data.as_deref()
+                    && let Some(number) =
+                        crate::internal::js_ast::string_to_equivalent_number_value(&key.value)
+                    && number >= 0.0
+                {
+                    property.key.data = Some(Box::new(ExprData::Number(number)));
+                }
             }
             if core.options.minify_syntax && has_spread && assign_target == AssignTarget::None {
                 object.properties = mangle_object_spread(&object.properties);
