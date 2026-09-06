@@ -51,6 +51,11 @@ pub(crate) fn parse_statements_up_to(
     end: Token,
 ) -> Vec<Stmt> {
     let mut statements = Vec::new();
+    let mut is_directive_prologue = core.current_scope.as_ref().is_some_and(|scope| {
+        let scope = scope.lock().expect("scope lock");
+        scope.kind == crate::internal::js_ast::ScopeKind::FunctionBody
+            || (scope.kind == crate::internal::js_ast::ScopeKind::Entry && scope.parent.is_none())
+    });
     loop {
         for comment in &lexer.legal_comments_before_token {
             statements.push(Stmt::new(
@@ -67,7 +72,45 @@ pub(crate) fn parse_statements_up_to(
         if lexer.token == end {
             break;
         }
-        statements.push(parse_statement(core, lexer));
+        let statement = parse_statement(core, lexer);
+        if is_directive_prologue {
+            is_directive_prologue = false;
+            if let Some(StmtData::Expr(expression)) = statement.data.as_deref()
+                && let Some(ExprData::String(value)) = expression.value.data.as_deref()
+                && matches!(
+                    usize::try_from(statement.loc.start)
+                        .ok()
+                        .and_then(|start| core.source.contents.get(start)),
+                    Some(b'\'' | b'"')
+                )
+            {
+                is_directive_prologue = true;
+                if value.value == "use strict".encode_utf16().collect::<Vec<_>>() {
+                    use crate::internal::js_ast::{ScopeKind, StrictModeKind};
+                    let mut scope = core
+                        .current_scope
+                        .as_ref()
+                        .expect("directive scope")
+                        .lock()
+                        .expect("scope lock");
+                    scope.strict_mode = StrictModeKind::ExplicitStrict;
+                    scope.use_strict_loc = expression.value.loc;
+                    if scope.kind == ScopeKind::FunctionBody
+                        && let Some(parent) =
+                            scope.parent.as_ref().and_then(std::sync::Weak::upgrade)
+                    {
+                        let mut parent = parent.lock().expect("scope lock");
+                        if parent.kind == ScopeKind::FunctionArgs
+                            && parent.strict_mode == StrictModeKind::Sloppy
+                        {
+                            parent.strict_mode = StrictModeKind::ExplicitStrict;
+                            parent.use_strict_loc = expression.value.loc;
+                        }
+                    }
+                }
+            }
+        }
+        statements.push(statement);
     }
     statements
 }

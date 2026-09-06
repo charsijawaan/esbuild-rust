@@ -134,6 +134,8 @@ pub(crate) struct ParserCore {
     pub(crate) lower_super_property_access: bool,
     pub(crate) has_top_level_return: bool,
     pub(crate) has_jsx_element: bool,
+    pub(crate) first_jsx_element_loc: Loc,
+    pub(crate) enclosing_class_keyword: Range,
     pub(crate) has_type_script_export: bool,
     pub(crate) should_fold_type_script_constant_expressions: bool,
     pub(crate) will_wrap_module_in_try_catch_for_using: bool,
@@ -227,6 +229,8 @@ impl ParserCore {
             lower_super_property_access: false,
             has_top_level_return: false,
             has_jsx_element: false,
+            first_jsx_element_loc: Loc { start: -1 },
+            enclosing_class_keyword: Range::default(),
             has_type_script_export: false,
             should_fold_type_script_constant_expressions: false,
             will_wrap_module_in_try_catch_for_using: false,
@@ -504,10 +508,10 @@ impl ParserCore {
             .is_some_and(|value| value.value)
             && let Some(scope) = &self.current_scope
         {
-            scope
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .strict_mode = StrictModeKind::ImplicitStrictTsAlwaysStrict;
+            // Upstream changes only the entry scope here, before ESM propagation.
+            // Recursing instead changes block-function hoisting (issue #2537).
+            scope.lock().expect("scope lock").strict_mode =
+                StrictModeKind::ImplicitStrictTsAlwaysStrict;
         }
 
         let is_file_considered_to_have_esm_exports =
@@ -521,6 +525,15 @@ impl ParserCore {
                     .expect("visit pass requires a module scope"),
                 StrictModeKind::ImplicitStrictEsm,
             );
+        }
+        if self.options.jsx.automatic_runtime
+            && self.has_jsx_element
+            && let Some(scope) = &self.current_scope
+        {
+            let mut scope = scope.lock().expect("scope lock");
+            if scope.strict_mode == StrictModeKind::Sloppy {
+                scope.strict_mode = StrictModeKind::ImplicitStrictJsxAutomaticRuntime;
+            }
         }
 
         self.require_ref = if self.options.mode == Mode::PassThrough {
@@ -570,6 +583,77 @@ impl ParserCore {
     }
 
     fn hoist_symbols_in_scope(&mut self, scope: &ScopeRef) {
+        // This cannot be checked while parsing: an export later in the file
+        // can make earlier duplicate function declarations invalid.
+        let (scope_kind, strict_mode, use_strict_loc, is_top_level) = {
+            let scope = scope.lock().expect("scope lock");
+            (
+                scope.kind,
+                scope.strict_mode,
+                scope.use_strict_loc,
+                scope.parent.is_none(),
+            )
+        };
+        if (strict_mode != StrictModeKind::Sloppy && scope_kind == ScopeKind::Block)
+            || (is_top_level && self.is_file_considered_esm)
+        {
+            let (replaced, members_by_name) = {
+                let scope = scope.lock().expect("scope lock");
+                (scope.replaced.clone(), scope.members.clone())
+            };
+            for replaced in replaced {
+                let symbol = &self.symbols[replaced.reference.inner_index as usize];
+                if !symbol.kind.is_function() {
+                    continue;
+                }
+                let name = symbol.original_name.clone();
+                let Some(member) = members_by_name.get(&name) else {
+                    continue;
+                };
+                if !self.symbols[member.reference.inner_index as usize]
+                    .kind
+                    .is_function()
+                {
+                    continue;
+                }
+                let (prefix, mut notes) = if is_top_level && self.is_file_considered_esm {
+                    ("Duplicate top-level function declarations are not allowed in an ECMAScript module. ".into(),
+                        super::visit::why_es_module_note(self).into_iter().collect::<Vec<_>>())
+                } else {
+                    let (place, notes) =
+                        super::visit::why_strict_mode(self, strict_mode, use_strict_loc);
+                    (
+                        format!(
+                            "Duplicate function declarations are not allowed in nested blocks {place}. "
+                        ),
+                        notes,
+                    )
+                };
+                if let Some(note) = notes.first_mut() {
+                    note.text.insert_str(0, &prefix);
+                } else {
+                    notes.push(crate::internal::logger::MsgData {
+                        text: prefix.trim_end().into(),
+                        ..Default::default()
+                    });
+                }
+                notes.insert(
+                    0,
+                    self.tracker.msg_data(
+                        range_of_identifier(&self.source, replaced.loc),
+                        format!("The symbol {name:?} was originally declared here:"),
+                    ),
+                );
+                if let Some(log) = self.log.clone() {
+                    log.add_error_with_notes(
+                        Some(&mut self.tracker),
+                        range_of_identifier(&self.source, member.loc),
+                        format!("The symbol {name:?} has already been declared"),
+                        notes,
+                    );
+                }
+            }
+        }
         let (kind, strict_mode, parent, mut members, children) = {
             let scope = scope
                 .lock()

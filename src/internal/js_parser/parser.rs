@@ -366,20 +366,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             .any(|statement| matches!(statement.data.as_deref(), Some(StmtData::Import(_))));
         let has_esm_exports = core.esm_export_keyword.len > 0
             || core.esm_import_meta.len > 0
-            || core.top_level_await_keyword.len > 0
-            || (core.options.jsx.automatic_runtime && core.has_jsx_element);
-        if has_esm_exports
-            || has_import_statement
-            || core.options.module_type_data.module_type.is_esm()
-            || directives.iter().any(|directive| directive == "use strict")
-        {
-            for loc in directive_legacy_octal_locs {
-                core.add_error_range(
-                    core.source.range_of_legacy_octal_escape(loc),
-                    "Legacy octal escape sequences cannot be used in strict mode",
-                );
-            }
-        }
+            || core.top_level_await_keyword.len > 0;
         core.will_wrap_module_in_try_catch_for_using = statements.iter().any(|statement| {
             matches!(
                 statement.data.as_deref(),
@@ -404,6 +391,14 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         core.declared_symbols.clear();
         let scopes = core.scope_refs_in_order();
         core.prepare_for_visit_pass(has_esm_exports, has_import_statement);
+        for loc in directive_legacy_octal_locs {
+            let range = core.source.range_of_legacy_octal_escape(loc);
+            super::visit::mark_strict_mode_feature(
+                &mut core,
+                range,
+                "Legacy octal escape sequences",
+            );
+        }
         core.hoist_symbols();
         precompute_type_script_enum_constants(&mut core, &statements);
         let (mut parts, mut module_metadata, uses_exports_ref, uses_module_ref) =
@@ -5031,7 +5026,9 @@ mod tests {
             parse_source_with_options("<><div key={id} />{left}{right}</>;", options.clone());
         assert!(ok);
         assert!(log.done().is_empty());
-        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::Esm);
+        // Verified against the pinned Go parser: the generated JSX import
+        // enables strict mode but does not mark the source as having ESM exports.
+        assert_eq!(ast.exports_kind, crate::internal::js_ast::ExportsKind::None);
         assert_eq!(ast.import_records.len(), 1);
         assert_eq!(ast.import_records[0].path.text, "react/jsx-runtime");
         assert_eq!(ast.named_imports.len(), 3);
@@ -5710,6 +5707,72 @@ mod tests {
     #[test]
     fn rejects_with_statements_in_strict_mode() {
         let (_, ok, log) = parse_source("\"use strict\"; with (object) {}");
+        assert!(ok);
+        assert_eq!(log.done().len(), 1);
+    }
+
+    #[test]
+    fn strict_mode_notes_point_to_the_directive_module_or_class() {
+        for (source, reason, marker, length) in [
+            ("'use strict'; with (x) {}", "directive", "'use strict'", 12),
+            (
+                "'use strict'; function f() {\n\"use strict\"; with (x) {} }",
+                "directive",
+                "\"use strict\"",
+                12,
+            ),
+            ("export {}; with (x) {}", "ECMAScript module", "export", 6),
+            (
+                "class C { m() { with (x) {} } }",
+                "inside a class",
+                "class",
+                5,
+            ),
+        ] {
+            let (_, ok, log) = parse_source(source);
+            assert!(ok);
+            let messages = log.done();
+            assert_eq!(messages.len(), 1, "{source}");
+            assert_eq!(messages[0].notes.len(), 1, "{source}");
+            let note = &messages[0].notes[0];
+            assert!(note.text.contains(reason), "{}", note.text);
+            let location = note.location.as_ref().expect("strictness source location");
+            let start = source.find(marker).unwrap();
+            let prefix = &source[..start];
+            assert_eq!(
+                location.line,
+                prefix.bytes().filter(|byte| *byte == b'\n').count() + 1
+            );
+            assert_eq!(location.column, prefix.rsplit('\n').next().unwrap().len());
+            assert_eq!(location.length, length);
+        }
+    }
+
+    #[test]
+    fn duplicate_parameters_always_reference_the_first_binding() {
+        let (_, ok, log) = parse_source("function f(a, a, a) { 'use strict' }");
+        assert!(ok);
+        let messages = log.done();
+        assert_eq!(messages.len(), 2);
+        for message in messages {
+            assert_eq!(message.notes.len(), 1);
+            let location = message.notes[0].location.as_ref().unwrap();
+            assert_eq!(
+                (location.line, location.column, location.length),
+                (1, 11, 1)
+            );
+        }
+    }
+
+    #[test]
+    fn minifying_computed_octal_key_reports_strictness_only_once() {
+        let (_, ok, log) = parse_source_with_options(
+            "'use strict'; ({[0123]: 4})",
+            Options {
+                minify_syntax: true,
+                ..Options::default()
+            },
+        );
         assert!(ok);
         assert_eq!(log.done().len(), 1);
     }

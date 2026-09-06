@@ -9,9 +9,9 @@ The captured corpus currently contains 14,005 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 6,726 | 1,917 | 8,643 |
+| JS/TS parser and parser lowering | 6,861 | 1,782 | 8,643 |
 | Bundler | 893 | 178 | 1,071 |
-| Total | 11,910 | 2,095 | 14,005 |
+| Total | 12,045 | 1,960 | 14,005 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility/API tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -89,7 +89,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 6,726 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 6,861 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -101,6 +101,13 @@ ESBUILD_RS_UPSTREAM_PARSER_REPORT=/tmp/parser-audit.json cargo test --lib \
 Use `ESBUILD_RS_UPSTREAM_PARSER_INDEX` to select an individual fixture or
 `ESBUILD_RS_UPSTREAM_PARSER_TEST` to select an upstream test group (including its
 inactive cases) with `matches_pinned_upstream_active_js_parser_corpus`.
+
+All 231 captured `TestStrictMode` cases are active. Strictness is tracked from
+directive parsing and reported with upstream's module/class/directive/JSX reason
+notes. Coverage includes duplicate function and parameter declarations,
+for-in initializers, contextual label names, and octal property keys. Local
+regressions additionally verify note locations and avoid duplicate diagnostics
+when minification folds a computed property key.
 
 The CSS parser generator instruments a temporary copy of upstream's Go test
 package and runs it to capture all 2,781 concrete cases, including cases built
@@ -159,7 +166,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 67
-reviewed cases beyond the original option-based selection. So 11,910 concrete
+reviewed cases beyond the original option-based selection. So 12,045 concrete
 upstream cases are currently active in `cargo test`; the remaining 178 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

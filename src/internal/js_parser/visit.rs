@@ -51,7 +51,7 @@ fn contains_closing_script_tag(text: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(b"</script"))
 }
 
-fn why_es_module_note(core: &mut ParserCore) -> Option<MsgData> {
+pub(crate) fn why_es_module_note(core: &mut ParserCore) -> Option<MsgData> {
     let because = "This file is considered to be an ECMAScript module because";
     let (range, text) = if core.esm_export_keyword.len > 0 {
         (
@@ -68,6 +68,28 @@ fn why_es_module_note(core: &mut ParserCore) -> Option<MsgData> {
             core.top_level_await_keyword,
             format!("{because} of the top-level \"await\" keyword here:"),
         )
+    } else if matches!(
+        core.options.module_type_data.module_type,
+        crate::internal::js_ast::ModuleType::EsmMjs | crate::internal::js_ast::ModuleType::EsmMts
+    ) {
+        let extension = if core.options.module_type_data.module_type
+            == crate::internal::js_ast::ModuleType::EsmMjs
+        {
+            ".mjs"
+        } else {
+            ".mts"
+        };
+        return Some(MsgData {
+            text: format!("{because} the file name ends in {extension:?}."),
+            ..MsgData::default()
+        });
+    } else if core.options.module_type_data.module_type
+        == crate::internal::js_ast::ModuleType::EsmPackageJson
+    {
+        let data = &core.options.module_type_data;
+        let mut tracker = crate::internal::logger::LineColumnTracker::new(data.source.as_deref());
+        return Some(tracker.msg_data(data.range,
+            format!("{because} the enclosing \"package.json\" file sets the type of this file to \"module\":")));
     } else if core.esm_import_statement_keyword.len > 0 {
         (
             core.esm_import_statement_keyword,
@@ -77,6 +99,85 @@ fn why_es_module_note(core: &mut ParserCore) -> Option<MsgData> {
         return None;
     };
     Some(core.tracker.msg_data(range, text))
+}
+
+// Keep all strict-mode diagnostics tied to the scope that introduced strictness,
+// just like upstream's markStrictModeFeature/whyStrictMode pair.
+pub(crate) fn mark_strict_mode_feature(core: &mut ParserCore, range: Range, feature: &str) {
+    let (kind, use_strict_loc) =
+        core.current_scope
+            .as_ref()
+            .map_or((StrictModeKind::Sloppy, Loc::default()), |scope| {
+                let scope = scope.lock().expect("scope lock");
+                (scope.strict_mode, scope.use_strict_loc)
+            });
+    if kind == StrictModeKind::Sloppy
+        && core.options.output_format != crate::internal::config::Format::EsModule
+    {
+        return;
+    }
+    let (place, notes) = why_strict_mode(core, kind, use_strict_loc);
+    let place = if kind == StrictModeKind::Sloppy {
+        "with the \"esm\" output format due to strict mode"
+    } else {
+        place
+    };
+    if let Some(log) = core.log.clone() {
+        log.add_error_with_notes(
+            Some(&mut core.tracker),
+            range,
+            format!("{feature} cannot be used {place}"),
+            notes,
+        );
+    }
+}
+
+pub(crate) fn why_strict_mode(
+    core: &mut ParserCore,
+    kind: StrictModeKind,
+    use_strict_loc: Loc,
+) -> (&'static str, Vec<MsgData>) {
+    let mut notes = Vec::new();
+    let mut place = "in strict mode";
+    match kind {
+        StrictModeKind::Sloppy => {}
+        StrictModeKind::ExplicitStrict => notes.push(core.tracker.msg_data(
+            core.source.range_of_string(use_strict_loc),
+            "Strict mode is triggered by the \"use strict\" directive here:",
+        )),
+        StrictModeKind::ImplicitStrictEsm => {
+            place = "in an ECMAScript module";
+            notes.extend(why_es_module_note(core));
+        }
+        StrictModeKind::ImplicitStrictClass => notes.push(core.tracker.msg_data(
+            core.enclosing_class_keyword,
+            "All code inside a class is implicitly in strict mode",
+        )),
+        StrictModeKind::ImplicitStrictTsAlwaysStrict => {
+            if let Some(setting) = &core.options.ts_always_strict {
+                let mut tracker =
+                    crate::internal::logger::LineColumnTracker::new(Some(&setting.source));
+                notes.push(tracker.msg_data(
+                    setting.range,
+                    format!("TypeScript's {:?} setting was enabled here:", setting.name),
+                ));
+            }
+        }
+        StrictModeKind::ImplicitStrictJsxAutomaticRuntime => {
+            notes.push(core.tracker.msg_data(
+                Range {
+                    loc: core.first_jsx_element_loc,
+                    len: 1,
+                },
+                "This file is implicitly in strict mode due to the JSX element here:",
+            ));
+            notes.push(MsgData {
+                text: "When React's \"automatic\" JSX transform is enabled, using a JSX element automatically inserts an \"import\" statement at the top of the file for the corresponding the JSX helper function. This means the file is considered an ECMAScript module, and all ECMAScript modules use strict mode.".into(),
+                ..MsgData::default()
+            });
+        }
+    }
+    (place, notes)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2021,12 +2122,11 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 }
             }
             Some(StmtData::With(with_statement)) => {
-                if core.is_strict_mode() {
-                    core.add_error_range(
-                        crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
-                        "With statements cannot be used in strict mode",
-                    );
-                }
+                mark_strict_mode_feature(
+                    core,
+                    crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
+                    "With statements",
+                );
                 visit_expr(core, &mut with_statement.value, resolve_identifiers);
                 validate_single_statement(
                     core,
@@ -2103,7 +2203,14 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                             Some(BindingData::Identifier(identifier))
                                 if declaration.value_or_nil.data.is_some() =>
                             {
-                                Some((declaration.binding.loc, identifier.reference))
+                                Some((
+                                    declaration.binding.loc,
+                                    identifier.reference,
+                                    core.source.range_of_operator_before(
+                                        declaration.value_or_nil.loc,
+                                        b"=",
+                                    ),
+                                ))
                             }
                             _ => None,
                         }
@@ -2111,7 +2218,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     _ => None,
                 };
                 visit_for_loop_init(core, &mut loop_statement.init, resolve_identifiers, true);
-                if let Some((binding_loc, reference)) = var_initializer {
+                if let Some((binding_loc, reference, _)) = var_initializer {
                     let assignment = match loop_statement.init.data.as_deref_mut() {
                         Some(StmtData::Expr(expression)) => {
                             let assignment = std::mem::take(&mut expression.value);
@@ -2169,6 +2276,15 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     optimize_loop_body(core, &mut loop_statement.body);
                 }
                 relocate_for_in_or_of_init(core, &mut loop_statement.init);
+                if let Some((_, _, range)) = var_initializer
+                    && core.is_strict_mode()
+                {
+                    mark_strict_mode_feature(
+                        core,
+                        range,
+                        "Variable initializers inside for-in loops",
+                    );
+                }
                 core.pop_scope();
             }
             Some(StmtData::ForOf(loop_statement)) => {
@@ -4046,22 +4162,16 @@ fn validate_single_statement(
                     SingleStatementContext::If | SingleStatementContext::Label
                 )
             {
-                if core.is_strict_mode() {
-                    let place = if context == SingleStatementContext::If {
-                        "if statements"
-                    } else {
-                        "labels"
-                    };
-                    let reason = if core.is_file_considered_esm {
-                        "an ECMAScript module"
-                    } else {
-                        "strict mode"
-                    };
-                    core.add_error_range(
-                        crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
-                        format!("Function declarations inside {place} cannot be used in {reason}"),
-                    );
-                }
+                let place = if context == SingleStatementContext::If {
+                    "if statements"
+                } else {
+                    "labels"
+                };
+                mark_strict_mode_feature(
+                    core,
+                    crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
+                    &format!("Function declarations inside {place}"),
+                );
             } else {
                 report_forbidden_single_statement(core, statement.loc);
             }
@@ -4098,6 +4208,13 @@ fn visit_label_statement_chain(
         core.push_scope_for_visit_pass(ScopeKind::Label, current.loc);
         let name =
             String::from_utf8_lossy(core.load_name_from_ref(label.name.reference)).into_owned();
+        if crate::internal::js_lexer::is_strict_mode_reserved_word(&name) {
+            mark_strict_mode_feature(
+                core,
+                crate::internal::js_lexer::range_of_identifier(&core.source, label.name.loc),
+                &format!("{name:?} is a reserved word and"),
+            );
+        }
         let should_drop = core.options.drop_labels.contains(&name);
         let reference = core.new_symbol(crate::internal::ast::SymbolKind::Label, name);
         label.name.reference = reference;
@@ -5070,6 +5187,8 @@ fn visit_class(
         visit_expr(core, &mut decorator.value, resolve_identifiers);
     }
     core.push_scope_for_visit_pass(ScopeKind::ClassName, class.class_keyword.loc);
+    let old_enclosing_class_keyword =
+        std::mem::replace(&mut core.enclosing_class_keyword, class.class_keyword);
     let mut inner_class_name = None;
     if let Some(name) = &mut class.name {
         let name_was_stored = ParserCore::is_stored_name_ref(name.reference);
@@ -5289,6 +5408,8 @@ fn visit_class(
     for property in &mut class.properties {
         if property.flags.contains(PropertyFlags::IS_COMPUTED) {
             visit_expr(core, &mut property.key, resolve_identifiers);
+        } else {
+            validate_non_computed_property_key(core, &property.key);
         }
         for decorator in &mut property.decorators {
             visit_expr(core, &mut decorator.value, resolve_identifiers);
@@ -5431,6 +5552,7 @@ fn visit_class(
     }
     core.pop_scope();
     core.pop_scope();
+    core.enclosing_class_keyword = old_enclosing_class_keyword;
     if core.options.minify_syntax && outer_class_name.is_none() && used_inner_name.is_none() {
         class.name = None;
     }
@@ -9148,6 +9270,8 @@ fn visit_binding_initializers(
             for property in &mut object.properties {
                 if property.is_computed {
                     visit_expr(core, &mut property.key, resolve_identifiers);
+                } else {
+                    validate_non_computed_property_key(core, &property.key);
                 }
                 visit_binding_initializers(core, &mut property.value, resolve_identifiers);
                 visit_expr(
@@ -9160,6 +9284,25 @@ fn visit_binding_initializers(
             }
         }
         Some(BindingData::Missing | BindingData::Identifier(_)) | None => {}
+    }
+}
+
+fn validate_non_computed_property_key(core: &mut ParserCore, key: &Expr) {
+    match key.data.as_deref() {
+        Some(ExprData::Number(_)) => {
+            if let Some(range) = core.legacy_octal_literals.get(&key.loc).copied() {
+                mark_strict_mode_feature(core, range, "Legacy octal literals");
+            }
+        }
+        Some(ExprData::String(value)) if value.legacy_octal_loc.start > 0 => {
+            mark_strict_mode_feature(
+                core,
+                core.source
+                    .range_of_legacy_octal_escape(value.legacy_octal_loc),
+                "Legacy octal escape sequences",
+            );
+        }
+        _ => {}
     }
 }
 
@@ -9181,13 +9324,23 @@ fn record_binding_with_duplicates(
             validate_binding_name(core, loc, identifier.reference);
             if let Some(duplicates) = duplicates.as_deref_mut() {
                 let range = crate::internal::js_lexer::range_of_identifier(&core.source, loc);
-                if duplicates.insert(name.clone(), range).is_some() {
-                    core.add_error_range(
-                        range,
-                        format!(
-                            "{name:?} cannot be bound multiple times in the same parameter list"
-                        ),
+                if let Some(first_range) = duplicates.get(&name) {
+                    let note = core.tracker.msg_data(
+                        *first_range,
+                        format!("The name {name:?} was originally bound here:"),
                     );
+                    if let Some(log) = core.log.clone() {
+                        log.add_error_with_notes(
+                            Some(&mut core.tracker),
+                            range,
+                            format!(
+                                "{name:?} cannot be bound multiple times in the same parameter list"
+                            ),
+                            vec![note],
+                        );
+                    }
+                } else {
+                    duplicates.insert(name.clone(), range);
                 }
             }
         }
@@ -9195,26 +9348,27 @@ fn record_binding_with_duplicates(
 }
 
 fn validate_binding_name(core: &mut ParserCore, loc: Loc, reference: crate::internal::ast::Ref) {
-    if !core.is_strict_mode() {
-        return;
-    }
     let symbol_index = usize::try_from(reference.inner_index).expect("symbol index");
     let name = core.symbols[symbol_index].original_name.clone();
     let text = if crate::internal::js_lexer::is_strict_mode_reserved_word(&name) {
-        format!("{name:?} is a reserved word and cannot be used in strict mode")
+        format!("{name:?} is a reserved word and")
     } else if matches!(name.as_str(), "eval" | "arguments") {
-        format!("Declarations with the name {name:?} cannot be used in strict mode")
+        format!("Declarations with the name {name:?}")
     } else {
         return;
     };
-    core.add_error_range(
+    mark_strict_mode_feature(
+        core,
         crate::internal::js_lexer::range_of_identifier(&core.source, loc),
-        text,
+        &text,
     );
 }
 
 fn function_body_use_strict(core: &ParserCore, statements: &[Stmt]) -> Option<Loc> {
     for statement in statements {
+        if matches!(statement.data.as_deref(), Some(StmtData::Comment(_))) {
+            continue;
+        }
         let Some(StmtData::Expr(expression)) = statement.data.as_deref() else {
             return None;
         };
@@ -9752,15 +9906,14 @@ fn visit_expr_with_target_and_context(
             if ParserCore::is_stored_name_ref(identifier.reference) {
                 let name = String::from_utf8_lossy(core.load_name_from_ref(identifier.reference))
                     .into_owned();
-                if core.is_strict_mode()
-                    && crate::internal::js_lexer::is_strict_mode_reserved_word(&name)
-                {
-                    core.add_error_range(
+                if crate::internal::js_lexer::is_strict_mode_reserved_word(&name) {
+                    mark_strict_mode_feature(
+                        core,
                         crate::internal::js_lexer::range_of_identifier(
                             &core.source,
                             expression.loc,
                         ),
-                        format!("{name:?} is a reserved word and cannot be used in strict mode"),
+                        &format!("{name:?} is a reserved word and"),
                     );
                 }
                 let result = core.find_symbol(expression.loc, &name);
@@ -9986,15 +10139,15 @@ fn visit_expr_with_target_and_context(
         }
         ExprData::Unary(unary) => {
             if unary.op == OpCode::UnaryDelete
-                && core.is_strict_mode()
                 && matches!(unary.value.data.as_deref(), Some(ExprData::Identifier(_)))
             {
-                core.add_error_range(
+                mark_strict_mode_feature(
+                    core,
                     Range {
                         loc: expression.loc,
                         len: 6,
                     },
-                    "Delete of a bare identifier cannot be used in strict mode",
+                    "Delete of a bare identifier",
                 );
             }
             let mut super_key = if core.lower_super_property_access
@@ -11222,6 +11375,8 @@ fn visit_expr_with_target_and_context(
                             property.flags.remove(PropertyFlags::IS_COMPUTED);
                         }
                     }
+                } else {
+                    validate_non_computed_property_key(core, &property.key);
                 }
                 let old_super_home_ref = core.visit_super_home_ref;
                 let old_super_home_is_class_instance = core.visit_super_home_is_class_instance;
@@ -12198,19 +12353,14 @@ fn visit_expr_with_target_and_context(
                         range,
                         "Legacy octal escape sequences cannot be used in template literals",
                     );
-                } else if core.is_strict_mode() {
-                    core.add_error_range(
-                        range,
-                        "Legacy octal escape sequences cannot be used in strict mode",
-                    );
+                } else {
+                    mark_strict_mode_feature(core, range, "Legacy octal escape sequences");
                 }
             }
         }
         ExprData::Number(_) => {
-            if core.is_strict_mode()
-                && let Some(range) = core.legacy_octal_literals.get(&expression.loc).copied()
-            {
-                core.add_error_range(range, "Legacy octal literals cannot be used in strict mode");
+            if let Some(range) = core.legacy_octal_literals.get(&expression.loc).copied() {
+                mark_strict_mode_feature(core, range, "Legacy octal literals");
             }
         }
         ExprData::NewTarget(new_target) => {
