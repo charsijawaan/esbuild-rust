@@ -14,12 +14,46 @@ use esbuild_rs::{
         MessageKind, Packages, Target, TransformOptions, analyze_metafile, build, format_messages,
         transform,
     },
-    internal::cli_helpers,
+    internal::{cli_helpers, logger::LogLevel},
 };
+
+fn parse_log_level(value: &str, argument: &str) -> Result<LogLevel, String> {
+    match value {
+        "verbose" => Ok(LogLevel::Verbose),
+        "debug" => Ok(LogLevel::Debug),
+        "info" => Ok(LogLevel::Info),
+        "warning" => Ok(LogLevel::Warning),
+        "error" => Ok(LogLevel::Error),
+        "silent" => Ok(LogLevel::Silent),
+        _ => Err(format!(
+            "Invalid value {value:?} in {argument:?}\n\nValid values are \"verbose\", \"debug\", \"info\", \"warning\", \"error\", or \"silent\"."
+        )),
+    }
+}
+
+fn cli_log_level(arguments: &[String]) -> LogLevel {
+    arguments
+        .iter()
+        .filter_map(|argument| {
+            argument
+                .strip_prefix("--log-level=")
+                .and_then(|value| parse_log_level(value, argument).ok())
+        })
+        .next_back()
+        .unwrap_or(LogLevel::Info)
+}
+
+fn cli_message_is_visible(arguments: &[String], kind: MessageKind) -> bool {
+    cli_log_level(arguments)
+        <= match kind {
+            MessageKind::Error => LogLevel::Error,
+            MessageKind::Warning => LogLevel::Warning,
+        }
+}
 
 fn format_cli_messages(arguments: &[String], messages: &[Message], kind: MessageKind) -> String {
     let mut output = format_cli_message_details(arguments, messages, kind);
-    output.push_str(&cli_message_summary(messages, kind));
+    output.push_str(&cli_message_summary(arguments, messages, kind));
     output
 }
 
@@ -28,6 +62,9 @@ fn format_cli_message_details(
     messages: &[Message],
     kind: MessageKind,
 ) -> String {
+    if !cli_message_is_visible(arguments, kind) {
+        return String::new();
+    }
     let terminal_width = esbuild_rs::internal::logger::get_terminal_info(&io::stderr()).width;
     format_messages(
         messages.to_vec(),
@@ -40,7 +77,10 @@ fn format_cli_message_details(
     .concat()
 }
 
-fn cli_message_summary(messages: &[Message], kind: MessageKind) -> String {
+fn cli_message_summary(arguments: &[String], messages: &[Message], kind: MessageKind) -> String {
+    if cli_log_level(arguments) > LogLevel::Info {
+        return String::new();
+    }
     let noun = match (kind, messages.len()) {
         (MessageKind::Error, 1) => "error",
         (MessageKind::Error, _) => "errors",
@@ -93,7 +133,13 @@ fn main() {
             }
         }
         Err(error) => {
-            eprintln!("{error}");
+            if cli_log_level(&arguments) != LogLevel::Silent && !error.is_empty() {
+                if error.ends_with('\n') {
+                    eprint!("{error}");
+                } else {
+                    eprintln!("{error}");
+                }
+            }
             std::process::exit(1);
         }
     }
@@ -224,6 +270,10 @@ fn run_with_stdin_and_node_paths(
         }
         if let Some(value) = parse_bool_flag(argument, "--color") {
             value?;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--log-level=") {
+            parse_log_level(value, argument)?;
             continue;
         }
         if argument == "--splitting" {
@@ -726,7 +776,7 @@ fn run_with_stdin_and_node_paths(
         let warning_summary = if result.warnings.is_empty() {
             String::new()
         } else {
-            cli_message_summary(&result.warnings, MessageKind::Warning)
+            cli_message_summary(arguments, &result.warnings, MessageKind::Warning)
         };
         let mut stderr = warning_details.clone();
         if !allow_overwrite && (!outdir.is_empty() || !outfile.is_empty()) {
@@ -899,17 +949,23 @@ fn run_with_stdin_and_node_paths(
         ));
     }
     let output = Output::Code(result.code);
-    Ok(if result.warnings.is_empty() {
-        output
-    } else {
-        Output::WithStderr {
-            output: Box::new(output),
-            stderr: format!(
-                "{}\n",
-                format_cli_messages(arguments, &result.warnings, MessageKind::Warning)
-            ),
-        }
-    })
+    Ok(
+        if result.warnings.is_empty() || !cli_message_is_visible(arguments, MessageKind::Warning) {
+            output
+        } else {
+            Output::WithStderr {
+                output: Box::new(output),
+                stderr: {
+                    let mut text =
+                        format_cli_messages(arguments, &result.warnings, MessageKind::Warning);
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text
+                },
+            }
+        },
+    )
 }
 
 fn parse_targets(value: &str, argument: &str) -> Result<(Target, Vec<Engine>), String> {
@@ -1001,6 +1057,7 @@ fn help_text() -> String {
          \x20\x20--bundle\n\
          \x20\x20--analyze[=verbose]\n\
          \x20\x20--color[=true|false]\n\
+         \x20\x20--log-level=LEVEL\n\
          \x20\x20--outdir=DIR\n\
          \x20\x20--outfile=FILE\n\
          \x20\x20--outbase=DIR\n\
@@ -1071,6 +1128,36 @@ mod tests {
         EngineName, Loader, Output, Target, parse_bool_flag, parse_loader, parse_targets, run,
         run_with_stdin, run_with_stdin_and_node_paths,
     };
+
+    #[test]
+    fn log_level_flags_validate_values_and_last_flag_wins() {
+        let arguments = vec!["--log-level=error".into(), "--log-level=warning".into()];
+        assert_eq!(super::cli_log_level(&arguments), super::LogLevel::Warning);
+        for value in ["verbose", "debug", "info", "warning", "error", "silent"] {
+            assert!(super::parse_log_level(value, &format!("--log-level={value}")).is_ok());
+        }
+        let error = match run_with_stdin(&["--log-level=warnings".into()], Some(b"")) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid log level was accepted"),
+        };
+        assert!(error.contains("Invalid value \"warnings\" in \"--log-level=warnings\""));
+        assert!(error.contains("Valid values are"));
+        for bundle in [false, true] {
+            for level in ["warning", "error", "silent"] {
+                let mut arguments = vec!["--loader=css".into(), format!("--log-level={level}")];
+                if bundle {
+                    arguments.push("--bundle".into());
+                }
+                let output = run_with_stdin(&arguments, Some(b"//")).expect("warning is non-fatal");
+                let stderr = match output {
+                    Output::WithStderr { stderr, .. } => stderr,
+                    _ => String::new(),
+                };
+                assert_eq!(stderr.contains("[WARNING]"), level == "warning", "{stderr}");
+                assert!(!stderr.contains("1 warning"), "{stderr}");
+            }
+        }
+    }
 
     fn transform_code(arguments: &[&str], source: &[u8]) -> String {
         let arguments = arguments

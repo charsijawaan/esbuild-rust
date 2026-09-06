@@ -17,6 +17,38 @@ This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility/API tests and upstream's JavaScript API, plugin, WebAssembly,
 and platform matrices still need a complete correspondence inventory.
 
+## CLI and runtime end-to-end suite
+
+The original `scripts/end-to-end-tests.js` can also run directly against either
+binary, without rewriting its assertions or generated programs:
+
+```sh
+cargo build --bin esbuild
+node scripts/audit_upstream_end_to_end_tests.mjs /path/to/pinned/esbuild \
+  target/debug/esbuild /tmp/rust-e2e.json
+node scripts/audit_upstream_end_to_end_tests.mjs /path/to/pinned/esbuild \
+  /path/to/pinned/esbuild/esbuild /tmp/go-e2e.json
+```
+
+This suite registers 1,462 tests on Node 24/macOS; some registrations depend on
+the runtime/platform and some tests exercise multiple output formats. These are
+separate from the 14,005 fixture cases above. The runner reads the original
+committed test script, substitutes the compiler executable, and gives each test
+an isolated temporary directory and process group. It retains failed artifacts,
+writes an incremental JSON report, and returns failure if any selected test fails
+or times out. Process groups are killed on timeout or interruption.
+
+Use `ESBUILD_RS_E2E_START` and `ESBUILD_RS_E2E_LIMIT` to select a contiguous range,
+or `ESBUILD_RS_E2E_TIMEOUT_MS` to adjust the 90-second per-test timeout. Executable
+startup has a separate preflight check. Reports include Node/platform details;
+compare with the pinned Go binary before attributing a failure to the port.
+
+The CLI supports diagnostic filtering with `--log-level`, including suppressing
+the summary below `info` and keeping a failing exit status in `silent` mode.
+Collection of extra resolver debug/verbose messages remains a separate parity gap.
+
+## Fixture regeneration
+
 Regenerate the JavaScript printer corpus with:
 
 ```sh
