@@ -941,7 +941,17 @@ fn parse_label_statement(
         let is_single_line_stmt = !lexer.has_newline_before && lexer.token != Token::OpenBrace;
         labels.push((loc, name_loc, reference, is_single_line_stmt));
 
-        if lexer.token == Token::Identifier && !matches!(lexer.raw(), b"await" | b"yield") {
+        if lexer.token == Token::Identifier
+            && !matches!(
+                lexer.raw(),
+                b"await" | b"yield" | b"let" | b"async" | b"using"
+            )
+            && !(core.options.ts.parse
+                && matches!(
+                    lexer.raw(),
+                    b"type" | b"interface" | b"declare" | b"namespace" | b"module" | b"abstract"
+                ))
+        {
             let comment_flags = lexer.has_comment_before;
             let loc = lexer.loc();
             let name_loc = loc;

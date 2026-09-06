@@ -60,7 +60,8 @@ async function worker() {
         child.on('error', error => { clearTimeout(timer); resolve({ status: 'execution-error', output: String(error) }); });
         child.on('close', code => {
           clearTimeout(timer);
-          resolve({ status: timedOut ? 'timeout' : code === 0 ? 'passing-candidate' : 'failed',
+          resolve({ status: timedOut ? 'timeout' : code === 0 ? 'passing-candidate'
+            : output.includes('unmapped upstream options:') ? 'unmapped-options' : 'failed',
             ...(code !== 0 ? { output } : {}) });
         });
       });

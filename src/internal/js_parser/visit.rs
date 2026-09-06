@@ -4204,10 +4204,17 @@ fn visit_label_statement_chain(
 }
 
 fn report_forbidden_single_statement(core: &mut ParserCore, loc: Loc) {
-    core.add_error_range(
-        crate::internal::js_lexer::range_of_identifier(&core.source, loc),
-        "Cannot use a declaration in a single-statement context",
-    );
+    if let Some(log) = &core.log {
+        log.add_error_with_notes(
+            Some(&mut core.tracker),
+            crate::internal::js_lexer::range_of_identifier(&core.source, loc),
+            "Cannot use a declaration in a single-statement context",
+            vec![crate::internal::logger::MsgData {
+                text: "Wrap this declaration in a block statement to use it here.".into(),
+                ..crate::internal::logger::MsgData::default()
+            }],
+        );
+    }
 }
 
 fn visit_statement(core: &mut ParserCore, statement: &mut Stmt, resolve_identifiers: bool) {

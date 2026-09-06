@@ -34,6 +34,9 @@ mod syntax_typescript;
 mod syntax_yield_await;
 mod visit;
 
+#[cfg(test)]
+mod upstream_tests;
+
 pub use define::parse_define_expr;
 pub use global_name::parse_global_name;
 pub use json::{JsonOptions, is_valid_json, parse_json};

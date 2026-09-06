@@ -1517,12 +1517,28 @@ fn resolve_with_plugins(
     // stateless resolver may visit the same package file along several lookup
     // paths, so collect and replay its diagnostics once per resolution.
     let resolver_log = Log::new_defer(logger::DeferLogKind::All, log.overrides.as_ref().clone());
+    let css_extension_order;
+    let extension_order = if kind.must_resolve_to_css() {
+        css_extension_order = options
+            .extension_order
+            .iter()
+            .filter(|extension| {
+                let loader =
+                    config::loader_from_file_extension(&options.extension_to_loader, extension);
+                loader == Loader::None || loader.is_css()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        &css_extension_order
+    } else {
+        &options.extension_order
+    };
     let mut result = resolver::resolve_with_metadata(
         &resolver_log,
         file_system,
         abs_resolve_dir,
         path,
-        &options.extension_order,
+        extension_order,
         options.platform,
         (!options.main_fields.is_empty()).then_some(options.main_fields.as_slice()),
         is_require,
@@ -4553,6 +4569,17 @@ mod tests {
         let cases = cases.as_array().expect("bundler corpus array");
         let selected_test = std::env::var("ESBUILD_RS_UPSTREAM_TEST").ok();
         let list_only = std::env::var_os("ESBUILD_RS_UPSTREAM_LIST").is_some();
+        let additional_active: Vec<String> = serde_json::from_str(include_str!(
+            "../../../tests/upstream/bundler_additional_active.json"
+        ))
+        .expect("valid additional active bundler cases");
+        let additional_active_set: HashSet<_> =
+            additional_active.iter().map(String::as_str).collect();
+        assert_eq!(
+            additional_active_set.len(),
+            additional_active.len(),
+            "duplicate active bundler case"
+        );
         let mut matched = 0;
 
         for case in cases {
@@ -5060,7 +5087,9 @@ mod tests {
                         )
                     ))
             {
-                if selected_test.is_none() {
+                if selected_test.is_none()
+                    && !additional_active_set.contains(case["upstream_test"].as_str().unwrap())
+                {
                     if list_only {
                         println!(
                             "INACTIVE\t{}\t{}\t{}",
@@ -5085,6 +5114,67 @@ mod tests {
                 );
                 continue;
             }
+            let mapped_options = [
+                "AbsNodePaths",
+                "AbsOutputBase",
+                "AbsOutputDir",
+                "AbsOutputFile",
+                "AssetPathTemplate",
+                "ChunkPathTemplate",
+                "CodeSplitting",
+                "Conditions",
+                "DropLabels",
+                "EntryPathTemplate",
+                "ExtensionOrder",
+                "ExtensionToLoader",
+                "ExternalPackages",
+                "ExternalSettings",
+                "GlobalName",
+                "IgnoreDCEAnnotations",
+                "InjectPaths",
+                "JSBanner",
+                "JSX",
+                "KeepNames",
+                "LegalComments",
+                "LineLimit",
+                "MainFields",
+                "MangleProps",
+                "MangleQuoted",
+                "MinifyIdentifiers",
+                "MinifySyntax",
+                "MinifyWhitespace",
+                "Mode",
+                "NeedsMetafile",
+                "OriginalTargetEnv",
+                "OutputExtensionJS",
+                "OutputFormat",
+                "PackageAliases",
+                "Platform",
+                "PublicPath",
+                "ReserveProps",
+                "SourceMap",
+                "Stdin",
+                "TS",
+                "TSConfigPath",
+                "TreeShaking",
+                "UnsupportedCSSFeatures",
+                "UnsupportedJSFeatures",
+                "WriteToStdout",
+            ];
+            let unmapped_options: Vec<_> = option_names
+                .iter()
+                .filter(|name| !mapped_options.contains(name))
+                .collect();
+            assert!(
+                unmapped_options.is_empty(),
+                "{test_name}: unmapped upstream options: {unmapped_options:?}"
+            );
+            assert!(
+                case.get("unsupported_options")
+                    .and_then(serde_json::Value::as_array)
+                    .is_none_or(Vec::is_empty),
+                "{test_name}: non-serializable upstream options"
+            );
             let mut files: HashMap<String, Vec<u8>> = case["files"]
                 .as_object()
                 .expect("upstream bundler files")
@@ -5135,6 +5225,30 @@ mod tests {
                     )
                 });
             let mut options = Options {
+                original_target_environment: upstream_string_option(
+                    options_json,
+                    "OriginalTargetEnv",
+                )
+                .unwrap_or_default(),
+                tsconfig_path: upstream_string_option(options_json, "TSConfigPath")
+                    .unwrap_or_default(),
+                output_extension_js: upstream_string_option(options_json, "OutputExtensionJS")
+                    .unwrap_or_default(),
+                js_banner: upstream_string_option(options_json, "JSBanner").unwrap_or_default(),
+                line_limit: upstream_numeric_option(options_json, "LineLimit")
+                    .unwrap_or_default()
+                    .try_into()
+                    .expect("line limit"),
+                ignore_dce_annotations: upstream_bool_option(options_json, "IgnoreDCEAnnotations")
+                    .unwrap_or_default(),
+                mangle_quoted: upstream_bool_option(options_json, "MangleQuoted")
+                    .unwrap_or_default(),
+                drop_labels: upstream_string_array_option(options_json, "DropLabels")
+                    .unwrap_or_default(),
+                global_name: upstream_string_array_option(options_json, "GlobalName")
+                    .unwrap_or_default(),
+                extension_order: upstream_string_array_option(options_json, "ExtensionOrder")
+                    .unwrap_or_default(),
                 write_to_stdout: upstream_bool_option(options_json, "WriteToStdout")
                     .unwrap_or_default(),
                 mode: upstream_numeric_option(options_json, "Mode")
@@ -5189,6 +5303,31 @@ mod tests {
             if let Some(features) = upstream_u64_option(options_json, "UnsupportedJSFeatures") {
                 options.unsupported_js_features =
                     crate::internal::compat::JsFeature::from_bits(features);
+            }
+            if let Some(features) = upstream_u64_option(options_json, "UnsupportedCSSFeatures") {
+                options.unsupported_css_features = crate::internal::compat::CssFeature::from_bits(
+                    features.try_into().expect("CSS feature bits fit u16"),
+                );
+            }
+            for (name, target) in [
+                ("MangleProps", &mut options.mangle_props),
+                ("ReserveProps", &mut options.reserve_props),
+            ] {
+                if let Some(pattern) = upstream_string_option(options_json, name) {
+                    *target = Some(Arc::new(
+                        regex::Regex::new(&pattern).expect("upstream property regex"),
+                    ));
+                }
+            }
+            if let Some(source_map) = upstream_numeric_option(options_json, "SourceMap") {
+                options.source_map = match source_map {
+                    0 => config::SourceMap::None,
+                    1 => config::SourceMap::Inline,
+                    2 => config::SourceMap::LinkedWithComment,
+                    3 => config::SourceMap::ExternalWithoutComment,
+                    4 => config::SourceMap::InlineAndExternal,
+                    _ => panic!("unknown upstream SourceMap {source_map}"),
+                };
             }
             if let Some(loaders) = options_json
                 .get("ExtensionToLoader")
@@ -5415,7 +5554,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 825 },
+            if selected_test.is_some() { 1 } else { 892 },
             "upstream basic bundler corpus case count"
         );
     }
