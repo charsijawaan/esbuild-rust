@@ -440,7 +440,7 @@ pub struct ResolverContext<'a> {
     pub strip_node_prefix_for_require: bool,
 }
 
-fn is_external_match(matchers: &ExternalMatchers, path: &str, kind: ImportKind) -> bool {
+pub(crate) fn is_external_match(matchers: &ExternalMatchers, path: &str, kind: ImportKind) -> bool {
     kind != ImportKind::EntryPoint
         && (matchers.exact.contains_key(path)
             || matchers.patterns.iter().any(|pattern| {
@@ -554,6 +554,17 @@ pub fn resolve_file_or_package_with_context(
     }
 
     let suffix_index = import_path.find(['?', '#']).filter(|index| *index > 0)?;
+    // Upstream retries filesystem resolution here, after external matching has
+    // already run on the full import path. A query must not turn a non-match
+    // such as "image.png?raw" into a match for an external "*.png" pattern.
+    let retry_external_settings = context.external_settings.map(|settings| ExternalSettings {
+        pre_resolve: ExternalMatchers::default(),
+        post_resolve: settings.post_resolve.clone(),
+    });
+    let retry_context = ResolverContext {
+        external_settings: retry_external_settings.as_ref(),
+        ..context
+    };
     let mut result = resolve_file_or_package_core(
         log,
         file_system,
@@ -563,7 +574,7 @@ pub fn resolve_file_or_package_with_context(
         platform,
         configured_main_fields,
         is_require,
-        context,
+        retry_context,
         false,
     )?;
     apply_browser_map_to_loaded_path(

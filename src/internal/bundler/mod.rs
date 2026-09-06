@@ -9,8 +9,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::internal::{
     ast::{
-        AssertOrWithKeyword, ImportAssertOrWith, ImportKind, ImportRecordFlags, Index32,
-        find_assert_or_with_entry,
+        AssertOrWithKeyword, ImportAssertOrWith, ImportKind, ImportPhase, ImportRecordFlags,
+        Index32, find_assert_or_with_entry,
     },
     cache::{CacheSet, SourceIndexKind},
     compat::{CssFeature, JsFeature},
@@ -159,6 +159,10 @@ fn compile_javascript_bundle_with_css_names(
                 .scan_result
                 .arbitrary_namespace_issues
                 .extend(group.scan_result.arbitrary_namespace_issues);
+            compiled
+                .scan_result
+                .css_composes_issues
+                .extend(group.scan_result.css_composes_issues);
         }
         deduplicate_identical_output_files(&mut compiled.output_files);
         compiled.metafile =
@@ -423,6 +427,48 @@ pub fn bundle_javascript(
                     ),
                 );
             }
+        }
+    }
+    for issue in &compiled.scan_result.css_composes_issues {
+        let file = &scanned.files[issue.source_index as usize].input_file;
+        let target = &scanned.files[issue.target_source_index as usize].input_file;
+        let target_path = target.source.pretty_paths.select(options.log_path_style);
+        let mut tracker = LineColumnTracker::new(Some(&file.source));
+        let range = crate::internal::css_lexer::range_of_identifier(&file.source, issue.alias_loc);
+        if let Some(global_loc) = issue.global_loc {
+            let mut target_tracker = LineColumnTracker::new(Some(&target.source));
+            let hint = if target.loader == Loader::Css {
+                format!("Use the \"local-css\" loader for {target_path:?} to enable local names.")
+            } else {
+                format!(
+                    "Use the \":local\" selector to change {:?} into a local name.",
+                    issue.alias
+                )
+            };
+            log.add_error_with_notes(
+                Some(&mut tracker),
+                range,
+                format!("Cannot use global name {:?} with \"composes\"", issue.alias),
+                vec![
+                    target_tracker.msg_data(
+                        crate::internal::css_lexer::range_of_identifier(&target.source, global_loc),
+                        format!("The global name {:?} is defined here:", issue.alias),
+                    ),
+                    MsgData {
+                        text: hint,
+                        ..MsgData::default()
+                    },
+                ],
+            );
+        } else {
+            log.add_error(
+                Some(&mut tracker),
+                range,
+                format!(
+                    "The name {:?} never appears in {target_path:?}",
+                    issue.alias
+                ),
+            );
         }
     }
     for (source_index, issue) in &compiled.scan_result.import_issues {
@@ -726,21 +772,28 @@ fn quoted_js_string(text: &str, ascii_only: bool) -> String {
         .expect("JSON quoting always produces UTF-8")
 }
 
+fn glob_import_call(kind: ImportKind, phase: ImportPhase) -> &'static str {
+    match (kind, phase) {
+        (ImportKind::Require, _) => "require",
+        (ImportKind::Dynamic, ImportPhase::Evaluation) => "import",
+        (ImportKind::Dynamic, ImportPhase::Defer) => "import.defer",
+        (ImportKind::Dynamic, ImportPhase::Source) => "import.source",
+        _ => unreachable!("glob imports must be require() or import()"),
+    }
+}
+
 fn glob_module_path(
     file_system: &dyn Fs,
     options: &Options,
     source: &Source,
     source_directory: &str,
     pattern: &crate::internal::ast::GlobPattern,
+    phase: ImportPhase,
     assert_or_with: Option<&crate::internal::ast::ImportAssertOrWith>,
     matches: Vec<String>,
 ) -> Path {
     let pattern_text = crate::internal::helpers::glob_pattern_to_string(&pattern.parts);
-    let call = match pattern.kind {
-        ImportKind::Require => "require",
-        ImportKind::Dynamic => "import",
-        _ => unreachable!("glob imports must be require() or import()"),
-    };
+    let call = glob_import_call(pattern.kind, phase);
     let pretty_call = format!(
         "{call}({})",
         quoted_js_string(&pattern_text, options.ascii_only)
@@ -758,11 +811,6 @@ fn glob_module_path(
             relative_path = format!("./{relative_path}");
         }
         let quoted = quoted_js_string(&relative_path, options.ascii_only);
-        let operation = match pattern.kind {
-            ImportKind::Require => "require",
-            ImportKind::Dynamic => "import",
-            _ => unreachable!(),
-        };
         let mut options_suffix = String::new();
         if pattern.kind == ImportKind::Dynamic
             && let Some(assert_or_with) = assert_or_with
@@ -771,16 +819,18 @@ fn glob_module_path(
             for entry in &assert_or_with.entries {
                 let key = String::from_utf8_lossy(&utf16_to_string(&entry.key)).into_owned();
                 let value = String::from_utf8_lossy(&utf16_to_string(&entry.value)).into_owned();
-                options_suffix.push_str(&quoted_js_string(&key, options.ascii_only));
+                if !entry.prefer_quoted_key && js_ast::is_identifier_es5_and_es_next(&key) {
+                    options_suffix.push_str(&key);
+                } else {
+                    options_suffix.push_str(&quoted_js_string(&key, options.ascii_only));
+                }
                 options_suffix.push(':');
                 options_suffix.push_str(&quoted_js_string(&value, options.ascii_only));
                 options_suffix.push(',');
             }
             options_suffix.push_str("}}");
         }
-        contents.push_str(&format!(
-            "{quoted}:()=>{operation}({quoted}{options_suffix}),\n"
-        ));
+        contents.push_str(&format!("{quoted}:()=>{call}({quoted}{options_suffix}),\n"));
     }
     contents.push_str("});");
 
@@ -1992,20 +2042,8 @@ fn resolve_import_records_from_directory(
             continue;
         }
         if let Some(pattern) = &record.glob_pattern {
-            report_explicit_phase_import(
-                log,
-                &mut tracker,
-                record.range,
-                record.phase,
-                false,
-                options.output_format,
-            );
             let pattern_text = crate::internal::helpers::glob_pattern_to_string(&pattern.parts);
-            let call = match pattern.kind {
-                ImportKind::Require => "require",
-                ImportKind::Dynamic => "import",
-                _ => unreachable!("glob imports must be require() or import()"),
-            };
+            let call = glob_import_call(pattern.kind, record.phase);
             let pretty_call = format!(
                 "{call}({})",
                 quoted_js_string(&pattern_text, options.ascii_only)
@@ -2025,6 +2063,35 @@ fn resolve_import_records_from_directory(
             }
             let matches =
                 expand_entry_point_glob(file_system, &absolute_pattern).unwrap_or_default();
+            if record.phase != ImportPhase::Evaluation {
+                let all_are_external = matches.iter().all(|absolute_path| {
+                    let Some(mut relative_path) = file_system.rel(&source_directory, absolute_path)
+                    else {
+                        return false;
+                    };
+                    relative_path = relative_path.replace('\\', "/");
+                    if resolver::is_package_path(&relative_path) {
+                        relative_path = format!("./{relative_path}");
+                    }
+                    resolver::is_external_match(
+                        &options.external_settings.pre_resolve,
+                        &relative_path,
+                        pattern.kind,
+                    ) || resolver::is_external_match(
+                        &options.external_settings.post_resolve,
+                        absolute_path,
+                        pattern.kind,
+                    )
+                });
+                report_explicit_phase_import(
+                    log,
+                    &mut tracker,
+                    record.range,
+                    record.phase,
+                    all_are_external,
+                    options.output_format,
+                );
+            }
             if matches.is_empty() {
                 log.add_id(
                     logger::MsgId::BundlerEmptyGlob,
@@ -2040,6 +2107,7 @@ fn resolve_import_records_from_directory(
                 &source,
                 &source_directory,
                 pattern,
+                record.phase,
                 record.assert_or_with.as_ref(),
                 matches,
             );
@@ -2202,14 +2270,16 @@ fn resolve_import_records_from_directory(
             }
             continue;
         };
-        report_explicit_phase_import(
-            log,
-            &mut tracker,
-            record.range,
-            record.phase,
-            resolve_result.path_pair.is_external,
-            options.output_format,
-        );
+        if source.key_path.namespace != "glob" {
+            report_explicit_phase_import(
+                log,
+                &mut tracker,
+                record.range,
+                record.phase,
+                resolve_result.path_pair.is_external,
+                options.output_format,
+            );
+        }
         if resolve_result.path_pair.is_external {
             record.path = rewrite_external_path(
                 file_system,
@@ -3494,9 +3564,14 @@ fn finalize_scan_import_records(
             .pretty_paths
             .select(options.log_path_style)
             .to_string();
+            let importer = &files[importer_index as usize].input_file;
+            let mut tracker = LineColumnTracker::new(Some(&importer.source));
+            let range = importer.repr.as_ref().unwrap().import_records().unwrap()
+                [record_index as usize]
+                .range;
             log.add_error(
-                None,
-                Range::default(),
+                Some(&mut tracker),
+                range,
                 format!(
                     "Cannot import {target_path:?} into a JavaScript file without an output path configured"
                 ),
@@ -3599,6 +3674,7 @@ fn validate_scan_imports(log: &Log, options: &Options, files: &[ScannerFile]) {
                 .source
                 .pretty_paths
                 .select(options.log_path_style);
+            let loader_name = config::LOADER_TO_STRING[target.input_file.loader as usize];
             if record.flags.contains(ImportRecordFlags::ASSERT_TYPE_JSON)
                 && !matches!(target.input_file.loader, Loader::Json | Loader::Copy)
             {
@@ -3635,38 +3711,54 @@ fn validate_scan_imports(log: &Log, options: &Options, files: &[ScannerFile]) {
                     if matches!(target.input_file.repr, Some(InputFileRepr::Js(_)))
                         && target.input_file.loader != Loader::Empty =>
                 {
-                    log.add_error(
-                        None,
+                    log.add_error_with_notes(
+                        Some(&mut tracker),
                         record.range,
                         format!("Cannot use \"composes\" with {target_path:?}"),
+                        vec![MsgData {
+                            text: format!("You can only use \"composes\" with CSS files and {target_path:?} is not a CSS file (it was loaded with the {loader_name:?} loader)."),
+                            ..MsgData::default()
+                        }],
                     );
                 }
                 ImportKind::At
                     if matches!(target.input_file.repr, Some(InputFileRepr::Js(_)))
                         && target.input_file.loader != Loader::Empty =>
                 {
-                    log.add_error(
-                        None,
+                    log.add_error_with_notes(
+                        Some(&mut tracker),
                         record.range,
                         format!("Cannot import {target_path:?} into a CSS file"),
+                        vec![MsgData {
+                            text: format!("An \"@import\" rule can only be used to import another CSS file and {target_path:?} is not a CSS file (it was loaded with the {loader_name:?} loader)."),
+                            ..MsgData::default()
+                        }],
                     );
                 }
                 ImportKind::Url => match &target.input_file.repr {
                     Some(InputFileRepr::Css(_)) => {
-                        log.add_error(
-                            None,
+                        log.add_error_with_notes(
+                            Some(&mut tracker),
                             record.range,
                             format!("Cannot use {target_path:?} as a URL"),
+                            vec![MsgData {
+                                text: format!("You can't use a \"url()\" token to reference a CSS file, and {target_path:?} is a CSS file (it was loaded with the {loader_name:?} loader)."),
+                                ..MsgData::default()
+                            }],
                         );
                     }
                     Some(InputFileRepr::Js(repr))
                         if repr.ast.url_for_css.is_empty()
                             && target.input_file.loader != Loader::Empty =>
                     {
-                        log.add_error(
-                            None,
+                        log.add_error_with_notes(
+                            Some(&mut tracker),
                             record.range,
                             format!("Cannot use {target_path:?} as a URL"),
+                            vec![MsgData {
+                                text: format!("You can't use a \"url()\" token to reference the file {target_path:?} because it was loaded with the {loader_name:?} loader, which doesn't provide a URL to embed in the resulting CSS."),
+                                ..MsgData::default()
+                            }],
                         );
                     }
                     _ => {}
@@ -4460,13 +4552,13 @@ mod tests {
         .expect("valid generated upstream bundler corpus");
         let cases = cases.as_array().expect("bundler corpus array");
         let selected_test = std::env::var("ESBUILD_RS_UPSTREAM_TEST").ok();
+        let list_only = std::env::var_os("ESBUILD_RS_UPSTREAM_LIST").is_some();
         let mut matched = 0;
 
         for case in cases {
-            if selected_test
-                .as_deref()
-                .is_some_and(|selected| case["upstream_test"] != selected)
-            {
+            if selected_test.as_deref().is_some_and(|selected| {
+                case["upstream_test"] != selected || case["file_system"] != "unix"
+            }) {
                 continue;
             }
             let options_json = &case["options"];
@@ -4491,6 +4583,16 @@ mod tests {
                         | "TestTopLevelReturnForbiddenExport"
                         | "TestTopLevelReturnForbiddenTLA"
                         | "TestCSSAtImportMissing"
+                        | "TestCSSFromJSMissingImport"
+                        | "TestJSXSyntaxInJS"
+                        | "TestJSXAutomaticSyntaxInJS"
+                        | "TestImportCSSFromJSComposesFromMissingImport"
+                        | "TestImportCSSFromJSComposesFromNotCSS"
+                        | "TestImportCSSFromJSWriteToStdout"
+                        | "TestImportJSFromCSS"
+                        | "TestImportJSONFromCSS"
+                        | "TestInvalidImportURLInCSS"
+                        | "TestCSSExternalQueryAndHashNoMatchIssue1822"
                         | "TestMissingImportURLInCSS"
                         | "TestTopLevelAwaitIIFE"
                         | "TestTopLevelAwaitCJS"
@@ -4559,7 +4661,7 @@ mod tests {
                     && case["suite"] != "splitting"
                     && case["suite"] != "yarnpnp"
                     && case["suite"] != "glob"
-                    && !(case["suite"] == "importphase" && is_supported_diagnostic_only_case))
+                    && case["suite"] != "importphase")
                 || ((!case["expected_scan_log"]
                     .as_str()
                     .unwrap_or_default()
@@ -4604,6 +4706,7 @@ mod tests {
                     .and_then(serde_json::Value::as_array)
                     .is_some_and(|options| !options.is_empty())
                 || (option_names != ["AbsNodePaths", "AbsOutputFile", "Mode"]
+                    && option_names != ["Mode", "WriteToStdout"]
                     && option_names != ["AbsOutputFile", "Mode"]
                     && option_names != ["AbsOutputFile", "Mode", "OutputFormat"]
                     && option_names != ["AbsOutputFile", "Conditions", "Mode"]
@@ -4958,6 +5061,14 @@ mod tests {
                     ))
             {
                 if selected_test.is_none() {
+                    if list_only {
+                        println!(
+                            "INACTIVE\t{}\t{}\t{}",
+                            case["suite"].as_str().unwrap(),
+                            case["upstream_test"].as_str().unwrap(),
+                            case["file_system"].as_str().unwrap()
+                        );
+                    }
                     continue;
                 }
             }
@@ -4966,6 +5077,14 @@ mod tests {
             let test_name = case["upstream_test"]
                 .as_str()
                 .expect("upstream bundler test name");
+            if list_only {
+                println!(
+                    "ACTIVE\t{}\t{test_name}\t{}",
+                    case["suite"].as_str().unwrap(),
+                    case["file_system"].as_str().unwrap()
+                );
+                continue;
+            }
             let mut files: HashMap<String, Vec<u8>> = case["files"]
                 .as_object()
                 .expect("upstream bundler files")
@@ -5016,6 +5135,8 @@ mod tests {
                     )
                 });
             let mut options = Options {
+                write_to_stdout: upstream_bool_option(options_json, "WriteToStdout")
+                    .unwrap_or_default(),
                 mode: upstream_numeric_option(options_json, "Mode")
                     .map_or(Mode::PassThrough, upstream_mode),
                 abs_output_file,
@@ -5294,7 +5415,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 813 },
+            if selected_test.is_some() { 1 } else { 825 },
             "upstream basic bundler corpus case count"
         );
     }

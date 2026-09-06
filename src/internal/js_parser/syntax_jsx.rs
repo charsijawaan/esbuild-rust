@@ -8,7 +8,7 @@ use crate::internal::{
         PropertyFlags, PropertyKind, SpreadExpr, StringExpr,
     },
     js_lexer::{Lexer, Token, lexer_panic},
-    logger::{Loc, Range},
+    logger::{self, ApiKind, Loc, MsgData, Range},
 };
 
 use super::{parser_core::ParserCore, syntax_expression::parse_expression};
@@ -21,10 +21,24 @@ pub(crate) fn parse_jsx_element_prefix(core: &mut ParserCore, lexer: &mut Lexer)
         if core.options.ts.parse {
             return None;
         }
-        core.add_error_range(
-            lexer.range(),
-            "The JSX syntax extension is not currently enabled",
-        );
+        if let Some(log) = &core.log {
+            let hint = match logger::api_kind() {
+                ApiKind::Cli => " You can use \"--loader:.js=jsx\" to do that.",
+                ApiKind::Js => " You can use \"loader: { '.js': 'jsx' }\" to do that.",
+                ApiKind::Go => {
+                    " You can use 'Loader: map[string]api.Loader{\".js\": api.LoaderJSX}' to do that."
+                }
+            };
+            log.add_error_with_notes(
+                Some(&mut core.tracker),
+                lexer.range(),
+                "The JSX syntax extension is not currently enabled",
+                vec![MsgData {
+                    text: format!("The esbuild loader for this file is currently set to \"js\" but it must be set to \"jsx\" to be able to parse JSX syntax.{hint}"),
+                    ..MsgData::default()
+                }],
+            );
+        }
         core.options.jsx.parse = true;
     }
     let loc = lexer.loc();

@@ -231,6 +231,16 @@ pub struct ScanImportsAndExportsResult {
     pub import_issues: Vec<(u32, ImportMatchIssue)>,
     pub ambiguous_re_exports: Vec<(u32, AmbiguousReExport)>,
     pub arbitrary_namespace_issues: Vec<ArbitraryNamespaceIssue>,
+    pub css_composes_issues: Vec<CssComposesIssue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CssComposesIssue {
+    pub source_index: u32,
+    pub target_source_index: u32,
+    pub alias: String,
+    pub alias_loc: crate::internal::logger::Loc,
+    pub global_loc: Option<crate::internal::logger::Loc>,
 }
 
 #[derive(Debug, Default)]
@@ -2669,6 +2679,40 @@ pub fn scan_imports_and_exports<S: BuildHasher>(
     let reachable = graph.reachable_files.clone();
     let mut result = ScanImportsAndExportsResult::default();
     for &source_index in &reachable {
+        if let Some(InputFileRepr::Css(repr)) =
+            graph.files[source_index as usize].input_file.repr.as_ref()
+        {
+            for composes in repr.ast.composes.values() {
+                for name in &composes.imported_names {
+                    let record = &repr.ast.import_records[name.import_record_index as usize];
+                    if !record.source_index.is_valid() {
+                        continue;
+                    }
+                    let target_source_index = record.source_index.get_index();
+                    let Some(InputFileRepr::Css(target)) = graph.files
+                        [target_source_index as usize]
+                        .input_file
+                        .repr
+                        .as_ref()
+                    else {
+                        continue;
+                    };
+                    if !target.ast.local_scope.contains_key(&name.alias) {
+                        result.css_composes_issues.push(CssComposesIssue {
+                            source_index,
+                            target_source_index,
+                            alias: name.alias.clone(),
+                            alias_loc: name.alias_loc,
+                            global_loc: target
+                                .ast
+                                .global_scope
+                                .get(&name.alias)
+                                .map(|name| name.loc),
+                        });
+                    }
+                }
+            }
+        }
         let Some(InputFileRepr::Js(repr)) =
             graph.files[source_index as usize].input_file.repr.as_ref()
         else {

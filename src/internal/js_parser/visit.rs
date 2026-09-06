@@ -12449,7 +12449,7 @@ fn handle_glob_pattern(
             },
         );
         core.glob_import_records.insert(
-            format!("{}:{pattern}", kind as u8),
+            format!("{}:{}", kind as u8, key.1),
             (import_record_index, namespace_ref),
         );
         core.glob_imports.insert(key, reference);

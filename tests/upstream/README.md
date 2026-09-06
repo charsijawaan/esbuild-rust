@@ -82,10 +82,10 @@ instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 Files containing invalid UTF-8 are additionally stored in a base64 sidecar so
 binary-loader snapshots retain the exact upstream bytes.
 
-The active bundler tranche exact-compares 750 Unix snapshots and 63
+The active bundler tranche exact-compares 752 Unix snapshots and 73
 diagnostic-only cases from the default, DCE, import-star, TypeScript import-star,
 lowering, TypeScript, package-json,
-tsconfig, loader, CSS, code-splitting, Yarn PnP, and entry-point glob suites that use
+tsconfig, loader, CSS, code-splitting, Yarn PnP, import-phase, and entry-point glob suites that use
 `AbsOutputFile` or `AbsOutputDir`, with all eligible DCE cases and selected
 combinations of `Mode`, `OutputFormat`, `Platform`, legal-comment settings,
 `KeepNames`, `MinifySyntax`, `MinifyIdentifiers`, `MinifyWhitespace`, and
@@ -110,9 +110,34 @@ and absolute node search paths with browser remapping. It also checks
 output-base and public-path asset layouts plus
 metafile input/output accounting for JS, CSS, JSON attributes, copied files,
 and code-split long paths. The missing-glob-directory diagnostic-only case is
-also covered. So 5,105 concrete upstream cases are currently active in
-`cargo test`; the remaining 257 captured bundler cases are the parity backlog,
+also covered. All 12 import-phase cases are active, including external glob
+imports with distinct attributes. CSS import diagnostics validate loader
+compatibility, missing or global `composes` names, output paths, and external
+patterns with query/hash suffixes. So 5,117 concrete upstream cases are currently active in
+`cargo test`; the remaining 245 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
+
+List active and inactive bundler fixtures, including their filesystem variant:
+
+```sh
+ESBUILD_RS_UPSTREAM_LIST=1 cargo test --lib \
+  matches_pinned_upstream_active_bundler_corpus -- --nocapture
+```
+
+Audit inactive fixtures without enabling them or changing expected output:
+
+```sh
+node scripts/audit_upstream_bundler_tests.mjs /tmp/bundler-audit.json
+# Optionally limit the audit to a suite:
+node scripts/audit_upstream_bundler_tests.mjs /tmp/css-audit.json css
+```
+
+The audit reports passing candidates, failures, unsupported options/filesystems,
+and the separately covered missing-glob test. A passing candidate still needs
+review of the option translation before it can be added to active coverage.
+These counts describe the captured corpus; they do not include uncaptured
+JavaScript/TypeScript parser suites or upstream's JavaScript API, plugin,
+WebAssembly, and platform test matrices.
 
 The generated JSON is checked in so `cargo test` does not require Go or a
 separate upstream checkout.
