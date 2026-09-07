@@ -131,6 +131,12 @@ pub(crate) fn parse_expression_suffix(
 
     let mut previous_operator = None;
     loop {
+        let allow_generic_arrow = !core.options.jsx.parse
+            || (core.options.ts.parse
+                && lexer.token == Token::LessThan
+                && matches!(left.data.as_deref(), Some(ExprData::Identifier(identifier))
+                    if core.load_name_from_ref(identifier.reference) == b"async")
+                && super::syntax_typescript::is_ts_arrow_fn_jsx(lexer));
         if core.options.ts.parse
             && lexer.token == Token::LessThan
             && super::syntax_typescript::try_skip_type_arguments_in_expression(lexer)
@@ -143,6 +149,12 @@ pub(crate) fn parse_expression_suffix(
                 false,
                 |core, lexer, precedence| parse_expression(core, lexer, precedence, true),
             );
+            if allow_generic_arrow
+                && lexer.token == Token::EqualsGreaterThan
+                && is_async_arrow_call(core, &left)
+            {
+                return parse_async_arrow_from_call(core, lexer, left);
+            }
             continue;
         }
         if core.options.ts.parse

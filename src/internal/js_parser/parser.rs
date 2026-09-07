@@ -4879,6 +4879,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_tsx_generic_components_and_async_generic_arrows() {
+        let mut options = Options::default();
+        options.ts.parse = true;
+        options.jsx.parse = true;
+        for source in [
+            "const x = <Foo<T> data-foo />",
+            "const x = <Foo<Map<string, Array<number>>> data-foo></Foo>",
+            "const x = async <T,>() => {}",
+            "const x = async <T, U>(value) => value",
+            "const x = <T,>(value: T) => value",
+            "const x = <T extends object>(value: T) => value",
+        ] {
+            let (_, ok, log) = parse_source_with_options(source, options.clone());
+            assert!(ok, "{source}");
+            assert!(log.done().is_empty(), "{source}");
+        }
+        let source = "const x = async <T>() => {}";
+        let (_, _, log) = parse_source_with_options(source, options.clone());
+        assert_eq!(log.done()[0].data.text, "Expected \";\" but found \"=>\"");
+        options.jsx.parse = false;
+        let (_, ok, log) = parse_source_with_options(source, options);
+        assert!(ok);
+        assert!(log.done().is_empty());
+    }
+
+    #[test]
     fn jsx_errors_include_upstream_notes_and_replacement_suggestions() {
         for (source, xml_escape, js_string) in [
             (

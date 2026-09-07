@@ -17,6 +17,20 @@ pub(crate) fn parse_jsx_element_prefix(core: &mut ParserCore, lexer: &mut Lexer)
     if lexer.token != Token::LessThan {
         return None;
     }
+    if core.options.ts.parse
+        && core.options.jsx.parse
+        && super::syntax_typescript::is_ts_arrow_fn_jsx(lexer)
+    {
+        super::syntax_typescript::skip_type_parameters(lexer);
+        if lexer.token != Token::OpenParen {
+            lexer.expected(Token::OpenParen);
+        }
+        let value = parse_expression(core, lexer, Precedence::Prefix, true);
+        if !matches!(value.data.as_deref(), Some(ExprData::Arrow(_))) {
+            lexer.expected(Token::EqualsGreaterThan);
+        }
+        return Some(value);
+    }
     if !core.options.jsx.parse {
         if core.options.ts.parse {
             return None;
@@ -154,6 +168,11 @@ fn parse_jsx_tag(core: &mut ParserCore, lexer: &mut Lexer) -> (Range, String, Ex
 #[allow(clippy::too_many_lines)]
 fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr {
     let (start_range, start_text, start_tag_or_nil) = parse_jsx_tag(core, lexer);
+    if core.options.ts.parse {
+        // After the final type argument, lex JSX attributes (including dashes)
+        // instead of ordinary JavaScript tokens, just like upstream.
+        super::syntax_typescript::skip_type_parameters_with_jsx(lexer, true);
+    }
     let mut properties = Vec::new();
     let mut attribute_locs = HashMap::new();
     let mut is_single_line = true;

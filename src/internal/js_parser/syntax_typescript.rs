@@ -18,6 +18,33 @@ use super::{
 };
 
 pub(crate) fn skip_type_parameters(lexer: &mut Lexer) {
+    skip_type_parameters_with_jsx(lexer, false);
+}
+
+pub(crate) fn is_ts_arrow_fn_jsx(lexer: &Lexer) -> bool {
+    let mut lookahead = lexer.clone();
+    lookahead.next();
+    if lookahead.token == Token::Const {
+        lookahead.next();
+    }
+    if lookahead.token != Token::Identifier {
+        return false;
+    }
+    lookahead.next();
+    match lookahead.token {
+        Token::Comma | Token::Equals => true,
+        Token::Extends => {
+            lookahead.next();
+            !matches!(
+                lookahead.token,
+                Token::Equals | Token::GreaterThan | Token::Slash
+            )
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn skip_type_parameters_with_jsx(lexer: &mut Lexer, is_inside_jsx_element: bool) {
     if lexer.token != Token::LessThan {
         return;
     }
@@ -32,7 +59,7 @@ pub(crate) fn skip_type_parameters(lexer: &mut Lexer) {
             | Token::GreaterThanGreaterThanGreaterThan
             | Token::GreaterThanGreaterThanGreaterThanEquals => {
                 depth -= 1;
-                lexer.expect_greater_than(false);
+                lexer.expect_greater_than(depth == 0 && is_inside_jsx_element);
                 if depth == 0 {
                     return;
                 }

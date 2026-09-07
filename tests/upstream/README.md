@@ -9,9 +9,9 @@ The captured corpus currently contains 14,005 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 6,977 | 1,666 | 8,643 |
+| JS/TS parser and parser lowering | 7,010 | 1,633 | 8,643 |
 | Bundler | 893 | 178 | 1,071 |
-| Total | 12,161 | 1,844 | 14,005 |
+| Total | 12,194 | 1,811 | 14,005 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility/API tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -138,7 +138,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 6,977 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,010 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -156,6 +156,13 @@ added 97 matching cases by porting missing diagnostics/suggestions, generated
 import ordering, UTF-16 development source positions, and upstream's test-only
 `OmitJSXRuntimeForTests` behavior. That option accounts for most automatic-JSX
 gains; these are not 97 independent user-facing feature fixes.
+
+The following TSX checkpoint added 33 matching cases: generic component type
+arguments return to JSX lexing for attributes, generic async calls are checked
+for arrow bodies, and upstream's TSX arrow lookahead distinguishes type
+parameters from JSX. Ambiguous `<T>` remains rejected for TSX arrows while the
+same spelling is allowed with the TS loader; a comma, default, or constraint can
+disambiguate TSX type parameters. More complex type grammar remains in the backlog.
 
 All 231 captured `TestStrictMode` cases are active. Strictness is tracked from
 directive parsing and reported with upstream's module/class/directive/JSX reason
@@ -221,7 +228,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 67
-reviewed cases beyond the original option-based selection. So 12,161 concrete
+reviewed cases beyond the original option-based selection. So 12,194 concrete
 upstream cases are currently active in `cargo test`; the remaining 178 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
