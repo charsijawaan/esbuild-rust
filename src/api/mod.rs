@@ -6962,6 +6962,62 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn resolves_inherited_tsconfig_paths_from_real_location() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("esbuild-rs-tsconfig-symlink-{unique}"));
+        for child in ["tooling", "src", "app"] {
+            std::fs::create_dir_all(directory.join(child)).expect("create test directory");
+        }
+        for (path, contents) in [
+            (
+                "tooling/base.json",
+                r#"{"compilerOptions":{"paths":{"@/*":["../src/*"]}}}"#,
+            ),
+            ("src/value.ts", "export const value = 42"),
+            ("app/tsconfig.json", r#"{"extends":"./config/base.json"}"#),
+            (
+                "app/entry.ts",
+                "import {value} from '@/value'; console.log(value)",
+            ),
+        ] {
+            std::fs::write(directory.join(path), contents).expect("write test file");
+        }
+        std::os::unix::fs::symlink("../tooling", directory.join("app/config"))
+            .expect("create config symlink");
+
+        for preserve_symlinks in [false, true] {
+            let result = build(BuildOptions {
+                entry_points: vec!["app/entry.ts".into()],
+                outdir: "out".into(),
+                abs_working_dir: directory.to_string_lossy().into_owned(),
+                preserve_symlinks,
+                ..BuildOptions::default()
+            });
+            if preserve_symlinks {
+                assert!(
+                    result
+                        .errors
+                        .iter()
+                        .any(|error| error.text.contains("Could not resolve")),
+                    "{:?}",
+                    result.errors
+                );
+            } else {
+                assert!(result.errors.is_empty(), "{:?}", result.errors);
+                assert!(
+                    String::from_utf8_lossy(&result.output_files[0].contents)
+                        .contains("var value = 42;")
+                );
+            }
+        }
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn controls_symlink_identity_during_resolution() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

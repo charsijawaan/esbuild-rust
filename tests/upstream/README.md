@@ -52,6 +52,15 @@ assertion was changed to accept these results. Case 1415 (`--analyze` on a
 stdin-only transform) times out at that baseline because the Rust CLI waits for
 stdin instead of validating the flag combination first.
 
+Subsequent checkpoints fixed case 1415 (verified individually), inherited
+tsconfig paths through symlinks (case 25), and browser-field lookup of bare file
+keys and implicit extensions (cases 31, 33, 35, and 43). The first 50 original
+runtime cases now pass 48/50; only the existing JSX diagnostic failures at 26
+and 27 remain in that range. The complete runtime baseline above has not been
+rerun and is intentionally retained as a historical measurement. Local
+regressions also cover `preserve_symlinks` and disabled browser mappings, which
+must preserve the requested path without requiring the original file to exist.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Collection of extra resolver debug/verbose messages remains a separate parity gap.

@@ -1599,6 +1599,7 @@ pub(crate) fn resolve_for_plugin_api(
                 file_system,
                 abs_resolve_dir,
                 (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
+                options.preserve_symlinks,
             )
         } else {
             None
@@ -2320,6 +2321,7 @@ fn find_nearest_tsconfig(
     file_system: &dyn Fs,
     start_directory: &str,
     override_path: Option<&str>,
+    preserve_symlinks: bool,
 ) -> Option<resolver::TsConfigJson> {
     fn discover_pnp(
         log: &Log,
@@ -2362,7 +2364,16 @@ fn find_nearest_tsconfig(
         visited: &mut HashSet<String>,
         config_dir: &str,
         pnp: Option<&resolver::PnpData>,
+        preserve_symlinks: bool,
     ) -> Option<resolver::TsConfigJson> {
+        // Base-directory-sensitive settings must use the real config location,
+        // matching upstream parseTSConfig (unless symlinks are preserved).
+        let real_path = if preserve_symlinks {
+            None
+        } else {
+            file_system.eval_symlinks(path)
+        };
+        let path = real_path.as_deref().unwrap_or(path);
         if !visited.insert(path.to_string()) {
             return None;
         }
@@ -2390,6 +2401,12 @@ fn find_nearest_tsconfig(
         let mut extends = |text: &str, range: Range| {
             let mut did_find_candidate = false;
             let mut try_file = |path: &str, visited: &mut HashSet<String>| {
+                let real_path = if preserve_symlinks {
+                    None
+                } else {
+                    file_system.eval_symlinks(path)
+                };
+                let path = real_path.as_deref().unwrap_or(path);
                 let (_, error, _) = file_system.read_file(path);
                 if error.is_none() {
                     did_find_candidate = true;
@@ -2403,7 +2420,15 @@ fn find_nearest_tsconfig(
                         );
                         None
                     } else {
-                        load(log, file_system, path, visited, config_dir, pnp)
+                        load(
+                            log,
+                            file_system,
+                            path,
+                            visited,
+                            config_dir,
+                            pnp,
+                            preserve_symlinks,
+                        )
                     }
                 } else {
                     None
@@ -2558,6 +2583,7 @@ fn find_nearest_tsconfig(
             &mut visited,
             &config_dir,
             pnp.as_ref(),
+            preserve_symlinks,
         );
     }
     if crate::internal::helpers::is_inside_node_modules(start_directory) {
@@ -2576,6 +2602,7 @@ fn find_nearest_tsconfig(
                     &mut visited,
                     &directory,
                     pnp.as_ref(),
+                    preserve_symlinks,
                 );
             }
         }
@@ -2738,6 +2765,7 @@ pub fn scan_bundle(
                     &stdin.abs_resolve_dir
                 },
                 (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
+                options.preserve_symlinks,
             )
         } else {
             None
@@ -3047,6 +3075,7 @@ pub fn scan_bundle(
                 file_system,
                 &file_system.dir(&source.key_path.text),
                 (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
+                options.preserve_symlinks,
             )
         } else {
             None

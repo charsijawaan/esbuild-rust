@@ -271,11 +271,13 @@ fn load_package_main_candidate(
     extension_order: &[String],
 ) -> Option<LoadedPath> {
     let mut mapped_path = relative_path.to_string();
-    if let Some(remapped) = package.browser_map.get(relative_path).or_else(|| {
-        relative_path
-            .strip_prefix("./")
-            .and_then(|path| package.browser_map.get(path))
-    }) {
+    let browser_path = if is_package_path(relative_path) {
+        format!("./{relative_path}")
+    } else {
+        relative_path.to_string()
+    };
+    if let Some(remapped) = browser_map_for_package_subpath(package, &browser_path, extension_order)
+    {
         let Some(remapped) = remapped else {
             return Some(LoadedPath {
                 path: file_system.join(&[package_dir, relative_path]),
@@ -291,6 +293,21 @@ fn load_package_main_candidate(
 }
 
 fn browser_map_for_package_subpath<'a>(
+    package: &'a PackageJson,
+    subpath: &str,
+    extension_order: &[String],
+) -> Option<&'a Option<String>> {
+    // Upstream checks an absolute file's relative spelling without "./" first,
+    // then retries with "./". Both forms can also gain implicit extensions.
+    if let Some(relative) = subpath.strip_prefix("./") {
+        browser_map_check_path(package, relative, extension_order)
+            .or_else(|| browser_map_check_path(package, subpath, extension_order))
+    } else {
+        browser_map_check_path(package, subpath, extension_order)
+    }
+}
+
+fn browser_map_check_path<'a>(
     package: &'a PackageJson,
     subpath: &str,
     extension_order: &[String],
@@ -495,6 +512,7 @@ pub fn resolve_file_or_package_with_context(
             import_path,
             platform,
             configured_main_fields,
+            extension_order,
         )
     {
         match mapping {
@@ -506,33 +524,38 @@ pub fn resolve_file_or_package_with_context(
             Some(_) => {}
         }
     }
-    let result = if browser_disabled && is_node_builtin(import_path) {
-        Some(LoadedPathPair {
-            paths: PathPair {
-                primary: Path {
-                    text: import_path.to_string(),
-                    namespace: "file".into(),
-                    flags: PathFlags::DISABLED,
-                    ..Path::default()
+    let result =
+        if browser_disabled && (!is_package_path(import_path) || is_node_builtin(import_path)) {
+            Some(LoadedPathPair {
+                paths: PathPair {
+                    primary: Path {
+                        text: if is_package_path(import_path) {
+                            import_path.to_string()
+                        } else {
+                            file_system.join(&[source_dir, import_path])
+                        },
+                        namespace: "file".into(),
+                        flags: PathFlags::DISABLED,
+                        ..Path::default()
+                    },
+                    ..PathPair::default()
                 },
-                ..PathPair::default()
-            },
-            different_case: None,
-        })
-    } else {
-        resolve_file_or_package_core(
-            log,
-            file_system,
-            effective_source_dir.as_ref(),
-            effective_import_path.as_ref(),
-            extension_order,
-            platform,
-            configured_main_fields,
-            is_require,
-            context,
-            false,
-        )
-    };
+                different_case: None,
+            })
+        } else {
+            resolve_file_or_package_core(
+                log,
+                file_system,
+                effective_source_dir.as_ref(),
+                effective_import_path.as_ref(),
+                extension_order,
+                platform,
+                configured_main_fields,
+                is_require,
+                context,
+                false,
+            )
+        };
     if let Some(mut result) = result {
         if browser_disabled {
             for path in result.paths.iter_mut() {
@@ -602,6 +625,7 @@ fn find_browser_package_mapping(
     import_path: &str,
     platform: Platform,
     configured_main_fields: Option<&[String]>,
+    extension_order: &[String],
 ) -> Option<(String, Option<String>)> {
     let mut directory = source_dir.to_string();
     loop {
@@ -612,22 +636,25 @@ fn find_browser_package_mapping(
             platform,
             configured_main_fields,
         ) {
-            let relative_key = if is_package_path(import_path) {
+            let relative_key = {
                 let absolute = file_system.join(&[source_dir, import_path]);
                 file_system.rel(&directory, &absolute).and_then(|relative| {
                     (!relative.starts_with(".."))
                         .then(|| format!("./{}", relative.replace('\\', "/")))
                 })
-            } else {
-                None
             };
-            return package
-                .browser_map
-                .get(import_path)
+            if !is_package_path(import_path) {
+                return relative_key
+                    .as_deref()
+                    .and_then(|key| browser_map_for_package_subpath(&package, key, extension_order))
+                    .cloned()
+                    .map(|mapping| (directory, mapping));
+            }
+            return browser_map_check_path(&package, import_path, extension_order)
                 .or_else(|| {
                     relative_key
                         .as_deref()
-                        .and_then(|key| package.browser_map.get(key))
+                        .and_then(|key| browser_map_check_path(&package, key, &[]))
                 })
                 .cloned()
                 .map(|mapping| (directory, mapping));
@@ -684,11 +711,13 @@ fn apply_browser_map_to_loaded_path(
                 };
                 let mapping = requested
                     .as_deref()
-                    .and_then(|requested| package.browser_map.get(requested))
+                    .and_then(|requested| {
+                        browser_map_for_package_subpath(&package, requested, extension_order)
+                    })
                     .or_else(|| {
-                        relative
-                            .as_deref()
-                            .and_then(|relative| package.browser_map.get(relative))
+                        relative.as_deref().and_then(|relative| {
+                            browser_map_for_package_subpath(&package, relative, extension_order)
+                        })
                     });
                 if let Some(mapping) = mapping {
                     match mapping {
@@ -3897,6 +3926,108 @@ mod tests {
         js_parser::{JsonOptions, parse_json},
         logger::{DeferLogKind, Loc, Log, Path, PrettyPaths, Range, Source},
     };
+
+    #[test]
+    fn disabled_browser_files_preserve_requested_paths_without_resolving() {
+        let file_system = mock_fs(
+            &HashMap::from([
+                (
+                    "/project/package.json".into(),
+                    r#"{"browser":{"./present.js":false,"missing":false}}"#.into(),
+                ),
+                ("/project/present.js".into(), String::new()),
+            ]),
+            MockKind::Unix,
+            "/",
+        );
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        for import in ["./present", "./missing"] {
+            let result = resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project",
+                import,
+                &[".js".into()],
+                Platform::Browser,
+                None,
+                true,
+            )
+            .expect("disabled files do not need to exist");
+            assert_eq!(
+                result.paths.primary.text,
+                format!("/project/{}", import.strip_prefix("./").unwrap())
+            );
+            assert!(result.paths.primary.is_disabled());
+        }
+    }
+
+    #[test]
+    fn browser_maps_match_bare_file_keys_and_missing_main_extensions() {
+        for (directory, import, json) in [
+            (
+                "/project",
+                "./foo",
+                r#"{"browser":{"foo":"./browser.js","./foo":"./wrong.js"}}"#,
+            ),
+            (
+                "/project",
+                "./foo",
+                r#"{"browser":{"./foo.js":"./browser.js"}}"#,
+            ),
+            (
+                "/project/node_modules/pkg",
+                "pkg/subpath",
+                r#"{"browser":{"subpath":"./browser.js"}}"#,
+            ),
+            (
+                "/project/node_modules/pkg",
+                "pkg",
+                r#"{"main":"main","browser":{"./main.js":"./browser.js"}}"#,
+            ),
+        ] {
+            let file_system = mock_fs(
+                &HashMap::from([
+                    (format!("{directory}/package.json"), json.to_string()),
+                    (format!("{directory}/browser.js"), String::new()),
+                    (format!("{directory}/wrong.js"), String::new()),
+                ]),
+                MockKind::Unix,
+                "/",
+            );
+            let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+            let extensions = vec![".js".into()];
+            let result = resolve_file_or_package(
+                &log,
+                &file_system,
+                "/project",
+                import,
+                &extensions,
+                Platform::Browser,
+                None,
+                true,
+            )
+            .expect("browser remapping should not require the original file");
+            assert_eq!(
+                result.paths.primary.text,
+                format!("{directory}/browser.js"),
+                "{json}"
+            );
+            assert!(
+                resolve_file_or_package(
+                    &log,
+                    &file_system,
+                    "/project",
+                    import,
+                    &extensions,
+                    Platform::Node,
+                    None,
+                    true
+                )
+                .is_none(),
+                "node must not use browser mappings"
+            );
+        }
+    }
 
     #[test]
     fn path_pair_iterates_primary_and_optional_secondary() {
