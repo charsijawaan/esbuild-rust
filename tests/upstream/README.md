@@ -79,12 +79,20 @@ initial baseline above is retained as a historical measurement. Local
 regressions also cover `preserve_symlinks` and disabled browser mappings, which
 must preserve the requested path without requiring the original file to exist.
 
-The complete comparison at Rust commit `f46cbec` is recorded separately in
-`end_to_end_checkpoint.json`: Rust passed 1,243, failed 219, and had no timeouts;
-Go again passed 1,461 with the same shared failure at case 80. There are 218
-Rust-only failures, 29 fixes since the initial baseline, and no regressions.
+The complete comparison at Rust commit `0473d7c` is recorded separately in
+`end_to_end_checkpoint.json`: Rust passed 1,258, failed 204, and had no timeouts;
+Go again passed 1,461 with the same shared failure at case 80. There are 203
+Rust-only failures, 44 fixes since the initial baseline, and no regressions.
 The Rust executable was snapshotted before the run to prevent later builds from
 mixing compiler versions within the report.
+
+This checkpoint includes CommonJS `module.require()` dependency recognition,
+async-generator lowering, direct-eval diagnostics, re-exported TypeScript import
+retention, external ESM namespace aliases, and missing-import warnings with
+`undefined` substitution. The API no longer turns warning-only linker issues
+into generic errors. Warning suppression and promotion preserve output/exit
+behavior and source locations. All eight formerly inactive import-star cases
+now match their original output and diagnostics exactly.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
