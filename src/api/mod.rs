@@ -51,6 +51,9 @@ struct TransformRenamer {
 }
 
 impl Renamer for TransformRenamer {
+    fn import_item_status_for_symbol(&self, reference: Ref) -> crate::internal::ast::ImportItemStatus {
+        self.symbols.get(self.symbols.follow_symbols_const(reference)).import_item_status
+    }
     fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
         reference
     }
@@ -3977,19 +3980,8 @@ fn build_with_output_state_core(
         "API",
     );
     let (mut errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
-    if errors.is_empty() {
-        errors.extend(
-            compiled
-                .scan_result
-                .import_issues
-                .iter()
-                .map(|(_, issue)| Message {
-                    text: format!("Could not resolve imported symbol {:?}", issue.result.alias),
-                    kind: MessageKind::Error,
-                    ..Message::default()
-                }),
-        );
-    }
+    // The bundler has already logged import issues with their actual severity,
+    // location, and overrides. Missing generated imports can be warnings, not errors.
     let metafile = if errors.is_empty() {
         compiled.metafile
     } else {
@@ -7628,6 +7620,56 @@ mod tests {
         for expected in ["import * as ns from \"pkg\"", "ns.default", "ns.foo", "ns[\"foo-bar\"]", "ns.run()"] {
             assert!(output.contains(expected), "{output}");
         }
+    }
+
+    #[test]
+    fn missing_namespace_imports_remain_warnings_and_print_undefined() {
+        let directory = context_test_directory("missing-imports");
+        for file in ["empty.js", "empty.mjs"] {
+            std::fs::write(directory.join(file), "").unwrap();
+        }
+        for (property, file, reason) in [
+            ("default", "empty.mjs", "there is no matching export"),
+            ("missing", "empty.js", "has no exports"),
+        ] {
+            std::fs::write(directory.join("entry.js"), format!(
+                "import * as ns from './{file}'; console.log(ns.{property});"
+            )).unwrap();
+            for minify in [false, true] {
+                for (level, errors, warnings) in [
+                    (super::LogLevel::Warning, 0, 1),
+                    (super::LogLevel::Silent, 0, 0),
+                    (super::LogLevel::Error, 1, 0),
+                ] {
+                    let result = build(BuildOptions {
+                        minify_identifiers: minify,
+                        minify_syntax: minify,
+                        log_override: HashMap::from([("import-is-undefined".into(), level)]),
+                        ..context_options(&directory)
+                    });
+                    assert_eq!((result.errors.len(), result.warnings.len()), (errors, warnings),
+                        "{file} {level:?}: {:?} {:?}", result.errors, result.warnings);
+                    assert_eq!(result.output_files.is_empty(), errors != 0);
+                    for message in result.errors.iter().chain(&result.warnings) {
+                        assert!(message.text.contains(reason), "{}", message.text);
+                        assert_eq!(message.location.as_ref().unwrap().length, property.len());
+                    }
+                    if errors == 0 {
+                        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+                        assert!(output.contains("void 0"), "{output}");
+                        assert!(!output.contains(&format!("ns.{property}")), "{output}");
+                    }
+                }
+            }
+        }
+        std::fs::write(directory.join("empty.mjs"), "export {};").unwrap();
+        std::fs::write(directory.join("entry.js"),
+            "import {missing} from './empty.mjs'; console.log(missing)").unwrap();
+        let result = build(context_options(&directory));
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].text.starts_with("No matching export"));
+        assert!(result.output_files.is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

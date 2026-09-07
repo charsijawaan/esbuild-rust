@@ -1,7 +1,7 @@
 //! Port of `internal/renamer`.
 
 use crate::internal::ast::{
-    DEFAULT_NAME_MINIFIER_JS, INVALID_REF, Index32, NameMinifier, NamespaceAlias, Ref, SlotCounts,
+    DEFAULT_NAME_MINIFIER_JS, INVALID_REF, ImportItemStatus, Index32, NameMinifier, NamespaceAlias, Ref, SlotCounts,
     SlotNamespace, Symbol, SymbolFlags, SymbolKind, SymbolMap,
 };
 use crate::internal::js_ast::{ScopeRef, SymbolUse};
@@ -85,6 +85,10 @@ pub trait Renamer: Sync {
     fn namespace_alias_for_symbol(&self, _reference: Ref) -> Option<NamespaceAlias> {
         None
     }
+
+    fn import_item_status_for_symbol(&self, _reference: Ref) -> ImportItemStatus {
+        ImportItemStatus::default()
+    }
 }
 
 pub struct NoOpRenamer {
@@ -97,6 +101,9 @@ pub fn new_no_op_renamer(symbols: SymbolMap) -> NoOpRenamer {
 }
 
 impl Renamer for NoOpRenamer {
+    fn import_item_status_for_symbol(&self, reference: Ref) -> ImportItemStatus {
+        self.symbols.get(self.symbols.follow_symbols_const(reference)).import_item_status
+    }
     fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
         self.symbols.follow_symbols_const(reference)
     }
@@ -352,6 +359,9 @@ impl MinifyRenamer {
 }
 
 impl Renamer for MinifyRenamer {
+    fn import_item_status_for_symbol(&self, reference: Ref) -> ImportItemStatus {
+        self.symbols.get(self.symbols.follow_symbols_const(reference)).import_item_status
+    }
     fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
         self.symbols.follow_symbols_const(reference)
     }
@@ -646,6 +656,9 @@ impl NumberRenamer {
 }
 
 impl Renamer for NumberRenamer {
+    fn import_item_status_for_symbol(&self, reference: Ref) -> ImportItemStatus {
+        self.symbols.get(self.symbols.follow_symbols_const(reference)).import_item_status
+    }
     fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
         self.symbols.follow_symbols_const(reference)
     }

@@ -10,9 +10,9 @@ The captured corpus currently contains 14,038 concrete cases:
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
 | JS/TS parser and parser lowering | 7,013 | 1,630 | 8,643 |
-| Bundler | 893 | 178 | 1,071 |
+| Bundler | 909 | 162 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,230 | 1,808 | 14,038 |
+| Total | 12,246 | 1,792 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -241,7 +241,7 @@ instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 Files containing invalid UTF-8 are additionally stored in a base64 sidecar so
 binary-loader snapshots retain the exact upstream bytes.
 
-The active bundler tranche exact-compares 815 Unix snapshots and 77
+The active bundler tranche exact-compares 827 Unix snapshots and 81
 diagnostic-only cases from the default, DCE, import-star, TypeScript import-star,
 lowering, TypeScript, package-json,
 tsconfig, loader, CSS, code-splitting, Yarn PnP, import-phase, and entry-point glob suites that use
@@ -275,9 +275,9 @@ compatibility, missing or global `composes` names, output paths, and external
 patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
-when selecting an inactive case. `bundler_additional_active.json` enables 67
-reviewed cases beyond the original option-based selection. So 12,230 concrete
-upstream cases are currently active in `cargo test`; the remaining 178 captured bundler cases are the parity backlog,
+when selecting an inactive case. `bundler_additional_active.json` enables 83
+reviewed cases beyond the original option-based selection. So 12,246 concrete
+upstream cases are currently active in `cargo test`; the remaining 162 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
 List active and inactive bundler fixtures, including their filesystem variant:

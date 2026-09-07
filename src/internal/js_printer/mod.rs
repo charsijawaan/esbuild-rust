@@ -2795,7 +2795,11 @@ impl Printer<'_> {
             }
             ExprData::ImportIdentifier(identifier) => {
                 let reference = self.renamer.canonical_ref_for_symbol(identifier.reference);
-                if let Some(value) = self
+                if self.renamer.import_item_status_for_symbol(reference)
+                    == crate::internal::ast::ImportItemStatus::Missing
+                {
+                    self.print_expr_at(&Expr::new(expr.loc, ExprData::Undefined), level);
+                } else if let Some(value) = self
                     .linker_options
                     .and_then(|options| options.const_values)
                     .and_then(|values| values.get(&reference))
@@ -3246,6 +3250,8 @@ impl Printer<'_> {
                         Some(ExprData::Dot(_) | ExprData::Index(_)) => true,
                         Some(ExprData::ImportIdentifier(identifier)) => {
                             identifier.was_originally_identifier
+                                && self.renamer.import_item_status_for_symbol(identifier.reference)
+                                    != crate::internal::ast::ImportItemStatus::Missing
                                 && self
                                     .renamer
                                     .namespace_alias_for_symbol(identifier.reference)

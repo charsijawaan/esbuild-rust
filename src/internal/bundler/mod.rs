@@ -499,6 +499,22 @@ pub fn bundle_javascript(
         let range =
             crate::internal::js_lexer::range_of_identifier(&importer.input_file.source, alias_loc);
         let mut tracker = LineColumnTracker::new(Some(&importer.input_file.source));
+        if issue.result.is_missing {
+            let target = &scanned.files[issue.result.source_index as usize].input_file.source;
+            log.add_id(
+                crate::internal::logger::MsgId::BundlerImportIsUndefined,
+                if crate::internal::helpers::is_inside_node_modules(&importer.input_file.source.key_path.text) {
+                    MsgKind::Debug
+                } else {
+                    MsgKind::Warning
+                },
+                Some(&mut tracker),
+                range,
+                format!("Import {:?} will always be undefined because the file {:?} has no exports",
+                    named_import.alias, target.pretty_paths.select(options.log_path_style)),
+            );
+            continue;
+        }
         match issue.result.kind {
             linker::MatchImportKind::Cycle => log.add_error(
                 Some(&mut tracker),
@@ -587,15 +603,26 @@ pub fn bundle_javascript(
                         text,
                     ));
                 }
-                log.add_error_with_notes(
-                    Some(&mut tracker),
-                    range,
-                    format!(
-                        "Ambiguous import {:?} has multiple matching exports",
-                        named_import.alias
-                    ),
-                    notes,
-                );
+                if issue.was_generated {
+                    log.add_id_with_notes(
+                        crate::internal::logger::MsgId::BundlerImportIsUndefined,
+                        MsgKind::Warning,
+                        Some(&mut tracker),
+                        range,
+                        format!("Import {:?} will always be undefined because there are multiple matching exports", named_import.alias),
+                        notes,
+                    );
+                } else {
+                    log.add_error_with_notes(
+                        Some(&mut tracker),
+                        range,
+                        format!(
+                            "Ambiguous import {:?} has multiple matching exports",
+                            named_import.alias
+                        ),
+                        notes,
+                    );
+                }
             }
             _ => {}
         }
@@ -5583,7 +5610,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 892 },
+            if selected_test.is_some() { 1 } else { 908 },
             "upstream basic bundler corpus case count"
         );
     }

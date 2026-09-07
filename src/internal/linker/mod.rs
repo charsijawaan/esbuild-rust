@@ -1655,6 +1655,9 @@ pub fn bind_imports_to_exports_for_file(
                 });
             }
             MatchImportKind::Cycle | MatchImportKind::Ambiguous => {
+                if result.kind == MatchImportKind::Ambiguous && was_generated {
+                    graph.symbols.get_mut(import_ref).import_item_status = ImportItemStatus::Missing;
+                }
                 issues.push(ImportMatchIssue {
                     import_ref,
                     result,
