@@ -10903,6 +10903,27 @@ fn visit_expr_with_target_and_context(
                     core.record_usage(core.module_ref);
                     core.record_usage(core.exports_ref);
                 }
+                if let Some(log) = core.log.clone() {
+                    let kind = if core.options.mode == crate::internal::config::Mode::Bundle
+                        && core.is_file_considered_esm
+                        && !is_inside_node_modules(&core.source.key_path.text)
+                    {
+                        MsgKind::Warning
+                    } else {
+                        MsgKind::Debug
+                    };
+                    log.add_id_with_notes(
+                        MsgId::JsDirectEval,
+                        kind,
+                        Some(&mut core.tracker),
+                        crate::internal::js_lexer::range_of_identifier(&core.source, call.target.loc),
+                        "Using direct eval with a bundler is not recommended and may cause problems",
+                        vec![MsgData {
+                            text: "You can read more about direct eval and bundling here: https://esbuild.github.io/link/direct-eval".into(),
+                            ..MsgData::default()
+                        }],
+                    );
+                }
             }
             if core.options.minify_syntax
                 && let Some(replacement) = maybe_inline_iife(expression.loc, call)

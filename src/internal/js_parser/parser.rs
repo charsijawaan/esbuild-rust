@@ -3691,7 +3691,10 @@ mod tests {
         let (ast, ok, log) =
             parse_source("let top; function run(param) { let local; eval(code); }");
         assert!(ok);
-        assert!(log.done().is_empty());
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Debug);
+        assert_eq!(messages[0].id, MsgId::JsDirectEval);
         let Some(StmtData::Function(function)) = ast.parts[1].statements[1].data.as_deref() else {
             panic!("expected function");
         };
@@ -3753,6 +3756,29 @@ mod tests {
     }
 
     #[test]
+    fn direct_eval_diagnostics_follow_upstream_mode_and_dependency_rules() {
+        for (mode, path, kind) in [
+            (crate::internal::config::Mode::Bundle, "/src/entry.js", MsgKind::Warning),
+            (crate::internal::config::Mode::Bundle, "/node_modules/pkg/entry.js", MsgKind::Debug),
+            (crate::internal::config::Mode::PassThrough, "/src/entry.js", MsgKind::Debug),
+        ] {
+            let (_, ok, log) = parse_source_at_path_with_options(
+                "export {}; eval(code); (0, eval)(code); eval?.(code);", path,
+                Options { mode, ..Options::default() },
+            );
+            assert!(ok);
+            let messages = log.done();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].kind, kind);
+            assert_eq!(messages[0].id, MsgId::JsDirectEval);
+            assert_eq!(messages[0].data.location.as_ref().unwrap().column, 11);
+            assert_eq!(messages[0].data.location.as_ref().unwrap().length, 4);
+            assert_eq!(messages[0].notes[0].text,
+                "You can read more about direct eval and bundling here: https://esbuild.github.io/link/direct-eval");
+        }
+    }
+
+    #[test]
     fn commonjs_wrapper_usage_classifies_the_module() {
         let parse_with_mode = |text: &'static [u8], mode| {
             let log = Log::new_defer(DeferLogKind::All, HashMap::new());
@@ -3797,7 +3823,10 @@ mod tests {
 
         let (ast, ok, log) = parse_with_mode(b"eval(code);", crate::internal::config::Mode::Bundle);
         assert!(ok);
-        assert!(log.done().is_empty());
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Debug);
+        assert_eq!(messages[0].id, MsgId::JsDirectEval);
         assert_eq!(
             ast.exports_kind,
             crate::internal::js_ast::ExportsKind::CommonJs
