@@ -12,7 +12,7 @@ use crate::internal::{
     config::pretty_print_target_environment,
     helpers::{GlobPart, GlobWildcard, is_inside_node_modules, string_to_utf16, utf16_to_string},
     js_ast::{
-        AnnotationExpr, AnnotationFlags, Arg, ArrowExpr, AssignTarget, BinaryExpr, Binding,
+        AnnotationExpr, AnnotationFlags, Arg, ArrayExpr, ArrowExpr, AssignTarget, BinaryExpr, Binding,
         BindingData, BlockStmt, CallExpr, CallKind, Class, Decl, DotExpr, Expr, ExprData, ExprStmt,
         ForStmt, Function, FunctionBody, FunctionExpr, IdentifierBinding, IdentifierExpr, IfExpr,
         IfStmt, IndexExpr, LabelStmt, LocalKind, LocalStmt, NewExpr, ObjectExpr, OpCode,
@@ -4723,6 +4723,24 @@ fn async_this_value(core: &mut ParserCore, loc: Loc, is_arrow: bool, uses_this: 
     Expr::new(loc, ExprData::This)
 }
 
+fn async_arguments_could_throw(args: &[Arg]) -> bool {
+    args.iter().any(|arg| {
+        !matches!(arg.binding.data.as_deref(), Some(BindingData::Identifier(_)))
+            || !matches!(arg.default_or_nil.data.as_deref(),
+                None | Some(ExprData::Null | ExprData::Undefined | ExprData::Boolean(_)
+                    | ExprData::Number(_) | ExprData::BigInt(_) | ExprData::String(_)
+                    | ExprData::Function(_) | ExprData::Arrow(_)))
+    })
+}
+
+fn async_forwarding_arg(core: &mut ParserCore, scope: &ScopeRef, loc: Loc, index: usize) -> Arg {
+    let reference = core.new_symbol(SymbolKind::Other, format!("_{index}"));
+    scope.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .generated.push(reference);
+    core.record_declared_symbol(reference);
+    Arg { binding: identifier_binding(loc, reference), ..Arg::default() }
+}
+
 fn lower_async_function(core: &mut ParserCore, function: &mut Function, argument_scope: &ScopeRef) {
     if !function.is_async
         || !(core
@@ -4743,7 +4761,7 @@ fn lower_async_function(core: &mut ParserCore, function: &mut Function, argument
             .is_some_and(|usage| usage.count_estimate > 0);
     let mut generator_args = Vec::new();
     let mut generator_has_rest_arg = false;
-    let forwarded_arguments = if uses_arguments {
+    let forwarded_arguments = if uses_arguments || async_arguments_could_throw(&function.args) {
         generator_args = std::mem::take(&mut function.args);
         generator_has_rest_arg = std::mem::take(&mut function.has_rest_arg);
         for (index, argument) in generator_args.iter().enumerate() {
@@ -4752,17 +4770,19 @@ fn lower_async_function(core: &mut ParserCore, function: &mut Function, argument
             {
                 break;
             }
-            let reference = core.new_symbol(SymbolKind::Other, format!("_{index}"));
+            function.args.push(async_forwarding_arg(core, argument_scope, argument.binding.loc, index));
+        }
+        if function.arguments_ref == crate::internal::ast::INVALID_REF {
+            // A parameter named "arguments" moved into the generator. The outer
+            // wrapper now needs its own intrinsic arguments object for forwarding.
+            let reference = core.new_symbol(SymbolKind::Arguments, "arguments");
+            core.symbols[reference.inner_index as usize].flags |= SymbolFlags::MUST_NOT_BE_RENAMED;
             argument_scope
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .generated
                 .push(reference);
-            core.record_declared_symbol(reference);
-            function.args.push(Arg {
-                binding: identifier_binding(argument.binding.loc, reference),
-                ..Arg::default()
-            });
+            function.arguments_ref = reference;
         }
         core.record_usage(function.arguments_ref);
         Expr::new(
@@ -4821,7 +4841,7 @@ fn lower_async_function(core: &mut ParserCore, function: &mut Function, argument
     function.is_generator = false;
 }
 
-fn lower_async_arrow(core: &mut ParserCore, loc: Loc, arrow: &mut ArrowExpr, uses_this: bool) {
+fn lower_async_arrow(core: &mut ParserCore, loc: Loc, arrow: &mut ArrowExpr, uses_this: bool, argument_scope: &ScopeRef) {
     if !arrow.is_async
         || !core
             .options
@@ -4831,7 +4851,7 @@ fn lower_async_arrow(core: &mut ParserCore, loc: Loc, arrow: &mut ArrowExpr, use
         return;
     }
     let body_loc = arrow.body.loc;
-    let generator = Function {
+    let mut generator = Function {
         body: std::mem::take(&mut arrow.body),
         arguments_ref: crate::internal::ast::INVALID_REF,
         open_paren_loc: loc,
@@ -4840,13 +4860,46 @@ fn lower_async_arrow(core: &mut ParserCore, loc: Loc, arrow: &mut ArrowExpr, use
         is_unique_formal_parameters: true,
         ..Function::default()
     };
+    let forwarded_arguments = if async_arguments_could_throw(&arrow.args) {
+        generator.args = std::mem::take(&mut arrow.args);
+        generator.has_rest_arg = std::mem::take(&mut arrow.has_rest_arg);
+        // Preserve .length while moving parameter evaluation inside the promise.
+        for (index, arg) in generator.args.iter().enumerate() {
+            if arg.default_or_nil.data.is_some()
+                || (generator.has_rest_arg && index + 1 == generator.args.len())
+            {
+                break;
+            }
+            arrow.args.push(async_forwarding_arg(core, argument_scope, arg.binding.loc, index));
+        }
+        if arrow.args.len() < generator.args.len() {
+            arrow.args.push(async_forwarding_arg(core, argument_scope, body_loc, arrow.args.len()));
+            arrow.has_rest_arg = true;
+        }
+        let mut items = Vec::with_capacity(arrow.args.len());
+        for (index, arg) in arrow.args.iter().enumerate() {
+            let Some(BindingData::Identifier(id)) = arg.binding.data.as_deref() else {
+                unreachable!("forwarding arguments are identifiers");
+            };
+            core.record_usage(id.reference);
+            let mut value = temp_identifier(arg.binding.loc, id.reference);
+            if arrow.has_rest_arg && index + 1 == arrow.args.len() {
+                value = Expr::new(arg.binding.loc,
+                    ExprData::Spread(crate::internal::js_ast::SpreadExpr { value }));
+            }
+            items.push(value);
+        }
+        Expr::new(body_loc, ExprData::Array(ArrayExpr { items, is_single_line: true, ..ArrayExpr::default() }))
+    } else {
+        Expr::new(body_loc, ExprData::Null)
+    };
     let this_value = async_this_value(core, body_loc, true, uses_this);
     let call = core.call_runtime(
         body_loc,
         "__async",
         vec![
             this_value,
-            Expr::new(body_loc, ExprData::Null),
+            forwarded_arguments,
             Expr::new(
                 body_loc,
                 ExprData::Function(FunctionExpr {
@@ -11991,6 +12044,7 @@ fn visit_expr_with_target_and_context(
                 visit_binding_initializers(core, &mut argument.binding, resolve_identifiers);
                 visit_expr(core, &mut argument.default_or_nil, resolve_identifiers);
             }
+            let argument_scope = core.current_scope.as_ref().expect("arrow argument scope").clone();
             core.push_scope_for_visit_pass(ScopeKind::FunctionBody, arrow.body.loc);
             let generated_temps = visit_function_body_statements(
                 core,
@@ -12025,7 +12079,7 @@ fn visit_expr_with_target_and_context(
             } else {
                 false
             };
-            lower_async_arrow(core, expression.loc, arrow, uses_this);
+            lower_async_arrow(core, expression.loc, arrow, uses_this, &argument_scope);
             core.pop_scope();
             core.pop_scope();
             core.visit_loop_depth = old_loop_depth;

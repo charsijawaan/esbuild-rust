@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,013 | 1,630 | 8,643 |
+| JS/TS parser and parser lowering | 7,014 | 1,629 | 8,643 |
 | Bundler | 909 | 162 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,246 | 1,792 | 14,038 |
+| Total | 12,247 | 1,791 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -93,6 +93,26 @@ retention, external ESM namespace aliases, and missing-import warnings with
 into generic errors. Warning suppression and promotion preserve output/exit
 behavior and source locations. All eight formerly inactive import-star cases
 now match their original output and diagnostics exactly.
+
+The next verified checkpoint moves potentially throwing async parameter
+initializers and destructuring into the promise wrapper, preserving function
+length and forwarded arguments. Parser case 115 (`TestLowerAsyncFunctions`)
+now matches upstream exactly, bringing active fixture coverage to 12,247.
+The original runtime slice 1250–1266 passes 16/17: case 1266 is newly fixed;
+case 1254 is an existing class/super receiver failure. This is a targeted
+verification, not a replacement for the complete 1,258-pass report above.
+The local suite passes 906 library, 42 CLI, and four integration tests (952
+total; the exhaustive parser audit is separately ignored in normal runs).
+
+Resume point: default-format JavaScript transforms can emit lowering-helper
+calls such as `__async` without including the runtime helper definition. The
+file-build/linker path includes them. Routing every JS transform through the
+linker was explored but deferred because it also changes Unicode escaping and
+TypeScript namespace minifier output; that experiment is not in this checkpoint.
+Resolve these differences against pinned upstream and add executable stdin/API
+regressions before changing transform routing. Then rerun the complete runtime
+audit. The captured fixture backlog is 1,629 parser/lowering and 162 bundler
+cases (1,791 total); the wider API/plugin/WASM inventory remains separate.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
@@ -194,7 +214,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,013 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,014 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -284,7 +304,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 83
-reviewed cases beyond the original option-based selection. So 12,246 concrete
+reviewed cases beyond the original option-based selection. So 12,247 concrete
 upstream cases are currently active in `cargo test`; the remaining 162 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

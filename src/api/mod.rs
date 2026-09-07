@@ -9140,6 +9140,36 @@ mod tests {
     }
 
     #[test]
+    fn moves_throwing_async_parameters_into_the_promise_wrapper() {
+        for (source, expected) in [
+            ("async function f(x, y = fail()) { return y }",
+             "return __async(this, arguments, function* (x, y = fail())"),
+            ("const f = async (x, y = fail()) => y",
+             "__async(null, [_0, ..._1], function* (x, y = fail())"),
+            ("const f = async ({x}) => x",
+             "__async(null, [_0], function* ({ x })"),
+        ] {
+            let output = code(transform(source, TransformOptions {
+                target: Target::Es2015, ..TransformOptions::default()
+            }));
+            assert!(output.contains(expected), "{output}");
+        }
+        let output = code(transform("async function f(x, y = 0) { return y }", TransformOptions {
+            target: Target::Es2015, ..TransformOptions::default()
+        }));
+        assert!(output.contains("function f(x, y = 0)"), "{output}");
+        assert!(output.contains("__async(this, null, function* ()"), "{output}");
+
+        // The original parameter shadows the intrinsic arguments object only in
+        // the inner generator, not in the newly generated forwarding wrapper.
+        let result = transform("async function f(arguments = fail()) { return arguments }", TransformOptions {
+            target: Target::Es2015, ..TransformOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(!result.code.is_empty());
+    }
+
+    #[test]
     fn lowers_async_generators_and_preserves_nested_async_scopes() {
         let source = "async function* values(x) {\
             yield await x; yield* x;\
