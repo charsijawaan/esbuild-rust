@@ -10648,6 +10648,37 @@ fn visit_expr_with_target_and_context(
                 },
             );
             core.lower_super_property_access = old_lower_super_property_access;
+            // Upstream treats calls to the CommonJS module's "require" property
+            // as require calls for Webpack compatibility. Only rewrite actual
+            // calls, not reads, constructor targets, or optional property access.
+            if core.options.mode == crate::internal::config::Mode::Bundle {
+                let property = match call.target.data.as_deref() {
+                    Some(ExprData::Dot(dot))
+                        if dot.optional_chain == OptionalChain::None && dot.name == "require" =>
+                    {
+                        Some((&dot.target, dot.name_loc))
+                    }
+                    Some(ExprData::Index(index))
+                        if index.optional_chain == OptionalChain::None
+                            && matches!(index.index.data.as_deref(), Some(ExprData::String(name))
+                                if crate::internal::helpers::utf16_equals_wtf8(&name.value, b"require")) =>
+                    {
+                        Some((&index.target, index.index.loc))
+                    }
+                    _ => None,
+                };
+                if let Some((target, loc)) = property
+                    && matches!(target.data.as_deref(), Some(ExprData::Identifier(id))
+                        if id.reference == core.module_ref)
+                {
+                    core.ignore_usage(core.module_ref);
+                    core.record_usage(core.require_ref);
+                    call.target = Expr::new(loc, ExprData::Identifier(IdentifierExpr {
+                        reference: core.require_ref,
+                        ..IdentifierExpr::default()
+                    }));
+                }
+            }
             if core.options.minify_syntax {
                 let collapse_indirect_identifier = match call.target.data.as_deref() {
                     Some(ExprData::Binary(binary))

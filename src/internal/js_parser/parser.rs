@@ -4027,6 +4027,31 @@ mod tests {
     }
 
     #[test]
+    fn bundling_recognizes_commonjs_module_require_calls_only() {
+        let source = "module.require('one'); module['require']('two');\
+            module.require; module['require']; new module.require('constructor');\
+            module?.require('optional'); module['other']('other');\
+            function f(module) { module.require('shadowed'); }";
+        for mode in [crate::internal::config::Mode::Bundle, crate::internal::config::Mode::PassThrough] {
+            for minify_syntax in [false, true] {
+                let (ast, ok, log) = parse_source_with_options(source, Options {
+                    mode,
+                    minify_syntax,
+                    ..Options::default()
+                });
+                assert!(ok);
+                assert!(log.done().is_empty());
+                let paths = ast.import_records.iter().map(|record| record.path.text.as_str()).collect::<Vec<_>>();
+                if mode == crate::internal::config::Mode::Bundle {
+                    assert_eq!(paths, ["one", "two"]);
+                } else {
+                    assert!(paths.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn shadowed_require_calls_are_not_import_records() {
         let (ast, ok, log) = parse_source(
             "function load(require) {\
