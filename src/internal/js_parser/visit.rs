@@ -1179,8 +1179,19 @@ pub(crate) fn precompute_type_script_enum_constants(core: &mut ParserCore, state
     }
 }
 
-fn lower_for_await_value(core: &ParserCore, loc: Loc, value: Expr) -> Expr {
+fn lower_await_value(core: &mut ParserCore, loc: Loc, mut value: Expr) -> Expr {
     if core.lower_await_to_yield {
+        if core.visit_is_async_generator {
+            // Distinguish an internal await from a value yielded to the caller.
+            value = Expr::new(
+                loc,
+                ExprData::New(NewExpr {
+                    target: core.import_from_runtime(loc, "__await"),
+                    args: vec![value],
+                    ..NewExpr::default()
+                }),
+            );
+        }
         Expr::new(
             loc,
             ExprData::Yield(crate::internal::js_ast::YieldExpr {
@@ -1271,7 +1282,7 @@ fn lower_for_await_loop(
             ..CallExpr::default()
         }),
     );
-    let await_iter_next = lower_for_await_value(core, loc, iter_next);
+    let await_iter_next = lower_await_value(core, loc, iter_next);
     let temp_call_iter = Expr::new(
         loc,
         ExprData::Call(CallExpr {
@@ -1289,7 +1300,7 @@ fn lower_for_await_loop(
             ..CallExpr::default()
         }),
     );
-    let await_temp_call_iter = lower_for_await_value(core, loc, temp_call_iter);
+    let await_temp_call_iter = lower_await_value(core, loc, temp_call_iter);
 
     let for_statement = Stmt::new(
         loc,
@@ -4703,11 +4714,12 @@ fn async_this_value(core: &mut ParserCore, loc: Loc, is_arrow: bool, uses_this: 
 
 fn lower_async_function(core: &mut ParserCore, function: &mut Function, argument_scope: &ScopeRef) {
     if !function.is_async
-        || function.is_generator
-        || !core
+        || !(core
             .options
             .unsupported_js_features
             .contains(JsFeature::ASYNC_AWAIT)
+            || (function.is_generator
+                && core.options.unsupported_js_features.contains(JsFeature::ASYNC_GENERATOR)))
     {
         return;
     }
@@ -4767,7 +4779,11 @@ fn lower_async_function(core: &mut ParserCore, function: &mut Function, argument
     let this_value = async_this_value(core, body_loc, false, true);
     let call = core.call_runtime(
         body_loc,
-        "__async",
+        if function.is_generator {
+            "__asyncGenerator"
+        } else {
+            "__async"
+        },
         vec![
             this_value,
             forwarded_arguments,
@@ -4791,6 +4807,7 @@ fn lower_async_function(core: &mut ParserCore, function: &mut Function, argument
         },
     };
     function.is_async = false;
+    function.is_generator = false;
 }
 
 fn lower_async_arrow(core: &mut ParserCore, loc: Loc, arrow: &mut ArrowExpr, uses_this: bool) {
@@ -4844,11 +4861,12 @@ fn lower_async_arrow(core: &mut ParserCore, loc: Loc, arrow: &mut ArrowExpr, use
 
 fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identifiers: bool) {
     let should_lower_async = function.is_async
-        && !function.is_generator
-        && core
+        && (core
             .options
             .unsupported_js_features
-            .contains(JsFeature::ASYNC_AWAIT);
+            .contains(JsFeature::ASYNC_AWAIT)
+            || (function.is_generator
+                && core.options.unsupported_js_features.contains(JsFeature::ASYNC_GENERATOR)));
     let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
     let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
     let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);
@@ -4858,6 +4876,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
         &mut core.visit_is_async_generator,
         function.is_async && function.is_generator,
     );
+    let old_is_generator = std::mem::replace(&mut core.visit_is_generator, function.is_generator);
     let old_this_is_nested = std::mem::replace(&mut core.visit_this_is_nested, true);
     let old_is_outside_fn_or_arrow =
         std::mem::replace(&mut core.visit_is_outside_fn_or_arrow, false);
@@ -5034,6 +5053,7 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     core.visit_try_catch_loc = old_try_catch_loc;
     core.visit_new_target_allowed = old_new_target_allowed;
     core.visit_is_async_generator = old_is_async_generator;
+    core.visit_is_generator = old_is_generator;
     core.visit_this_is_nested = old_this_is_nested;
     core.visit_is_outside_fn_or_arrow = old_is_outside_fn_or_arrow;
     core.lower_await_to_yield = old_lower_await_to_yield;
@@ -11615,10 +11635,9 @@ fn visit_expr_with_target_and_context(
                 record.error_handler_loc = core.visit_try_catch_loc;
             }
             if core.lower_await_to_yield {
-                *data = ExprData::Yield(crate::internal::js_ast::YieldExpr {
-                    value_or_nil: std::mem::take(&mut await_expression.value),
-                    is_star: false,
-                });
+                *data = *lower_await_value(
+                    core, expression.loc, std::mem::take(&mut await_expression.value),
+                ).data.expect("lowered await");
             }
         }
         ExprData::Yield(yield_expression) => {
@@ -11627,6 +11646,15 @@ fn visit_expr_with_target_and_context(
                 &mut yield_expression.value_or_nil,
                 resolve_identifiers,
             );
+            if yield_expression.is_star
+                && core.visit_is_generator
+                && core.options.unsupported_js_features.contains(JsFeature::ASYNC_GENERATOR)
+            {
+                yield_expression.value_or_nil = core.call_runtime(
+                    expression.loc, "__yieldStar",
+                    vec![std::mem::take(&mut yield_expression.value_or_nil)],
+                );
+            }
         }
         ExprData::If(if_expression) => {
             visit_expr(core, &mut if_expression.test, resolve_identifiers);
@@ -11886,6 +11914,7 @@ fn visit_expr_with_target_and_context(
             let old_try_catch_loc = core.visit_try_catch_loc;
             let old_is_async_generator =
                 std::mem::replace(&mut core.visit_is_async_generator, false);
+            let old_is_generator = std::mem::take(&mut core.visit_is_generator);
             let old_is_outside_fn_or_arrow =
                 std::mem::replace(&mut core.visit_is_outside_fn_or_arrow, false);
             let old_lower_await_to_yield =
@@ -11965,6 +11994,7 @@ fn visit_expr_with_target_and_context(
             core.visit_try_body_depth = old_try_body_depth;
             core.visit_try_catch_loc = old_try_catch_loc;
             core.visit_is_async_generator = old_is_async_generator;
+            core.visit_is_generator = old_is_generator;
             core.visit_is_outside_fn_or_arrow = old_is_outside_fn_or_arrow;
             core.lower_await_to_yield = old_lower_await_to_yield;
             core.visit_inside_async_arrow = old_inside_async_arrow;

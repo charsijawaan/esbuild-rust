@@ -9053,6 +9053,41 @@ mod tests {
     }
 
     #[test]
+    fn lowers_async_generators_and_preserves_nested_async_scopes() {
+        let source = "async function* values(x) {\
+            yield await x; yield* x;\
+            async function nested() { return await x; }\
+            const arrow = async () => await x;\
+            for await (const item of x) yield item;\
+            return arguments[0];\
+        }";
+        for lower_async_await in [false, true] {
+            let result = transform(source, TransformOptions {
+                supported: HashMap::from([
+                    ("async-generator".into(), false),
+                    ("async-await".into(), !lower_async_await),
+                    ("for-await".into(), false),
+                ]),
+                ..TransformOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            let code = String::from_utf8(result.code).unwrap();
+            assert!(!code.contains("async function*"), "{code}");
+            assert!(code.contains("return __asyncGenerator(this, arguments, function* (x)"), "{code}");
+            assert!(code.contains("yield yield new __await(x)"), "{code}");
+            assert!(code.contains("yield* __yieldStar(x)"), "{code}");
+            assert!(!code.contains("for await"), "{code}");
+            assert_eq!(code.contains("async function nested()"), !lower_async_await, "{code}");
+            assert_eq!(code.contains("const arrow = async () => await x"), !lower_async_await, "{code}");
+        }
+        let result = transform(source, TransformOptions::default());
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let code = String::from_utf8(result.code).unwrap();
+        assert!(code.contains("async function* values(x)"));
+        assert!(!code.contains("__asyncGenerator"));
+    }
+
+    #[test]
     fn respects_syntax_guard_boundaries_and_supported_overrides() {
         for (source, target) in [
             ("class C {}", Target::Es2015),
