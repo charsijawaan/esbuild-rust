@@ -1,5 +1,7 @@
 //! Port of esbuild's public `pkg/api` package.
 
+#[cfg(test)]
+mod upstream_tests;
 mod watcher;
 
 use std::{
@@ -651,6 +653,26 @@ fn internal_location(location: Location) -> MsgLocation {
         line: location.line,
         column: location.column,
         length: location.length,
+    }
+}
+
+// Upstream's serving layer uses this lexical path helper. Porting this helper
+// and its tests does not imply that the serving API itself is implemented.
+#[allow(dead_code)]
+fn strip_dir_prefix<'a>(path: &'a str, prefix: &str, allowed_slashes: &str) -> Option<&'a str> {
+    let suffix = path.strip_prefix(prefix)?;
+    if prefix.is_empty() || suffix.is_empty() {
+        return Some(suffix);
+    }
+    if allowed_slashes
+        .as_bytes()
+        .contains(prefix.as_bytes().last().unwrap())
+    {
+        Some(suffix)
+    } else if allowed_slashes.as_bytes().contains(&suffix.as_bytes()[0]) {
+        Some(&suffix[1..])
+    } else {
+        None
     }
 }
 

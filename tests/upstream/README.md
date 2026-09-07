@@ -4,18 +4,37 @@ Generated fixtures in this directory are extracted from the esbuild revision
 recorded in [`UPSTREAM.md`](../../UPSTREAM.md). The generators must reject any
 upstream case they cannot translate so missing coverage cannot be silent.
 
-The captured corpus currently contains 14,005 concrete cases:
+The captured corpus currently contains 14,038 concrete cases:
 
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
 | JS/TS parser and parser lowering | 7,010 | 1,633 | 8,643 |
 | Bundler | 893 | 178 | 1,071 |
-| Total | 12,194 | 1,811 | 14,005 |
+| Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
+| Total | 12,227 | 1,811 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
-surface. Go utility/API tests and upstream's JavaScript API, plugin, WebAssembly,
+surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
 and platform matrices still need a complete correspondence inventory.
+
+## Repository-wide inventory
+
+`test_inventory.json` records source-level accounting for the pinned revision:
+33 Go test files with 1,392 test functions, plus 1,271 registered JavaScript API
+tests (537 build, 686 transform, and 48 in other groups), 97 plugin tests, and 13
+WASM tests. JavaScript registration is inspected without invoking the suite's
+entry point, installing a package, or executing a test. These registrations are
+**not** claimed as passing Rust coverage. Go utility files without captured
+fixtures and other scripts (including Test262 and fuzzers) are listed explicitly
+for further correspondence work.
+
+Function definitions, generated helper cases, and JavaScript registrations are
+different counting units. Do not add these totals into one parity denominator.
+
+```sh
+node scripts/audit_upstream_test_inventory.mjs /path/to/pinned/esbuild tests/upstream/test_inventory.json
+```
 
 ## CLI and runtime end-to-end suite
 
@@ -32,7 +51,7 @@ node scripts/audit_upstream_end_to_end_tests.mjs /path/to/pinned/esbuild \
 
 This suite registers 1,462 tests on Node 24/macOS; some registrations depend on
 the runtime/platform and some tests exercise multiple output formats. These are
-separate from the 14,005 fixture cases above. The runner reads the original
+separate from the 14,038 fixture cases above. The runner reads the original
 committed test script, substitutes the compiler executable, and gives each test
 an isolated temporary directory and process group. It retains failed artifacts,
 writes an incremental JSON report, and returns failure if any selected test fails
@@ -77,6 +96,21 @@ Extra CLI info/debug/verbose output (including diagnostics assigned these levels
 through overrides) and resolver tracing remain separate logging parity gaps.
 Legacy `use asm` directives are removed, as upstream does, without ending the
 directive prologue or suppressing a subsequent `use strict` directive.
+
+## Go API test corpus
+
+`api.json` captures all 33 helper calls in the pinned `pkg/api/api_test.go` and
+`api_impl_test.go`: 14 message-formatting cases and 19 directory-prefix cases.
+The generator runs their original Go assertions in an isolated package copy,
+preserves original call-site lines, and rejects unknown test groups/helpers.
+The Rust harness maps all fields explicitly and compares the original expected
+output exactly. Capturing the serving layer's prefix helper does not mean the
+serving API or JavaScript API test suite has been implemented.
+
+```sh
+node scripts/generate_upstream_api_tests.mjs /path/to/pinned/esbuild tests/upstream/api.json
+cargo test --lib matches_pinned_upstream_go_api_corpus
+```
 
 ## Fixture regeneration
 
@@ -242,7 +276,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 67
-reviewed cases beyond the original option-based selection. So 12,194 concrete
+reviewed cases beyond the original option-based selection. So 12,227 concrete
 upstream cases are currently active in `cargo test`; the remaining 178 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

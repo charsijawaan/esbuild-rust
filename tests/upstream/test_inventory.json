@@ -1,0 +1,347 @@
+{
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+  "node_version": "v24.15.0",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "go_test_files": 33,
+  "go_test_functions": 1392,
+  "captured_fixture_cases": 14038,
+  "counting_note": "Go function definitions, captured helper calls, and JavaScript registrations are different units. Do not add them into a parity denominator.",
+  "go_files": [
+    {
+      "file": "internal/bundler_tests/bundler_css_test.go",
+      "test_function_count": 62,
+      "captured_fixture_cases": 64,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_dce_test.go",
+      "test_function_count": 121,
+      "captured_fixture_cases": 121,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_default_test.go",
+      "test_function_count": 302,
+      "captured_fixture_cases": 302,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_glob_test.go",
+      "test_function_count": 10,
+      "captured_fixture_cases": 10,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_importphase_test.go",
+      "test_function_count": 12,
+      "captured_fixture_cases": 12,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_importstar_test.go",
+      "test_function_count": 80,
+      "captured_fixture_cases": 80,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_importstar_ts_test.go",
+      "test_function_count": 23,
+      "captured_fixture_cases": 23,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_loader_test.go",
+      "test_function_count": 85,
+      "captured_fixture_cases": 85,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_lower_test.go",
+      "test_function_count": 84,
+      "captured_fixture_cases": 84,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_packagejson_test.go",
+      "test_function_count": 96,
+      "captured_fixture_cases": 96,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_splitting_test.go",
+      "test_function_count": 23,
+      "captured_fixture_cases": 23,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_test.go",
+      "test_function_count": 0,
+      "captured_fixture_cases": 0,
+      "correspondence": "test-infrastructure"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_ts_test.go",
+      "test_function_count": 87,
+      "captured_fixture_cases": 87,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_tsconfig_test.go",
+      "test_function_count": 80,
+      "captured_fixture_cases": 81,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/bundler_tests/bundler_yarnpnp_test.go",
+      "test_function_count": 3,
+      "captured_fixture_cases": 3,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/compat/compat_test.go",
+      "test_function_count": 1,
+      "captured_fixture_cases": 0,
+      "correspondence": "requires-correspondence-audit"
+    },
+    {
+      "file": "internal/css_lexer/css_lexer_test.go",
+      "test_function_count": 6,
+      "captured_fixture_cases": 69,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/css_parser/css_parser_test.go",
+      "test_function_count": 52,
+      "captured_fixture_cases": 2781,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/css_printer/css_printer_test.go",
+      "test_function_count": 18,
+      "captured_fixture_cases": 289,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/fs/fs_mock_test.go",
+      "test_function_count": 4,
+      "captured_fixture_cases": 0,
+      "correspondence": "requires-correspondence-audit"
+    },
+    {
+      "file": "internal/helpers/dataurl_test.go",
+      "test_function_count": 1,
+      "captured_fixture_cases": 0,
+      "correspondence": "requires-correspondence-audit"
+    },
+    {
+      "file": "internal/js_ast/js_ast_test.go",
+      "test_function_count": 1,
+      "captured_fixture_cases": 0,
+      "correspondence": "requires-correspondence-audit"
+    },
+    {
+      "file": "internal/js_lexer/js_lexer_test.go",
+      "test_function_count": 7,
+      "captured_fixture_cases": 335,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/js_parser/js_parser_lower_test.go",
+      "test_function_count": 18,
+      "captured_fixture_cases": 459,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/js_parser/js_parser_test.go",
+      "test_function_count": 130,
+      "captured_fixture_cases": 6578,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/js_parser/json_parser_test.go",
+      "test_function_count": 7,
+      "captured_fixture_cases": 122,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/js_parser/ts_parser_test.go",
+      "test_function_count": 37,
+      "captured_fixture_cases": 1606,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/js_printer/js_printer_test.go",
+      "test_function_count": 37,
+      "captured_fixture_cases": 695,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "internal/logger/logger_test.go",
+      "test_function_count": 1,
+      "captured_fixture_cases": 0,
+      "correspondence": "requires-correspondence-audit"
+    },
+    {
+      "file": "internal/resolver/yarnpnp_test.go",
+      "test_function_count": 1,
+      "captured_fixture_cases": 0,
+      "correspondence": "requires-correspondence-audit"
+    },
+    {
+      "file": "internal/runtime/runtime_test.go",
+      "test_function_count": 1,
+      "captured_fixture_cases": 0,
+      "correspondence": "requires-correspondence-audit"
+    },
+    {
+      "file": "pkg/api/api_impl_test.go",
+      "test_function_count": 1,
+      "captured_fixture_cases": 19,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    },
+    {
+      "file": "pkg/api/api_test.go",
+      "test_function_count": 1,
+      "captured_fixture_cases": 14,
+      "correspondence": "captured-fixtures-not-a-pass-count"
+    }
+  ],
+  "javascript_suites": [
+    {
+      "file": "scripts/js-api-tests.js",
+      "registered_tests": 1271,
+      "status": "registered-only-not-executed-against-port",
+      "groups": [
+        {
+          "name": "buildTests",
+          "count": 537
+        },
+        {
+          "name": "watchTests",
+          "count": 7
+        },
+        {
+          "name": "serveTests",
+          "count": 24
+        },
+        {
+          "name": "transformTests",
+          "count": 686
+        },
+        {
+          "name": "formatTests",
+          "count": 1
+        },
+        {
+          "name": "analyzeTests",
+          "count": 1
+        },
+        {
+          "name": "apiSyncTests",
+          "count": 12
+        },
+        {
+          "name": "childProcessTests",
+          "count": 2
+        },
+        {
+          "name": "serialTests",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "scripts/plugin-tests.js",
+      "registered_tests": 97,
+      "status": "registered-only-not-executed-against-port",
+      "groups": [
+        {
+          "name": "pluginTests",
+          "count": 83
+        },
+        {
+          "name": "syncTests",
+          "count": 14
+        }
+      ]
+    },
+    {
+      "file": "scripts/wasm-tests.js",
+      "registered_tests": 13,
+      "status": "registered-only-not-executed-against-port",
+      "groups": [
+        {
+          "name": "tests",
+          "count": 13
+        }
+      ]
+    }
+  ],
+  "other_test_scripts": [
+    {
+      "file": "scripts/browser/browser-tests.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/decorator-tests.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/decorator-tests.ts",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/deno-tests.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/destructuring-fuzzer.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/end-to-end-tests.js",
+      "status": "separate-runtime-report"
+    },
+    {
+      "file": "scripts/gradient-tests.css",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/gradient-tests.html",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/node-unref-tests.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/register-test.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/terser-tests.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/test-yarnpnp.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/test262-async.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/test262.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/ts-type-tests.js",
+      "status": "not-enumerated"
+    },
+    {
+      "file": "scripts/uglify-tests.js",
+      "status": "not-enumerated"
+    }
+  ]
+}

@@ -1,0 +1,625 @@
+[
+  {
+    "allowed_slashes": "/",
+    "expected": "/foo/bar/baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 37,
+    "path": "/foo/bar/baz",
+    "prefix": "",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "/",
+    "expected": "foo/bar/baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 38,
+    "path": "/foo/bar/baz",
+    "prefix": "/",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "/",
+    "expected": "bar/baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 39,
+    "path": "/foo/bar/baz",
+    "prefix": "/foo",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "/",
+    "expected": "baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 40,
+    "path": "/foo/bar/baz",
+    "prefix": "/foo/bar",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "/",
+    "expected": "",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 41,
+    "path": "/foo/bar/baz",
+    "prefix": "/foo/bar/baz",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "/",
+    "expected": "/baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 42,
+    "path": "/foo/bar//baz",
+    "prefix": "/foo/bar",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "expected": "C:\\foo\\bar\\baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 43,
+    "path": "C:\\foo\\bar\\baz",
+    "prefix": "",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "expected": "foo\\bar\\baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 44,
+    "path": "C:\\foo\\bar\\baz",
+    "prefix": "C:",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "expected": "foo\\bar\\baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 45,
+    "path": "C:\\foo\\bar\\baz",
+    "prefix": "C:\\",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "expected": "bar\\baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 46,
+    "path": "C:\\foo\\bar\\baz",
+    "prefix": "C:\\foo",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "expected": "baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 47,
+    "path": "C:\\foo\\bar\\baz",
+    "prefix": "C:\\foo\\bar",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "expected": "",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 48,
+    "path": "C:\\foo\\bar\\baz",
+    "prefix": "C:\\foo\\bar\\baz",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "expected": "\\baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 49,
+    "path": "C:\\foo\\bar\\\\baz",
+    "prefix": "C:\\foo\\bar",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "expected": "baz",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 50,
+    "path": "C:\\foo\\bar/baz",
+    "prefix": "C:\\foo\\bar",
+    "success": true,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "/",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 52,
+    "path": "/foo/bar",
+    "prefix": "/foo/ba",
+    "success": false,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "/",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 53,
+    "path": "/foo/bar",
+    "prefix": "/fo",
+    "success": false,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 54,
+    "path": "C:\\foo\\bar",
+    "prefix": "C:\\foo\\ba",
+    "success": false,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 55,
+    "path": "C:\\foo\\bar",
+    "prefix": "C:\\fo",
+    "success": false,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "allowed_slashes": "\\/",
+    "file": "api_impl_test.go",
+    "kind": "strip_dir_prefix",
+    "line": 56,
+    "path": "C:/foo/bar",
+    "prefix": "C:\\foo",
+    "success": false,
+    "upstream_test": "TestStripDirPrefix"
+  },
+  {
+    "expected": "✘ [ERROR] This is a test\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 18,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": null,
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Error",
+    "options": {
+      "TerminalWidth": 0,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "▲ [WARNING] This is a test\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 19,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": null,
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Warning",
+    "options": {
+      "TerminalWidth": 0,
+      "Kind": 1,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] This is a test\n\n    some file.js:100:5:\n      100 │ this.foo();\n          │      ~~~\n          ╵      bar\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 21,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 5,
+        "Length": 3,
+        "LineText": "this.foo();",
+        "Suggestion": "bar"
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Basic location",
+    "options": {
+      "TerminalWidth": 0,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "▲ [WARNING] This is a test\n\n    some file.js:100:17:\n      100 │ 𝓉𝒽𝒾𝓈.𝒻ℴℴ();\n          │      ~~~\n          ╵      𝒷𝒶𝓇\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 41,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 17,
+        "Length": 10,
+        "LineText": "𝓉𝒽𝒾𝓈.𝒻ℴℴ();",
+        "Suggestion": "𝒷𝒶𝓇"
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Unicode location",
+    "options": {
+      "TerminalWidth": 0,
+      "Kind": 1,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "▲ [WARNING] This is a test\n\n    some file.js:100:6:\n      100 │ 0 1 23  45  678\n          ╵       ~~~~~~\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 63,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 6,
+        "Length": 4,
+        "LineText": "0\t1\t23\t45\t678",
+        "Suggestion": ""
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Tab stop rendering",
+    "options": {
+      "TerminalWidth": 0,
+      "Kind": 1,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] This is a test\n\n    some file.js:100:3:\n      100 │ 012345678 abcdefg...\n          ╵    ^\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 83,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 3,
+        "Length": 0,
+        "LineText": "012345678 abcdefghi ABCDEFGHI 012345678 abcdefghi ABCDEFGHI",
+        "Suggestion": ""
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Truncated location tail, zero length",
+    "options": {
+      "TerminalWidth": 32,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] This is a test\n\n    some file.js:100:3:\n      100 │ 012345678 abcdefg...\n          ╵    ~~~~~~\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 103,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 3,
+        "Length": 6,
+        "LineText": "012345678 abcdefghi ABCDEFGHI 012345678 abcdefghi ABCDEFGHI",
+        "Suggestion": ""
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Truncated location tail, nonzero length",
+    "options": {
+      "TerminalWidth": 32,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] This is a test\n\n    some file.js:100:3:\n      100 │ 012345678 abcdefg...\n          ╵    ~~~~~~~~~~~~~~\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 123,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 3,
+        "Length": 100,
+        "LineText": "012345678 abcdefghi ABCDEFGHI 012345678 abcdefghi ABCDEFGHI",
+        "Suggestion": ""
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Truncated location tail, truncated length",
+    "options": {
+      "TerminalWidth": 32,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] This is a test\n\n    some file.js:100:59:\n      100 │ ...defghi ABCDEFGHI\n          ╵                    ^\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 143,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 200,
+        "Length": 0,
+        "LineText": "012345678 abcdefghi ABCDEFGHI 012345678 abcdefghi ABCDEFGHI",
+        "Suggestion": ""
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Truncated location head, zero length",
+    "options": {
+      "TerminalWidth": 32,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] This is a test\n\n    some file.js:100:50:\n      100 │ ...cdefghi ABCDEFGHI\n          ╵            ~~~~~~~~~\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 163,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 50,
+        "Length": 200,
+        "LineText": "012345678 abcdefghi ABCDEFGHI 012345678 abcdefghi ABCDEFGHI",
+        "Suggestion": ""
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Truncated location head, nonzero length",
+    "options": {
+      "TerminalWidth": 32,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] This is a test\n\n    some file.js:100:30:\n      100 │ ... 012345678 abc...\n          ╵     ~~~~~~~~~~~~~\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 183,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 30,
+        "Length": 30,
+        "LineText": "012345678 abcdefghi ABCDEFGHI 012345678 abcdefghi ABCDEFGHI",
+        "Suggestion": ""
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Truncated location head and tail, truncated length",
+    "options": {
+      "TerminalWidth": 32,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] This is a test\n\n    some file.js:100:30:\n      100 │ ...HI 012345678 a...\n          ╵       ~~~~~~~~~\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 203,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "This is a test",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 30,
+        "Length": 9,
+        "LineText": "012345678 abcdefghi ABCDEFGHI 012345678 abcdefghi ABCDEFGHI",
+        "Suggestion": ""
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Truncated location head and tail, non-truncated length",
+    "options": {
+      "TerminalWidth": 32,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] ReferenceError: Cannot access 'foo' before initialization\n\n    some file.js:100:2:\n      100 │   foo();\n          ╵   ^\n\n    at ModuleJob.run (node:internal/modules/esm/module_job:185:25)\n    at async Promise.all (index 0)\n    at async ESMLoader.import (node:internal/modules/esm/loader:281:24)\n    at async loadESM (node:internal/process/esm_loader:88:5)\n    at async handleMainPromise (node:internal/modules/run_main:65:12)\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 223,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "ReferenceError: Cannot access 'foo' before initialization",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 100,
+        "Column": 2,
+        "Length": 0,
+        "LineText": "  foo();\n    at ModuleJob.run (node:internal/modules/esm/module_job:185:25)\n    at async Promise.all (index 0)\n    at async ESMLoader.import (node:internal/modules/esm/loader:281:24)\n    at async loadESM (node:internal/process/esm_loader:88:5)\n    at async handleMainPromise (node:internal/modules/run_main:65:12)",
+        "Suggestion": ""
+      },
+      "Notes": null,
+      "Detail": null
+    },
+    "name": "Multi-line line text",
+    "options": {
+      "TerminalWidth": 0,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  },
+  {
+    "expected": "✘ [ERROR] Why would you do this?\n\n    some file.js:1:10:\n      1 │ let ten = +([+!+[]]+[+[]]);\n        ╵           ~~~~~~~~~~~~~~~~\n\n  This is 1:\n\n    some file.js:1:12:\n      1 │ let ten = +([+!+[]]+[+[]]);\n        │             ~~~~~~~\n        ╵             '1'\n\n  This is 0:\n\n    some file.js:1:20:\n      1 │ let ten = +([+!+[]]+[+[]]);\n        │                     ~~~~~\n        ╵                     '0'\n\n  The number 0 is created by +[], where\n  [] is the empty array and + is the\n  unary plus, used to convert the right\n  side to a numeric value. The number 1\n  is formed as +!+[], where the boolean\n  value true is converted into the\n  numeric value 1 by the prepended plus\n  sign.\n\n",
+    "file": "api_test.go",
+    "kind": "format",
+    "line": 251,
+    "message": {
+      "ID": "",
+      "PluginName": "",
+      "Text": "Why would you do this?",
+      "Location": {
+        "File": "some file.js",
+        "Namespace": "",
+        "Line": 1,
+        "Column": 10,
+        "Length": 16,
+        "LineText": "let ten = +([+!+[]]+[+[]]);",
+        "Suggestion": ""
+      },
+      "Notes": [
+        {
+          "Text": "This is 1:",
+          "Location": {
+            "File": "some file.js",
+            "Namespace": "",
+            "Line": 1,
+            "Column": 12,
+            "Length": 7,
+            "LineText": "let ten = +([+!+[]]+[+[]]);",
+            "Suggestion": "'1'"
+          }
+        },
+        {
+          "Text": "This is 0:",
+          "Location": {
+            "File": "some file.js",
+            "Namespace": "",
+            "Line": 1,
+            "Column": 20,
+            "Length": 5,
+            "LineText": "let ten = +([+!+[]]+[+[]]);",
+            "Suggestion": "'0'"
+          }
+        },
+        {
+          "Text": "The number 0 is created by +[], where [] is the empty array and + is the unary plus, used to convert the right side to a numeric value. The number 1 is formed as +!+[], where the boolean value true is converted into the numeric value 1 by the prepended plus sign.",
+          "Location": null
+        }
+      ],
+      "Detail": null
+    },
+    "name": "Note formatting",
+    "options": {
+      "TerminalWidth": 40,
+      "Kind": 0,
+      "Color": false
+    },
+    "upstream_test": "TestFormatMessages"
+  }
+]
