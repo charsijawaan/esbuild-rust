@@ -55,14 +55,28 @@ stdin instead of validating the flag combination first.
 Subsequent checkpoints fixed case 1415 (verified individually), inherited
 tsconfig paths through symlinks (case 25), and browser-field lookup of bare file
 keys and implicit extensions (cases 31, 33, 35, and 43). The first 50 original
-runtime cases now pass 50/50 after fixing JSX diagnostic cases 26 and 27. The complete runtime baseline above has not been
-rerun and is intentionally retained as a historical measurement. Local
+runtime cases now pass 50/50 after fixing JSX diagnostic cases 26 and 27. The
+initial baseline above is retained as a historical measurement. Local
 regressions also cover `preserve_symlinks` and disabled browser mappings, which
 must preserve the requested path without requiring the original file to exist.
 
+The complete comparison at Rust commit `90fa349` is recorded separately in
+`end_to_end_checkpoint.json`: Rust passed 1,222, failed 240, and had no timeouts;
+Go again passed 1,461 with the same shared failure at case 80. There are 239
+Rust-only failures, eight fixes since the initial baseline, and no regressions.
+The Rust executable was snapshotted before the run to prevent later builds from
+mixing compiler versions within the report.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
-Collection of extra resolver debug/verbose messages remains a separate parity gap.
+Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
+logger for builds and transforms, including warning suppression, promotion to
+errors, and grouped `package.json`/`tsconfig.json` IDs. Unknown IDs are ignored,
+matching upstream. The Rust API exposes the corresponding `log_override` map.
+Extra CLI info/debug/verbose output (including diagnostics assigned these levels
+through overrides) and resolver tracing remain separate logging parity gaps.
+Legacy `use asm` directives are removed, as upstream does, without ending the
+directive prologue or suppressing a subsequent `use strict` directive.
 
 ## Fixture regeneration
 

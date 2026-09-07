@@ -276,6 +276,25 @@ fn run_with_stdin_and_node_paths(
             parse_log_level(value, argument)?;
             continue;
         }
+        if let Some(value) = argument.strip_prefix("--log-override:") {
+            let Some((name, value)) = value.split_once('=') else {
+                return Err(format!(
+                    "Missing \"=\" in {argument:?}\n\nYou need to use \"=\" to specify both the message name and the log level. For example, \"--log-override:css-syntax-error=error\" turns all \"css-syntax-error\" log messages into errors."
+                ));
+            };
+            use esbuild_rs::api::LogLevel as ApiLogLevel;
+            let level = match parse_log_level(value, argument)? {
+                LogLevel::Silent => ApiLogLevel::Silent,
+                LogLevel::Verbose => ApiLogLevel::Verbose,
+                LogLevel::Debug => ApiLogLevel::Debug,
+                LogLevel::Info => ApiLogLevel::Info,
+                LogLevel::Warning => ApiLogLevel::Warning,
+                LogLevel::Error => ApiLogLevel::Error,
+                LogLevel::None => unreachable!("CLI log levels are explicit"),
+            };
+            options.log_override.insert(name.into(), level);
+            continue;
+        }
         if argument == "--splitting" {
             splitting = true;
             continue;
@@ -716,6 +735,7 @@ fn run_with_stdin_and_node_paths(
             None
         };
         let result = build(BuildOptions {
+            log_override: options.log_override,
             bundle,
             entry_points,
             entry_points_advanced,
@@ -1075,6 +1095,7 @@ fn help_text() -> String {
          \x20\x20--analyze[=verbose]\n\
          \x20\x20--color[=true|false]\n\
          \x20\x20--log-level=LEVEL\n\
+         \x20\x20--log-override:MESSAGE=LEVEL\n\
          \x20\x20--outdir=DIR\n\
          \x20\x20--outfile=FILE\n\
          \x20\x20--outbase=DIR\n\
@@ -1145,6 +1166,43 @@ mod tests {
         EngineName, Loader, Output, Target, parse_bool_flag, parse_loader, parse_targets, run,
         run_with_stdin, run_with_stdin_and_node_paths,
     };
+
+    #[test]
+    fn log_override_flags_suppress_promote_and_validate_diagnostics() {
+        for bundle in [false, true] {
+            for level in ["silent", "warning", "error"] {
+                let mut arguments = vec![
+                    "--loader=css".into(),
+                    format!("--log-override:js-comment-in-css={level}"),
+                ];
+                if bundle {
+                    arguments.push("--bundle".into());
+                }
+                let result = run_with_stdin(&arguments, Some(b"//"));
+                if level == "error" {
+                    assert!(matches!(result, Err(error) if error.contains("[ERROR]")));
+                } else {
+                    let stderr = match result.expect("non-fatal override") {
+                        Output::WithStderr { stderr, .. } => stderr,
+                        _ => String::new(),
+                    };
+                    assert_eq!(stderr.contains("[WARNING]"), level == "warning");
+                }
+            }
+        }
+        for argument in ["--log-override:x", "--log-override:x=invalid"] {
+            assert!(run_with_stdin(&[argument.into()], Some(b"")).is_err());
+        }
+        let result = run_with_stdin(
+            &[
+                "--loader=css".into(),
+                "--log-override:js-comment-in-css=error".into(),
+                "--log-override:js-comment-in-css=silent".into(),
+            ],
+            Some(b"//"),
+        );
+        assert!(result.is_ok());
+    }
 
     #[test]
     fn log_level_flags_validate_values_and_last_flag_wins() {

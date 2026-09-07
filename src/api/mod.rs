@@ -420,9 +420,40 @@ pub struct Engine {
     pub version: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LogLevel {
+    #[default]
+    Silent,
+    Verbose,
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
+
+fn log_overrides(
+    input: &HashMap<String, LogLevel>,
+) -> HashMap<crate::internal::logger::MsgId, crate::internal::logger::LogLevel> {
+    use crate::internal::logger::LogLevel as Internal;
+    let mut overrides = HashMap::new();
+    for (name, level) in input {
+        let level = match level {
+            LogLevel::Silent => Internal::Silent,
+            LogLevel::Verbose => Internal::Verbose,
+            LogLevel::Debug => Internal::Debug,
+            LogLevel::Info => Internal::Info,
+            LogLevel::Warning => Internal::Warning,
+            LogLevel::Error => Internal::Error,
+        };
+        crate::internal::logger::string_to_msg_ids(name, level, &mut overrides);
+    }
+    overrides
+}
+
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TransformOptions {
+    pub log_override: HashMap<String, LogLevel>,
     pub sourcefile: String,
     pub loader: Loader,
     pub abs_paths: AbsPaths,
@@ -463,6 +494,7 @@ pub struct TransformOptions {
 impl Default for TransformOptions {
     fn default() -> Self {
         Self {
+            log_override: HashMap::new(),
             sourcefile: String::new(),
             loader: Loader::default(),
             abs_paths: AbsPaths::default(),
@@ -767,6 +799,7 @@ struct PluginResolveRuntime {
     file_system: RwLock<Arc<dyn Fs>>,
     cache: Arc<CacheSet>,
     options: config::Options,
+    log_overrides: HashMap<crate::internal::logger::MsgId, crate::internal::logger::LogLevel>,
 }
 
 struct PluginResolveFsGuard {
@@ -1504,6 +1537,7 @@ impl PluginBuild<'_> {
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildOptions {
+    pub log_override: HashMap<String, LogLevel>,
     pub bundle: bool,
     pub entry_points: Vec<String>,
     pub entry_points_advanced: Vec<BuildEntryPoint>,
@@ -1572,6 +1606,7 @@ pub struct BuildOptions {
 impl Default for BuildOptions {
     fn default() -> Self {
         Self {
+            log_override: HashMap::new(),
             bundle: false,
             entry_points: Vec::new(),
             entry_points_advanced: Vec::new(),
@@ -2936,7 +2971,10 @@ fn build_option_error(text: impl Into<String>) -> Message {
 
 #[allow(clippy::too_many_lines)]
 fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec<Message> {
-    let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let log = Log::new_defer(
+        DeferLogKind::NoVerboseOrDebug,
+        log_overrides(&options.log_override),
+    );
     let _ = validate_target_features(
         &log,
         options.target,
@@ -3152,6 +3190,7 @@ fn activate_plugin_resolve(
             file_system: RwLock::new(file_system),
             cache,
             options: resolve_options,
+            log_overrides: log_overrides(&options.log_override),
         }));
     Ok(())
 }
@@ -3250,7 +3289,10 @@ fn run_plugin_resolve(
         };
         path
     };
-    let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let log = Log::new_defer(
+        DeferLogKind::NoVerboseOrDebug,
+        runtime.log_overrides.clone(),
+    );
     let raw_tsconfig = if runtime.options.tsconfig_raw.is_empty() {
         None
     } else {
@@ -3439,7 +3481,10 @@ fn build_with_output_state_core(
     previous_hashes: Option<&HashMap<String, String>>,
     watch_data_sink: Option<&Mutex<WatchData>>,
 ) -> BuildResult {
-    let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let log = Log::new_defer(
+        DeferLogKind::NoVerboseOrDebug,
+        log_overrides(&options.log_override),
+    );
     let log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
     let target_features = validate_target_features(
         &log,
@@ -3963,7 +4008,10 @@ fn build_with_output_state_core(
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::too_many_lines)]
 pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> TransformResult {
-    let log = Log::new_defer(DeferLogKind::NoVerboseOrDebug, HashMap::new());
+    let log = Log::new_defer(
+        DeferLogKind::NoVerboseOrDebug,
+        log_overrides(&options.log_override),
+    );
     let mut options = options;
     let log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
     let target_features = validate_target_features(
@@ -4220,6 +4268,7 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
         options.tsconfig_raw
     };
     let result = build(BuildOptions {
+        log_override: options.log_override,
         stdin: Some(BuildStdin {
             contents: input,
             sourcefile: options.sourcefile,
@@ -13021,6 +13070,78 @@ mod tests {
             result.errors.first().map(|message| message.text.as_str()),
             Some("Do not know how to load path: entry.unknown")
         );
+    }
+
+    #[test]
+    fn removes_asm_directives_without_ending_the_directive_prologue() {
+        for source in [
+            "'use asm'; 'use strict'; console.log('ok')",
+            "function f() { 'use asm'; 'use strict'; eval('0') }",
+            "function f() { 'custom'; 'use asm'; 'use strict'; eval('0') }",
+        ] {
+            let result = transform(source, TransformOptions::default());
+            assert!(result.errors.is_empty());
+            let output = String::from_utf8(result.code).unwrap();
+            assert!(!output.contains("use asm"), "{output}");
+            assert!(output.contains("use strict"), "{output}");
+        }
+    }
+
+    #[test]
+    fn log_overrides_apply_to_transform_build_and_formatted_transform() {
+        for (level, error_count, warning_count) in [
+            (super::LogLevel::Silent, 0, 0),
+            (super::LogLevel::Verbose, 0, 0),
+            (super::LogLevel::Debug, 0, 0),
+            (super::LogLevel::Info, 0, 0),
+            (super::LogLevel::Warning, 0, 1),
+            (super::LogLevel::Error, 1, 0),
+        ] {
+            let overrides = HashMap::from([("duplicate-object-key".into(), level)]);
+            let source = "console.log({a: 1, a: 2})";
+            for format in [BuildFormat::Default, BuildFormat::CommonJs] {
+                let result = transform(
+                    source,
+                    TransformOptions {
+                        log_override: overrides.clone(),
+                        format,
+                        ..TransformOptions::default()
+                    },
+                );
+                assert_eq!(
+                    (result.errors.len(), result.warnings.len()),
+                    (error_count, warning_count),
+                    "{level:?} {format:?}"
+                );
+                assert_eq!(result.code.is_empty(), error_count != 0);
+            }
+            let result = build(BuildOptions {
+                log_override: overrides,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    ..BuildStdin::default()
+                }),
+                ..BuildOptions::default()
+            });
+            assert_eq!(
+                (result.errors.len(), result.warnings.len()),
+                (error_count, warning_count),
+                "build {level:?}"
+            );
+            assert_eq!(result.output_files.is_empty(), error_count != 0);
+        }
+        for (name, warnings) in [("tsconfig.json", 0), ("not-a-known-message", 1)] {
+            let result = transform(
+                "let x = 1",
+                TransformOptions {
+                    log_override: HashMap::from([(name.into(), super::LogLevel::Silent)]),
+                    tsconfig_raw: r#"{"compilerOptions":{"target":"banana"}}"#.into(),
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty());
+            assert_eq!(result.warnings.len(), warnings);
+        }
     }
 
     #[test]

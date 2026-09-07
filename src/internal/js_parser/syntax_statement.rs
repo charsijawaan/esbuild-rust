@@ -107,6 +107,12 @@ pub(crate) fn parse_statements_up_to(
                             parent.use_strict_loc = expression.value.loc;
                         }
                     }
+                } else if value.value == "use asm".encode_utf16().collect::<Vec<_>>() {
+                    // Like upstream, drop this legacy directive: transformed code
+                    // is not guaranteed to retain asm.js validation constraints.
+                    // Keep scanning the prologue so subsequent directives are
+                    // still recognized by this port's directive extraction.
+                    continue;
                 }
             }
         }
