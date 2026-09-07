@@ -7586,6 +7586,51 @@ mod tests {
     }
 
     #[test]
+    fn retains_type_script_imports_used_only_by_export_clauses() {
+        for declaration in [
+            "import value from 'pkg';",
+            "import {default as value} from 'pkg';",
+            "import {value} from 'pkg';",
+            "import * as value from 'pkg';",
+        ] {
+            for export_first in [false, true] {
+                for tree_shaking in [BuildTreeShaking::Disabled, BuildTreeShaking::Enabled] {
+                    for format in [BuildFormat::Default, BuildFormat::CommonJs] {
+                        let source = if export_first {
+                            format!("export {{value}}; {declaration}")
+                        } else {
+                            format!("{declaration} export {{value}};")
+                        };
+                        let output = code(transform(&source, TransformOptions {
+                            loader: Loader::Ts, tree_shaking, format,
+                            ..TransformOptions::default()
+                        }));
+                        assert!(output.contains("\"pkg\""), "{source}: {output}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_external_namespace_property_references_in_esm_bundles() {
+        let result = build(BuildOptions {
+            stdin: Some(BuildStdin {
+                contents: "import * as ns from 'pkg'; console.log(ns.default, ns.foo, ns['foo-bar']); ns.run();".into(),
+                ..BuildStdin::default()
+            }),
+            format: BuildFormat::EsModule,
+            external: vec!["pkg".into()],
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let output = String::from_utf8_lossy(&result.output_files[0].contents);
+        for expected in ["import * as ns from \"pkg\"", "ns.default", "ns.foo", "ns[\"foo-bar\"]", "ns.run()"] {
+            assert!(output.contains(expected), "{output}");
+        }
+    }
+
+    #[test]
     fn preserves_configured_external_imports() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

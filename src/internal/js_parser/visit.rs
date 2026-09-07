@@ -1552,6 +1552,17 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     }
                 }
             }
+            Some(StmtData::ExportClause(export)) => {
+                // Resolve exports during the visit pass, before the later import
+                // scan uses symbol counts to remove unused TypeScript imports.
+                for item in &mut export.items {
+                    if ParserCore::is_stored_name_ref(item.name.reference) {
+                        let name = String::from_utf8_lossy(core.load_name_from_ref(item.name.reference))
+                            .into_owned();
+                        item.name.reference = core.find_symbol(item.alias_loc, &name).reference;
+                    }
+                }
+            }
             Some(StmtData::ExportStar(export)) => {
                 core.record_declared_symbol(export.namespace_ref);
                 if let Some(scope) = &core.current_scope {
@@ -9460,6 +9471,13 @@ fn maybe_rewrite_import_namespace_property(
         let reference = core.new_symbol(SymbolKind::Import, name);
         core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
             .import_item_status = crate::internal::ast::ImportItemStatus::Generated;
+        // Internal imports can be linked to a bare symbol. External ESM imports
+        // retain their namespace statement and must still print a property read.
+        core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
+            .namespace_alias = Some(crate::internal::ast::NamespaceAlias {
+                namespace_ref,
+                alias: name.into(),
+            });
         core.module_scope
             .as_ref()
             .expect("generated namespace import item requires a module scope")
