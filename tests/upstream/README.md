@@ -60,10 +60,10 @@ initial baseline above is retained as a historical measurement. Local
 regressions also cover `preserve_symlinks` and disabled browser mappings, which
 must preserve the requested path without requiring the original file to exist.
 
-The complete comparison at Rust commit `90fa349` is recorded separately in
-`end_to_end_checkpoint.json`: Rust passed 1,222, failed 240, and had no timeouts;
-Go again passed 1,461 with the same shared failure at case 80. There are 239
-Rust-only failures, eight fixes since the initial baseline, and no regressions.
+The complete comparison at Rust commit `f46cbec` is recorded separately in
+`end_to_end_checkpoint.json`: Rust passed 1,243, failed 219, and had no timeouts;
+Go again passed 1,461 with the same shared failure at case 80. There are 218
+Rust-only failures, 29 fixes since the initial baseline, and no regressions.
 The Rust executable was snapshotted before the run to prevent later builds from
 mixing compiler versions within the report.
 
