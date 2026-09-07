@@ -9,9 +9,9 @@ The captured corpus currently contains 14,005 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 6,880 | 1,763 | 8,643 |
+| JS/TS parser and parser lowering | 6,977 | 1,666 | 8,643 |
 | Bundler | 893 | 178 | 1,071 |
-| Total | 12,064 | 1,941 | 14,005 |
+| Total | 12,161 | 1,844 | 14,005 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility/API tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -55,8 +55,7 @@ stdin instead of validating the flag combination first.
 Subsequent checkpoints fixed case 1415 (verified individually), inherited
 tsconfig paths through symlinks (case 25), and browser-field lookup of bare file
 keys and implicit extensions (cases 31, 33, 35, and 43). The first 50 original
-runtime cases now pass 48/50; only the existing JSX diagnostic failures at 26
-and 27 remain in that range. The complete runtime baseline above has not been
+runtime cases now pass 50/50 after fixing JSX diagnostic cases 26 and 27. The complete runtime baseline above has not been
 rerun and is intentionally retained as a historical measurement. Local
 regressions also cover `preserve_symlinks` and disabled browser mappings, which
 must preserve the requested path without requiring the original file to exist.
@@ -139,7 +138,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 6,880 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 6,977 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -151,6 +150,12 @@ ESBUILD_RS_UPSTREAM_PARSER_REPORT=/tmp/parser-audit.json cargo test --lib \
 Use `ESBUILD_RS_UPSTREAM_PARSER_INDEX` to select an individual fixture or
 `ESBUILD_RS_UPSTREAM_PARSER_TEST` to select an upstream test group (including its
 inactive cases) with `matches_pinned_upstream_active_js_parser_corpus`.
+
+The `TestJSX` and `TestJSXAutomatic` groups are fully active. The JSX checkpoint
+added 97 matching cases by porting missing diagnostics/suggestions, generated
+import ordering, UTF-16 development source positions, and upstream's test-only
+`OmitJSXRuntimeForTests` behavior. That option accounts for most automatic-JSX
+gains; these are not 97 independent user-facing feature fixes.
 
 All 231 captured `TestStrictMode` cases are active. Strictness is tracked from
 directive parsing and reported with upstream's module/class/directive/JSX reason
@@ -216,7 +221,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 67
-reviewed cases beyond the original option-based selection. So 12,064 concrete
+reviewed cases beyond the original option-based selection. So 12,161 concrete
 upstream cases are currently active in `cargo test`; the remaining 178 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

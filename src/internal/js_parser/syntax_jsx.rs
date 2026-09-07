@@ -153,10 +153,11 @@ fn parse_jsx_tag(core: &mut ParserCore, lexer: &mut Lexer) -> (Range, String, Ex
 
 #[allow(clippy::too_many_lines)]
 fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr {
-    let (_start_range, start_text, start_tag_or_nil) = parse_jsx_tag(core, lexer);
+    let (start_range, start_text, start_tag_or_nil) = parse_jsx_tag(core, lexer);
     let mut properties = Vec::new();
     let mut attribute_locs = HashMap::new();
     let mut is_single_line = true;
+    let mut previous_string_with_backslash_loc = Loc::default();
 
     if start_tag_or_nil.data.is_some() {
         loop {
@@ -203,6 +204,11 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                         let value = match lexer.token {
                             Token::StringLiteral => {
                                 let string_loc = lexer.loc();
+                                if lexer.previous_backslash_quote_in_jsx.loc.start
+                                    > string_loc.start
+                                {
+                                    previous_string_with_backslash_loc = string_loc;
+                                }
                                 let value = if core.options.jsx.preserve {
                                     Expr::new(
                                         string_loc,
@@ -274,6 +280,52 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                 _ => break,
             }
         }
+    }
+
+    // JSX attribute strings use XML escapes, not JavaScript escapes. Match
+    // upstream's targeted diagnostic for accidentally pasted JSON strings.
+    if lexer.token == Token::SyntaxError
+        && lexer.raw() == b"\\"
+        && previous_string_with_backslash_loc.start > 0
+    {
+        let mut message = logger::Msg::new(logger::MsgKind::Error, "");
+        message.data = core
+            .tracker
+            .msg_data(lexer.range(), "Unexpected backslash in JSX element");
+        let escape_range = lexer.previous_backslash_quote_in_jsx;
+        let xml_escape = match core.source.text_for_range(escape_range) {
+            b"\\\"" => Some("&quot;"),
+            b"\\'" => Some("&apos;"),
+            _ => None,
+        };
+        if let Some(xml_escape) = xml_escape {
+            let mut note = core.tracker.msg_data(
+                escape_range,
+                "Quoted JSX attributes use XML-style escapes instead of JavaScript-style escapes:",
+            );
+            if let Some(location) = &mut note.location {
+                location.suggestion = xml_escape.into();
+            }
+            message.notes.push(note);
+        }
+        let string_range = core
+            .source
+            .range_of_string(previous_string_with_backslash_loc);
+        if string_range.len > 0 {
+            let mut note = core.tracker.msg_data(string_range,
+                "Consider using a JavaScript string inside {...} instead of a quoted JSX attribute:");
+            if let Some(location) = &mut note.location {
+                location.suggestion = format!(
+                    "{{{}}}",
+                    String::from_utf8_lossy(core.source.text_for_range(string_range))
+                );
+            }
+            message.notes.push(note);
+        }
+        if let Some(log) = &core.log {
+            log.add_msg(message);
+        }
+        lexer_panic();
     }
 
     if lexer.token == Token::Slash {
@@ -355,7 +407,8 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                 lexer.next_inside_jsx_element();
                 let (end_range, end_text, _) = parse_jsx_tag(core, lexer);
                 if start_text != end_text {
-                    core.add_error_range(
+                    let mut message = logger::Msg::new(logger::MsgKind::Error, "");
+                    message.data = core.tracker.msg_data(
                         end_range,
                         format!(
                             "Unexpected closing {} does not match opening {}",
@@ -363,6 +416,19 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                             tag_or_fragment_help_text(&start_text)
                         ),
                     );
+                    if let Some(location) = &mut message.data.location {
+                        location.suggestion = start_text.clone();
+                    }
+                    message.notes.push(core.tracker.msg_data(
+                        start_range,
+                        format!(
+                            "The opening {} is here:",
+                            tag_or_fragment_help_text(&start_text)
+                        ),
+                    ));
+                    if let Some(log) = &core.log {
+                        log.add_msg(message);
+                    }
                 }
                 if lexer.token != Token::GreaterThan {
                     lexer.expected(Token::GreaterThan);
@@ -379,13 +445,27 @@ fn parse_jsx_element(core: &mut ParserCore, lexer: &mut Lexer, loc: Loc) -> Expr
                 );
             }
             Token::EndOfFile => {
-                core.add_error_range(
+                let mut message = logger::Msg::new(logger::MsgKind::Error, "");
+                message.data = core.tracker.msg_data(
                     lexer.range(),
                     format!(
                         "Unexpected end of file before a closing {}",
                         tag_or_fragment_help_text(&start_text)
                     ),
                 );
+                if let Some(location) = &mut message.data.location {
+                    location.suggestion = format!("</{start_text}>");
+                }
+                message.notes.push(core.tracker.msg_data(
+                    start_range,
+                    format!(
+                        "The opening {} is here:",
+                        tag_or_fragment_help_text(&start_text)
+                    ),
+                ));
+                if let Some(log) = &core.log {
+                    log.add_msg(message);
+                }
                 lexer_panic();
             }
             _ => lexer.unexpected(),

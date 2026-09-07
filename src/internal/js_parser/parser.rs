@@ -579,13 +579,21 @@ fn insert_generated_import_parts(
         .count();
     let mut generated_imports = core
         .jsx_import_records
-        .values()
-        .chain(core.glob_import_records.values())
-        .copied()
+        .iter()
+        .filter(|_| !core.options.omit_jsx_runtime_for_tests)
+        .map(|(path, pair)| {
+            (
+                u8::from(path == core.options.jsx.import_source.trim_end_matches('/')),
+                *pair,
+            )
+        })
+        .chain(core.glob_import_records.values().map(|pair| (2, *pair)))
         .collect::<Vec<_>>();
-    generated_imports.sort_unstable_by_key(|(record_index, _)| *record_index);
+    // Upstream emits automatic JSX imports, then legacy createElement, then globs.
+    generated_imports.sort_unstable_by_key(|(group, (record_index, _))| (*group, *record_index));
 
-    for (offset, (import_record_index, namespace_ref)) in generated_imports.into_iter().enumerate()
+    for (offset, (_, (import_record_index, namespace_ref))) in
+        generated_imports.into_iter().enumerate()
     {
         let mut imports = metadata
             .named_imports
@@ -4867,6 +4875,56 @@ mod tests {
             let (_, ok, log) = parse_source(source);
             assert!(ok, "{source}");
             assert_eq!(log.done().len(), 1, "{source}");
+        }
+    }
+
+    #[test]
+    fn jsx_errors_include_upstream_notes_and_replacement_suggestions() {
+        for (source, xml_escape, js_string) in [
+            (
+                r#"let button = <Button content="some so-called \"button text\"" />"#,
+                "&quot;",
+                r#"{"some so-called \"button text\""}"#,
+            ),
+            (
+                r#"let button = <Button content='some so-called \'button text\'' />"#,
+                "&apos;",
+                r#"{'some so-called \'button text\''}"#,
+            ),
+        ] {
+            let mut options = Options::default();
+            options.jsx.parse = true;
+            let (_, _, log) = parse_source_with_options(source, options);
+            let messages = log.done();
+            assert_eq!(messages.len(), 1);
+            let message = &messages[0];
+            assert_eq!(message.data.text, "Unexpected backslash in JSX element");
+            assert_eq!(message.data.location.as_ref().unwrap().column, 58);
+            assert_eq!(message.notes.len(), 2);
+            let escape = message.notes[0].location.as_ref().unwrap();
+            assert_eq!((escape.column, escape.length), (45, 2));
+            assert_eq!(escape.suggestion, xml_escape);
+            assert_eq!(
+                message.notes[1].location.as_ref().unwrap().suggestion,
+                js_string
+            );
+        }
+        for (source, replacement) in [("<Panel></Other>", "Panel"), ("<Panel>", "</Panel>")] {
+            let mut options = Options::default();
+            options.jsx.parse = true;
+            let (_, _, log) = parse_source_with_options(source, options);
+            let messages = log.done();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages[0].data.location.as_ref().unwrap().suggestion,
+                replacement
+            );
+            assert_eq!(
+                messages[0].notes[0].text,
+                "The opening \"Panel\" tag is here:"
+            );
+            let opening = messages[0].notes[0].location.as_ref().unwrap();
+            assert_eq!((opening.column, opening.length), (1, 5));
         }
     }
 

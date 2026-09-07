@@ -11969,6 +11969,31 @@ fn visit_expr_with_target_and_context(
             }
         }
         ExprData::JsxElement(element) => {
+            // Compute source positions before visiting children so the scan only
+            // moves forward. React development metadata counts UTF-16 columns.
+            if core.options.jsx.development && core.options.jsx.automatic_runtime {
+                while core.jsx_source_offset
+                    < usize::try_from(expression.loc.start).unwrap_or_default()
+                {
+                    let (rune, width) = crate::internal::helpers::decode_wtf8_rune(
+                        &core.source.contents[core.jsx_source_offset..],
+                    );
+                    core.jsx_source_offset += width;
+                    if matches!(rune, 0x0a | 0x0d | 0x2028 | 0x2029) {
+                        if rune == 0x0d
+                            && core.source.contents.get(core.jsx_source_offset) == Some(&b'\n')
+                        {
+                            core.jsx_source_offset += 1;
+                        }
+                        core.jsx_source_line += 1;
+                        core.jsx_source_column = 0;
+                    } else {
+                        core.jsx_source_column += if rune < 0xffff { 1 } else { 2 };
+                    }
+                }
+            }
+            let jsx_source_line = core.jsx_source_line;
+            let jsx_source_column = core.jsx_source_column;
             visit_expr(core, &mut element.tag_or_nil, resolve_identifiers);
             let mut has_spread = false;
             for property in &mut element.properties {
@@ -12064,27 +12089,45 @@ fn visit_expr_with_target_and_context(
                         match property_name(&property).as_deref() {
                             Some("key") => {
                                 if property.flags.contains(PropertyFlags::WAS_SHORTHAND) {
-                                    core.add_error_range(
+                                    let mut message = crate::internal::logger::Msg::new(
+                                        crate::internal::logger::MsgKind::Error,
+                                        "",
+                                    );
+                                    message.data = core.tracker.msg_data(
                                         crate::internal::logger::Range {
                                             loc: property.loc,
                                             len: 3,
                                         },
                                         "Please provide an explicit value for \"key\":",
                                     );
+                                    if let Some(location) = &mut message.data.location {
+                                        location.suggestion = "key={true}".into();
+                                    }
+                                    message.notes.push(crate::internal::logger::MsgData {
+                                        text: "Using \"key\" as a shorthand for \"key={true}\" is not allowed when using React's \"automatic\" JSX transform.".into(),
+                                        ..Default::default()
+                                    });
+                                    if let Some(log) = &core.log {
+                                        log.add_msg(message);
+                                    }
                                 }
                                 key_or_nil = Some(property.value_or_nil);
                             }
                             Some("__source" | "__self") => {
-                                core.add_error_range(
-                                    crate::internal::logger::Range {
-                                        loc: property.loc,
-                                        len: 0,
-                                    },
+                                if let Some(log) = &core.log {
+                                    log.add_error_with_notes(
+                                    Some(&mut core.tracker),
+                                    crate::internal::js_lexer::range_of_identifier(&core.source, property.loc),
                                     format!(
                                         "Duplicate {:?} prop found:",
                                         property_name(&property).unwrap_or_default()
                                     ),
+                                    vec![crate::internal::logger::MsgData {
+                                        text: "Both \"__source\" and \"__self\" are set automatically by esbuild when using React's \"automatic\" JSX transform. This duplicate prop may have come from a plugin.".into(),
+                                        ..Default::default()
+                                    }],
                                 );
+                                }
                             }
                             _ => properties.push(property),
                         }
@@ -12140,21 +12183,10 @@ fn visit_expr_with_target_and_context(
                             expression.loc,
                             ExprData::Boolean(is_static_children),
                         ));
-                        let source_location =
-                            core.tracker
-                                .msg_location_or_none(crate::internal::logger::Range {
-                                    loc: expression.loc,
-                                    len: 0,
-                                });
-                        let (line, column) = source_location.map_or((1.0, 1.0), |location| {
-                            (
-                                f64::from(u32::try_from(location.line).unwrap_or(u32::MAX)),
-                                f64::from(
-                                    u32::try_from(location.column.saturating_add(1))
-                                        .unwrap_or(u32::MAX),
-                                ),
-                            )
-                        });
+                        let line =
+                            f64::from(u32::try_from(jsx_source_line + 1).unwrap_or(u32::MAX));
+                        let column =
+                            f64::from(u32::try_from(jsx_source_column + 1).unwrap_or(u32::MAX));
                         let file_name = core
                             .source
                             .pretty_paths
