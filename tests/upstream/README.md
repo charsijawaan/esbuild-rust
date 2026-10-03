@@ -596,6 +596,15 @@ timeouts. Cases 1241–1244, 1247, and 1248 are newly passing without regression
 relative to `fe9852b`. Case 80 remains the shared environment failure, leaving
 42 Rust-only failures.
 
+Anonymous class expressions now have an immutable inner binding available for
+lowered `super` access. The binding becomes a printed class name only when used;
+synthetic names do not change private-storage name hints. An executable
+regression passes 32 Rust/pinned-Go transform/bundle combinations covering
+lowered async methods and fields, nested computed class keys, reassignment,
+factory calls, borrowed receivers, prototype changes, and name preservation.
+The normal suite passes 992 tests, the parser audit preserves all 7,061 active
+cases, and strict Clippy retains 623 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

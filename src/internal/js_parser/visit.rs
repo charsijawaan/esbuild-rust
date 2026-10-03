@@ -5761,12 +5761,20 @@ enum ExperimentalDecoratorBinding {
     Inner,
 }
 
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum ClassVisitKind {
+    #[default]
+    Declaration,
+    Expression,
+}
+
 #[derive(Clone, Copy, Default)]
 struct ClassVisitOptions {
     merge_inner_name: bool,
     capture_private_class_expression: bool,
     capture_static_initialization: bool,
     experimental_decorator_binding: ExperimentalDecoratorBinding,
+    kind: ClassVisitKind,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -5781,6 +5789,7 @@ fn visit_class(
         capture_private_class_expression,
         capture_static_initialization,
         experimental_decorator_binding,
+        kind,
     } = options;
     let capture_experimental_member_decorators =
         experimental_decorator_binding == ExperimentalDecoratorBinding::Inner;
@@ -5836,6 +5845,10 @@ fn visit_class(
         if name_was_stored {
             name.reference = inner_reference;
         }
+    } else if kind == ClassVisitKind::Expression {
+        let reference = core.new_symbol(SymbolKind::Const, "_this");
+        core.record_declared_symbol(reference);
+        inner_class_name = Some(reference);
     }
     crate::internal::js_ast::Scope::recursive_set_strict_mode(
         core.current_scope.as_ref().expect("class name scope"),
@@ -5862,7 +5875,12 @@ fn visit_class(
     }
     let private_class_name = outer_class_name
         .map(|reference| symbol_name(core, reference))
-        .or_else(|| inner_class_name.map(|reference| symbol_name(core, reference)))
+        .or_else(|| {
+            class
+                .name
+                .and(inner_class_name)
+                .map(|reference| symbol_name(core, reference))
+        })
         .or_else(|| core.class_name_hint.clone())
         .unwrap_or_else(|| "class".into());
     let private_static_brand_name = format!("{private_class_name}_static");
@@ -6148,6 +6166,14 @@ fn visit_class(
             || core.symbols[usize::try_from(inner.inner_index).expect("symbol index")]
                 .use_count_estimate != 0
     });
+    if class.name.is_none()
+        && let Some(reference) = used_inner_name
+    {
+        class.name = Some(crate::internal::ast::LocRef {
+            loc: class.class_keyword.loc,
+            reference,
+        });
+    }
     move_type_script_parameter_property_constructor_to_front(class);
     lower_standard_decorators(core, class, outer_class_name);
     let (lower_public_instance_fields, lower_public_static_fields) =
@@ -13479,6 +13505,7 @@ fn visit_expr_with_target_and_context(
                 ClassVisitOptions {
                     merge_inner_name: true,
                     capture_private_class_expression: lower_private_members || lower_public_static,
+                    kind: ClassVisitKind::Expression,
                     ..ClassVisitOptions::default()
                 },
             );
