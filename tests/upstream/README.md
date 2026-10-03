@@ -363,6 +363,12 @@ targets, feature overrides, and minification. The normal suite passes 977
 tests, the parser audit retains 7,055 matches without active regressions, and
 strict Clippy retains 623 existing errors without added diagnostics.
 
+The complete runtime audit at `c403793` is recorded in
+`end_to_end_class_name_checkpoint.json`: 1,360 passed, 102 failed, and no
+timeouts. It gains 23 original cases without regressions relative to
+`5cbf3c3`. Case 80 remains the shared environment failure, leaving 101
+Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
