@@ -5702,6 +5702,7 @@ fn visit_class(
     let mut private_instance_brand = None;
     let mut private_class_capture = None;
     let lower_static_blocks = class_static_blocks_can_be_lowered(core, class);
+    let lower_all_private_members = class_static_fields_require_private_lowering(core, class);
     for property in &class.properties {
         if let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() {
             core.record_declared_symbol(private.reference);
@@ -5714,6 +5715,7 @@ fn visit_class(
                 .unsupported_js_features
                 .contains(crate::internal::compat::symbol_feature(kind))
                 || lower_static_blocks
+                || lower_all_private_members
                 || core.symbols[symbol_index]
                     .flags
                     .contains(SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED)
@@ -6034,7 +6036,7 @@ fn visit_class(
     lower_type_script_class_field_assignments(core, class, constructor_was_present);
     restore_lowered_class_field_order(core, class, &instance_field_locations);
     restore_lowered_field_statement_order(core, class_post_start, &static_field_locations);
-    if class_static_blocks_can_be_lowered(core, class)
+    if (lower_public_static_fields || class_static_blocks_can_be_lowered(core, class))
         && let Some(class_ref) = private_class_capture.or(used_inner_name).or(outer_class_name)
     {
         let mut static_initializers = lower_class_static_blocks(core, class, class_ref);
@@ -6347,6 +6349,7 @@ fn lower_private_members(
 
 fn class_private_static_members_need_lowering(core: &ParserCore, class: &Class) -> bool {
     let lower_static_blocks = class_static_blocks_can_be_lowered(core, class);
+    let lower_all_private_members = class_static_fields_require_private_lowering(core, class);
     class.properties.iter().any(|property| {
         if !property.flags.contains(PropertyFlags::IS_STATIC) {
             return false;
@@ -6365,6 +6368,7 @@ fn class_private_static_members_need_lowering(core: &ParserCore, class: &Class) 
             .unsupported_js_features
             .contains(crate::internal::compat::symbol_feature(symbol.kind))
             || lower_static_blocks
+            || lower_all_private_members
             || symbol
                 .flags
                 .contains(SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED)
@@ -6412,6 +6416,7 @@ fn class_has_non_constructor_method(class: &Class) -> bool {
 
 fn class_private_members_need_lowering(core: &ParserCore, class: &Class) -> bool {
     let lower_static_blocks = class_static_blocks_can_be_lowered(core, class);
+    let lower_all_private_members = class_static_fields_require_private_lowering(core, class);
     class.properties.iter().any(|property| {
         if auto_accessor_storage_needs_lowering(core, class, property) {
             return true;
@@ -6427,6 +6432,7 @@ fn class_private_members_need_lowering(core: &ParserCore, class: &Class) -> bool
             .unsupported_js_features
             .contains(crate::internal::compat::symbol_feature(symbol.kind))
             || lower_static_blocks
+            || lower_all_private_members
             || symbol
                 .flags
                 .contains(SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED)
@@ -6436,6 +6442,29 @@ fn class_private_members_need_lowering(core: &ParserCore, class: &Class) -> bool
                 .copied()
                 .unwrap_or(false)
     })
+}
+
+fn class_static_fields_require_private_lowering(core: &ParserCore, class: &Class) -> bool {
+    // Moved static initializers can reference any private member. All private
+    // declarations must be lowered before visiting those references so they
+    // remain valid outside the class body.
+    // Upstream applies file-wide brand-check flags after this blanket pass.
+    class_public_static_fields_need_lowering(core, class)
+        || class_static_blocks_can_be_lowered(core, class)
+        || class.properties.iter().any(|property| {
+            if auto_accessor_storage_needs_lowering(core, class, property) {
+                return true;
+            }
+            let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
+                return false;
+            };
+            let reference = core.follow_symbol_link(private.reference);
+            let symbol = &core.symbols[reference.inner_index as usize];
+            core.options
+                .unsupported_js_features
+                .contains(crate::internal::compat::symbol_feature(symbol.kind))
+                || symbol.flags.contains(SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED)
+        })
 }
 
 fn class_private_member_lowering_flags(core: &ParserCore, class: &Class) -> (bool, bool) {

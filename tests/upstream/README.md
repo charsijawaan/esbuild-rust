@@ -403,6 +403,17 @@ timeouts. Eight original cases are newly passing without regressions relative
 to `3a5e782`. Case 80 remains the shared environment failure, leaving 92
 Rust-only failures.
 
+Static field lowering now lowers every private member before visiting moved
+initializers, including private features still supported by the target. This
+avoids private-member syntax escaping its class scope. Static blocks move with
+lowered fields and retain source order even when static blocks are supported.
+The blanket decision precedes file-wide brand-check flags, preserving the
+pinned Go brand-check snapshot. An executable regression passes native Node
+and 24 Rust/pinned-Go transform/bundle combinations across six feature
+overrides, minification, and repeated factory calls. The normal suite passes
+980 tests; the parser audit retains 7,056 matches without active regressions,
+and strict Clippy retains 623 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
