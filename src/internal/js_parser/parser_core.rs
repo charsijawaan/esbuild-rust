@@ -1411,17 +1411,67 @@ impl ParserCore {
         reference
     }
 
-    pub(crate) fn generate_auto_accessor_storage_ref(&mut self, name: &str) -> Ref {
-        let name = name.strip_prefix('#').unwrap_or(name);
-        let reference = self.new_symbol(SymbolKind::Other, format!("_{name}"));
-        self.module_scope
+    fn class_member_temp_scope(&self) -> ScopeRef {
+        let mut scope = self
+            .current_scope
+            .clone()
+            .expect("class members require a scope");
+        loop {
+            let (kind, parent) = {
+                let scope = scope
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    scope.kind,
+                    scope.parent.as_ref().and_then(std::sync::Weak::upgrade),
+                )
+            };
+            if matches!(kind, ScopeKind::Entry | ScopeKind::FunctionBody) {
+                return scope;
+            }
+            scope = parent.expect("class member storage requires a hoist scope");
+        }
+    }
+
+    pub(crate) fn generate_class_member_temp_ref(&mut self, name: String) -> Ref {
+        let scope = self.class_member_temp_scope();
+        if self
+            .module_scope
             .as_ref()
-            .expect("auto-accessor storage requires a module scope")
+            .is_some_and(|module| Arc::ptr_eq(module, &scope))
+        {
+            let reference = self.generate_named_top_level_temp_ref(name);
+            self.top_level_temp_refs.push(reference);
+            return reference;
+        }
+        let reference = self.new_symbol(SymbolKind::Other, name);
+        scope
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generated
             .push(reference);
-        self.top_level_temp_refs.push(reference);
+        self.temp_refs_to_declare.push(reference);
+        reference
+    }
+
+    pub(crate) fn generate_auto_accessor_storage_ref(&mut self, name: &str) -> Ref {
+        let name = name.strip_prefix('#').unwrap_or(name);
+        let reference = self.new_symbol(SymbolKind::Other, format!("_{name}"));
+        let scope = self.class_member_temp_scope();
+        scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generated
+            .push(reference);
+        if self
+            .module_scope
+            .as_ref()
+            .is_some_and(|module| Arc::ptr_eq(module, &scope))
+        {
+            self.top_level_temp_refs.push(reference);
+        } else {
+            self.temp_refs_to_declare.push(reference);
+        }
         reference
     }
 

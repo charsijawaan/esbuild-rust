@@ -548,6 +548,105 @@ console.log('ok');
 }
 
 #[test]
+fn lowered_private_storage_is_local_to_each_factory_call() {
+    let source = r#"
+function make(value) {
+  const _field = 11, method_fn = 12;
+  class Local {
+    #field = value;
+    static #seed = value;
+    #method() { return [Local, this.#field]; }
+    get #access() { return this.#field; }
+    set #access(next) { this.#field = next; }
+    read() { return this.#method(); }
+    increment() { this.#access += 1; return this.#access; }
+    static seed() { return this.#seed; }
+  }
+  const Original = Local;
+  Local = null;
+  if (_field !== 11 || method_fn !== 12) throw 'name collision';
+  return Original;
+}
+function expression(value) {
+  return class {
+    #field = value;
+    static #seed = value;
+    #method() { return this.#field; }
+    read() { return this.#method(); }
+    static seed() { return this.#seed; }
+  };
+}
+const arrow = value => class {
+  #field = value;
+  #method() { return this.#field; }
+  read() { return this.#method(); }
+};
+const A = make(1), a = new A, B = make(2), b = new B;
+if (a.read()[0] !== A || a.read()[1] !== 1 || b.read()[0] !== B || b.read()[1] !== 2
+  || A.seed() !== 1 || B.seed() !== 2 || a.increment() !== 2 || b.read()[1] !== 2)
+  throw 'shared declaration storage';
+let rejected = false;
+try { A.prototype.read.call(b); } catch (error) { rejected = error instanceof TypeError; }
+if (!rejected) throw 'shared private brands';
+const C = expression(3), c = new C, D = expression(4), d = new D;
+if (c.read() !== 3 || d.read() !== 4 || C.seed() !== 3 || D.seed() !== 4)
+  throw 'shared expression storage';
+const E = arrow(5), e = new E, F = arrow(6), f = new F;
+if (e.read() !== 5 || f.read() !== 6) throw 'shared arrow storage';
+console.log('ok');
+"#;
+    execute_node(source.as_bytes());
+    for (target, lower_private) in [
+        (Target::Es2015, false),
+        (Target::Es2022, false),
+        (Target::Es2022, true),
+    ] {
+        for minify in [false, true] {
+            let supported = if lower_private {
+                std::collections::HashMap::from([
+                    ("class-private-field".into(), false),
+                    ("class-private-method".into(), false),
+                    ("class-private-accessor".into(), false),
+                    ("class-private-static-field".into(), false),
+                ])
+            } else {
+                std::collections::HashMap::new()
+            };
+            let result = transform(
+                source,
+                TransformOptions {
+                    target,
+                    supported: supported.clone(),
+                    minify_identifiers: minify,
+                    minify_syntax: minify,
+                    minify_whitespace: minify,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.code);
+            let result = build(BuildOptions {
+                bundle: true,
+                format: BuildFormat::CommonJs,
+                platform: BuildPlatform::Node,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    ..BuildStdin::default()
+                }),
+                target,
+                supported,
+                minify_identifiers: minify,
+                minify_syntax: minify,
+                minify_whitespace: minify,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.output_files[0].contents);
+        }
+    }
+}
+
+#[test]
 fn lowered_private_members_retain_the_original_class_binding() {
     let source = r#"
 let saved, active;

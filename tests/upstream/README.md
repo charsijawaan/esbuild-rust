@@ -285,6 +285,16 @@ timeouts. Cases 792, 1106, 1107, and 1110 are newly passing relative to `9ae1ea0
 with no regressions. Excluding the shared case-80 failure leaves 158 Rust-only
 failures.
 
+Private storage and extracted member functions inside a factory now belong to
+that factory's function scope. Repeated calls keep distinct fields, static
+storage, accessors, method closures, and brands. Module-level allocation retains
+its existing naming. A new executable regression passes native Node execution
+and 12 target, minification, transform/bundle, and feature-override combinations
+on Rust and pinned Go, including declaration, expression, and arrow factories
+and generated-name collisions. The normal suite passes 970 tests; the parser
+audit retains 7,040 matches with no active regressions or new inactive matches.
+Strict Clippy retains 623 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

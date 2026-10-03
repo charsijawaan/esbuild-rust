@@ -5667,8 +5667,7 @@ fn visit_class(
                     && property.flags.contains(PropertyFlags::IS_STATIC)
                     && private_class_capture.is_none()
                 {
-                    let reference = core.generate_named_top_level_temp_ref("_a".into());
-                    core.top_level_temp_refs.push(reference);
+                    let reference = core.generate_class_member_temp_ref("_a".into());
                     private_class_capture = Some(reference);
                 }
                 match kind {
@@ -5706,24 +5705,21 @@ fn visit_class(
                             PropertyKind::Getter => {
                                 if lowered.getter.is_none() {
                                     let reference = core
-                                        .generate_named_top_level_temp_ref(format!("{base}_get"));
-                                    core.top_level_temp_refs.push(reference);
+                                        .generate_class_member_temp_ref(format!("{base}_get"));
                                     lowered.getter = Some(reference);
                                 }
                             }
                             PropertyKind::Setter => {
                                 if lowered.setter.is_none() {
                                     let reference = core
-                                        .generate_named_top_level_temp_ref(format!("{base}_set"));
-                                    core.top_level_temp_refs.push(reference);
+                                        .generate_class_member_temp_ref(format!("{base}_set"));
                                     lowered.setter = Some(reference);
                                 }
                             }
                             PropertyKind::Method => {
                                 if lowered.method.is_none() {
                                     let reference = core
-                                        .generate_named_top_level_temp_ref(format!("{base}_fn"));
-                                    core.top_level_temp_refs.push(reference);
+                                        .generate_class_member_temp_ref(format!("{base}_fn"));
                                     lowered.method = Some(reference);
                                 }
                             }
@@ -5752,21 +5748,20 @@ fn visit_class(
                         let base = name.strip_prefix('#').unwrap_or(&name);
                         let reference = match property.kind {
                             PropertyKind::Getter if lowered.getter.is_none() => Some((
-                                core.generate_named_top_level_temp_ref(format!("{base}_get")),
+                                core.generate_class_member_temp_ref(format!("{base}_get")),
                                 PropertyKind::Getter,
                             )),
                             PropertyKind::Setter if lowered.setter.is_none() => Some((
-                                core.generate_named_top_level_temp_ref(format!("{base}_set")),
+                                core.generate_class_member_temp_ref(format!("{base}_set")),
                                 PropertyKind::Setter,
                             )),
                             PropertyKind::Method if lowered.method.is_none() => Some((
-                                core.generate_named_top_level_temp_ref(format!("{base}_fn")),
+                                core.generate_class_member_temp_ref(format!("{base}_fn")),
                                 PropertyKind::Method,
                             )),
                             _ => None,
                         };
                         if let Some((reference, kind)) = reference {
-                            core.top_level_temp_refs.push(reference);
                             match kind {
                                 PropertyKind::Getter => lowered.getter = Some(reference),
                                 PropertyKind::Setter => lowered.setter = Some(reference),
