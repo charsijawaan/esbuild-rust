@@ -758,6 +758,11 @@ values on the current case-insensitive filesystem. The normal suite passes
 1,015 tests, including the active parser fixtures; strict Clippy retains 621
 existing errors without added diagnostics.
 
+The complete runtime audit at `5d96242` is recorded in
+`end_to_end_path_case_checkpoint.json`: 1,447 passed, 15 failed, and no timeouts.
+Cases 1425 and 1427 are newly passing without regressions relative to `560f331`.
+Case 80 remains the shared environment failure, leaving 14 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
