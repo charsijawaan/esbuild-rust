@@ -386,6 +386,17 @@ timeouts. Original case 818 is newly passing without regressions relative to
 `c403793`. Case 80 remains the shared environment failure, leaving 100
 Rust-only failures.
 
+Name preservation now follows the surrounding binding/property context.
+Property assignments keep anonymous function/class names empty, computed
+object keys keep their runtime names, and destructuring assignment defaults
+use the binding name instead of the property alias. Lowered private methods
+and accessors receive their original private name before assignment to the
+generated storage binding. The executable regression passes native Node and
+eight Rust/pinned-Go transform/bundle combinations, including feature
+overrides and minification. The normal suite passes 979 tests; the parser
+audit retains 7,056 matches without active regressions, and strict Clippy
+retains 623 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

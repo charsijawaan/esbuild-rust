@@ -1231,20 +1231,12 @@ fn lower_template_literal(
     )
 }
 
-fn inferred_name_from_expression(core: &ParserCore, expression: &Expr) -> Option<String> {
+fn inferred_name_from_property_key(core: &ParserCore, expression: &Expr) -> Option<String> {
     match expression.data.as_deref() {
-        Some(ExprData::Identifier(identifier)) => Some(symbol_name(core, identifier.reference)),
         Some(ExprData::PrivateIdentifier(private)) => Some(symbol_name(core, private.reference)),
-        Some(ExprData::Dot(dot)) => Some(dot.name.clone()),
         Some(ExprData::String(string)) => {
             Some(String::from_utf8_lossy(&utf16_to_string(&string.value)).into_owned())
         }
-        Some(ExprData::Index(index)) => match index.index.data.as_deref() {
-            Some(ExprData::String(string)) => {
-                Some(String::from_utf8_lossy(&utf16_to_string(&string.value)).into_owned())
-            }
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -5900,7 +5892,7 @@ fn visit_class(
             &mut core.lower_super_property_access,
             lower_static_field && class_super_home_ref.is_some(),
         );
-        let inferred_name = inferred_name_from_expression(core, &property.key);
+        let inferred_name = inferred_name_from_property_key(core, &property.key);
         prepare_inferred_class_name(
             core,
             &mut property.initializer_or_nil,
@@ -5912,7 +5904,7 @@ fn visit_class(
             property.kind,
             PropertyKind::Field | PropertyKind::AutoAccessor
         ) {
-            let name = inferred_name_from_expression(core, &property.key);
+            let name = inferred_name_from_property_key(core, &property.key);
             keep_inferred_name(core, &mut property.initializer_or_nil, name);
         }
         core.visit_new_target_allowed = old_new_target_allowed;
@@ -6222,10 +6214,13 @@ fn lower_private_members(
                 };
                 if let Some(function_ref) = function_ref {
                     let target = private_storage_identifier(core, loc, function_ref);
+                    let mut value = std::mem::take(&mut property.value_or_nil);
+                    let name = symbol_name(core, reference);
+                    keep_inferred_name(core, &mut value, Some(name));
                     member_initializers.push(Stmt::new(
                         loc,
                         StmtData::Expr(ExprStmt {
-                            value: assign(target, std::mem::take(&mut property.value_or_nil)),
+                            value: assign(target, value),
                             ..ExprStmt::default()
                         }),
                     ));
@@ -6275,10 +6270,13 @@ fn lower_private_members(
                 };
                 if let Some(function_ref) = function_ref {
                     let target = private_storage_identifier(core, loc, function_ref);
+                    let mut value = std::mem::take(&mut property.value_or_nil);
+                    let name = symbol_name(core, reference);
+                    keep_inferred_name(core, &mut value, Some(name));
                     member_initializers.push(Stmt::new(
                         loc,
                         StmtData::Expr(ExprStmt {
-                            value: assign(target, std::mem::take(&mut property.value_or_nil)),
+                            value: assign(target, value),
                             ..ExprStmt::default()
                         }),
                     ));
@@ -11628,8 +11626,9 @@ fn visit_expr_with_target_and_context(
                     | OpCode::BinaryNullishCoalescingAssign
                     | OpCode::BinaryLogicalOrAssign
                     | OpCode::BinaryLogicalAndAssign
-            ) {
-                inferred_name_from_expression(core, &binary.left)
+            ) && let Some(ExprData::Identifier(identifier)) = binary.left.data.as_deref()
+            {
+                Some(symbol_name(core, identifier.reference))
             } else {
                 None
             };
@@ -12739,7 +12738,13 @@ fn visit_expr_with_target_and_context(
                     core.lower_super_property_access = false;
                 }
                 if property.kind == PropertyKind::Field {
-                    let name = inferred_name_from_expression(core, &property.key);
+                    let name = inferred_name_from_property_key(core, &property.key);
+                    let initializer_name = match property.value_or_nil.data.as_deref() {
+                        Some(ExprData::Identifier(identifier)) => {
+                            Some(symbol_name(core, identifier.reference))
+                        }
+                        _ => None,
+                    };
                     prepare_inferred_class_name(
                         core,
                         &mut property.value_or_nil,
@@ -12748,7 +12753,7 @@ fn visit_expr_with_target_and_context(
                     prepare_inferred_class_name(
                         core,
                         &mut property.initializer_or_nil,
-                        name.as_deref(),
+                        initializer_name.as_deref(),
                     );
                 }
                 visit_expr_with_target(
@@ -12766,9 +12771,15 @@ fn visit_expr_with_target_and_context(
                 core.visit_super_home_is_class_instance = old_super_home_is_class_instance;
                 core.lower_super_property_access = old_lower_super_property_access;
                 if property.kind == PropertyKind::Field {
-                    let name = inferred_name_from_expression(core, &property.key);
-                    keep_inferred_name(core, &mut property.value_or_nil, name.clone());
-                    keep_inferred_name(core, &mut property.initializer_or_nil, name);
+                    let name = inferred_name_from_property_key(core, &property.key);
+                    let initializer_name = match property.value_or_nil.data.as_deref() {
+                        Some(ExprData::Identifier(identifier)) => {
+                            Some(symbol_name(core, identifier.reference))
+                        }
+                        _ => None,
+                    };
+                    keep_inferred_name(core, &mut property.value_or_nil, name);
+                    keep_inferred_name(core, &mut property.initializer_or_nil, initializer_name);
                 }
                 for decorator in &mut property.decorators {
                     visit_expr(core, &mut decorator.value, resolve_identifiers);
