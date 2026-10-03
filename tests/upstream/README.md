@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,030 | 1,613 | 8,643 |
+| JS/TS parser and parser lowering | 7,037 | 1,606 | 8,643 |
 | Bundler | 909 | 162 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,263 | 1,775 | 14,038 |
+| Total | 12,270 | 1,768 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -200,6 +200,22 @@ The normal suite passes 965 tests and the full parser audit preserves all
 strict Clippy still has the same 625 pre-existing error diagnostics as untouched
 `965fee5`, with no new diagnostic categories or lint suppression.
 
+The combined runtime audit at `a764bd0` passes 1,291 of 1,462, with 16 gains
+and no regressions relative to `f606229` (eight duplicate-member and eight
+source-name diagnostic cases). Lowered expression-only static blocks now join
+static field initializers in source order, after helper storage and private
+brands are initialized. Converted classes assign their outer binding after
+this initialization. The block rewrite follows lexical arrows, their parameter
+defaults/bindings, and nested control flow, while ordinary functions and class
+bodies retain their own receivers. Existing field-arrow snapshots remain
+unchanged. A new executable regression passes 24 declaration/expression,
+transform/bundle, target, and minification combinations on Rust and pinned Go.
+Original runtime cases 969 and 1153 pass individually. Seven original
+`TestLowerClassStaticBlocks` cases (271–277) now match exactly and are active.
+The normal suite passes 966 tests; the full parser audit preserves all prior
+active cases. Strict Clippy has 623 pre-existing error diagnostics, with two
+removed by the helper refactor and none added relative to the baseline.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -300,7 +316,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,030 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,037 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -390,7 +406,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 83
-reviewed cases beyond the original option-based selection. So 12,263 concrete
+reviewed cases beyond the original option-based selection. So 12,270 concrete
 upstream cases are currently active in `cargo test`; the remaining 162 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

@@ -1964,7 +1964,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                                 ..LocalStmt::default()
                             }),
                         );
-                        if lower_static_members {
+                        if lower_static_members || lower_static_blocks {
                             core.class_post_statements.push(outer_declaration);
                         } else {
                             append_to_statement.push(outer_declaration);
@@ -5652,7 +5652,8 @@ fn visit_class(
         && !merge_inner_name
         && outer_class_name.is_some()
         && (class_private_static_members_need_lowering(core, class)
-            || class_public_static_fields_need_lowering(core, class));
+            || class_public_static_fields_need_lowering(core, class)
+            || class_static_blocks_can_be_lowered(core, class));
     let used_inner_name = inner_class_name.filter(|inner| {
         needs_inner_name_for_static_initialization
             || core.symbols[usize::try_from(inner.inner_index).expect("symbol index")]
@@ -5681,6 +5682,15 @@ fn visit_class(
     );
     lower_type_script_experimental_decorators(core, class, outer_class_name, &decorator_keys);
     let constructor_was_present = class_constructor_index(class).is_some();
+    let static_field_locations = class
+        .properties
+        .iter()
+        .filter(|property| {
+            property.kind == PropertyKind::Field
+                && property.flags.contains(PropertyFlags::IS_STATIC)
+        })
+        .map(|property| property.loc)
+        .collect::<HashSet<_>>();
     lower_private_members(
         core,
         class,
@@ -5701,6 +5711,23 @@ fn visit_class(
     );
     lower_type_script_static_field_assignments(core, class, outer_class_name, class_post_start);
     lower_type_script_class_field_assignments(core, class, constructor_was_present);
+    if class_static_blocks_can_be_lowered(core, class)
+        && let Some(class_ref) = private_class_capture.or(used_inner_name).or(outer_class_name)
+    {
+        let mut static_initializers = lower_class_static_blocks(core, class, class_ref);
+        let generated = core.class_post_statements.split_off(class_post_start);
+        for statement in generated {
+            if static_field_locations.contains(&statement.loc)
+                && is_lowered_class_static_field_initializer(core, &statement)
+            {
+                static_initializers.push(statement);
+            } else {
+                core.class_post_statements.push(statement);
+            }
+        }
+        static_initializers.sort_by_key(|statement| statement.loc.start);
+        core.class_post_statements.extend(static_initializers);
+    }
     if let Some(constructor_index) = class_constructor_index(class) {
         if let Some(ExprData::Function(function)) = class.properties[constructor_index]
             .value_or_nil
@@ -6155,13 +6182,41 @@ fn lower_class_static_blocks(
             .expect("class static block property");
         for mut statement in block.block.statements {
             if let Some(StmtData::Expr(expression)) = statement.data.as_deref_mut() {
-                rewrite_lowered_class_static_expression(core, &mut expression.value, class_ref);
+                rewrite_lowered_class_static_lexical_expression(core, &mut expression.value, class_ref);
                 lowered.push(statement);
             }
         }
         false
     });
     lowered
+}
+
+fn is_lowered_class_static_field_initializer(core: &ParserCore, statement: &Stmt) -> bool {
+    let Some(StmtData::Expr(statement)) = statement.data.as_deref() else {
+        return false;
+    };
+    match statement.value.data.as_deref() {
+        Some(ExprData::Call(call)) => {
+            let reference = match call.target.data.as_deref() {
+                Some(ExprData::Identifier(identifier)) => identifier.reference,
+                Some(ExprData::ImportIdentifier(identifier)) => identifier.reference,
+                _ => return false,
+            };
+            ["__publicField", "__privateAdd"].iter().any(|name| {
+                core.runtime_imports
+                    .get(*name)
+                    .is_some_and(|helper| helper.reference == reference)
+            })
+        }
+        Some(ExprData::Binary(binary)) => {
+            binary.op == OpCode::BinaryAssign
+                && matches!(
+                    binary.left.data.as_deref(),
+                    Some(ExprData::Dot(_) | ExprData::Index(_))
+                )
+        }
+        _ => false,
+    }
 }
 
 fn class_capture_identifier(core: &mut ParserCore, loc: Loc, class_ref: Ref) -> Expr {
@@ -6264,11 +6319,31 @@ fn rewrite_lowered_class_static_expression(
     expression: &mut Expr,
     class_ref: Ref,
 ) {
+    rewrite_lowered_class_static_expression_impl(core, expression, class_ref, false);
+}
+
+fn rewrite_lowered_class_static_lexical_expression(
+    core: &mut ParserCore,
+    expression: &mut Expr,
+    class_ref: Ref,
+) {
+    rewrite_lowered_class_static_expression_impl(core, expression, class_ref, true);
+}
+
+fn rewrite_lowered_class_static_expression_impl(
+    core: &mut ParserCore,
+    expression: &mut Expr,
+    class_ref: Ref,
+    rewrite_lexical: bool,
+) {
+    let rewrite = |core: &mut ParserCore, expression: &mut Expr| {
+        rewrite_lowered_class_static_expression_impl(core, expression, class_ref, rewrite_lexical);
+    };
     if let Some(ExprData::Binary(binary)) = expression.data.as_deref_mut()
         && binary.op == OpCode::BinaryAssign
         && let Some(key) = super_property_key(&binary.left)
     {
-        rewrite_lowered_class_static_expression(core, &mut binary.right, class_ref);
+        rewrite(core, &mut binary.right);
         let value = std::mem::take(&mut binary.right);
         let loc = expression.loc;
         let class = class_capture_identifier(core, loc, class_ref);
@@ -6301,91 +6376,425 @@ fn rewrite_lowered_class_static_expression(
         );
         return;
     }
+    if rewrite_lowered_class_static_super_get(core, expression, class_ref) {
+        return;
+    }
     match expression.data.as_deref_mut() {
         Some(ExprData::This) => {
             *expression = class_capture_identifier(core, expression.loc, class_ref);
         }
+        Some(ExprData::Unary(unary)) => {
+            rewrite(core, &mut unary.value);
+        }
+        Some(ExprData::Binary(binary)) => {
+            rewrite(core, &mut binary.left);
+            rewrite(core, &mut binary.right);
+        }
+        Some(ExprData::Dot(dot)) => {
+            rewrite(core, &mut dot.target);
+        }
+        Some(ExprData::Index(index)) => {
+            rewrite(core, &mut index.target);
+            rewrite(core, &mut index.index);
+        }
+        Some(ExprData::Call(call)) => {
+            capture_lowered_class_private_call_receiver(core, call, expression.loc, class_ref);
+            rewrite(core, &mut call.target);
+            for argument in &mut call.args {
+                rewrite(core, argument);
+            }
+        }
+        Some(ExprData::New(new_expression)) => {
+            rewrite(core, &mut new_expression.target);
+            for argument in &mut new_expression.args {
+                rewrite(core, argument);
+            }
+        }
+        Some(ExprData::Array(array)) => {
+            for item in &mut array.items {
+                rewrite(core, item);
+            }
+        }
+        Some(ExprData::If(if_expression)) => {
+            rewrite(core, &mut if_expression.test);
+            rewrite(core, &mut if_expression.yes);
+            rewrite(core, &mut if_expression.no);
+        }
+        _ if rewrite_lexical => {
+            rewrite_lowered_class_static_lexical_children(core, expression, class_ref);
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_lowered_class_static_super_get(
+    core: &mut ParserCore,
+    expression: &mut Expr,
+    class_ref: Ref,
+) -> bool {
+    let key = match expression.data.as_deref_mut() {
         Some(ExprData::Dot(dot)) if matches!(dot.target.data.as_deref(), Some(ExprData::Super)) => {
-            let loc = expression.loc;
-            let key = Expr::new(
+            Expr::new(
                 dot.name_loc,
                 ExprData::String(StringExpr {
                     value: string_to_utf16(dot.name.as_bytes()),
                     ..StringExpr::default()
                 }),
-            );
-            let class = class_capture_identifier(core, loc, class_ref);
-            let receiver = class_capture_identifier(core, loc, class_ref);
-            *expression = core.call_runtime(loc, "__superGet", vec![class, receiver, key]);
+            )
         }
         Some(ExprData::Index(index))
             if matches!(index.target.data.as_deref(), Some(ExprData::Super)) =>
         {
-            let loc = expression.loc;
-            let key = std::mem::take(&mut index.index);
-            let class = class_capture_identifier(core, loc, class_ref);
-            let receiver = class_capture_identifier(core, loc, class_ref);
-            *expression = core.call_runtime(loc, "__superGet", vec![class, receiver, key]);
+            std::mem::take(&mut index.index)
         }
-        Some(ExprData::Unary(unary)) => {
-            rewrite_lowered_class_static_expression(core, &mut unary.value, class_ref);
-        }
-        Some(ExprData::Binary(binary)) => {
-            rewrite_lowered_class_static_expression(core, &mut binary.left, class_ref);
-            rewrite_lowered_class_static_expression(core, &mut binary.right, class_ref);
-        }
-        Some(ExprData::Dot(dot)) => {
-            rewrite_lowered_class_static_expression(core, &mut dot.target, class_ref);
-        }
-        Some(ExprData::Index(index)) => {
-            rewrite_lowered_class_static_expression(core, &mut index.target, class_ref);
-            rewrite_lowered_class_static_expression(core, &mut index.index, class_ref);
-        }
-        Some(ExprData::Call(call)) => {
-            // Private method calls preserve their receiver with a temporary. If the
-            // receiver was `this`, that temporary wasn't needed while the call was
-            // still inside the class. It is needed after a static field initializer
-            // is moved outside and `this` becomes the captured class reference.
-            if let Some(ExprData::Dot(dot)) = call.target.data.as_deref_mut()
-                && dot.name == "call"
-                && let Some(ExprData::Call(private_method)) = dot.target.data.as_deref_mut()
-                && is_identifier_named(core, &private_method.target, "__privateMethod")
-                && private_method.args.first().is_some_and(|argument| {
-                    matches!(argument.data.as_deref(), Some(ExprData::This))
-                })
-                && call.args.first().is_some_and(|argument| {
-                    matches!(argument.data.as_deref(), Some(ExprData::This))
-                })
-            {
-                let reference = core.generate_temp_ref(true);
-                core.record_usage(reference);
-                core.record_usage(reference);
-                private_method.args[0] = assign(
-                    temp_identifier(expression.loc, reference),
-                    class_capture_identifier(core, expression.loc, class_ref),
+        _ => return false,
+    };
+    let loc = expression.loc;
+    let class = class_capture_identifier(core, loc, class_ref);
+    let receiver = class_capture_identifier(core, loc, class_ref);
+    *expression = core.call_runtime(loc, "__superGet", vec![class, receiver, key]);
+    true
+}
+
+fn capture_lowered_class_private_call_receiver(
+    core: &mut ParserCore,
+    call: &mut crate::internal::js_ast::CallExpr,
+    loc: Loc,
+    class_ref: Ref,
+) {
+    // Private method calls preserve their receiver with a temporary. If the
+    // receiver was `this`, that temporary wasn't needed while the call was
+    // still inside the class. It is needed after a static field initializer
+    // is moved outside and `this` becomes the captured class reference.
+    if let Some(ExprData::Dot(dot)) = call.target.data.as_deref_mut()
+        && dot.name == "call"
+        && let Some(ExprData::Call(private_method)) = dot.target.data.as_deref_mut()
+        && is_identifier_named(core, &private_method.target, "__privateMethod")
+        && private_method
+            .args
+            .first()
+            .is_some_and(|argument| matches!(argument.data.as_deref(), Some(ExprData::This)))
+        && call
+            .args
+            .first()
+            .is_some_and(|argument| matches!(argument.data.as_deref(), Some(ExprData::This)))
+    {
+        let reference = core.generate_temp_ref(true);
+        core.record_usage(reference);
+        core.record_usage(reference);
+        private_method.args[0] = assign(
+            temp_identifier(loc, reference),
+            class_capture_identifier(core, loc, class_ref),
+        );
+        call.args[0] = temp_identifier(loc, reference);
+    }
+}
+
+fn rewrite_lowered_class_static_lexical_children(
+    core: &mut ParserCore,
+    expression: &mut Expr,
+    class_ref: Ref,
+) {
+    match expression.data.as_deref_mut() {
+        Some(ExprData::Arrow(arrow)) => {
+            for argument in &mut arrow.args {
+                rewrite_lowered_class_static_binding(core, &mut argument.binding, class_ref);
+                rewrite_lowered_class_static_lexical_expression(
+                    core,
+                    &mut argument.default_or_nil,
+                    class_ref,
                 );
-                call.args[0] = temp_identifier(expression.loc, reference);
             }
-            rewrite_lowered_class_static_expression(core, &mut call.target, class_ref);
-            for argument in &mut call.args {
-                rewrite_lowered_class_static_expression(core, argument, class_ref);
+            rewrite_lowered_class_static_statements(
+                core,
+                &mut arrow.body.block.statements,
+                class_ref,
+            );
+        }
+        Some(ExprData::Object(object)) => {
+            for property in &mut object.properties {
+                rewrite_lowered_class_static_lexical_expression(core, &mut property.key, class_ref);
+                rewrite_lowered_class_static_lexical_expression(
+                    core,
+                    &mut property.value_or_nil,
+                    class_ref,
+                );
+                rewrite_lowered_class_static_lexical_expression(
+                    core,
+                    &mut property.initializer_or_nil,
+                    class_ref,
+                );
             }
         }
-        Some(ExprData::New(new_expression)) => {
-            rewrite_lowered_class_static_expression(core, &mut new_expression.target, class_ref);
-            for argument in &mut new_expression.args {
-                rewrite_lowered_class_static_expression(core, argument, class_ref);
+        Some(ExprData::Class(class)) => {
+            rewrite_lowered_class_static_class(core, &mut class.class, class_ref);
+        }
+        Some(ExprData::Spread(spread)) => {
+            rewrite_lowered_class_static_lexical_expression(core, &mut spread.value, class_ref);
+        }
+        Some(ExprData::Template(template)) => {
+            rewrite_lowered_class_static_lexical_expression(
+                core,
+                &mut template.tag_or_nil,
+                class_ref,
+            );
+            for part in &mut template.parts {
+                rewrite_lowered_class_static_lexical_expression(core, &mut part.value, class_ref);
             }
         }
-        Some(ExprData::Array(array)) => {
+        Some(ExprData::Await(await_expression)) => {
+            rewrite_lowered_class_static_lexical_expression(
+                core,
+                &mut await_expression.value,
+                class_ref,
+            );
+        }
+        Some(ExprData::Yield(yield_expression)) => rewrite_lowered_class_static_lexical_expression(
+            core,
+            &mut yield_expression.value_or_nil,
+            class_ref,
+        ),
+        Some(ExprData::Annotation(annotation)) => {
+            rewrite_lowered_class_static_lexical_expression(core, &mut annotation.value, class_ref);
+        }
+        Some(ExprData::InlinedEnum(inlined)) => {
+            rewrite_lowered_class_static_lexical_expression(core, &mut inlined.value, class_ref);
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_lowered_class_static_class(core: &mut ParserCore, class: &mut Class, class_ref: Ref) {
+    rewrite_lowered_class_static_lexical_expression(core, &mut class.extends_or_nil, class_ref);
+    for decorator in &mut class.decorators {
+        rewrite_lowered_class_static_lexical_expression(core, &mut decorator.value, class_ref);
+    }
+    for property in &mut class.properties {
+        if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+            rewrite_lowered_class_static_lexical_expression(core, &mut property.key, class_ref);
+        }
+        for decorator in &mut property.decorators {
+            rewrite_lowered_class_static_lexical_expression(core, &mut decorator.value, class_ref);
+        }
+    }
+}
+
+fn rewrite_lowered_class_static_binding(
+    core: &mut ParserCore,
+    binding: &mut Binding,
+    class_ref: Ref,
+) {
+    match binding.data.as_deref_mut() {
+        Some(BindingData::Array(array)) => {
             for item in &mut array.items {
-                rewrite_lowered_class_static_expression(core, item, class_ref);
+                rewrite_lowered_class_static_binding(core, &mut item.binding, class_ref);
+                rewrite_lowered_class_static_lexical_expression(
+                    core,
+                    &mut item.default_value_or_nil,
+                    class_ref,
+                );
             }
         }
-        Some(ExprData::If(if_expression)) => {
-            rewrite_lowered_class_static_expression(core, &mut if_expression.test, class_ref);
-            rewrite_lowered_class_static_expression(core, &mut if_expression.yes, class_ref);
-            rewrite_lowered_class_static_expression(core, &mut if_expression.no, class_ref);
+        Some(BindingData::Object(object)) => {
+            for property in &mut object.properties {
+                rewrite_lowered_class_static_lexical_expression(core, &mut property.key, class_ref);
+                rewrite_lowered_class_static_binding(core, &mut property.value, class_ref);
+                rewrite_lowered_class_static_lexical_expression(
+                    core,
+                    &mut property.default_value_or_nil,
+                    class_ref,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_lowered_class_static_statements(
+    core: &mut ParserCore,
+    statements: &mut [Stmt],
+    class_ref: Ref,
+) {
+    for statement in statements {
+        match statement.data.as_deref_mut() {
+            Some(StmtData::Expr(statement)) => {
+                rewrite_lowered_class_static_lexical_expression(
+                    core,
+                    &mut statement.value,
+                    class_ref,
+                );
+            }
+            Some(StmtData::Return(statement)) => rewrite_lowered_class_static_lexical_expression(
+                core,
+                &mut statement.value_or_nil,
+                class_ref,
+            ),
+            Some(StmtData::Throw(statement)) => {
+                rewrite_lowered_class_static_lexical_expression(
+                    core,
+                    &mut statement.value,
+                    class_ref,
+                );
+            }
+            Some(StmtData::Block(block)) => {
+                rewrite_lowered_class_static_statements(core, &mut block.statements, class_ref);
+            }
+            Some(StmtData::Local(local)) => {
+                for declaration in &mut local.declarations {
+                    rewrite_lowered_class_static_binding(core, &mut declaration.binding, class_ref);
+                    rewrite_lowered_class_static_lexical_expression(
+                        core,
+                        &mut declaration.value_or_nil,
+                        class_ref,
+                    );
+                }
+            }
+            Some(StmtData::Class(class)) => {
+                rewrite_lowered_class_static_class(core, &mut class.class, class_ref);
+            }
+            Some(StmtData::Label(label)) => rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut label.statement),
+                class_ref,
+            ),
+            _ => rewrite_lowered_class_static_control_flow(core, statement, class_ref),
+        }
+    }
+}
+
+fn rewrite_lowered_class_static_control_flow(
+    core: &mut ParserCore,
+    statement: &mut Stmt,
+    class_ref: Ref,
+) {
+    match statement.data.as_deref_mut() {
+        Some(StmtData::If(statement)) => {
+            rewrite_lowered_class_static_lexical_expression(core, &mut statement.test, class_ref);
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.yes),
+                class_ref,
+            );
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.no_or_nil),
+                class_ref,
+            );
+        }
+        Some(StmtData::For(statement)) => {
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.init_or_nil),
+                class_ref,
+            );
+            rewrite_lowered_class_static_lexical_expression(
+                core,
+                &mut statement.test_or_nil,
+                class_ref,
+            );
+            rewrite_lowered_class_static_lexical_expression(
+                core,
+                &mut statement.update_or_nil,
+                class_ref,
+            );
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.body),
+                class_ref,
+            );
+        }
+        Some(StmtData::ForIn(statement)) => {
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.init),
+                class_ref,
+            );
+            rewrite_lowered_class_static_lexical_expression(core, &mut statement.value, class_ref);
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.body),
+                class_ref,
+            );
+        }
+        Some(StmtData::ForOf(statement)) => {
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.init),
+                class_ref,
+            );
+            rewrite_lowered_class_static_lexical_expression(core, &mut statement.value, class_ref);
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.body),
+                class_ref,
+            );
+        }
+        Some(StmtData::While(statement)) => {
+            rewrite_lowered_class_static_lexical_expression(core, &mut statement.test, class_ref);
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.body),
+                class_ref,
+            );
+        }
+        Some(StmtData::DoWhile(statement)) => {
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.body),
+                class_ref,
+            );
+            rewrite_lowered_class_static_lexical_expression(core, &mut statement.test, class_ref);
+        }
+        Some(StmtData::With(statement)) => {
+            rewrite_lowered_class_static_lexical_expression(core, &mut statement.value, class_ref);
+            rewrite_lowered_class_static_statements(
+                core,
+                std::slice::from_mut(&mut statement.body),
+                class_ref,
+            );
+        }
+        _ => rewrite_lowered_class_static_branch_blocks(core, statement, class_ref),
+    }
+}
+
+fn rewrite_lowered_class_static_branch_blocks(
+    core: &mut ParserCore,
+    statement: &mut Stmt,
+    class_ref: Ref,
+) {
+    match statement.data.as_deref_mut() {
+        Some(StmtData::Try(statement)) => {
+            rewrite_lowered_class_static_statements(
+                core,
+                &mut statement.block.statements,
+                class_ref,
+            );
+            if let Some(catch) = &mut statement.catch {
+                rewrite_lowered_class_static_binding(core, &mut catch.binding_or_nil, class_ref);
+                rewrite_lowered_class_static_statements(
+                    core,
+                    &mut catch.block.statements,
+                    class_ref,
+                );
+            }
+            if let Some(finally) = &mut statement.finally {
+                rewrite_lowered_class_static_statements(
+                    core,
+                    &mut finally.block.statements,
+                    class_ref,
+                );
+            }
+        }
+        Some(StmtData::Switch(statement)) => {
+            rewrite_lowered_class_static_lexical_expression(core, &mut statement.test, class_ref);
+            for case in &mut statement.cases {
+                rewrite_lowered_class_static_lexical_expression(
+                    core,
+                    &mut case.value_or_nil,
+                    class_ref,
+                );
+                rewrite_lowered_class_static_statements(core, &mut case.body, class_ref);
+            }
         }
         _ => {}
     }

@@ -372,3 +372,74 @@ console.log('ok');
         }
     }
 }
+
+#[test]
+fn lowered_static_blocks_and_fields_preserve_initialization_order() {
+    let source = r#"
+const events = [];
+class Box {
+  static first = (events.push(1), 11);
+  static #second = (events.push(2), 22);
+  static {
+    events.push(3);
+    this.total = this.#method();
+    this.saved = () => this;
+    this.savedDeep = ({ value = this } = {}) => {
+      const object = { [this.first]: this, nested: () => this, method() { return this; } };
+      try {
+        if (value === this && object[this.first] === this && object.nested() === this
+          && object.method() === object) return this;
+        throw value;
+      } catch { return null; }
+    };
+    this.ordinary = function() { return this; };
+  }
+  static fourth = (events.push(4), 44);
+  static #method() { return this.first + this.#second; }
+}
+const Captured = Box;
+Box = null;
+if (events.join(',') !== '1,2,3,4' || Captured.total !== 33 || Captured.fourth !== 44
+  || Captured.saved() !== Captured || Captured.savedDeep() !== Captured
+  || Captured.ordinary.call(events) !== events)
+  throw new Error('wrong static initialization');
+console.log('ok');
+"#;
+    for source in [
+        source.to_owned(),
+        source.replace("class Box {", "let Box = class {"),
+    ] {
+        for target in [Target::Es2015, Target::Es2021, Target::Es2022] {
+            for minify in [false, true] {
+                let result = transform(
+                    &source,
+                    TransformOptions {
+                        target,
+                        minify_identifiers: minify,
+                        minify_syntax: minify,
+                        minify_whitespace: minify,
+                        ..TransformOptions::default()
+                    },
+                );
+                assert!(result.errors.is_empty(), "{:?}", result.errors);
+                execute_node(&result.code);
+                let result = build(BuildOptions {
+                    bundle: true,
+                    format: BuildFormat::CommonJs,
+                    platform: BuildPlatform::Node,
+                    stdin: Some(BuildStdin {
+                        contents: source.clone(),
+                        ..BuildStdin::default()
+                    }),
+                    target,
+                    minify_identifiers: minify,
+                    minify_syntax: minify,
+                    minify_whitespace: minify,
+                    ..BuildOptions::default()
+                });
+                assert!(result.errors.is_empty(), "{:?}", result.errors);
+                execute_node(&result.output_files[0].contents);
+            }
+        }
+    }
+}
