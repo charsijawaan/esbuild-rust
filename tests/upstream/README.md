@@ -351,6 +351,18 @@ no timeouts. It gains all nine original cases using `--mangle-props` without
 regressions relative to `738873b`. Case 80 remains the shared environment
 failure, leaving 124 Rust-only failures.
 
+Class names required by `keep_names` are now prepared before class lowering,
+so static fields and blocks observe the source name. This covers declarations,
+named/inferred expressions, assignments, object/class members, destructuring
+defaults, and default exports. Generated name blocks participate in existing
+static initialization ordering, and default exports avoid adding a second
+name block afterward. Classes with an explicit static `name` field retain a
+captured binding for moved initializers. A new regression passes native Node
+execution and 12 Rust/pinned-Go transform/bundle combinations covering older
+targets, feature overrides, and minification. The normal suite passes 977
+tests, the parser audit retains 7,055 matches without active regressions, and
+strict Clippy retains 623 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

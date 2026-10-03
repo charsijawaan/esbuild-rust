@@ -1419,6 +1419,13 @@ fn default_export_name_to_keep(
         }
         Some(StmtData::Class(class)) => {
             visit_keep_name_class_blocks(core, &mut class.class);
+            if class_has_keep_name_static_block(&class.class)
+                || core.symbols[export.default_name.reference.inner_index as usize]
+                    .flags
+                    .contains(crate::internal::ast::SymbolFlags::DID_KEEP_NAME)
+            {
+                return None;
+            }
             let name = existing_name_to_keep(core, class.class.name)
                 .map_or_else(|| "default".into(), |(_, name, _)| name);
             insert_class_name_static_block(core, &mut class.class, &name);

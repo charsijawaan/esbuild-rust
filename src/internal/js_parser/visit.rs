@@ -1266,6 +1266,14 @@ fn class_has_static_name(class: &Class) -> bool {
     })
 }
 
+fn class_has_static_initialization(class: &Class) -> bool {
+    class.properties.iter().any(|property| {
+        property.kind == PropertyKind::ClassStaticBlock
+            || (property.flags.contains(PropertyFlags::IS_STATIC)
+                && matches!(property.kind, PropertyKind::Field | PropertyKind::AutoAccessor))
+    })
+}
+
 fn class_has_keep_name_static_block(class: &Class) -> bool {
     class.properties.iter().any(|property| {
         property
@@ -1333,6 +1341,17 @@ fn insert_class_name_static_block(core: &mut ParserCore, class: &mut Class, name
         },
     );
     true
+}
+
+fn prepare_inferred_class_name(core: &mut ParserCore, expression: &mut Expr, name: Option<&str>) {
+    if core.options.keep_names
+        && let Some(name) = name
+        && let Some(ExprData::Class(class)) = expression.data.as_deref_mut()
+        && class.class.name.is_none()
+        && !class_has_keep_name_static_block(&class.class)
+    {
+        insert_class_name_static_block(core, &mut class.class, name);
+    }
 }
 
 fn keep_inferred_name(core: &mut ParserCore, expression: &mut Expr, name: Option<String>) {
@@ -1915,6 +1934,11 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     }
                     visit_binding_initializers(core, &mut declaration.binding, resolve_identifiers);
                     let class_name_hint = inferred_name_from_binding(core, &declaration.binding);
+                    prepare_inferred_class_name(
+                        core,
+                        &mut declaration.value_or_nil,
+                        class_name_hint.as_deref(),
+                    );
                     let old_class_name_hint =
                         std::mem::replace(&mut core.class_name_hint, class_name_hint);
                     visit_expr(core, &mut declaration.value_or_nil, resolve_identifiers);
@@ -2034,9 +2058,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
             Some(StmtData::Class(class)) => {
                 let pre_start = core.class_pre_statements.len();
                 let post_start = core.class_post_statements.len();
-                let lower_private_members = class_private_members_need_lowering(core, &class.class);
-                let kept_class_name = if lower_private_members
-                    && core.options.keep_names
+                let kept_class_name = if core.options.keep_names
+                    && (class_has_static_initialization(&class.class)
+                        || class_private_members_need_lowering(core, &class.class))
                     && let Some(name) = class.class.name
                 {
                     let original_name = symbol_name(core, name.reference);
@@ -2049,11 +2073,13 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 } else {
                     false
                 };
+                let lower_private_members = class_private_members_need_lowering(core, &class.class);
                 let lower_static_blocks = class_static_blocks_can_be_lowered(core, &class.class);
                 let lower_private_static = (class.class.extends_or_nil.data.is_some()
                     || class_has_non_constructor_method(&class.class))
                     && class_private_static_members_need_lowering(core, &class.class);
-                let lower_public_static = class.class.extends_or_nil.data.is_some()
+                let lower_public_static = (class.class.extends_or_nil.data.is_some()
+                    || class_has_static_name(&class.class))
                     && class_public_static_fields_need_lowering(core, &class.class);
                 let (_, lower_static_due_to_private_members) =
                     class_private_member_lowering_flags(core, &class.class);
@@ -2077,6 +2103,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     && core.options.mode == crate::internal::config::Mode::Bundle)
                     || has_experimental_class_decorators
                     || class.class.should_lower_standard_decorators
+                    || (lower_static_blocks && kept_class_name)
                     || lower_private_static
                     || lower_public_static;
                 let (inner_name, _) = visit_class(
@@ -2164,7 +2191,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                                 }),
                             ),
                         }],
-                        kind: if (lower_static_members || capture_private_inner_name)
+                        kind: if ((lower_static_members && !class_has_static_name(&class.class))
+                            || (lower_static_blocks && kept_class_name)
+                            || capture_private_inner_name)
                             && capture_ref.is_some()
                         {
                             LocalKind::Const
@@ -2296,6 +2325,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 let mut remove_type_only_default = false;
                 match export.value.data.as_deref_mut() {
                     Some(StmtData::Expr(expression)) => {
+                        prepare_inferred_class_name(core, &mut expression.value, Some("default"));
                         visit_expr(core, &mut expression.value, resolve_identifiers);
                         keep_inferred_name(core, &mut expression.value, Some("default".into()));
                         if core.options.ts.parse
@@ -2320,6 +2350,20 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         visit_function(core, &mut function.function, resolve_identifiers);
                     }
                     Some(StmtData::Class(class)) => {
+                        if core.options.keep_names {
+                            let name = class.class.name.map_or_else(
+                                || "default".into(),
+                                |name| symbol_name(core, name.reference),
+                            );
+                            if insert_class_name_static_block(core, &mut class.class, &name) {
+                                core.symbols[export.default_name.reference.inner_index as usize]
+                                    .flags |= SymbolFlags::DID_KEEP_NAME;
+                                if let Some(name) = class.class.name {
+                                    core.symbols[name.reference.inner_index as usize].flags |=
+                                        SymbolFlags::DID_KEEP_NAME;
+                                }
+                            }
+                        }
                         if class.class.name.is_none()
                             && core.options.ts.config.experimental_decorators
                                 == crate::internal::config::MaybeBool::True
@@ -5830,6 +5874,12 @@ fn visit_class(
         let old_lower_super_property_access = std::mem::replace(
             &mut core.lower_super_property_access,
             lower_static_field && class_super_home_ref.is_some(),
+        );
+        let inferred_name = inferred_name_from_expression(core, &property.key);
+        prepare_inferred_class_name(
+            core,
+            &mut property.initializer_or_nil,
+            inferred_name.as_deref(),
         );
         visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
         visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
@@ -10458,8 +10508,9 @@ fn visit_binding_initializers(
         Some(BindingData::Array(array)) => {
             for item in &mut array.items {
                 visit_binding_initializers(core, &mut item.binding, resolve_identifiers);
-                visit_expr(core, &mut item.default_value_or_nil, resolve_identifiers);
                 let name = inferred_name_from_binding(core, &item.binding);
+                prepare_inferred_class_name(core, &mut item.default_value_or_nil, name.as_deref());
+                visit_expr(core, &mut item.default_value_or_nil, resolve_identifiers);
                 keep_inferred_name(core, &mut item.default_value_or_nil, name);
             }
         }
@@ -10474,12 +10525,17 @@ fn visit_binding_initializers(
                     validate_non_computed_property_key(core, &property.key);
                 }
                 visit_binding_initializers(core, &mut property.value, resolve_identifiers);
+                let name = inferred_name_from_binding(core, &property.value);
+                prepare_inferred_class_name(
+                    core,
+                    &mut property.default_value_or_nil,
+                    name.as_deref(),
+                );
                 visit_expr(
                     core,
                     &mut property.default_value_or_nil,
                     resolve_identifiers,
                 );
-                let name = inferred_name_from_binding(core, &property.value);
                 keep_inferred_name(core, &mut property.default_value_or_nil, name);
             }
         }
@@ -11573,6 +11629,7 @@ fn visit_expr_with_target_and_context(
             core.is_control_flow_dead |= right_is_dead;
             let old_class_name_hint =
                 std::mem::replace(&mut core.class_name_hint, inferred_name.clone());
+            prepare_inferred_class_name(core, &mut binary.right, inferred_name.as_deref());
             visit_expr(core, &mut binary.right, resolve_identifiers);
             core.class_name_hint = old_class_name_hint;
             core.is_control_flow_dead = old_control_flow_dead;
@@ -12656,6 +12713,19 @@ fn visit_expr_with_target_and_context(
                     core.visit_super_home_is_class_instance = false;
                     core.lower_super_property_access = false;
                 }
+                if property.kind == PropertyKind::Field {
+                    let name = inferred_name_from_expression(core, &property.key);
+                    prepare_inferred_class_name(
+                        core,
+                        &mut property.value_or_nil,
+                        name.as_deref(),
+                    );
+                    prepare_inferred_class_name(
+                        core,
+                        &mut property.initializer_or_nil,
+                        name.as_deref(),
+                    );
+                }
                 visit_expr_with_target(
                     core,
                     &mut property.value_or_nil,
@@ -13076,17 +13146,16 @@ fn visit_expr_with_target_and_context(
         ExprData::Class(class) => {
             let pre_start = core.class_pre_statements.len();
             let post_start = core.class_post_statements.len();
+            if core.options.keep_names
+                && let Some(name) = class.class.name
+                && !class_has_keep_name_static_block(&class.class)
+            {
+                let name = symbol_name(core, name.reference);
+                insert_class_name_static_block(core, &mut class.class, &name);
+            }
             let lower_static_blocks = class_static_blocks_can_be_lowered(core, &class.class);
             let lower_private_members = class_private_members_need_lowering(core, &class.class);
             let lower_public_static = class_public_static_fields_need_lowering(core, &class.class);
-            let name_to_keep = if core.options.keep_names {
-                class
-                    .class
-                    .name
-                    .map(|name| symbol_name(core, name.reference))
-            } else {
-                None
-            };
             let (inner_name, private_capture) = visit_class(
                 core,
                 &mut class.class,
@@ -13102,9 +13171,6 @@ fn visit_expr_with_target_and_context(
             if let (Some(inner_name), Some(capture)) = (inner_name, private_capture) {
                 core.merge_symbols(inner_name, capture);
                 class.class.name = None;
-            }
-            if let Some(name) = name_to_keep {
-                insert_class_name_static_block(core, &mut class.class, &name);
             }
             let mut prefix = Expr::default();
             let generated_pre = core
