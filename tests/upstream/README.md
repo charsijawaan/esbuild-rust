@@ -708,6 +708,11 @@ including the active parser fixtures; strict Clippy retains 623 existing errors
 without added diagnostics. Suggestions for misspelled flag syntax remain
 separate work.
 
+The complete runtime audit at `494cc56` is recorded in
+`end_to_end_cli_flags_checkpoint.json`: 1,443 passed, 19 failed, and no timeouts.
+Cases 1348 and 1414 are newly passing without regressions relative to `e151e1a`.
+Case 80 remains the shared environment failure, leaving 18 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
