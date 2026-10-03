@@ -699,6 +699,15 @@ Cases 1417, 1418, 1419, 1420, and 1423 are newly passing without regressions
 relative to `0a062a2`. Case 80 remains the shared environment failure, leaving
 20 Rust-only failures.
 
+Unknown CLI flags now produce structured build/transform errors independent of
+argument order, and literal single quotes before flags produce upstream's shell
+quoting note. Parsing errors honor color/log-level settings and retain the info
+level error summary. Thirty executable configurations match pinned Go exactly,
+including silent mode and analyze flags. The normal suite passes 1,004 tests,
+including the active parser fixtures; strict Clippy retains 623 existing errors
+without added diagnostics. Suggestions for misspelled flag syntax remain
+separate work.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

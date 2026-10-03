@@ -11,7 +11,7 @@ use esbuild_rs::{
         AbsPaths, AnalyzeMetafileOptions, BuildEntryPoint, BuildFormat, BuildJsx,
         BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap, BuildSourcesContent,
         BuildStdin, BuildTreeShaking, Engine, EngineName, FormatMessagesOptions, Loader, Message,
-        MessageKind, Packages, Target, TransformOptions, analyze_metafile, build, format_messages,
+        MessageKind, Note, Packages, Target, TransformOptions, analyze_metafile, build, format_messages,
         transform,
     },
     internal::{cli_helpers, logger::LogLevel},
@@ -75,6 +75,25 @@ fn format_cli_message_details(
         },
     )
     .concat()
+}
+
+fn format_cli_flag_error(arguments: &[String], error: cli_helpers::ErrorWithNote) -> String {
+    format_cli_messages(
+        arguments,
+        &[Message {
+            text: error.text,
+            notes: if error.note.is_empty() {
+                Vec::new()
+            } else {
+                vec![Note {
+                    text: error.note,
+                    ..Note::default()
+                }]
+            },
+            ..Message::default()
+        }],
+        MessageKind::Error,
+    )
 }
 
 fn cli_message_summary(arguments: &[String], messages: &[Message], kind: MessageKind) -> String {
@@ -662,8 +681,31 @@ fn run_with_stdin_and_node_paths(
             options.footer = footer.into();
             continue;
         }
+        if argument.starts_with("'--") {
+            return Err(format_cli_flag_error(
+                arguments,
+                cli_helpers::make_error_with_note(
+                    format!("Unexpected single quote character before flag: {argument}"),
+                    "This typically happens when attempting to use single quotes to quote arguments with a shell that doesn't recognize single quotes. Try using double quote characters to quote arguments instead.",
+                ),
+            ));
+        }
         if argument.starts_with('-') {
-            return Err(format!("Invalid option {argument:?}"));
+            let kind = if arguments
+                .iter()
+                .any(|argument| !argument.starts_with('-') || argument == "--bundle")
+            {
+                "build"
+            } else {
+                "transform"
+            };
+            return Err(format_cli_flag_error(
+                arguments,
+                cli_helpers::make_error_with_note(
+                    format!("Invalid {kind} flag: {argument:?}"),
+                    "",
+                ),
+            ));
         }
         input_paths.push(argument.clone());
     }
@@ -682,13 +724,12 @@ fn run_with_stdin_and_node_paths(
                 argument.as_str() == "--analyze" || argument.as_str() == "--analyze=verbose"
             })
             .expect("analyze flag");
-        return Err(format_cli_messages(
+        return Err(format_cli_flag_error(
             arguments,
-            &[Message {
-                text: format!("Invalid transform flag: {argument:?}"),
-                ..Message::default()
-            }],
-            MessageKind::Error,
+            cli_helpers::make_error_with_note(
+                format!("Invalid transform flag: {argument:?}"),
+                "",
+            ),
         ));
     }
 
