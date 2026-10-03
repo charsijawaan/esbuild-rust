@@ -147,6 +147,44 @@ fn cli_color(arguments: &[String]) -> bool {
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
+    let mut service_requested = false;
+    let mut send_pings = false;
+    for argument in &arguments {
+        if matches!(argument.as_str(), "-h" | "-help" | "--help" | "/?") {
+            if let Err(error) = write_output(Output::Text(help_text())) {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        if argument == "--version" {
+            println!("{}", esbuild_rs::service::VERSION);
+            return;
+        }
+        if let Some(host_version) = argument.strip_prefix("--service=") {
+            service_requested = true;
+            let version = esbuild_rs::service::VERSION;
+            if host_version != version {
+                esbuild_rs::internal::logger::print_error_to_stderr(
+                    &arguments,
+                    format!(
+                        "Cannot start service: Host version {} does not match binary version {}",
+                        esbuild_rs::internal::helpers::quote_go_string(host_version.as_bytes()),
+                        esbuild_rs::internal::helpers::quote_go_string(version.as_bytes()),
+                    ),
+                );
+                std::process::exit(1);
+            }
+        }
+        send_pings |= argument.starts_with("--ping");
+    }
+    if service_requested {
+        if let Err(error) = esbuild_rs::service::run_service(send_pings) {
+            eprintln!("Service failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     match run(&arguments) {
         Ok(output) => {
             if let Err(error) = write_output(output) {
@@ -277,7 +315,7 @@ fn run_with_stdin_and_node_paths(
             return Ok(Output::Text(help_text()));
         }
         if argument == "--version" {
-            return Ok(Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))));
+            return Ok(Output::Text(format!("{}\n", esbuild_rs::service::VERSION)));
         }
         if let Some(value) = parse_bool_flag(argument, "--minify") {
             let value = value?;
@@ -1560,7 +1598,7 @@ mod tests {
         let Output::Text(version) = run(&["--version".into()]).expect("version succeeds") else {
             panic!("expected version text");
         };
-        assert_eq!(version, format!("{}\n", env!("CARGO_PKG_VERSION")));
+        assert_eq!(version, format!("{}\n", esbuild_rs::service::VERSION));
     }
 
     #[test]

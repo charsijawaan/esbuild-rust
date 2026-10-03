@@ -3,15 +3,15 @@
 This is an experimental, AI-generated Rust port of esbuild. It is incomplete,
 unaudited, and not an official esbuild project.
 
-Status reviewed on 2026-10-03 against committed checkpoint `70012e7`, including
-the injection implementation at `02230a5`. All comparisons target
+Status reviewed on 2026-10-04 through the native stateless service integration,
+following native checkpoint `fb01f71`. All comparisons target
 `6ff1d8b0d8c134e867a397eef39702a223ebef9e` (esbuild 0.28.1), as recorded in
-[UPSTREAM.md](UPSTREAM.md). These measurements do not cover later or
-uncommitted changes.
+[UPSTREAM.md](UPSTREAM.md). Separate plugin, context, cancellation, and compiler
+proposals are excluded until verified and committed.
 
 ## What the percentages mean
 
-- **Captured fixtures: 87.79% active** (12,324 / 14,038). These cases compare
+- **Captured fixtures: 88.19% active** (12,380 / 14,038). These cases compare
   original upstream output or diagnostics exactly in the normal test suite.
   This measures the captured corpus, not all upstream behavior.
 - **Original CLI/runtime suite: 99.93% passing** (1,461 / 1,462), matching
@@ -35,28 +35,30 @@ outside the port.
 | Captured corpus | Active | Remaining inactive | Captured |
 | --- | ---: | ---: | ---: |
 | Lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and lowering | 7,068 | 1,575 | 8,643 |
-| Bundler | 932 | 139 | 1,071 |
+| JS/TS parser and lowering | 7,116 | 1,527 | 8,643 |
+| Bundler | 940 | 131 | 1,071 |
 | Go API formatting/directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,324 | 1,714 | 14,038 |
+| Total | 12,380 | 1,658 | 14,038 |
 
-The parser backlog comprises 894 cases from `js_parser_test.go`, 559 from
-`ts_parser_test.go`, and 122 from `js_parser_lower_test.go`, calculated from
+The parser backlog comprises 879 cases from `js_parser_test.go`, 555 from
+`ts_parser_test.go`, and 93 from `js_parser_lower_test.go`, calculated from
 [the captured cases](tests/upstream/js_parser.json) and
 [the committed active indices](tests/upstream/js_parser_active.json).
 Inactive means not accepted as passing coverage; it can include output or
 diagnostic mismatches, unsupported harness options/filesystems, and candidates
 awaiting review. It does not mean one missing feature per case.
 
-[The latest complete runtime report](tests/upstream/end_to_end_injection_checkpoint.json)
-records the Rust binary from `02230a5`, both binary hashes, the environment,
+[The complete class-parameter runtime report](tests/upstream/end_to_end_class_parameter_checkpoint.json)
+records the Rust binary from `28438b2`, both binary hashes, the environment,
 and the shared case-80 failure. Rust and Go have the same pass/fail outcome for
 all 1,462 registered cases in that run. Other environments remain unverified.
 
 [The source-level inventory](tests/upstream/test_inventory.json) separately
 records 1,271 JavaScript API registrations, 97 plugin registrations, and 13 WASM
-registrations. These suites have not been established as passing against the
-Rust port. Seven Go utility test files still require a correspondence audit
+registrations. The original Node wrapper now passes 22 selected core API
+registrations and the original binary-stdin build in both worker modes through
+the native service. This bounded selection does not establish the wider suites
+as passing. Seven Go utility test files still require a correspondence audit
 (`compat`, `fs`, `helpers/dataurl`, `js_ast`, `logger`, `resolver/yarnpnp`, and
 `runtime`). Browser, Deno, Test262, decorator, fuzzer, and other scripts are
 listed without a complete case inventory. Do not add registration counts or
@@ -101,10 +103,10 @@ JavaScript or Go API distribution.
 | Surface | Current boundary |
 | --- | --- |
 | `internal/*` compiler packages | Parser/printer, resolver, linker, bundler, runtime helpers, minification, CSS, and source maps are implemented to varying degrees. The fixture backlog prevents a blanket package-parity claim. |
-| `cmd/esbuild`, `pkg/cli` | Native CLI implemented in `src/main.rs` and CLI helpers, including watch. Serve and service mode are absent; CLI/protocol compatibility is not complete. |
+| `cmd/esbuild`, `pkg/cli` | Native CLI includes watch and a stateless framed service for build/transform, formatting, and analysis. Serve and service contexts/plugins remain unsupported; CLI/protocol compatibility is not complete. |
 | `pkg/api` | Native Rust build/transform/context APIs, message formatting, metafile analysis, and plugin callbacks. Rebuild/watch/dispose exist; cancellation and serve do not. The 33 captured Go helper cases do not verify the whole API. |
 | Plugins | Native setup, resolve/load, lifecycle callbacks, nested resolution, plugin data, and watch paths exist. The upstream JavaScript plugin host and its service-protocol integration are not ported. |
-| Host/distribution | JavaScript and Go wrappers, the long-running service protocol, WebAssembly, npm/platform packages, and release/distribution tooling are not ported. |
+| Host/distribution | The native stateless service works with the pinned original Node wrapper in bounded tests. Wrappers are not distributed here; WebAssembly, npm/platform packages, and release/distribution tooling remain unported. |
 
 Remaining native work includes the inactive suites above and wider syntax,
 TypeScript/decorator, minifier, resolver, diagnostic, and source-map parity.
@@ -117,15 +119,16 @@ original upstream behavior before classifying them.
 
 ## Validation limits
 
-The latest recorded normal suite passed **1,045 Rust tests**, many of which
-iterate over captured cases; this is not 1,045 additional upstream cases.
+The latest recorded normal suite passed **1,123 Rust tests**, many of which
+iterate over captured cases; this is not 1,123 additional upstream cases.
 The exhaustive parser audit is separately ignored in normal runs. Strict
 Clippy remains blocked by **621 previously recorded errors**. See
 [tests/upstream/README.md](tests/upstream/README.md) for the committed checks,
 fixture selection rules, audit commands, and runtime checkpoint history.
 
-This status update inspected committed reports, fixtures, implementation, and
-focused tests; it did not rerun the full audits. Cross-platform filesystem and
+The service integration reran the normal suite, original core selections in
+both worker modes, native Go/JavaScript codec comparisons, and diagnostic
+probes. Cross-platform filesystem and
 runtime coverage, the wider API/plugin/WASM suites, security review, and
 performance benchmarks remain incomplete. The older 20-scenario release
 matrix in [EVALUATION.md](EVALUATION.md) is historical evidence, not a fresh

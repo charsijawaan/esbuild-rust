@@ -993,6 +993,33 @@ regressions against the approved earlier candidate; remaining function-header,
 indexed-access, and tagged-template mapping gaps are separate work. These native
 corrections are prerequisites for the original JavaScript service tests below.
 
+The native service now supports framed one-shot build/transform, message
+formatting, metafile analysis, binary input/file handoff, host version checking,
+concurrent requests, pings, and EOF draining. The original pinned Node wrapper
+and unchanged original assertions pass all 22 selected core registrations in
+both worker modes; pinned Go passes the same selections. Original binary-stdin
+build also passes in both modes. The isolated normal suite passes 1,123 tests;
+the opt-in codec comparison additionally passes against original Go and
+JavaScript codecs, and strict Clippy retains 621 existing errors without
+additions. Shared Go quoting closes the independently reviewed option/startup
+Unicode and control-character diagnostic mismatches.
+
+Run the selected original service tests with:
+
+```sh
+node scripts/audit_upstream_service_tests.mjs /path/to/pinned/esbuild \
+  /path/to/completed/rust-binary /tmp/service-core.json core
+ESBUILD_WORKER_THREADS=0 node scripts/audit_upstream_service_tests.mjs \
+  /path/to/pinned/esbuild /path/to/completed/rust-binary \
+  /tmp/service-core-no-workers.json core
+```
+
+Contexts, JavaScript plugins, cancellation, watch, and serve still return explicit
+unsupported errors in this committed service slice. Text fields require valid
+UTF-8 while binary source inputs retain their bytes. Explicit empty `mainFields`
+and full debug/verbose compilation traces remain native API limits. This bounded
+service acceptance adds no captured-fixture coverage or whole-API percentage.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
