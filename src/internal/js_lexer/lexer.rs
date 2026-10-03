@@ -395,7 +395,7 @@ impl Lexer {
         let found = if self.start == self.source.contents.len() {
             "end of file".to_owned()
         } else {
-            format!("{:?}", String::from_utf8_lossy(self.raw()))
+            crate::internal::helpers::quote_go_string(self.raw())
         };
         self.add_range_error(
             self.range(),

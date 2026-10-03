@@ -4072,16 +4072,6 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
 }
 
 fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformResult {
-    let Ok(input) = String::from_utf8(input.to_vec()) else {
-        return TransformResult {
-            errors: vec![Message {
-                text: "Formatted transform input must be valid UTF-8".into(),
-                kind: MessageKind::Error,
-                ..Message::default()
-            }],
-            ..TransformResult::default()
-        };
-    };
     let output_file = if options.sourcefile.is_empty() {
         "<stdin>-out".to_string()
     } else {
@@ -4107,7 +4097,7 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
     let build_options = BuildOptions {
         log_override: options.log_override,
         stdin: Some(BuildStdin {
-            contents: input,
+            contents_bytes: Some(input.to_vec()),
             sourcefile: options.sourcefile,
             loader: options.loader,
             ..BuildStdin::default()
@@ -4155,6 +4145,15 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
         ..BuildOptions::default()
     };
     let result = compile_transform(build_options);
+    // Transform only returns the primary output and its companion files. File
+    // loaders can emit additional assets; Go identifies the primary output by
+    // the shortest absolute path instead of treating each asset as code.
+    let code_path = result
+        .output_files
+        .iter()
+        .min_by_key(|output| output.path.len())
+        .map(|output| output.path.clone())
+        .unwrap_or_default();
     let mut transformed = TransformResult {
         mangle_cache: result.mangle_cache,
         errors: result.errors,
@@ -4162,15 +4161,12 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
         ..TransformResult::default()
     };
     for output in result.output_files {
-        if output.path.ends_with(".LEGAL.txt") {
-            transformed.legal_comments = output.contents;
-        } else if std::path::Path::new(&output.path)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("map"))
-        {
-            transformed.map = output.contents;
-        } else {
+        if output.path == code_path {
             transformed.code = output.contents;
+        } else if output.path == format!("{code_path}.map") {
+            transformed.map = output.contents;
+        } else if output.path == format!("{code_path}.LEGAL.txt") {
+            transformed.legal_comments = output.contents;
         }
     }
     transformed
@@ -7912,8 +7908,11 @@ mod tests {
         assert_eq!(result.errors.len(), 1);
         assert_eq!(
             result.errors[0].text,
-            "Formatted transform input must be valid UTF-8"
+            "Unexpected \"\\xff\""
         );
+        let location = result.errors[0].location.as_ref().unwrap();
+        assert_eq!(location.file, "<stdin>");
+        assert_eq!((location.line, location.column, location.length), (1, 0, 1));
     }
 
     #[test]

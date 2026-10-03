@@ -1046,6 +1046,17 @@ and executable exports, with 42 independent Go configurations. The isolated
 normal suite passes 1,142 tests and strict Clippy retains 621 existing errors
 without additions.
 
+CLI stdin builds and formatted native transforms now forward exact bytes to
+loaders. Invalid JS/TS bytes reach the lexer and receive Go's quoted diagnostic
+and byte range; formatted file-loader transforms select the primary output
+instead of returning an asset as code. Eight regressions cover 120 native Go
+transform comparisons, 92 exact successful stdin CLI runs, 10 disk asset cases,
+and 60 executable modules. The isolated normal suite passes 1,150 tests and
+strict Clippy retains 621 existing errors without additions. Invalid source
+excerpts still use the public UTF-8 String location field, so Go's raw invalid
+stderr bytes and Rust's replacement-character excerpt differ. Existing CLI
+file/copy stdin restrictions and flag-error presentation remain unchanged.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
