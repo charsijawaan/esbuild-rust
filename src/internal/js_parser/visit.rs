@@ -2108,7 +2108,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 if has_if_scope {
                     core.push_next_scope_for_visit_pass(ScopeKind::Block);
                 }
-                visit_function(core, &mut function.function, resolve_identifiers);
+                visit_function(core, &mut function.function, resolve_identifiers, false);
                 mark_inlinable_function_declaration(core, &function.function);
                 remove_overwritten_function = !function.is_export
                     && function.function.name.is_some_and(|name| {
@@ -2419,7 +2419,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                             core.symbols[name.reference.inner_index as usize].flags |=
                                 SymbolFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED;
                         }
-                        visit_function(core, &mut function.function, resolve_identifiers);
+                        visit_function(core, &mut function.function, resolve_identifiers, false);
                     }
                     Some(StmtData::Class(class)) => {
                         if core.options.keep_names {
@@ -5421,7 +5421,12 @@ fn lower_async_arrow(core: &mut ParserCore, loc: Loc, arrow: &mut ArrowExpr, use
     arrow.prefer_expr = true;
 }
 
-fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identifiers: bool) {
+fn visit_function(
+    core: &mut ParserCore,
+    function: &mut Function,
+    resolve_identifiers: bool,
+    is_lowered_private_method: bool,
+) {
     let should_lower_async = function.is_async
         && (core
             .options
@@ -5452,7 +5457,8 @@ fn visit_function(core: &mut ParserCore, function: &mut Function, resolve_identi
     let old_arguments_capture_ref = core.visit_arguments_capture_ref.take();
     let old_inside_async_arrow = std::mem::take(&mut core.visit_inside_async_arrow);
     let old_async_arrow_this_usage = std::mem::take(&mut core.async_arrow_this_usage);
-    let should_lower_super = should_lower_async && core.visit_super_home_ref.is_some();
+    let should_lower_super = (should_lower_async || is_lowered_private_method)
+        && core.visit_super_home_ref.is_some();
     let old_lower_super_property_access =
         std::mem::replace(&mut core.lower_super_property_access, should_lower_super);
     let old_super_receiver_is_home = std::mem::take(&mut core.visit_super_receiver_is_home);
@@ -6063,7 +6069,18 @@ fn visit_class(
             &mut property.initializer_or_nil,
             inferred_name.as_deref(),
         );
-        visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
+        if matches!(
+            property.kind,
+            PropertyKind::Method | PropertyKind::Getter | PropertyKind::Setter
+        ) && matches!(property.key.data.as_deref(), Some(ExprData::PrivateIdentifier(private))
+            if lowered_private_storage_ref(core, private.reference).is_some())
+            && let Some(ExprData::Function(method)) = property.value_or_nil.data.as_deref_mut()
+        {
+            // These methods move outside the class even when async syntax stays native.
+            visit_function(core, &mut method.function, resolve_identifiers, true);
+        } else {
+            visit_expr(core, &mut property.value_or_nil, resolve_identifiers);
+        }
         visit_expr(core, &mut property.initializer_or_nil, resolve_identifiers);
         if matches!(
             property.kind,
@@ -13430,7 +13447,7 @@ fn visit_expr_with_target_and_context(
             } else {
                 None
             };
-            visit_function(core, &mut function.function, resolve_identifiers);
+            visit_function(core, &mut function.function, resolve_identifiers, false);
             if core.options.minify_syntax
                 && name.is_some_and(|name| {
                     core.symbols[usize::try_from(name.reference.inner_index).expect("symbol index")]

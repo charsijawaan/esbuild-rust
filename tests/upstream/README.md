@@ -578,6 +578,18 @@ Cases 1240, 1267, 1268, and 1269 are newly passing without regressions relative
 to `3e98ebf`. Case 80 remains the shared environment failure, leaving 48
 Rust-only failures.
 
+Private methods, getters, and setters moved outside their class now lower
+`super` accesses even when async syntax stays native. Nested arrows inherit this
+lowering state, while ordinary nested functions reset it. An executable
+regression passes 32 Rust/pinned-Go transform/bundle combinations covering
+instance/static members, native/lowered async functions, accessors, computed
+assignments, factory calls, reassignment, minification, and name preservation.
+The normal suite passes 991 tests, the parser audit preserves all 7,061 active
+cases, and strict Clippy retains 623 existing errors without added diagnostics.
+Explored pinned-Go output shares gaps for native optional `super` calls in moved
+methods and implicit receivers in lowered async arrows; these are not claimed
+as covered by this regression.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
