@@ -2091,6 +2091,7 @@ fn declare_top_level_symbols(
                     super::parser_core::NamespaceImportItems {
                         entries,
                         import_record_index: import.import_record_index,
+                        warned_calls: HashSet::new(),
                     },
                 );
             }

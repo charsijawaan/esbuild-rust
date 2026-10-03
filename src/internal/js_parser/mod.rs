@@ -7,6 +7,7 @@ mod define;
 mod duplicate_properties;
 mod global_name;
 mod injection;
+mod import_warnings;
 mod json;
 mod lower_typescript;
 mod lower_using;

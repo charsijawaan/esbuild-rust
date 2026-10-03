@@ -7,6 +7,7 @@
   "TestCSSAtImportExtensionOrderCollisionUnsupported",
   "TestCSSCaseInsensitivity",
   "TestCSSFromJSMissingStarImport",
+  "TestCallImportNamespaceWarning",
   "TestDeduplicateRulesGlobalVsLocalNames",
   "TestDropLabels",
   "TestEdgeCaseIssue2793WithoutSplitting",

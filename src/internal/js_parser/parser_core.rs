@@ -38,6 +38,7 @@ pub(crate) struct ScopeOrder {
 pub(crate) struct NamespaceImportItems {
     pub(crate) entries: HashMap<String, LocRef>,
     pub(crate) import_record_index: u32,
+    pub(crate) warned_calls: HashSet<super::import_warnings::ImportNamespaceCallKind>,
 }
 
 #[derive(Clone, Copy, Debug)]

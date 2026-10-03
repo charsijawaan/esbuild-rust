@@ -28,6 +28,7 @@ use crate::internal::{
 };
 
 use super::duplicate_properties::{DuplicatePropertiesIn, find_duplicate_properties};
+use super::import_warnings::{ImportNamespaceCallKind, warn_about_import_namespace_call};
 use super::{
     lower_typescript::lower_nested_type_script_statements,
     parser::{apply_keep_names_to_statements, apply_keep_names_to_type_script_namespaces},
@@ -12503,6 +12504,7 @@ fn visit_expr_with_target_and_context(
                     ..ExprVisitContext::default()
                 },
             );
+            warn_about_import_namespace_call(core, &new.target, ImportNamespaceCallKind::New);
             let mut has_spread = false;
             for argument in &mut new.args {
                 has_spread |= matches!(argument.data.as_deref(), Some(ExprData::Spread(_)));
@@ -12535,6 +12537,7 @@ fn visit_expr_with_target_and_context(
                 },
             );
             core.lower_super_property_access = old_lower_super_property_access;
+            warn_about_import_namespace_call(core, &call.target, ImportNamespaceCallKind::Call);
             // Upstream treats calls to the CommonJS module's "require" property
             // as require calls for Webpack compatibility. Only rewrite actual
             // calls, not reads, constructor targets, or optional property access.
@@ -14043,6 +14046,11 @@ fn visit_expr_with_target_and_context(
             let jsx_source_line = core.jsx_source_line;
             let jsx_source_column = core.jsx_source_column;
             visit_expr(core, &mut element.tag_or_nil, resolve_identifiers);
+            warn_about_import_namespace_call(
+                core,
+                &element.tag_or_nil,
+                ImportNamespaceCallKind::JsxTag,
+            );
             let mut has_spread = false;
             for property in &mut element.properties {
                 if property.kind == PropertyKind::Spread {
@@ -14124,6 +14132,13 @@ fn visit_expr_with_target_and_context(
                     } else {
                         instantiate_jsx_define(core, expression.loc, false, resolve_identifiers)
                     };
+                    if !core.options.jsx.automatic_runtime {
+                        warn_about_import_namespace_call(
+                            core,
+                            &target,
+                            ImportNamespaceCallKind::Call,
+                        );
+                    }
                     let kind = if matches!(target.data.as_deref(), Some(ExprData::Dot(_))) {
                         CallKind::TargetWasOriginallyPropertyAccess
                     } else {

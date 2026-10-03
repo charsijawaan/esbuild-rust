@@ -10,9 +10,9 @@ The captured corpus currently contains 14,038 concrete cases:
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
 | JS/TS parser and parser lowering | 7,107 | 1,536 | 8,643 |
-| Bundler | 939 | 132 | 1,071 |
+| Bundler | 940 | 131 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,370 | 1,668 | 14,038 |
+| Total | 12,371 | 1,667 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -915,6 +915,21 @@ The isolated normal suite passes 1,055 tests, the exhaustive parser audit passes
 7,107 cases without regressions, and strict Clippy retains 621 existing errors
 without added diagnostics.
 
+The complete isolated runtime audit at `a37a5ae` is recorded in
+`end_to_end_string_folding_checkpoint.json`: 1,461 passed, one shared Go/Rust
+failure at case 80, and no timeouts or regressions relative to `0d1f035`.
+
+Namespace import calls, constructors, JSX components, and custom JSX factories
+now produce upstream's warnings and default-import suggestions. Warnings are
+deduplicated per binding and usage kind, preserve source ranges and Unicode
+names, and include TypeScript's interoperability note where applicable.
+The original bundler snapshot is newly active with unchanged assertions;
+eight additional regressions and 28 independent Go examples cover format
+conversion, shadowing, dependency files, warning overrides, and suggestions.
+The isolated normal suite passes 1,063 tests; a subsequent library/regression
+run verifies warning state stored with each namespace binding. Strict Clippy
+retains 621 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -1070,7 +1085,7 @@ instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 Files containing invalid UTF-8 are additionally stored in a base64 sidecar so
 binary-loader snapshots retain the exact upstream bytes.
 
-The active bundler tranche exact-compares 855 Unix snapshots and 83
+The active bundler tranche exact-compares 856 Unix snapshots and 83
 diagnostic-only cases from the default, DCE, import-star, TypeScript import-star,
 lowering, TypeScript, package-json,
 tsconfig, loader, CSS, code-splitting, Yarn PnP, import-phase, and entry-point glob suites that use
@@ -1104,7 +1119,7 @@ compatibility, missing or global `composes` names, output paths, and external
 patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
-when selecting an inactive case. `bundler_additional_active.json` enables 106
+when selecting an inactive case. `bundler_additional_active.json` enables 107
 reviewed cases beyond the original option-based selection. This includes all five
 captured explicit resource-management fixtures: synchronous and asynchronous
 disposal, `for of` and `for await` iterations, unsupported async targets, module
@@ -1112,8 +1127,8 @@ declaration hoisting, and TypeScript namespace exports. Their original option
 bits and output snapshots are unchanged. It also includes nine injection cases
 covering duplicate paths, import order, TypeScript, JSX dotted names, `import.meta`,
 string export names, non-bundled builds, and copied files. It also covers bundled
-and non-bundled import-assignment diagnostics. So 12,370 concrete upstream cases
-are currently active in `cargo test`; the remaining 132 captured bundler cases are the parity backlog,
+and non-bundled import-assignment diagnostics. So 12,371 concrete upstream cases
+are currently active in `cargo test`; the remaining 131 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
 List active and inactive bundler fixtures, including their filesystem variant:
