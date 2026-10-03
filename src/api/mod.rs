@@ -25,7 +25,7 @@ use crate::internal::{
     cache::CacheSet,
     config::{self, Mode},
     css_parser, css_printer,
-    fs::{Fs, RealFsOptions, WatchData, real_fs},
+    fs::{Fs, MockKind, RealFsOptions, WatchData, mock_fs, real_fs},
     helpers::{
         encode_string_as_shortest_data_url, escape_closing_tag, mime_type_by_extension,
         quote_for_json, string_to_utf16,
@@ -3242,6 +3242,7 @@ fn build_with_output_state(
         prepared_plugins,
         previous_hashes,
         watch_data_sink,
+        None,
     );
     let latest_hashes = result
         .output_files
@@ -3259,6 +3260,7 @@ fn build_with_output_state_core(
     prepared_plugins: &PreparedPlugins,
     previous_hashes: Option<&HashMap<String, String>>,
     watch_data_sink: Option<&Mutex<WatchData>>,
+    file_system: Option<Arc<dyn Fs>>,
 ) -> BuildResult {
     let log = Log::new_defer(
         DeferLogKind::NoVerboseOrDebug,
@@ -3281,12 +3283,19 @@ fn build_with_output_state_core(
     let write = options.write;
     let write_to_stdout = options.outdir.is_empty() && options.outfile.is_empty();
     let allow_overwrite = options.allow_overwrite;
-    let file_system: Arc<dyn Fs> = match real_fs(RealFsOptions {
-        abs_working_dir: options.abs_working_dir.clone(),
-        want_watch_data: watch_data_sink.is_some(),
-        ..RealFsOptions::default()
-    }) {
-        Ok(file_system) => file_system.into(),
+    let is_transform = file_system.is_some();
+    let file_system: Arc<dyn Fs> = match file_system.map_or_else(
+        || {
+            real_fs(RealFsOptions {
+                abs_working_dir: options.abs_working_dir.clone(),
+                want_watch_data: watch_data_sink.is_some(),
+                ..RealFsOptions::default()
+            })
+            .map(Arc::<dyn Fs>::from)
+        },
+        Ok,
+    ) {
+        Ok(file_system) => file_system,
         Err(error) => {
             return BuildResult {
                 errors: vec![Message {
@@ -3558,7 +3567,7 @@ fn build_with_output_state_core(
     }
     let output_file = if options.outfile.is_empty() {
         String::new()
-    } else if file_system.is_abs(&options.outfile) {
+    } else if is_transform || file_system.is_abs(&options.outfile) {
         options.outfile.clone()
     } else {
         file_system.join(&[file_system.cwd(), &options.outfile])
@@ -3920,9 +3929,16 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         options.loader,
         Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None
     );
+    // CSS source maps must also pass through the scanner and linker so input
+    // maps are parsed and composed just as they are for JavaScript transforms.
+    let needs_css_source_map_linker = options.sourcemap != BuildSourceMap::None
+        && matches!(options.loader, Loader::Css | Loader::GlobalCss | Loader::LocalCss);
     // Lowering can introduce any of the runtime helpers. Use the same linker
     // as builds to include their dependencies and rename them with user code.
-    if options.format != BuildFormat::Default || needs_javascript_linker {
+    if options.format != BuildFormat::Default
+        || needs_javascript_linker
+        || needs_css_source_map_linker
+    {
         return transform_with_linker(input.as_ref(), options);
     }
     let input_contents = Arc::<[u8]>::from(input.as_ref());
@@ -4079,7 +4095,7 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
     } else {
         options.tsconfig_raw
     };
-    let result = build(BuildOptions {
+    let build_options = BuildOptions {
         log_override: options.log_override,
         stdin: Some(BuildStdin {
             contents: input,
@@ -4128,7 +4144,8 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
         keep_names: options.keep_names,
         tsconfig_raw,
         ..BuildOptions::default()
-    });
+    };
+    let result = compile_transform(build_options);
     let mut transformed = TransformResult {
         mangle_cache: result.mangle_cache,
         errors: result.errors,
@@ -4148,6 +4165,20 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
         }
     }
     transformed
+}
+
+fn compile_transform(options: BuildOptions) -> BuildResult {
+    // Upstream's TransformCall scans against an empty Unix filesystem rooted
+    // at "/". A sourcefile is a label, not a resolve directory: external input
+    // maps and missing sourcesContent cannot read host files.
+    build_with_output_state_core(
+        options,
+        &CacheSet::default(),
+        &PreparedPlugins::default(),
+        None,
+        None,
+        Some(Arc::new(mock_fs(&HashMap::new(), MockKind::Unix, "/"))),
+    )
 }
 
 fn generate_transform_source_map(

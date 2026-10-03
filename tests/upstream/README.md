@@ -930,6 +930,19 @@ The isolated normal suite passes 1,063 tests; a subsequent library/regression
 run verifies warning state stored with each namespace binding. Strict Clippy
 retains 621 existing errors without added diagnostics.
 
+CSS transforms with source maps now use the scanner/linker to compose input
+maps. Transforms use upstream's empty Unix filesystem, so sourcefile labels
+cannot read host maps or missing original contents, and relative output labels
+remain relative. Six regressions cover chaining, indexed JavaScript maps,
+diagnostics, malformed URLs, isolation, and executable stack traces. The
+independent native Go API matrix compares 160 configurations and 444 chained
+mapping positions; all chained positions match. Raw mapping strings and some
+fallback CSS positions still differ and are separate printer work.
+The fresh isolated normal suite passes 1,069 tests; all six new tests also pass
+with pinned Go comparisons enabled. Strict Clippy retains 621 existing errors
+without added diagnostics. This adds no captured-fixture or JavaScript API
+coverage claim.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
