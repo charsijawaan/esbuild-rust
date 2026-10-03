@@ -713,6 +713,21 @@ The complete runtime audit at `494cc56` is recorded in
 Cases 1348 and 1414 are newly passing without regressions relative to `e151e1a`.
 Case 80 remains the shared environment failure, leaving 18 Rust-only failures.
 
+File builds now load referenced input source maps for JavaScript and CSS when
+output source maps are enabled. Relative paths, file URLs, base64/percent data
+URLs, query/fragment suffixes, missing source-content filling, and output-path
+rebasing feed the existing map composition pipeline. Read/parse diagnostics
+retain their comment locations and overrides. Native file errors use upstream's
+OS error text, and empty source files retain empty-string content. Regressions
+cover 40 map configurations checked with pinned Go, escaped filenames, exact
+read diagnostics, and Node stack traces pointing to the original file/line.
+The normal suite passes 1,009 tests, including the active parser fixtures;
+strict Clippy retains 623 existing errors without added diagnostics. The
+inactive default bundler audit still has 47 failures, 13 unsupported option
+cases, two unsupported filesystem cases, and one unmapped option case. URL
+parser error wording and default transform input-map integration remain
+separate work.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

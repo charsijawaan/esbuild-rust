@@ -1,5 +1,7 @@
 //! Port of upstream `internal/bundler`.
 
+mod source_map;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -2838,6 +2840,14 @@ pub fn scan_bundle(
             Some(stdin.abs_resolve_dir.as_str()),
             &mut result,
         );
+        source_map::load_input_source_map(
+            log,
+            file_system,
+            caches,
+            &file_options,
+            &stdin.abs_resolve_dir,
+            &mut result.file.input_file,
+        );
         enqueue_dependencies(&result, caches, &mut queued, &mut pending);
         let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
         bundle
@@ -3185,6 +3195,15 @@ pub fn scan_bundle(
             tsconfig.as_ref(),
             Some(&loaded.abs_resolve_dir),
             &mut result,
+        );
+
+        source_map::load_input_source_map(
+            log,
+            file_system,
+            caches,
+            &file_options,
+            &loaded.abs_resolve_dir,
+            &mut result.file.input_file,
         );
 
         enqueue_dependencies(&result, caches, &mut queued, &mut pending);

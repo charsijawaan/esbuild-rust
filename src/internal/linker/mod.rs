@@ -7715,6 +7715,26 @@ struct SourceMapItem {
     quoted_contents: Vec<u8>,
 }
 
+fn source_map_relative_url(path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut result = String::new();
+    if path.split('/').next().is_some_and(|segment| segment.contains(':')) {
+        result.push_str("./");
+    }
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b' ' | b'-' | b'.' | b'_' | b'~' | b'$' | b'&' | b'+' | b',' | b'/' | b':' | b';' | b'=' | b'@')
+        {
+            result.push(char::from(byte));
+        } else {
+            result.push('%');
+            result.push(char::from(HEX[usize::from(byte >> 4)]));
+            result.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+    }
+    result
+}
+
 fn quoted_source_content(
     content: Option<&crate::internal::sourcemap::SourceContent>,
     ascii_only: bool,
@@ -7810,7 +7830,15 @@ pub fn generate_source_map_for_chunk(
         if index != 0 {
             joiner.add_string(", ");
         }
-        joiner.add_bytes(quote_for_json(item.source.as_bytes(), options.ascii_only));
+        let source = if let Ok(url) = url::Url::parse(&item.source)
+            && let Ok(path) = url.to_file_path()
+            && let Some(relative) = file_system.rel(chunk_abs_dir, &path.to_string_lossy())
+        {
+            source_map_relative_url(&relative.replace('\\', "/"))
+        } else {
+            item.source.clone()
+        };
+        joiner.add_bytes(quote_for_json(source.as_bytes(), options.ascii_only));
     }
     joiner.add_string("]");
     if !options.source_root.is_empty() {

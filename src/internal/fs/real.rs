@@ -533,7 +533,17 @@ fn fs_error(error: &std::io::Error) -> FsError {
         std::io::ErrorKind::PermissionDenied => FsErrorKind::PermissionDenied,
         _ => FsErrorKind::Other,
     };
-    FsError::new(kind, error.to_string())
+    let mut message = error.to_string();
+    if let Some(code) = error.raw_os_error() {
+        let suffix = format!(" (os error {code})");
+        if message.ends_with(&suffix) {
+            message.truncate(message.len() - suffix.len());
+            if !cfg!(windows) {
+                message.make_ascii_lowercase();
+            }
+        }
+    }
+    FsError::new(kind, message)
 }
 
 #[cfg(test)]
