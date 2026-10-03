@@ -2175,6 +2175,13 @@ fn resolve_import_records_from_directory(
     let plugin_data = result.file.plugin_data.clone();
     let source_directory =
         source_directory.map_or_else(|| file_system.dir(&source.key_path.text), str::to_string);
+    // A raw build config replaces discovered configs and is anchored at cwd.
+    // Upstream's tsConfigForDir excludes imports from node_modules.
+    let tsconfig = if crate::internal::helpers::is_inside_node_modules(&source_directory) {
+        tsconfig
+    } else {
+        options.tsconfig_raw_config.as_deref().or(tsconfig)
+    };
     let Some(records) = result
         .file
         .input_file

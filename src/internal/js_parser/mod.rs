@@ -15,6 +15,7 @@ mod options;
 mod parser;
 mod parser_core;
 mod parser_types;
+mod regexp;
 mod source_map;
 mod standalone_helpers;
 mod symbols;

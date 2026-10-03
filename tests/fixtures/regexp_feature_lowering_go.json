@@ -1,0 +1,2248 @@
+{
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+  "source": "unchanged pinned JS wrapper against pinned Go; independent inputs; no Rust-derived expectations",
+  "cases": [
+    {
+      "name": "feature0-supported-target",
+      "input": "result = /./y",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es6"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /./y;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature0-unsupported-target",
+      "input": "result = /./y",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\".\", \"y\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature0-force-unsupported",
+      "input": "result = /./y",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es6",
+        "supported": {
+          "regexp-sticky-and-unicode-flags": false
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\".\", \"y\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature0-force-supported",
+      "input": "result = /./y",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5",
+        "supported": {
+          "regexp-sticky-and-unicode-flags": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /./y;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature0-diagnostic-warning",
+      "input": "result = /./y",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\".\", \"y\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 12,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /./y",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "The regular expression flag \"y\" is not available in the configured target environment (\"es5\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "feature1-supported-target",
+      "input": "result = /./u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es6"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /./u;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature1-unsupported-target",
+      "input": "result = /./u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\".\", \"u\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature1-force-unsupported",
+      "input": "result = /./u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es6",
+        "supported": {
+          "regexp-sticky-and-unicode-flags": false
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\".\", \"u\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature1-force-supported",
+      "input": "result = /./u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5",
+        "supported": {
+          "regexp-sticky-and-unicode-flags": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /./u;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature1-diagnostic-warning",
+      "input": "result = /./u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\".\", \"u\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 12,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /./u",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "The regular expression flag \"u\" is not available in the configured target environment (\"es5\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "feature2-supported-target",
+      "input": "result = /a.b/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /a.b/s;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature2-unsupported-target",
+      "input": "result = /a.b/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"a.b\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature2-force-unsupported",
+      "input": "result = /a.b/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018",
+        "supported": {
+          "regexp-dot-all-flag": false
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"a.b\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature2-force-supported",
+      "input": "result = /a.b/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "supported": {
+          "regexp-dot-all-flag": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /a.b/s;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature2-diagnostic-warning",
+      "input": "result = /a.b/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"a.b\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 14,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /a.b/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "The regular expression flag \"s\" is not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "feature3-supported-target",
+      "input": "result = /(?<=x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /(?<=x)/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature3-unsupported-target",
+      "input": "result = /(?<=x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature3-force-unsupported",
+      "input": "result = /(?<=x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018",
+        "supported": {
+          "regexp-lookbehind-assertions": false
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature3-force-supported",
+      "input": "result = /(?<=x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "supported": {
+          "regexp-lookbehind-assertions": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /(?<=x)/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature3-diagnostic-warning",
+      "input": "result = /(?<=x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 11,
+              "file": "regexp.js",
+              "length": 3,
+              "line": 1,
+              "lineText": "result = /(?<=x)/",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Lookbehind assertions in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "feature4-supported-target",
+      "input": "result = /(?<!x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /(?<!x)/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature4-unsupported-target",
+      "input": "result = /(?<!x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<!x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature4-force-unsupported",
+      "input": "result = /(?<!x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018",
+        "supported": {
+          "regexp-lookbehind-assertions": false
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<!x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature4-force-supported",
+      "input": "result = /(?<!x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "supported": {
+          "regexp-lookbehind-assertions": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /(?<!x)/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature4-diagnostic-warning",
+      "input": "result = /(?<!x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<!x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 11,
+              "file": "regexp.js",
+              "length": 3,
+              "line": 1,
+              "lineText": "result = /(?<!x)/",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Lookbehind assertions in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "feature5-supported-target",
+      "input": "result = /(?<name>x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /(?<name>x)/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature5-unsupported-target",
+      "input": "result = /(?<name>x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<name>x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature5-force-unsupported",
+      "input": "result = /(?<name>x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018",
+        "supported": {
+          "regexp-named-capture-groups": false
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<name>x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature5-force-supported",
+      "input": "result = /(?<name>x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "supported": {
+          "regexp-named-capture-groups": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /(?<name>x)/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature5-diagnostic-warning",
+      "input": "result = /(?<name>x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<name>x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 11,
+              "file": "regexp.js",
+              "length": 7,
+              "line": 1,
+              "lineText": "result = /(?<name>x)/",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Named capture groups in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "feature6-supported-target",
+      "input": "result = /\\p{Emoji}/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /\\p{Emoji}/u;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature6-unsupported-target",
+      "input": "result = /\\p{Emoji}/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"\\\\p{Emoji}\", \"u\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature6-force-unsupported",
+      "input": "result = /\\p{Emoji}/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018",
+        "supported": {
+          "regexp-unicode-property-escapes": false
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"\\\\p{Emoji}\", \"u\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature6-force-supported",
+      "input": "result = /\\p{Emoji}/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "supported": {
+          "regexp-unicode-property-escapes": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /\\p{Emoji}/u;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature6-diagnostic-warning",
+      "input": "result = /\\p{Emoji}/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"\\\\p{Emoji}\", \"u\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 10,
+              "file": "regexp.js",
+              "length": 9,
+              "line": 1,
+              "lineText": "result = /\\p{Emoji}/u",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Unicode property escapes in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "feature7-supported-target",
+      "input": "result = /x/d",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2022"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /x/d;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature7-unsupported-target",
+      "input": "result = /x/d",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2021"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"x\", \"d\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature7-force-unsupported",
+      "input": "result = /x/d",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2022",
+        "supported": {
+          "regexp-match-indices": false
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"x\", \"d\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature7-force-supported",
+      "input": "result = /x/d",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2021",
+        "supported": {
+          "regexp-match-indices": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /x/d;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature7-diagnostic-warning",
+      "input": "result = /x/d",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2021",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"x\", \"d\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 12,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /x/d",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "The regular expression flag \"d\" is not available in the configured target environment (\"es2021\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "feature8-supported-target",
+      "input": "result = /[\\p{White_Space}&&\\p{ASCII}]/v",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2024"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /[\\p{White_Space}&&\\p{ASCII}]/v;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature8-unsupported-target",
+      "input": "result = /[\\p{White_Space}&&\\p{ASCII}]/v",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2022"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"[\\\\p{White_Space}&&\\\\p{ASCII}]\", \"v\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature8-force-unsupported",
+      "input": "result = /[\\p{White_Space}&&\\p{ASCII}]/v",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2024",
+        "supported": {
+          "regexp-set-notation": false
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"[\\\\p{White_Space}&&\\\\p{ASCII}]\", \"v\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature8-force-supported",
+      "input": "result = /[\\p{White_Space}&&\\p{ASCII}]/v",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2022",
+        "supported": {
+          "regexp-set-notation": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /[\\p{White_Space}&&\\p{ASCII}]/v;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "feature8-diagnostic-warning",
+      "input": "result = /[\\p{White_Space}&&\\p{ASCII}]/v",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2022",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"[\\\\p{White_Space}&&\\\\p{ASCII}]\", \"v\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 39,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /[\\p{White_Space}&&\\p{ASCII}]/v",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "The regular expression flag \"v\" is not available in the configured target environment (\"es2022\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "flags-order",
+      "input": "result = /a/gimsyudv",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"a\", \"gimsyudv\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "no-flags",
+      "input": "result = /(?<name>x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<name>x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "escaped-slashes",
+      "input": "result = /a\\/b\\/c/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"a\\\\/b\\\\/c\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "quoted-backslash",
+      "input": "result = /\"'\\\\\\p{Emoji}/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(`\"'\\\\\\\\\\\\p{Emoji}`, \"u\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "unicode-pattern",
+      "input": "result = /(?<=🦊é)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=\\u{1F98A}\\xE9)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "unicode-before-feature",
+      "input": "result = /🦊é(?<=x)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"\\u{1F98A}\\xE9(?<=x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 17,
+              "file": "regexp.js",
+              "length": 3,
+              "line": 1,
+              "lineText": "result = /🦊é(?<=x)/",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Lookbehind assertions in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "escaped-feature",
+      "input": "result = /\\(\\?<=x\\)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /\\(\\?<=x\\)/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "double-escaped-property",
+      "input": "result = /\\\\p{Emoji}/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /\\\\p{Emoji}/u;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "class-property-quirk",
+      "input": "result = /[\\p{Emoji}]/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /[\\p{Emoji}]/u;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "class-feature",
+      "input": "result = /[(?<name>)]/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /[(?<name>)]/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "class-escaped-close",
+      "input": "result = /[\\])]/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /[\\])]/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "nonunicode-property",
+      "input": "result = /\\p{Emoji}/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /\\p{Emoji}/;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "uppercase-property",
+      "input": "result = /\\P{ASCII}/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"\\\\P{ASCII}\", \"u\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 10,
+              "file": "regexp.js",
+              "length": 9,
+              "line": 1,
+              "lineText": "result = /\\P{ASCII}/u",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Unicode property escapes in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "lookbehind-before-named",
+      "input": "result = /(?<=x)(?<name>y)/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=x)(?<name>y)\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 11,
+              "file": "regexp.js",
+              "length": 3,
+              "line": 1,
+              "lineText": "result = /(?<=x)(?<name>y)/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Lookbehind assertions in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "named-before-lookbehind",
+      "input": "result = /(?<name>y)(?<=x)/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<name>y)(?<=x)\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 11,
+              "file": "regexp.js",
+              "length": 7,
+              "line": 1,
+              "lineText": "result = /(?<name>y)(?<=x)/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Named capture groups in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "lookbehind-supported-named-disabled",
+      "input": "result = /(?<=x)(?<name>y)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018",
+        "supported": {
+          "regexp-named-capture-groups": false
+        },
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=x)(?<name>y)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 17,
+              "file": "regexp.js",
+              "length": 7,
+              "line": 1,
+              "lineText": "result = /(?<=x)(?<name>y)/",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Named capture groups in regular expressions are not available in the configured target environment (\"es2018\" + 1 override)"
+          }
+        ]
+      }
+    },
+    {
+      "name": "property-before-flags",
+      "input": "result = /\\p{Emoji}/usy",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"\\\\p{Emoji}\", \"usy\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 10,
+              "file": "regexp.js",
+              "length": 9,
+              "line": 1,
+              "lineText": "result = /\\p{Emoji}/usy",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Unicode property escapes in regular expressions are not available in the configured target environment (\"es5\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "no-complete-validation",
+      "input": "result = /(?<=x))/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=x))\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 11,
+              "file": "regexp.js",
+              "length": 3,
+              "line": 1,
+              "lineText": "result = /(?<=x))/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Lookbehind assertions in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unmatched-paren",
+      "input": "result = /)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "esnext"
+      },
+      "runtime": false,
+      "response": {
+        "errors": [
+          {
+            "id": "",
+            "location": {
+              "column": 10,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /)/",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [],
+            "pluginName": "",
+            "text": "Unexpected \")\" in regular expression"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "unmatched-paren-before-flags",
+      "input": "result = /)/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "errors": [
+          {
+            "id": "",
+            "location": {
+              "column": 10,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /)/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [],
+            "pluginName": "",
+            "text": "Unexpected \")\" in regular expression"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "unclosed-group-quirk",
+      "input": "result = /(/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 12,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /(/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "The regular expression flag \"s\" is not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "incomplete-name-quirk",
+      "input": "result = /(?<x/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<x\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 15,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /(?<x/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "The regular expression flag \"s\" is not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "incomplete-property-quirk",
+      "input": "result = /\\p{Emoji/u",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /\\p{Emoji/u;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "duplicate-flags",
+      "input": "result = /x/ss",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "errors": [
+          {
+            "id": "",
+            "location": {
+              "column": 13,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /x/ss",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": {
+                  "column": 12,
+                  "file": "regexp.js",
+                  "length": 1,
+                  "line": 1,
+                  "lineText": "result = /x/ss",
+                  "namespace": "",
+                  "suggestion": ""
+                },
+                "text": "The first \"s\" was here:"
+              }
+            ],
+            "pluginName": "",
+            "text": "Duplicate flag \"s\" in regular expression"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "unknown-flag",
+      "input": "result = /x/z",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5"
+      },
+      "runtime": false,
+      "response": {
+        "errors": [
+          {
+            "id": "",
+            "location": {
+              "column": 12,
+              "file": "regexp.js",
+              "length": 0,
+              "line": 1,
+              "lineText": "result = /x/z",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [],
+            "pluginName": "",
+            "text": "Syntax error \"z\""
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "unterminated",
+      "input": "result = /x\n",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5"
+      },
+      "runtime": false,
+      "response": {
+        "errors": [
+          {
+            "id": "",
+            "location": {
+              "column": 11,
+              "file": "regexp.js",
+              "length": 0,
+              "line": 1,
+              "lineText": "result = /x",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [],
+            "pluginName": "",
+            "text": "Unterminated regular expression"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "normal-gim",
+      "input": "result = /a/gim",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /a/gim;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "override-silent",
+      "input": "result = /(?<=x)/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "silent"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=x)\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "override-error",
+      "input": "result = /(?<=x)/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "error"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "errors": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 11,
+              "file": "regexp.js",
+              "length": 3,
+              "line": 1,
+              "lineText": "result = /(?<=x)/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Lookbehind assertions in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "override-warning-multiline",
+      "input": "\nvar result = /(?<name>x)/;",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "var result = new RegExp(\"(?<name>x)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 15,
+              "file": "regexp.js",
+              "length": 7,
+              "line": 2,
+              "lineText": "var result = /(?<name>x)/;",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Named capture groups in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "shadow-parameter",
+      "input": "function f(RegExp) { return /a/s } result = f(123);",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "function f(RegExp2) {\n  return new RegExp(\"a\", \"s\");\n}\nresult = f(123);\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "shadow-block",
+      "input": "{ let RegExp = 123; result = [RegExp, /a/s] }",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "{\n  let RegExp2 = 123;\n  result = [RegExp2, new RegExp(\"a\", \"s\")];\n}\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "shadow-module",
+      "input": "var RegExp = 123; result = [RegExp, /a/s]",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": false,
+      "response": {
+        "code": "var RegExp = 123;\nresult = [RegExp, new RegExp(\"a\", \"s\")];\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "shadow-minify",
+      "input": "function f(RegExp) { return [RegExp,/a/s] } result = f(123)",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "minify": true
+      },
+      "runtime": false,
+      "response": {
+        "code": "function f(n){return[n,new RegExp(\"a\",\"s\")]}result=f(123);\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "unused-effects",
+      "input": "/a/s; result = /b/s;",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "minifySyntax": true
+      },
+      "runtime": false,
+      "response": {
+        "code": "new RegExp(\"a\", \"s\"), result = new RegExp(\"b\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "pure-comment",
+      "input": "/* @__PURE__ */ /a/s; result = /b/s;",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "minifySyntax": true
+      },
+      "runtime": false,
+      "response": {
+        "code": "new RegExp(\"a\", \"s\"), result = new RegExp(\"b\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "minified-flags",
+      "input": "result = /(?<name>x)/gimyus",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "minify": true
+      },
+      "runtime": false,
+      "response": {
+        "code": "result=new RegExp(\"(?<name>x)\",\"gimyus\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "syntax-flag-supported-pattern-disabled",
+      "input": "result = /(?<name>x)/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2018",
+        "supported": {
+          "regexp-named-capture-groups": false,
+          "regexp-dot-all-flag": true
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<name>x)\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "engine-node8",
+      "input": "result = /(?<=x)/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "node8"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=x)\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "engine-node18",
+      "input": "result = /[a&&b]/v",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "node18"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"[a&&b]\", \"v\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "engine-chrome63",
+      "input": "result = /(?<=x)/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "chrome63"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /(?<=x)/s;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "mixed-engines",
+      "input": "result = /a/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": [
+          "node10",
+          "chrome63"
+        ]
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /a/s;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "unicode-charset",
+      "input": "result = /(?<=🦊é)/",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "charset": "utf8"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<=🦊é)\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "source-map",
+      "input": "result = /(?<name>x)/g",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "sourcemap": "external"
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"(?<name>x)\", \"g\");\n",
+        "map": "{\n  \"version\": 3,\n  \"sources\": [\"regexp.js\"],\n  \"sourcesContent\": [\"result = /(?<name>x)/g\"],\n  \"mappings\": \"AAAA,SAAS,WAAC,cAAW,GAAC;\",\n  \"names\": []\n}\n",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "forced-feature-diagnostic",
+      "input": "result = /a/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2024",
+        "supported": {
+          "regexp-dot-all-flag": false
+        },
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"a\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 12,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /a/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "The regular expression flag \"s\" is not available in the configured target environment (\"es2024\" + 1 override)"
+          }
+        ]
+      }
+    },
+    {
+      "name": "forced-feature-no-target-diagnostic",
+      "input": "result = /a/s",
+      "options": {
+        "sourcefile": "regexp.js",
+        "supported": {
+          "regexp-dot-all-flag": false
+        },
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"a\", \"s\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 12,
+              "file": "regexp.js",
+              "length": 1,
+              "line": 1,
+              "lineText": "result = /a/s",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "The regular expression flag \"s\" is not available in the configured target environment"
+          }
+        ]
+      }
+    },
+    {
+      "name": "forced-mixed-diagnostic",
+      "input": "result = /\\p{Emoji}/us",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "supported": {
+          "regexp-dot-all-flag": true,
+          "regexp-unicode-property-escapes": false
+        },
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = new RegExp(\"\\\\p{Emoji}\", \"us\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 10,
+              "file": "regexp.js",
+              "length": 9,
+              "line": 1,
+              "lineText": "result = /\\p{Emoji}/us",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Unicode property escapes in regular expressions are not available in the configured target environment (\"es2017\" + 2 overrides)"
+          }
+        ]
+      }
+    },
+    {
+      "name": "dead-code-diagnostics",
+      "input": "if(false) { /(?<=x)/s } result = 1",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "minifySyntax": true,
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = 1;\n",
+        "map": "",
+        "errors": [],
+        "warnings": [
+          {
+            "id": "unsupported-regexp",
+            "location": {
+              "column": 14,
+              "file": "regexp.js",
+              "length": 3,
+              "line": 1,
+              "lineText": "if(false) { /(?<=x)/s } result = 1",
+              "namespace": "",
+              "suggestion": ""
+            },
+            "notes": [
+              {
+                "location": null,
+                "text": "This regular expression literal has been converted to a \"new RegExp()\" constructor to avoid generating code with a syntax error. However, you will need to include a polyfill for \"RegExp\" for your code to have the correct behavior at run-time."
+              }
+            ],
+            "pluginName": "",
+            "text": "Lookbehind assertions in regular expressions are not available in the configured target environment (\"es2017\")"
+          }
+        ]
+      }
+    },
+    {
+      "name": "supported-excludes-all-fallbacks",
+      "input": "result = /(?<=x)(?<name>\\p{Emoji})/suyd",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es5",
+        "supported": {
+          "regexp-sticky-and-unicode-flags": true,
+          "regexp-dot-all-flag": true,
+          "regexp-lookbehind-assertions": true,
+          "regexp-named-capture-groups": true,
+          "regexp-unicode-property-escapes": true,
+          "regexp-match-indices": true,
+          "regexp-set-notation": true
+        },
+        "logOverride": {
+          "unsupported-regexp": "warning"
+        }
+      },
+      "runtime": false,
+      "response": {
+        "code": "result = /(?<=x)(?<name>\\p{Emoji})/suyd;\n",
+        "map": "",
+        "errors": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "runtime-constructor-effects",
+      "input": "/a/s; function f(RegExp) { return /b/s } result = f(123)",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017",
+        "minifySyntax": true
+      },
+      "runtime": true,
+      "response": {
+        "code": "new RegExp(\"a\", \"s\");\nfunction f(RegExp2) {\n  return new RegExp(\"b\", \"s\");\n}\nresult = f(123);\n",
+        "map": "",
+        "errors": [],
+        "warnings": [],
+        "runtime": {
+          "calls": [
+            [
+              "a",
+              "s"
+            ],
+            [
+              "b",
+              "s"
+            ]
+          ],
+          "result": {
+            "source": "b",
+            "flags": "s"
+          }
+        }
+      }
+    },
+    {
+      "name": "runtime-literal-pattern",
+      "input": "result = /a\\/b\\p{Emoji}/uy",
+      "options": {
+        "sourcefile": "regexp.js",
+        "target": "es2017"
+      },
+      "runtime": true,
+      "response": {
+        "code": "result = new RegExp(\"a\\\\/b\\\\p{Emoji}\", \"uy\");\n",
+        "map": "",
+        "errors": [],
+        "warnings": [],
+        "runtime": {
+          "calls": [
+            [
+              "a\\/b\\p{Emoji}",
+              "uy"
+            ]
+          ],
+          "result": {
+            "source": "a\\/b\\p{Emoji}",
+            "flags": "uy"
+          }
+        }
+      }
+    }
+  ]
+}

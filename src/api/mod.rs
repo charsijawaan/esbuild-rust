@@ -3603,7 +3603,7 @@ fn build_with_output_state_core(
     };
     let mut ts_options = config::TsOptions::default();
     let mut ts_always_strict = None;
-    if let Some(tsconfig) = raw_tsconfig {
+    if let Some(tsconfig) = &raw_tsconfig {
         tsconfig.jsx_settings.apply_to(&mut jsx_options);
         ts_options.config = tsconfig.settings;
         ts_always_strict = tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
@@ -3775,6 +3775,11 @@ fn build_with_output_state_core(
         write_to_stdout,
         tsconfig_path,
         tsconfig_raw: options.tsconfig_raw,
+        tsconfig_raw_config: if is_transform {
+            None
+        } else {
+            raw_tsconfig.map(Arc::new)
+        },
         stdin,
         needs_metafile: options.metafile,
         watch_mode: watch_data_sink.is_some(),

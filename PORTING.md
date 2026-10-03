@@ -11,7 +11,7 @@ proposals are excluded until verified and committed.
 
 ## What the percentages mean
 
-- **Captured fixtures: 88.30% active** (12,396 / 14,038). These cases compare
+- **Captured fixtures: 88.31% active** (12,397 / 14,038). These cases compare
   original upstream output or diagnostics exactly in the normal test suite.
   This measures the captured corpus, not all upstream behavior.
 - **Original CLI/runtime suite: 99.93% passing** (1,461 / 1,462), matching
@@ -35,12 +35,12 @@ outside the port.
 | Captured corpus | Active | Remaining inactive | Captured |
 | --- | ---: | ---: | ---: |
 | Lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and lowering | 7,127 | 1,516 | 8,643 |
+| JS/TS parser and lowering | 7,128 | 1,515 | 8,643 |
 | Bundler | 945 | 126 | 1,071 |
 | Go API formatting/directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,396 | 1,642 | 14,038 |
+| Total | 12,397 | 1,641 | 14,038 |
 
-The parser backlog comprises 868 cases from `js_parser_test.go`, 555 from
+The parser backlog comprises 867 cases from `js_parser_test.go`, 555 from
 `ts_parser_test.go`, and 93 from `js_parser_lower_test.go`, calculated from
 [the captured cases](tests/upstream/js_parser.json) and
 [the committed active indices](tests/upstream/js_parser_active.json).
@@ -76,7 +76,8 @@ package parity.
 | Property mangling | API and CLI expose property patterns, reservations, quoted-property control (`5cbf3c3`), and reusable caches (`40167fe`). API build/transform results return caches; CLI builds persist `--mangle-cache=FILE`. [Mangling tests](tests/property_mangling.rs), [cache tests](tests/mangle_cache.rs). |
 | Resource management | `using` / `await using` lowering (`f1b8b91`) handles disposal order, abrupt exits, async disposal, module hoisting, and TypeScript scopes. All five captured resource-management bundler fixtures are active; six original runtime cases were fixed. [Implementation](src/internal/js_parser/lower_using.rs), [tests](tests/using_lowering.rs). |
 | Diagnostics | CLI color, log-level filtering, and log overrides are implemented; native build/transform options expose `log_override`. [CLI tests](tests/cli_diagnostics.rs), [API implementation](src/api/mod.rs). Logging parity remains bounded as described below. |
-| Defines and target lowering | Native defines support `this`, `import.meta`, and complete property chains before lowering. Non-string dynamic imports lower through deferred `require` calls for unsupported targets, and bundled `node:` imports follow target and output-format support. [Define tests](tests/defines_import_meta.rs), [dynamic import tests](tests/dynamic_import_expressions.rs), [Node prefix tests](tests/node_prefix_targets.rs). |
+| Defines and target lowering | Native defines support `this`, `import.meta`, and complete property chains before lowering. Non-string dynamic imports lower through deferred `require` calls for unsupported targets, bundled `node:` imports follow target and output-format support, and unsupported RegExp syntax lowers to effectful constructor calls. [Define tests](tests/defines_import_meta.rs), [dynamic import tests](tests/dynamic_import_expressions.rs), [Node prefix tests](tests/node_prefix_targets.rs), [RegExp tests](tests/regexp_feature_lowering.rs). |
+| Raw tsconfig | Build-time `tsconfigRaw` paths/baseUrl use the build cwd, replace discovered configs, and exclude dependency imports inside node_modules. Direct transforms keep filesystem inheritance isolated; raw build-time `extends` remains a gap. [Tests](tests/tsconfig_raw_build.rs). |
 
 The latest parser audit activates nine original impossible-`typeof` warning
 cases and two identifier-escape diagnostics. The latter also exercise the
@@ -126,8 +127,8 @@ original upstream behavior before classifying them.
 
 ## Validation limits
 
-The latest recorded normal suite passed **1,213 Rust tests**, many of which
-iterate over captured cases; this is not 1,213 additional upstream cases.
+The latest recorded normal suite passed **1,221 Rust tests**, many of which
+iterate over captured cases; this is not 1,221 additional upstream cases.
 The exhaustive parser audit is separately ignored in normal runs. Strict
 Clippy remains blocked by **621 previously recorded errors**. See
 [tests/upstream/README.md](tests/upstream/README.md) for the committed checks,

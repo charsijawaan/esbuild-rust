@@ -888,6 +888,7 @@ pub struct Options {
     pub global_name: Vec<String>,
     pub tsconfig_path: String,
     pub tsconfig_raw: String,
+    pub tsconfig_raw_config: Option<Arc<crate::internal::resolver::TsConfigJson>>,
     pub extension_to_loader: HashMap<String, Loader>,
     pub public_path: String,
     pub inject_paths: Vec<String>,

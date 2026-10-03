@@ -14821,13 +14821,17 @@ fn visit_expr_with_target_and_context(
                 name.reference = core.symbol_for_mangled_prop(&text);
             }
         }
+        ExprData::RegExp(value) => {
+            if let Some(replacement) = super::regexp::lower_regexp(core, expression_loc, value) {
+                *data = replacement;
+            }
+        }
         ExprData::Boolean(_)
         | ExprData::Super
         | ExprData::Null
         | ExprData::Undefined
         | ExprData::JsxText(_)
         | ExprData::Missing
-        | ExprData::RegExp(_)
         | ExprData::RequireString(_)
         | ExprData::RequireResolveString(_)
         | ExprData::ImportString(_) => {}

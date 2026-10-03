@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,127 | 1,516 | 8,643 |
+| JS/TS parser and parser lowering | 7,128 | 1,515 | 8,643 |
 | Bundler | 945 | 126 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,396 | 1,642 | 14,038 |
+| Total | 12,397 | 1,641 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -1122,6 +1122,23 @@ originals and 22 service core originals in each worker mode. Independent
 verification of the correction matches Go's source bodies, diagnostics, and
 executed receiver/path traces across 30 affected cases per mode.
 
+Raw build configs now retain their parsed paths/baseUrl for import resolution,
+anchored at the build cwd and excluded inside node_modules. Three unchanged
+raw-config originals pass in each worker mode, including the transform control
+that ignores filesystem inheritance. Five native tests compare nine pinned Go
+configurations. Raw build-time `extends` remains an inherited gap; the direct
+paths/baseUrl fix does not complete inheritance parity.
+
+Unsupported RegExp features lower to effectful `new RegExp` calls using the
+effective target and supported overrides. The feature scan preserves escape,
+character-class, and feature precedence rules, and emits the original debug
+diagnostic ID and polyfill note. Three regressions compare 96 Go vectors and
+constructor timing; the original `regExpFeatures` passes in both worker modes.
+The parser audit adds unchanged diagnostic fixture 907 (`/)/`) with zero active
+regressions. Existing debug stderr, source-map, and dynamic-scope binding gaps
+remain outside this bounded port. The normal suite passes 1,221 tests; strict
+Clippy retains the same 621 diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -1222,7 +1239,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,127 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,128 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -1319,7 +1336,7 @@ declaration hoisting, and TypeScript namespace exports. Their original option
 bits and output snapshots are unchanged. It also includes nine injection cases
 covering duplicate paths, import order, TypeScript, JSX dotted names, `import.meta`,
 string export names, non-bundled builds, and copied files. It also covers bundled
-and non-bundled import-assignment diagnostics. So 12,396 concrete upstream cases
+and non-bundled import-assignment diagnostics. So 12,397 concrete upstream cases
 are currently active in `cargo test`; the remaining 126 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
