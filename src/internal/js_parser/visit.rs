@@ -6944,6 +6944,99 @@ fn generate_class_expression_capture_ref(core: &mut ParserCore, loc: Loc) -> Ref
     reference
 }
 
+struct ClassParameterTemps {
+    top_level_start: usize,
+    temp_start: usize,
+    references: Vec<Ref>,
+}
+
+impl ClassParameterTemps {
+    fn new(core: &ParserCore) -> Option<Self> {
+        core.current_scope.as_ref().and_then(|scope| {
+            (scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .kind
+                == ScopeKind::FunctionArgs)
+                .then(|| Self {
+                    top_level_start: core.top_level_temp_refs.len(),
+                    temp_start: core.temp_refs_to_declare.len(),
+                    references: Vec::new(),
+                })
+        })
+    }
+
+    fn take_declarations(&mut self, statement: &Stmt) -> bool {
+        let Some(StmtData::Local(local)) = statement.data.as_deref() else {
+            return false;
+        };
+        if local.kind != LocalKind::Var
+            || !local.declarations.iter().all(|declaration| {
+                declaration.value_or_nil.data.is_none()
+                    && matches!(
+                        declaration.binding.data.as_deref(),
+                        Some(BindingData::Identifier(_))
+                    )
+            })
+        {
+            return false;
+        }
+        for declaration in &local.declarations {
+            if let Some(BindingData::Identifier(binding)) = declaration.binding.data.as_deref() {
+                self.references.push(binding.reference);
+            }
+        }
+        true
+    }
+
+    fn wrap(mut self, core: &mut ParserCore, loc: Loc, mut value: Expr) -> Expr {
+        self.references
+            .extend(core.top_level_temp_refs.split_off(self.top_level_start));
+        self.references
+            .extend(core.temp_refs_to_declare.split_off(self.temp_start));
+        let mut references = HashSet::new();
+        self.references
+            .retain(|reference| references.insert(*reference));
+        if references.is_empty() {
+            return value;
+        }
+        core.generated_top_level_temp_refs
+            .retain(|reference| !references.contains(reference));
+
+        // These declarations must belong to this invocation's parameter scope,
+        // rather than the surrounding module/function that originally got them.
+        let mut scope = core.current_scope.clone();
+        let mut is_argument_scope = true;
+        while let Some(current) = scope {
+            let mut current = current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if is_argument_scope {
+                for &reference in &self.references {
+                    if !current.generated.contains(&reference) {
+                        current.generated.push(reference);
+                    }
+                }
+            } else {
+                current
+                    .generated
+                    .retain(|reference| !references.contains(reference));
+            }
+            scope = current.parent.as_ref().and_then(std::sync::Weak::upgrade);
+            is_argument_scope = false;
+        }
+        for reference in self.references.into_iter().rev() {
+            core.record_declared_symbol(reference);
+            value = CaptureValueWrapper {
+                argument_ref: Some(reference),
+                loc,
+            }
+            .wrap(value);
+        }
+        value
+    }
+}
+
 fn lower_class_static_blocks(
     core: &mut ParserCore,
     class: &mut Class,
@@ -13811,6 +13904,7 @@ fn visit_expr_with_target_and_context(
         ExprData::Class(class) => {
             let pre_start = core.class_pre_statements.len();
             let post_start = core.class_post_statements.len();
+            let mut parameter_temps = ClassParameterTemps::new(core);
             if core.options.keep_names
                 && let Some(name) = class.class.name
                 && !class_has_keep_name_static_block(&class.class)
@@ -13846,6 +13940,11 @@ fn visit_expr_with_target_and_context(
             for statement in generated_pre {
                 if let Some(StmtData::Expr(statement)) = statement.data.as_deref() {
                     prefix = join_with_comma(prefix, statement.value.clone());
+                } else if parameter_temps
+                    .as_mut()
+                    .is_some_and(|temps| temps.take_declarations(&statement))
+                {
+                    // The declaration will be supplied by an inline arrow.
                 } else {
                     core.class_pre_statements.push(statement);
                 }
@@ -13886,7 +13985,13 @@ fn visit_expr_with_target_and_context(
                     ExprData::Class(std::mem::take(class)),
                 ));
             }
-            if let Some(value) = replacement {
+            if let Some(temps) = parameter_temps {
+                let value = replacement.unwrap_or_else(|| {
+                    Expr::new(expression.loc, ExprData::Class(std::mem::take(class)))
+                });
+                let value = temps.wrap(core, expression.loc, join_with_comma(prefix, value));
+                *data = *value.data.expect("parameter class expression");
+            } else if let Some(value) = replacement {
                 let value = join_with_comma(prefix, value);
                 *data = *value.data.expect("lowered class expression");
             }
