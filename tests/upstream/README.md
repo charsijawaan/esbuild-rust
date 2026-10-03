@@ -146,10 +146,20 @@ Static private brands/fields and public static fields initialize that captured
 value before assigning the outer class binding. An executable regression checks
 initialization order, private methods/fields/getters used as calls and tags,
 outer-binding reassignment, derived classes, and static private brand checks,
-with and without minification/keep-names and across native/lowered targets.
+with and without minification, with keep-names, and across native/lowered targets.
 The normal suite passes 959 tests. Original runtime case 904 is newly passing
 in the targeted 900–917 slice, which has no regressions. The complete runtime
 audit will establish the combined effect of the receiver and class-capture fixes.
+
+The first combined audit exposed two regressions in bundled computed static
+fields (original runtime cases 1090 and 1183). Class lowering now preserves an
+inner class reference for static initialization only when it actually captures
+the class value outside the expression. Ordinary bundled public static fields
+continue to initialize the outer binding. Both original cases pass again, and
+an executable public-build-API regression checks evaluation order and the field
+value with ES2015/ES2022 targets and minification. Execution fixtures also use
+process and sequence identifiers to avoid temporary-file collisions when tests
+run concurrently. The normal suite passes 960 tests.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.

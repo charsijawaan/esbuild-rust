@@ -3,7 +3,10 @@ use std::{
     process::{Command, Stdio},
 };
 
-use esbuild_rs::api::{BuildLegalComments, BuildSourceMap, Target, TransformOptions, transform};
+use esbuild_rs::api::{
+    BuildFormat, BuildLegalComments, BuildOptions, BuildPlatform, BuildSourceMap, BuildStdin,
+    Loader, Target, TransformOptions, build, transform,
+};
 
 const ASYNC_PARAMETERS: &str = r#"
 const assert = require('node:assert/strict');
@@ -42,11 +45,16 @@ Promise.all([
 "#;
 
 fn execute_node(code: &[u8]) {
+    static NEXT_FILE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("esbuild-rs-transform-{unique}.cjs"));
+    let sequence = NEXT_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "esbuild-rs-transform-{}-{unique}-{sequence}.cjs",
+        std::process::id()
+    ));
     std::fs::write(&path, code).unwrap();
     let output = Command::new("node")
         .arg("--enable-source-maps")
@@ -323,6 +331,44 @@ console.log('ok');
             );
             assert!(result.errors.is_empty(), "{:?}", result.errors);
             execute_node(&result.code);
+        }
+    }
+}
+
+#[test]
+fn bundled_computed_static_fields_use_the_outer_class_binding() {
+    let source = r#"
+const events = [];
+class Foo {
+  [events.push(1)]() {}
+  static [events.push(2)] = 123;
+  [events.push(3)]() {}
+}
+if (events.join(',') !== '1,2,3' || Foo[2] !== 123) throw new Error('wrong initialization');
+console.log('ok');
+"#;
+    for target in [Target::Es2015, Target::Es2022] {
+        for minify in [false, true] {
+            let result = build(BuildOptions {
+                bundle: true,
+                format: BuildFormat::CommonJs,
+                platform: BuildPlatform::Node,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    sourcefile: "input.ts".into(),
+                    loader: Loader::Ts,
+                    ..BuildStdin::default()
+                }),
+                target,
+                supported: std::collections::HashMap::from([("class-static-field".into(), false)]),
+                minify_identifiers: minify,
+                minify_syntax: minify,
+                minify_whitespace: minify,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(result.output_files.len(), 1);
+            execute_node(&result.output_files[0].contents);
         }
     }
 }

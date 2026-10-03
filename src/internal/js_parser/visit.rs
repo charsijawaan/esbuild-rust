@@ -1827,7 +1827,8 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     !(convert_to_expression_before_visit
                         || lower_public_static_due_to_private_members),
                     false,
-                    convert_to_expression_before_visit,
+                    convert_to_expression_before_visit
+                        && (lower_static_blocks || lower_static_members),
                 );
                 let convert_to_expression = convert_to_expression_before_visit
                     || (lower_public_static_due_to_private_members && inner_name.is_some());
