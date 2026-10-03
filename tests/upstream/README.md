@@ -733,6 +733,17 @@ The complete runtime audit at `895a4d7` is recorded in
 timeouts. Case 1343 is newly passing without regressions relative to `494cc56`.
 Case 80 remains the shared environment failure, leaving 17 Rust-only failures.
 
+Base tsconfig searches now distinguish missing files from read errors and stop
+after a found or invalid config. Relative paths ending in `.json` report read
+errors directly. Extensionless paths use a sibling `.json` file only when the
+original path is absent or a directory; package searches continue past
+directories. Diagnostics retain the `extends` location and configured log path
+style. Nine search scenarios were independently checked with pinned Go, and
+the regressions also check absolute diagnostic paths. The normal suite passes
+1,012 tests, including the active parser fixtures; strict Clippy now reports
+621 existing errors, two fewer than the prior batch, without added diagnostics.
+The inactive default bundler audit retains its prior counts.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

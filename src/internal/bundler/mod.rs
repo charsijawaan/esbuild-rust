@@ -21,7 +21,7 @@ use crate::internal::{
         Platform, PluginData, has_placeholder, substitute_template, template_to_string,
     },
     css_parser,
-    fs::{EntryKind, Fs},
+    fs::{EntryKind, Fs, FsErrorKind},
     graph::{
         CssRepr, EntryPoint as GraphEntryPoint, InputFile, InputFileRepr, JsRepr, OutputFile,
         SideEffects, SideEffectsKind,
@@ -1638,6 +1638,7 @@ pub(crate) fn resolve_for_plugin_api(
                 abs_resolve_dir,
                 (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
                 options.preserve_symlinks,
+                options.log_path_style,
             )
         } else {
             None
@@ -2360,6 +2361,7 @@ fn find_nearest_tsconfig(
     start_directory: &str,
     override_path: Option<&str>,
     preserve_symlinks: bool,
+    log_path_style: logger::PathStyle,
 ) -> Option<resolver::TsConfigJson> {
     fn discover_pnp(
         log: &Log,
@@ -2395,6 +2397,7 @@ fn find_nearest_tsconfig(
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn load(
         log: &Log,
         file_system: &dyn Fs,
@@ -2403,6 +2406,7 @@ fn find_nearest_tsconfig(
         config_dir: &str,
         pnp: Option<&resolver::PnpData>,
         preserve_symlinks: bool,
+        log_path_style: logger::PathStyle,
     ) -> Option<resolver::TsConfigJson> {
         // Base-directory-sensitive settings must use the real config location,
         // matching upstream parseTSConfig (unless symlinks are preserved).
@@ -2437,8 +2441,8 @@ fn find_nearest_tsconfig(
         };
         let mut tracker = LineColumnTracker::new(Some(&source));
         let mut extends = |text: &str, range: Range| {
-            let mut did_find_candidate = false;
-            let mut try_file = |path: &str, visited: &mut HashSet<String>| {
+            let mut try_file = |path: &str, visited: &mut HashSet<String>, ignore_directories: bool| {
+                let display_path = path;
                 let real_path = if preserve_symlinks {
                     None
                 } else {
@@ -2446,30 +2450,45 @@ fn find_nearest_tsconfig(
                 };
                 let path = real_path.as_deref().unwrap_or(path);
                 let (_, error, _) = file_system.read_file(path);
-                if error.is_none() {
-                    did_find_candidate = true;
-                    if visited.contains(path) {
-                        log.add_id(
-                            logger::MsgId::TsConfigJsonCycle,
-                            MsgKind::Warning,
-                            Some(&mut tracker),
-                            range,
-                            format!("Base config file {text:?} forms cycle"),
-                        );
-                        None
-                    } else {
-                        load(
-                            log,
-                            file_system,
-                            path,
-                            visited,
-                            config_dir,
-                            pnp,
-                            preserve_symlinks,
-                        )
+                if let Some(error) = error {
+                    if error.kind == FsErrorKind::NotFound
+                        || (ignore_directories
+                            && file_system.kind(&file_system.dir(path), &file_system.base(path)).1
+                                == EntryKind::Dir)
+                    {
+                        return Err(());
                     }
+                    let pretty_paths = logger::PrettyPaths {
+                        abs: display_path.into(),
+                        rel: file_system.rel(file_system.cwd(), display_path)
+                            .unwrap_or_else(|| display_path.into()),
+                    };
+                    log.add_error(
+                        Some(&mut tracker),
+                        range,
+                        format!("Cannot read file {:?}: {}", pretty_paths.select(log_path_style), error.message),
+                    );
+                    Ok(None)
+                } else if visited.contains(path) {
+                    log.add_id(
+                        logger::MsgId::TsConfigJsonCycle,
+                        MsgKind::Warning,
+                        Some(&mut tracker),
+                        range,
+                        format!("Base config file {text:?} forms cycle"),
+                    );
+                    Ok(None)
                 } else {
-                    None
+                    Ok(load(
+                        log,
+                        file_system,
+                        path,
+                        visited,
+                        config_dir,
+                        pnp,
+                        preserve_symlinks,
+                        log_path_style,
+                    ))
                 }
             };
 
@@ -2487,9 +2506,9 @@ fn find_nearest_tsconfig(
                         pnp,
                         ..ResolverContext::default()
                     },
-                ) && let Some(config) = try_file(&resolved.paths.primary.text, visited)
+                ) && let Ok(config) = try_file(&resolved.paths.primary.text, visited, true)
                 {
-                    return Some(config);
+                    return config;
                 }
                 let (package_name, _) = resolver::parse_esm_package_name(text)?;
                 let mut current = directory.clone();
@@ -2533,8 +2552,8 @@ fn find_nearest_tsconfig(
                             joined.clone(),
                             format!("{joined}.json"),
                         ] {
-                            if let Some(config) = try_file(&candidate, visited) {
-                                return Some(config);
+                            if let Ok(config) = try_file(&candidate, visited, true) {
+                                return config;
                             }
                         }
                     }
@@ -2545,9 +2564,7 @@ fn find_nearest_tsconfig(
                     current = parent;
                 }
                 drop(try_file);
-                if !did_find_candidate
-                    && !crate::internal::helpers::is_inside_node_modules(&source.key_path.text)
-                {
+                if !crate::internal::helpers::is_inside_node_modules(&source.key_path.text) {
                     log.add_id(
                         logger::MsgId::TsConfigJsonMissing,
                         MsgKind::Warning,
@@ -2567,18 +2584,21 @@ fn find_nearest_tsconfig(
             if matches!(text, "." | "..") {
                 extended = file_system.join(&[&extended, "tsconfig.json"]);
             }
-            if let Some(config) = try_file(&extended, visited) {
-                return Some(config);
-            }
             if !extended.ends_with(".json") {
-                if let Some(config) = try_file(&format!("{extended}.json"), visited) {
-                    return Some(config);
+                let (entries, error, _) = file_system.read_directory(&file_system.dir(&extended));
+                let base = file_system.base(&extended);
+                if error.is_none()
+                    && entries.get(&base).0.is_none_or(|entry| entry.kind(file_system) != EntryKind::File)
+                    && entries.get(&format!("{base}.json")).0.is_some_and(|entry| entry.kind(file_system) == EntryKind::File)
+                {
+                    extended.push_str(".json");
                 }
             }
+            if let Ok(config) = try_file(&extended, visited, false) {
+                return config;
+            }
             drop(try_file);
-            if !did_find_candidate
-                && !crate::internal::helpers::is_inside_node_modules(&source.key_path.text)
-            {
+            if !crate::internal::helpers::is_inside_node_modules(&source.key_path.text) {
                 log.add_id(
                     logger::MsgId::TsConfigJsonMissing,
                     MsgKind::Warning,
@@ -2622,6 +2642,7 @@ fn find_nearest_tsconfig(
             &config_dir,
             pnp.as_ref(),
             preserve_symlinks,
+            log_path_style,
         );
     }
     if crate::internal::helpers::is_inside_node_modules(start_directory) {
@@ -2641,6 +2662,7 @@ fn find_nearest_tsconfig(
                     &directory,
                     pnp.as_ref(),
                     preserve_symlinks,
+                    log_path_style,
                 );
             }
         }
@@ -2804,6 +2826,7 @@ pub fn scan_bundle(
                 },
                 (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
                 options.preserve_symlinks,
+                options.log_path_style,
             )
         } else {
             None
@@ -3122,6 +3145,7 @@ pub fn scan_bundle(
                 &file_system.dir(&source.key_path.text),
                 (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
                 options.preserve_symlinks,
+                options.log_path_style,
             )
         } else {
             None
