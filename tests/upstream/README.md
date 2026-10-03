@@ -279,6 +279,12 @@ receiver variable. The local suite passes 969 tests and the full parser audit
 retains 7,040 matches without active regressions or new inactive matches.
 Strict Clippy retains 623 existing errors without added diagnostics.
 
+The full runtime audit at `26328d6` is recorded in
+`end_to_end_private_binding_checkpoint.json`: 1,303 passed, 159 failed, and no
+timeouts. Cases 792, 1106, 1107, and 1110 are newly passing relative to `9ae1ea0`,
+with no regressions. Excluding the shared case-80 failure leaves 158 Rust-only
+failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
