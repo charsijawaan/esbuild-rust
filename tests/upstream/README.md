@@ -174,6 +174,13 @@ Six original `TestPrivateIdentifiers` diagnostic cases (6564–6569) now match
 exactly and are active; the full parser audit preserves all prior active cases.
 The normal suite passes 962 tests.
 
+The complete runtime audit at `f606229` is preserved separately in
+`end_to_end_private_checkpoint.json`: 1,275 passed, 187 failed, and no timeouts.
+It has 16 newly passing cases and no regressions relative to `10ddb1a`; four
+of the gains come from the private-access warnings. Go still passes 1,461,
+with the shared case-80 failure. The 186 Rust-only runtime failures remain
+separate from the 1,785 inactive fixture cases and the API/plugin/WASM inventory.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
