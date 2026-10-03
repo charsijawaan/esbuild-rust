@@ -1,5 +1,6 @@
 use crate::internal::{
     config::Format,
+    helpers::quote_go_string,
     js_ast::{Expr, ExprData},
     js_lexer::range_of_identifier,
     logger::{MsgData, MsgId, MsgKind, Range},
@@ -38,13 +39,7 @@ pub(crate) fn warn_about_import_namespace_call(
     let name = core.symbols[reference.inner_index as usize]
         .original_name
         .clone();
-    // Go's %q prints combining marks literally. The two joiners are the only
-    // non-printable characters that can appear in a valid JavaScript identifier.
-    let quoted_name = format!(
-        "\"{}\"",
-        name.replace('\u{200c}', "\\u200c")
-            .replace('\u{200d}', "\\u200d")
-    );
+    let quoted_name = quote_go_string(name.as_bytes());
     let member = core.module_scope.as_ref().and_then(|scope| {
         scope
             .lock()

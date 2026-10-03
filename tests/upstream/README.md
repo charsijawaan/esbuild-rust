@@ -972,6 +972,16 @@ and strict Clippy retains 621 existing errors without additions. This adds no
 captured-fixture or original JavaScript API coverage claim. CLI and formatted
 transform byte forwarding remain separate follow-up work.
 
+JSON import assertion diagnostics now take precedence over immutable-import
+assignment errors for non-default namespace members, following pinned Go's
+rewrite order. Diagnostic names use one byte-preserving Go quoting helper,
+including controls, invalid UTF-8, surrogate bytes, and Unicode 15 printability.
+Two regressions compare 39 native API and 39 CLI configurations against captured
+Go diagnostics; namespace-call warnings reuse the same helper. The isolated
+normal suite passes 1,080 tests, the exhaustive parser audit preserves all 7,116
+passing cases, and strict Clippy retains 621 existing errors without additions.
+No original fixture activation or general printer-layout parity is claimed.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

@@ -1,0 +1,622 @@
+[
+  {
+    "name": "json-assignment",
+    "mode": "json",
+    "source": "import * as ns from 'foo' assert {type:'json'}; ns.x=2;",
+    "messages": [
+      {
+        "id": "assert-type-json",
+        "text": "Non-default import \"x\" is undefined with a JSON import assertion",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 51,
+          "length": 1,
+          "line_text": "import * as ns from 'foo' assert {type:'json'}; ns.x=2;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "The JSON import assertion is here:",
+            "location": {
+              "file": "input.js",
+              "namespace": "",
+              "line": 1,
+              "column": 34,
+              "length": 11,
+              "line_text": "import * as ns from 'foo' assert {type:'json'}; ns.x=2;",
+              "suggestion": ""
+            }
+          },
+          {
+            "text": "You can either keep the import assertion and only use the \"default\" import, or you can remove the import assertion and use the \"x\" import.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 0,
+        "warnings": 1,
+        "has_code": true
+      },
+      "silent": {
+        "errors": 0,
+        "warnings": 0,
+        "has_code": true
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "json-update",
+    "mode": "json",
+    "source": "import * as ns from 'foo' assert {type:'json'}; ns['x']++;",
+    "messages": [
+      {
+        "id": "assert-type-json",
+        "text": "Non-default import \"x\" is undefined with a JSON import assertion",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 51,
+          "length": 3,
+          "line_text": "import * as ns from 'foo' assert {type:'json'}; ns['x']++;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "The JSON import assertion is here:",
+            "location": {
+              "file": "input.js",
+              "namespace": "",
+              "line": 1,
+              "column": 34,
+              "length": 11,
+              "line_text": "import * as ns from 'foo' assert {type:'json'}; ns['x']++;",
+              "suggestion": ""
+            }
+          },
+          {
+            "text": "You can either keep the import assertion and only use the \"default\" import, or you can remove the import assertion and use the \"x\" import.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 0,
+        "warnings": 1,
+        "has_code": true
+      },
+      "silent": {
+        "errors": 0,
+        "warnings": 0,
+        "has_code": true
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "json-delete",
+    "mode": "json",
+    "source": "import * as ns from 'foo' assert {type:'json'}; delete ns.x;",
+    "messages": [
+      {
+        "id": "assert-type-json",
+        "text": "Non-default import \"x\" is undefined with a JSON import assertion",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 58,
+          "length": 1,
+          "line_text": "import * as ns from 'foo' assert {type:'json'}; delete ns.x;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "The JSON import assertion is here:",
+            "location": {
+              "file": "input.js",
+              "namespace": "",
+              "line": 1,
+              "column": 34,
+              "length": 11,
+              "line_text": "import * as ns from 'foo' assert {type:'json'}; delete ns.x;",
+              "suggestion": ""
+            }
+          },
+          {
+            "text": "You can either keep the import assertion and only use the \"default\" import, or you can remove the import assertion and use the \"x\" import.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 0,
+        "warnings": 1,
+        "has_code": true
+      },
+      "silent": {
+        "errors": 0,
+        "warnings": 0,
+        "has_code": true
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "json-control-key",
+    "mode": "json",
+    "source": "import * as ns from 'foo' assert {type:'json'}; ns['a\\n\\u0001']=2;",
+    "messages": [
+      {
+        "id": "assert-type-json",
+        "text": "Non-default import \"a\\n\\x01\" is undefined with a JSON import assertion",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 51,
+          "length": 11,
+          "line_text": "import * as ns from 'foo' assert {type:'json'}; ns['a\\n\\u0001']=2;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "The JSON import assertion is here:",
+            "location": {
+              "file": "input.js",
+              "namespace": "",
+              "line": 1,
+              "column": 34,
+              "length": 11,
+              "line_text": "import * as ns from 'foo' assert {type:'json'}; ns['a\\n\\u0001']=2;",
+              "suggestion": ""
+            }
+          },
+          {
+            "text": "You can either keep the import assertion and only use the \"default\" import, or you can remove the import assertion and use the \"a\\n\\x01\" import.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 0,
+        "warnings": 1,
+        "has_code": true
+      },
+      "silent": {
+        "errors": 0,
+        "warnings": 0,
+        "has_code": true
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "json-default-control",
+    "mode": "json",
+    "source": "import * as ns from 'foo' assert {type:'json'}; ns.default=2;",
+    "messages": [
+      {
+        "id": "",
+        "text": "Cannot assign to import \"default\"",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 51,
+          "length": 7,
+          "line_text": "import * as ns from 'foo' assert {type:'json'}; ns.default=2;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file (e.g. \"setDefault\") and then import and call that function here instead.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "silent": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "joiner-assignment",
+    "mode": "transform",
+    "source": "import {x as a\\u200c} from 'foo'; a\\u200c=0;",
+    "messages": [
+      {
+        "id": "assign-to-import",
+        "text": "This assignment will throw because \"a\\u200c\" is an import",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 34,
+          "length": 7,
+          "line_text": "import {x as a\\u200c} from 'foo'; a\\u200c=0;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file (e.g. \"setA‌\") and then import and call that function here instead.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 0,
+        "warnings": 1,
+        "has_code": true
+      },
+      "silent": {
+        "errors": 0,
+        "warnings": 0,
+        "has_code": true
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "joiner-update",
+    "mode": "transform",
+    "source": "import {x as a\\u200d} from 'foo'; a\\u200d++;",
+    "messages": [
+      {
+        "id": "assign-to-import",
+        "text": "This assignment will throw because \"a\\u200d\" is an import",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 34,
+          "length": 7,
+          "line_text": "import {x as a\\u200d} from 'foo'; a\\u200d++;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file (e.g. \"setA‍\") and then import and call that function here instead.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 0,
+        "warnings": 1,
+        "has_code": true
+      },
+      "silent": {
+        "errors": 0,
+        "warnings": 0,
+        "has_code": true
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "namespace-control",
+    "mode": "bundle",
+    "source": "import * as ns from 'foo'; ns['\\u0001\\u0007\\u000b']=0;",
+    "messages": [
+      {
+        "id": "",
+        "text": "Cannot assign to import \"\\x01\\a\\v\"",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 30,
+          "length": 20,
+          "line_text": "import * as ns from 'foo'; ns['\\u0001\\u0007\\u000b']=0;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file and then import and call that function here instead.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "silent": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "namespace-surrogate",
+    "mode": "bundle",
+    "source": "import * as ns from 'foo'; delete ns['\\uD800'];",
+    "messages": [
+      {
+        "id": "",
+        "text": "Cannot assign to import \"\\xed\\xa0\\x80\"",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 37,
+          "length": 8,
+          "line_text": "import * as ns from 'foo'; delete ns['\\uD800'];",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file and then import and call that function here instead.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "silent": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "namespace-spaces",
+    "mode": "bundle",
+    "source": "import * as ns from 'foo'; ns['\\u00a0\\ue000\\u{e0001}']++;",
+    "messages": [
+      {
+        "id": "",
+        "text": "Cannot assign to import \"\\u00a0\\ue000\\U000e0001\"",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 30,
+          "length": 23,
+          "line_text": "import * as ns from 'foo'; ns['\\u00a0\\ue000\\u{e0001}']++;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file and then import and call that function here instead.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "silent": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "namespace-joiner-dynamic",
+    "mode": "bundle",
+    "source": "import * as a\\u200c from 'foo'; a\\u200c[key]=0;",
+    "messages": [
+      {
+        "id": "",
+        "text": "Cannot assign to property on import \"a\\u200c\"",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 32,
+          "length": 7,
+          "line_text": "import * as a\\u200c from 'foo'; a\\u200c[key]=0;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file and then import and call that function here instead.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "silent": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "namespace-arbitrary",
+    "mode": "bundle",
+    "source": "import * as ns from 'foo'; ns['hello\\\\world\\\"quote\\n']=0;",
+    "messages": [
+      {
+        "id": "",
+        "text": "Cannot assign to import \"hello\\\\world\\\"quote\\n\"",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 30,
+          "length": 23,
+          "line_text": "import * as ns from 'foo'; ns['hello\\\\world\\\"quote\\n']=0;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file and then import and call that function here instead.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "silent": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  },
+  {
+    "name": "namespace-new-unicode",
+    "mode": "bundle",
+    "source": "import * as ns from 'foo'; ns['\\u1c89\\u{1fae9}']=0;",
+    "messages": [
+      {
+        "id": "",
+        "text": "Cannot assign to import \"\\u1c89\\U0001fae9\"",
+        "location": {
+          "file": "input.js",
+          "namespace": "",
+          "line": 1,
+          "column": 30,
+          "length": 17,
+          "line_text": "import * as ns from 'foo'; ns['\\u1c89\\u{1fae9}']=0;",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "text": "Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file and then import and call that function here instead.",
+            "location": null
+          }
+        ],
+        "plugin_name": ""
+      }
+    ],
+    "outcomes": {
+      "default": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "silent": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      },
+      "error": {
+        "errors": 1,
+        "warnings": 0,
+        "has_code": false
+      }
+    }
+  }
+]

@@ -10,7 +10,10 @@ use crate::internal::{
     },
     compat::JsFeature,
     config::pretty_print_target_environment,
-    helpers::{GlobPart, GlobWildcard, is_inside_node_modules, string_to_utf16, utf16_to_string},
+    helpers::{
+        GlobPart, GlobWildcard, is_inside_node_modules, quote_go_string, string_to_utf16,
+        utf16_to_string,
+    },
     js_ast::{
         AnnotationExpr, AnnotationFlags, Arg, ArrayExpr, ArrowExpr, AssignTarget, BinaryExpr, Binding,
         BindingData, BlockStmt, CallExpr, CallKind, Class, Decl, DotExpr, Expr, ExprData, ExprStmt,
@@ -11218,10 +11221,62 @@ fn dynamic_import_record_in_promise_chain(expression: &Expr) -> Option<u32> {
     }
 }
 
+fn maybe_rewrite_json_import_property(
+    core: &mut ParserCore,
+    namespace_ref: Ref,
+    import_record_index: u32,
+    name_for_diagnostic: &[u8],
+    name_loc: Loc,
+) -> Option<ExprData> {
+    let record = &core.import_records
+        [usize::try_from(import_record_index).expect("import record index fits")];
+    if !record.flags.contains(ImportRecordFlags::ASSERT_TYPE_JSON)
+        || name_for_diagnostic == b"default"
+    {
+        return None;
+    }
+    let quoted_name = quote_go_string(name_for_diagnostic);
+    let mut notes = Vec::new();
+    if let Some(entry) = record
+        .assert_or_with
+        .as_ref()
+        .and_then(|clause| crate::internal::ast::find_assert_or_with_entry(&clause.entries, "type"))
+    {
+        notes.push(core.tracker.msg_data(
+            crate::internal::js_lexer::range_of_import_assert_or_with(
+                &core.source,
+                entry,
+                crate::internal::js_lexer::KeyOrValue::KeyAndValueRange,
+            ),
+            "The JSON import assertion is here:",
+        ));
+    }
+    notes.push(MsgData {
+        text: format!("You can either keep the import assertion and only use the \"default\" import, or you can remove the import assertion and use the {quoted_name} import."),
+        ..MsgData::default()
+    });
+    if let Some(log) = core.log.clone() {
+        log.add_id_with_notes(
+            MsgId::JsAssertTypeJson,
+            if is_inside_node_modules(&core.source.key_path.text) {
+                MsgKind::Debug
+            } else {
+                MsgKind::Warning
+            },
+            Some(&mut core.tracker),
+            crate::internal::js_lexer::range_of_identifier(&core.source, name_loc),
+            format!("Non-default import {quoted_name} is undefined with a JSON import assertion"),
+            notes,
+        );
+    }
+    core.ignore_usage(namespace_ref);
+    Some(ExprData::Undefined)
+}
+
 fn maybe_rewrite_import_namespace_property(
     core: &mut ParserCore,
     target: &Expr,
-    name: &str,
+    name_for_diagnostic: &[u8],
     name_loc: Loc,
     prefer_quoted_key: bool,
     assign_target: AssignTarget,
@@ -11233,6 +11288,8 @@ fn maybe_rewrite_import_namespace_property(
     let Some(ExprData::Identifier(identifier)) = target.data.as_deref() else {
         return None;
     };
+    let name = String::from_utf8_lossy(name_for_diagnostic);
+    let name = name.as_ref();
     let namespace_ref = identifier.reference;
     let (existing, import_record_index) = {
         let items = core.import_items_for_namespace.get(&namespace_ref)?;
@@ -11241,6 +11298,15 @@ fn maybe_rewrite_import_namespace_property(
     let item = if let Some(item) = existing {
         item
     } else {
+        if let Some(value) = maybe_rewrite_json_import_property(
+            core,
+            namespace_ref,
+            import_record_index,
+            name_for_diagnostic,
+            name_loc,
+        ) {
+            return Some(value);
+        }
         let reference = core.new_symbol(SymbolKind::Import, name);
         core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
             .import_item_status = crate::internal::ast::ImportItemStatus::Generated;
@@ -11248,9 +11314,9 @@ fn maybe_rewrite_import_namespace_property(
         // retain their namespace statement and must still print a property read.
         core.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
             .namespace_alias = Some(crate::internal::ast::NamespaceAlias {
-                namespace_ref,
-                alias: name.into(),
-            });
+            namespace_ref,
+            alias: name.into(),
+        });
         core.module_scope
             .as_ref()
             .expect("generated namespace import item requires a module scope")
@@ -11283,7 +11349,7 @@ fn maybe_rewrite_import_namespace_property(
     core.ignore_usage(namespace_ref);
     core.record_usage(item.reference);
     if assign_target != AssignTarget::None || is_delete_target {
-        report_import_assignment(core, name_loc, item.reference);
+        report_import_assignment(core, name_loc, item.reference, Some(name_for_diagnostic));
         return Some(ExprData::Identifier(IdentifierExpr {
             reference: item.reference,
             ..IdentifierExpr::default()
@@ -11298,10 +11364,16 @@ fn maybe_rewrite_import_namespace_property(
     ))
 }
 
-fn report_import_assignment(core: &mut ParserCore, loc: Loc, reference: Ref) {
+fn report_import_assignment(
+    core: &mut ParserCore,
+    loc: Loc,
+    reference: Ref,
+    name_for_diagnostic: Option<&[u8]>,
+) {
     let name = core.symbols[reference.inner_index as usize]
         .original_name
         .clone();
+    let quoted_name = quote_go_string(name_for_diagnostic.unwrap_or(name.as_bytes()));
     let setter_hint = if is_identifier(&name) && name != "_" {
         if name.as_bytes().first().is_some_and(u8::is_ascii) {
             format!(
@@ -11329,7 +11401,7 @@ fn report_import_assignment(core: &mut ParserCore, loc: Loc, reference: Ref) {
             log.add_error_with_notes(
                 Some(&mut core.tracker),
                 range,
-                format!("Cannot assign to import {name:?}"),
+                format!("Cannot assign to import {quoted_name}"),
                 vec![note],
             );
         } else {
@@ -11342,7 +11414,7 @@ fn report_import_assignment(core: &mut ParserCore, loc: Loc, reference: Ref) {
                 },
                 Some(&mut core.tracker),
                 range,
-                format!("This assignment will throw because {name:?} is an import"),
+                format!("This assignment will throw because {quoted_name} is an import"),
                 vec![note],
             );
         }
@@ -11364,8 +11436,8 @@ fn report_import_namespace_property_assignment(core: &mut ParserCore, target: &E
             Some(&mut core.tracker),
             crate::internal::js_lexer::range_of_identifier(&core.source, target.loc),
             format!(
-                "Cannot assign to property on import {:?}",
-                symbol.original_name
+                "Cannot assign to property on import {}",
+                quote_go_string(symbol.original_name.as_bytes())
             ),
             vec![MsgData {
                 text: "Imports are immutable in JavaScript. To modify the value of this import, \
@@ -12004,7 +12076,7 @@ fn visit_expr_with_target_and_context(
                         }
                     }
                     crate::internal::ast::SymbolKind::Import => {
-                        report_import_assignment(core, expression.loc, identifier.reference);
+                        report_import_assignment(core, expression.loc, identifier.reference, None);
                     }
                     crate::internal::ast::SymbolKind::Injected => {
                         super::injection::assignment_error(
@@ -13054,7 +13126,7 @@ fn visit_expr_with_target_and_context(
                 && let Some(replacement) = maybe_rewrite_import_namespace_property(
                     core,
                     &dot.target,
-                    &dot.name,
+                    dot.name.as_bytes(),
                     dot.name_loc,
                     false,
                     assign_target,
@@ -13206,23 +13278,18 @@ fn visit_expr_with_target_and_context(
             }
             if index.optional_chain == OptionalChain::None
                 && let Some(ExprData::String(string)) = index.index.data.as_deref()
-            {
-                let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
-                    &string.value,
-                ))
-                .into_owned();
-                if let Some(replacement) = maybe_rewrite_import_namespace_property(
+                && let Some(replacement) = maybe_rewrite_import_namespace_property(
                     core,
                     &index.target,
-                    &name,
+                    &crate::internal::helpers::utf16_to_string(&string.value),
                     index.index.loc,
                     true,
                     assign_target,
                     context.is_delete_target,
-                ) {
-                    *data = replacement;
-                    return;
-                }
+                )
+            {
+                *data = replacement;
+                return;
             }
             if assign_target != AssignTarget::None || context.is_delete_target {
                 report_import_namespace_property_assignment(core, &index.target);

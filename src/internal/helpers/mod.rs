@@ -33,7 +33,8 @@ pub use quote::{quote_for_json, quote_single};
 pub use serializer::Serializer;
 pub use stack::pretty_printed_stack;
 pub use strings::{
-    string_array_arrays_equal, string_array_to_quoted_comma_separated_string, string_arrays_equal,
+    quote_go_string, string_array_arrays_equal, string_array_to_quoted_comma_separated_string,
+    string_arrays_equal,
 };
 pub use timer::Timer;
 pub use typos::TypoDetector;
