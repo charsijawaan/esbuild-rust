@@ -1114,6 +1114,14 @@ interaction regression and a draft `this` mismatch before integration; failed
 evidence remains preserved. Constructor-context differences remain outside this
 bounded correction.
 
+The completed runtime audit of `02ef9cf` is recorded in
+`end_to_end_api_lowering_checkpoint.json`: 1,461 passed, one shared Go/Rust
+failure at case 80, zero timeouts, and zero regressions relative to the prior
+service checkpoint. The final frozen binary also passes the 16 selected API
+originals and 22 service core originals in each worker mode. Independent
+verification of the correction matches Go's source bodies, diagnostics, and
+executed receiver/path traces across 30 affected cases per mode.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
