@@ -572,6 +572,12 @@ invalid `super` access. The normal suite passes 990 tests, the parser audit
 preserves all 7,061 active cases, and strict Clippy retains 623 existing errors
 without added diagnostics.
 
+The complete runtime audit at `fe9852b` is recorded in
+`end_to_end_super_keys_checkpoint.json`: 1,413 passed, 49 failed, and no timeouts.
+Cases 1240, 1267, 1268, and 1269 are newly passing without regressions relative
+to `3e98ebf`. Case 80 remains the shared environment failure, leaving 48
+Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
