@@ -245,6 +245,12 @@ pinned Go. Three exact upstream cases (`TestTSClass`, `TestTSSuperCall`, and
 The complete runtime audit of the preceding static-block override checkpoint
 remained at 1,293 passing cases, with no gains or regressions.
 
+The full runtime audit at `5127194` is recorded in
+`end_to_end_ts_computed_checkpoint.json`: 1,297 passed, 165 failed, and no timeouts.
+Cases 877, 970, 1061, and 1154 are newly passing relative to `c2fb0ab`, with no
+regressions. The pinned Go result remains 1,461 passed with the shared case-80
+failure, leaving 164 Rust-only runtime failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
