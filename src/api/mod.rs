@@ -150,6 +150,9 @@ pub struct TransformOptions {
     pub target: Target,
     pub engines: Vec<Engine>,
     pub supported: HashMap<String, bool>,
+    pub mangle_props: String,
+    pub reserve_props: String,
+    pub mangle_quoted: bool,
     pub platform: BuildPlatform,
     pub jsx: BuildJsx,
     pub jsx_factory: String,
@@ -191,6 +194,9 @@ impl Default for TransformOptions {
             target: Target::default(),
             engines: Vec::new(),
             supported: HashMap::new(),
+            mangle_props: String::new(),
+            reserve_props: String::new(),
+            mangle_quoted: false,
             platform: BuildPlatform::default(),
             jsx: BuildJsx::default(),
             jsx_factory: String::new(),
@@ -1262,6 +1268,9 @@ pub struct BuildOptions {
     pub target: Target,
     pub engines: Vec<Engine>,
     pub supported: HashMap<String, bool>,
+    pub mangle_props: String,
+    pub reserve_props: String,
+    pub mangle_quoted: bool,
     pub global_name: String,
     pub public_path: String,
     pub entry_names: String,
@@ -1331,6 +1340,9 @@ impl Default for BuildOptions {
             target: Target::default(),
             engines: Vec::new(),
             supported: HashMap::new(),
+            mangle_props: String::new(),
+            reserve_props: String::new(),
+            mangle_quoted: false,
             global_name: String::new(),
             public_path: String::new(),
             entry_names: String::new(),
@@ -2538,6 +2550,22 @@ fn parse_engine_version(version: &str) -> Option<crate::internal::compat::Semver
     })
 }
 
+fn validate_property_regex(log: &Log, setting: &str, pattern: &str) -> Option<Arc<regex::Regex>> {
+    if pattern.is_empty() {
+        return None;
+    }
+    if let Ok(pattern) = regex::Regex::new(pattern) {
+        Some(Arc::new(pattern))
+    } else {
+        log.add_error(
+            None,
+            crate::internal::logger::Range::default(),
+            format!("The {setting:?} setting is not a valid regular expression: {pattern}"),
+        );
+        None
+    }
+}
+
 fn validate_supported_features(
     log: &Log,
     supported: &HashMap<String, bool>,
@@ -2689,6 +2717,8 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
         &options.supported,
         options.platform,
     );
+    let _ = validate_property_regex(&log, "mangle props", &options.mangle_props);
+    let _ = validate_property_regex(&log, "reserve props", &options.reserve_props);
 
     let mut errors = Vec::new();
     let entry_point_count = options.entry_points.len()
@@ -3193,6 +3223,8 @@ fn build_with_output_state_core(
         log_overrides(&options.log_override),
     );
     let log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
+    let mangle_props = validate_property_regex(&log, "mangle props", &options.mangle_props);
+    let reserve_props = validate_property_regex(&log, "reserve props", &options.reserve_props);
     let target_features = validate_target_features(
         &log,
         options.target,
@@ -3558,6 +3590,9 @@ fn build_with_output_state_core(
     let mut internal_options = config::Options {
         mode,
         output_format,
+        mangle_props,
+        reserve_props,
+        mangle_quoted: options.mangle_quoted,
         platform: match options.platform {
             BuildPlatform::Default | BuildPlatform::Browser => config::Platform::Browser,
             BuildPlatform::Node => config::Platform::Node,
@@ -3709,6 +3744,8 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         log_overrides(&options.log_override),
     );
     let mut options = options;
+    let _ = validate_property_regex(&log, "mangle props", &options.mangle_props);
+    let _ = validate_property_regex(&log, "reserve props", &options.reserve_props);
     let log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
     let target_features = validate_target_features(
         &log,
@@ -3976,6 +4013,9 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
         target: options.target,
         engines: options.engines,
         supported: options.supported,
+        mangle_props: options.mangle_props,
+        reserve_props: options.reserve_props,
+        mangle_quoted: options.mangle_quoted,
         global_name: options.global_name,
         sourcemap: options.sourcemap,
         source_root: options.source_root,

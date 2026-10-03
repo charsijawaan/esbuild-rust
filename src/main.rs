@@ -326,6 +326,18 @@ fn run_with_stdin_and_node_paths(
             options.ignore_annotations = value?;
             continue;
         }
+        if let Some(value) = argument.strip_prefix("--mangle-props=") {
+            options.mangle_props = value.into();
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--reserve-props=") {
+            options.reserve_props = value.into();
+            continue;
+        }
+        if let Some(value) = parse_bool_flag(argument, "--mangle-quoted") {
+            options.mangle_quoted = value?;
+            continue;
+        }
         if argument == "--sourcemap" {
             sourcemap = BuildSourceMap::Linked;
             bare_sourcemap = true;
@@ -752,6 +764,9 @@ fn run_with_stdin_and_node_paths(
             target: options.target,
             engines: options.engines,
             supported: options.supported,
+            mangle_props: options.mangle_props,
+            reserve_props: options.reserve_props,
+            mangle_quoted: options.mangle_quoted,
             global_name,
             public_path,
             entry_names,
@@ -1133,6 +1148,7 @@ fn help_text() -> String {
          \x20\x20--out-extension:.js=.mjs\n\
          \x20\x20--define:KEY=VALUE\n\
          \x20\x20--supported:FEATURE=true|false\n\
+         \x20\x20--mangle-props=REGEX --reserve-props=REGEX --mangle-quoted\n\
          \x20\x20--pure:CALL\n\
          \x20\x20--keep-names\n\
          \x20\x20--main-fields=FIELDS\n\

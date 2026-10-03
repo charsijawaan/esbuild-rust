@@ -3170,7 +3170,12 @@ impl Printer<'_> {
                 }
             }
             ExprData::Index(index) => {
-                let inlined_dot_name = if self.options.minify_syntax {
+                let inlined_dot_name = if let Some(ExprData::NameOfSymbol(name)) =
+                    index.index.data.as_deref()
+                {
+                    let name = self.renamer.name_for_symbol(name.reference);
+                    is_identifier_es5_and_es_next(&name).then_some(name)
+                } else if self.options.minify_syntax {
                     let inlined = match index.index.data.as_deref() {
                         Some(ExprData::InlinedEnum(value)) => Some(value.value.clone()),
                         _ => self
@@ -3860,7 +3865,18 @@ impl Printer<'_> {
     }
 
     fn print_property_key(&mut self, key: &Expr) {
-        if let Some(ExprData::String(string)) = key.data.as_deref() {
+        if let Some(ExprData::NameOfSymbol(name)) = key.data.as_deref() {
+            let name = self.renamer.name_for_symbol(name.reference);
+            if is_identifier_es5_and_es_next(&name) {
+                self.print_identifier(&name);
+            } else {
+                self.output.extend(quote_utf16(
+                    &name.encode_utf16().collect::<Vec<_>>(),
+                    self.options,
+                    false,
+                ));
+            }
+        } else if let Some(ExprData::String(string)) = key.data.as_deref() {
             let name = String::from_utf16_lossy(&string.value);
             if is_identifier_es5_and_es_next(&name) {
                 self.print_identifier(&name);

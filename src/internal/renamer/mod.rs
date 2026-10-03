@@ -95,6 +95,45 @@ pub struct NoOpRenamer {
     symbols: SymbolMap,
 }
 
+/// Apply property names shared by all chunks while preserving local renaming.
+pub struct MangledPropsRenamer<'a> {
+    pub renamer: &'a dyn Renamer,
+    pub names: &'a HashMap<Ref, String>,
+}
+
+impl Renamer for MangledPropsRenamer<'_> {
+    fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
+        self.renamer.canonical_ref_for_symbol(reference)
+    }
+
+    fn name_for_symbol(&self, reference: Ref) -> String {
+        self.names
+            .get(&self.canonical_ref_for_symbol(reference))
+            .cloned()
+            .unwrap_or_else(|| self.renamer.name_for_symbol(reference))
+    }
+
+    fn original_name_for_symbol(&self, reference: Ref) -> String {
+        self.renamer.original_name_for_symbol(reference)
+    }
+
+    fn flags_for_symbol(&self, reference: Ref) -> SymbolFlags {
+        self.renamer.flags_for_symbol(reference)
+    }
+
+    fn kind_for_symbol(&self, reference: Ref) -> SymbolKind {
+        self.renamer.kind_for_symbol(reference)
+    }
+
+    fn namespace_alias_for_symbol(&self, reference: Ref) -> Option<NamespaceAlias> {
+        self.renamer.namespace_alias_for_symbol(reference)
+    }
+
+    fn import_item_status_for_symbol(&self, reference: Ref) -> ImportItemStatus {
+        self.renamer.import_item_status_for_symbol(reference)
+    }
+}
+
 #[must_use]
 pub fn new_no_op_renamer(symbols: SymbolMap) -> NoOpRenamer {
     NoOpRenamer { symbols }

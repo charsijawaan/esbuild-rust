@@ -5790,7 +5790,10 @@ fn visit_class(
     let (_, lower_all_static_fields_due_to_private_members) =
         class_private_member_lowering_flags(core, class);
     for property in &mut class.properties {
-        if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+        visit_mangled_property_key(core, &mut property.key);
+        if property.flags.contains(PropertyFlags::IS_COMPUTED)
+            || matches!(property.key.data.as_deref(), Some(ExprData::NameOfSymbol(_)))
+        {
             visit_expr(core, &mut property.key, resolve_identifiers);
         } else {
             validate_non_computed_property_key(core, &property.key);
@@ -9183,7 +9186,10 @@ fn class_field_assignment_target(property: &Property) -> Option<Expr> {
                 }),
             )
         }
-        ExprData::String(_) | ExprData::Number(_) | ExprData::PrivateIdentifier(_) => Expr::new(
+        ExprData::String(_)
+        | ExprData::Number(_)
+        | ExprData::PrivateIdentifier(_)
+        | ExprData::NameOfSymbol(_) => Expr::new(
             property.loc,
             ExprData::Index(crate::internal::js_ast::IndexExpr {
                 target: Expr::new(property.loc, ExprData::This),
@@ -10459,7 +10465,10 @@ fn visit_binding_initializers(
         }
         Some(BindingData::Object(object)) => {
             for property in &mut object.properties {
-                if property.is_computed {
+                visit_mangled_property_key(core, &mut property.key);
+                if property.is_computed
+                    || matches!(property.key.data.as_deref(), Some(ExprData::NameOfSymbol(_)))
+                {
                     visit_expr(core, &mut property.key, resolve_identifiers);
                 } else {
                     validate_non_computed_property_key(core, &property.key);
@@ -10475,6 +10484,22 @@ fn visit_binding_initializers(
             }
         }
         Some(BindingData::Missing | BindingData::Identifier(_)) | None => {}
+    }
+}
+
+fn visit_mangled_property_key(core: &mut ParserCore, key: &mut Expr) {
+    if core.options.mangle_quoted
+        && let Some(ExprData::String(string)) = key.data.as_deref()
+    {
+        let name = String::from_utf8_lossy(&utf16_to_string(&string.value)).into_owned();
+        if core.is_mangled_prop(&name) {
+            key.data = Some(Box::new(ExprData::NameOfSymbol(
+                crate::internal::js_ast::NameOfSymbolExpr {
+                    reference: core.symbol_for_mangled_prop(&name),
+                    ..crate::internal::js_ast::NameOfSymbolExpr::default()
+                },
+            )));
+        }
     }
 }
 
@@ -11513,6 +11538,9 @@ fn visit_expr_with_target_and_context(
             } else {
                 visit_expr_with_target(core, &mut binary.left, resolve_identifiers, left_target);
             }
+            if binary.op == OpCode::BinaryIn {
+                visit_mangled_property_key(core, &mut binary.left);
+            }
             let inferred_name = if matches!(
                 binary.op,
                 OpCode::BinaryAssign
@@ -12367,6 +12395,7 @@ fn visit_expr_with_target_and_context(
                 },
             );
             visit_expr(core, &mut index.index, resolve_identifiers);
+            visit_mangled_property_key(core, &mut index.index);
             warn_about_private_access(core, index, assign_target);
             if core.lower_super_property_access
                 && matches!(index.target.data.as_deref(), Some(ExprData::Super))
@@ -12572,6 +12601,7 @@ fn visit_expr_with_target_and_context(
             .then(|| core.new_symbol(SymbolKind::Other, "_a"));
             let mut has_spread = false;
             for property in &mut object.properties {
+                visit_mangled_property_key(core, &mut property.key);
                 has_spread |= property.kind == PropertyKind::Spread;
                 if assign_target == AssignTarget::None && property.initializer_or_nil.data.is_some()
                 {
@@ -12583,7 +12613,9 @@ fn visit_expr_with_target_and_context(
                         "Unexpected \"=\"",
                     );
                 }
-                if property.flags.contains(PropertyFlags::IS_COMPUTED) {
+                if property.flags.contains(PropertyFlags::IS_COMPUTED)
+                    || matches!(property.key.data.as_deref(), Some(ExprData::NameOfSymbol(_)))
+                {
                     visit_expr(core, &mut property.key, resolve_identifiers);
                     if core.options.minify_syntax {
                         let inlined_key = if let Some(ExprData::InlinedEnum(inlined)) =
@@ -13599,11 +13631,17 @@ fn visit_expr_with_target_and_context(
                 });
             }
         }
+        ExprData::NameOfSymbol(name) => {
+            if ParserCore::is_stored_name_ref(name.reference) {
+                let text = String::from_utf8_lossy(core.load_name_from_ref(name.reference))
+                    .into_owned();
+                name.reference = core.symbol_for_mangled_prop(&text);
+            }
+        }
         ExprData::Boolean(_)
         | ExprData::Super
         | ExprData::Null
         | ExprData::Undefined
-        | ExprData::NameOfSymbol(_)
         | ExprData::JsxText(_)
         | ExprData::Missing
         | ExprData::RegExp(_)

@@ -202,6 +202,11 @@ fn compile_javascript_bundle_with_css_names(
             .then_some(prepared.unbound_module_ref),
         options.profiler_names,
     );
+    let mangled_props = if options.mangle_props.is_some() {
+        linker::mangle_props(&mut prepared.graph, &mut config::MangleCache::new())
+    } else {
+        HashMap::new()
+    };
     let chunk_paths: Vec<_> = prepared
         .chunks
         .iter()
@@ -247,6 +252,10 @@ fn compile_javascript_bundle_with_css_names(
             &prepared.chunks[chunk_index],
             options,
         );
+        let renamer = crate::internal::renamer::MangledPropsRenamer {
+            renamer: renamer.as_ref(),
+            names: &mangled_props,
+        };
         linker::generate_javascript_chunk(
             &prepared.graph,
             &mut prepared.chunks,
@@ -254,7 +263,7 @@ fn compile_javascript_bundle_with_css_names(
             options,
             runtime_refs,
             entry_point_refs,
-            renamer.as_ref(),
+            &renamer,
             &output_paths,
         );
     }
@@ -5610,7 +5619,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 908 },
+            if selected_test.is_some() { 1 } else { 917 },
             "upstream basic bundler corpus case count"
         );
     }
