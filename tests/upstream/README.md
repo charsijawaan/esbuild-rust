@@ -1227,6 +1227,36 @@ failed integration log is retained. Original assertions and captured active
 indices are unchanged. Text-loader WTF-8 decoding, Data URL map source arrays,
 and older-target binary-loader helper gaps remain separate work.
 
+IIFE global-name components now preserve WTF-8 property keys and use pinned
+identifier eligibility and target-dependent escaping. Browser builds apply the
+automatic `process.env.NODE_ENV` define; transforms preserve it unless explicitly
+defined. Suspicious identifier defines report the original API-specific warning
+location and suggestion. JSX option errors use Go quoting and wording, while
+KeepNames validation honors the target's configurable function-name feature.
+Transform preflight collects define, JSX, global-name, property, KeepNames,
+source-map, and legal-comment errors in the checked order instead of returning
+only the final flag error.
+
+The frozen combined candidate passes 22 selected unchanged original API
+functions on Rust and pinned Go in each worker mode. The preceding MIME binary
+passes 14/22 with eight failures: four Unicode IIFE names, the transform NODE_ENV
+default, two suspicious-define warnings, and unsupported-target KeepNames.
+Thirty-four new native regression groups cover these fixes and validation
+interactions. The normal suite passes 1,314 tests; strict Clippy exits 101 with
+the same 621 diagnostic identities and no new suppressions. Two existing custom
+native/CLI tests that expected transform NODE_ENV defaults were corrected after
+fresh pinned-Go controls; both failed intermediate logs remain retained.
+Original upstream bodies, assertions, options, active indices, and corpus counts
+are unchanged. The earlier 261-function replay and full CLI/runtime checkpoint
+remain separate measurements.
+
+Independent combined interaction checks match Go completely in 27/28 cases
+per worker mode, up from 7/28; all 20 successful runtimes and CLI warning
+attribution match. The remaining complete-output mismatch retains an existing
+runtime-helper brace difference. Results and immutable report identities are
+recorded in `api_preflight_checkpoint.json`. Non-JS define validation without
+a preflight trigger remains a separate inherited gap.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

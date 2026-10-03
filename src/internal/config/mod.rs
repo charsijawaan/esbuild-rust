@@ -885,7 +885,8 @@ pub struct Options {
     pub abs_output_base: String,
     pub output_extension_js: String,
     pub output_extension_css: String,
-    pub global_name: Vec<String>,
+    /// Parsed path components as WTF-8, preserving UTF-16 property keys.
+    pub global_name: Vec<Vec<u8>>,
     pub tsconfig_path: String,
     pub tsconfig_raw: String,
     pub tsconfig_raw_config: Option<Arc<crate::internal::resolver::TsConfigJson>>,

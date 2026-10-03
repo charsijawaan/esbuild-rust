@@ -35,8 +35,9 @@ use crate::internal::{
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
     logger::{
-        DeferLogKind, Log, Msg, MsgData, MsgKind, MsgLocation, OutputOptions, Path, PathStyle,
-        PrettyPaths, Source, TerminalInfo, msg_id_to_string, string_to_maximum_msg_id,
+        ApiKind, DeferLogKind, Log, Msg, MsgData, MsgId, MsgKind, MsgLocation, OutputOptions, Path,
+        PathStyle, PrettyPaths, Source, TerminalInfo, api_kind, msg_id_to_string,
+        string_to_maximum_msg_id,
     },
     renamer::new_no_op_renamer,
     resolver,
@@ -2494,9 +2495,61 @@ fn validate_jsx_define(
     log.add_error(
         None,
         crate::internal::logger::Range::default(),
-        format!("Invalid value for {option_name}: {text:?}"),
+        format!(
+            "Invalid JSX {option_name}: {}",
+            quote_go_string(text.as_bytes())
+        ),
     );
     config::DefineExpr::default()
+}
+
+fn warn_about_suspicious_define(log: &Log, key: &str, value: &str, part: &str) {
+    let (file, column, length, line_text, suggestion) = match api_kind() {
+        ApiKind::Cli => (
+            "<cli>",
+            30,
+            part.len(),
+            format!("--define:process.env.NODE_ENV={part}"),
+            format!("\\\"{part}\\\""),
+        ),
+        ApiKind::Js => (
+            "<js>",
+            34,
+            part.len() + 2,
+            format!("define: {{ 'process.env.NODE_ENV': '{part}' }}"),
+            format!("'\"{part}\"'"),
+        ),
+        ApiKind::Go => (
+            "<go>",
+            50,
+            part.len() + 2,
+            format!("Define: map[string]string{{\"process.env.NODE_ENV\": \"{part}\"}}"),
+            format!("\"\\\"{part}\\\"\""),
+        ),
+    };
+    log.add_msg_id(MsgId::JsSuspiciousDefine, Msg {
+        data: MsgData {
+            text: format!(
+                "{} is defined as an identifier instead of a string (surround {} with quotes to get a string)",
+                quote_go_string(key.as_bytes()),
+                quote_go_string(value.as_bytes()),
+            ),
+            location: Some(MsgLocation {
+                file: PrettyPaths {
+                    abs: file.into(),
+                    rel: file.into(),
+                },
+                line: 1,
+                column,
+                length,
+                line_text: line_text.into_bytes(),
+                suggestion,
+                ..MsgLocation::default()
+            }),
+            ..MsgData::default()
+        },
+        ..Msg::new(MsgKind::Warning, "")
+    });
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2505,6 +2558,7 @@ fn validate_defines(
     defines: &HashMap<String, String>,
     pure: &[String],
     platform: BuildPlatform,
+    is_build_api: bool,
     minify: bool,
 ) -> Arc<config::ProcessedDefines> {
     let mut keys = defines.keys().collect::<Vec<_>>();
@@ -2548,6 +2602,9 @@ fn validate_defines(
             .map(|part| String::from_utf8_lossy(&part).into_owned())
             .collect::<Vec<_>>();
         if define_expr.constant.data.is_some() || !define_expr.parts.is_empty() {
+            if key_parts == ["process", "env", "NODE_ENV"] && define_expr.parts.len() == 1 {
+                warn_about_suspicious_define(log, key, value, &define_expr.parts[0]);
+            }
             raw.push(config::DefineData {
                 key_parts,
                 define_expr: Some(define_expr),
@@ -2590,17 +2647,22 @@ fn validate_defines(
             );
         }
     }
-    if matches!(platform, BuildPlatform::Default | BuildPlatform::Browser)
+    if is_build_api
+        && matches!(platform, BuildPlatform::Default | BuildPlatform::Browser)
         && !raw.iter().any(|define| {
             let parts = define
                 .key_parts
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            matches!(
-                parts.as_slice(),
-                ["process"] | ["process", "env"] | ["process", "env", "NODE_ENV"]
-            )
+            // Pure-call metadata does not override Go's automatic define.
+            define.define_expr.is_some()
+                && matches!(
+                    parts.as_slice(),
+                    // Pinned Go checks a single "process.env" part here. A
+                    // two-part process.env define leaves the full default enabled.
+                    ["process" | "process.env"] | ["process", "env", "NODE_ENV"]
+                )
         })
     {
         let (define_expr, _) = js_parser::parse_define_expr(if minify {
@@ -2826,6 +2888,31 @@ fn validate_target_features(
     }
 }
 
+fn validate_keep_names(log: &Log, keep_names: bool, target_features: &ValidatedTargetFeatures) {
+    if keep_names
+        && target_features
+            .unsupported_js_features
+            .contains(crate::internal::compat::JsFeature::FUNCTION_NAME_CONFIGURABLE)
+    {
+        let environment = config::pretty_print_target_environment(
+            &target_features.original_target_environment,
+            target_features.unsupported_js_feature_overrides_mask,
+        );
+        log.add_error_with_notes(
+            None,
+            crate::internal::logger::Range::default(),
+            format!("The \"keep names\" setting cannot be used with {environment}"),
+            vec![MsgData {
+                text: "In this environment, the \"Function.prototype.name\" property is not \
+                       configurable and assigning to it will throw an error. Either use a newer \
+                       target environment or disable the \"keep names\" setting."
+                    .into(),
+                ..MsgData::default()
+            }],
+        );
+    }
+}
+
 fn build_option_error(text: impl Into<String>) -> Message {
     Message {
         text: text.into(),
@@ -2840,7 +2927,7 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
         DeferLogKind::NoVerboseOrDebug,
         log_overrides(&options.log_override),
     );
-    let _ = validate_target_features(
+    let target_features = validate_target_features(
         &log,
         options.target,
         &options.engines,
@@ -2857,10 +2944,11 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
         &options.define,
         &options.pure,
         options.platform,
+        true,
         options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
     );
-    let _ = validate_jsx_define(&log, &options.jsx_factory, "jsx factory", false);
-    let _ = validate_jsx_define(&log, &options.jsx_fragment, "jsx fragment", true);
+    let _ = validate_jsx_define(&log, &options.jsx_factory, "factory", false);
+    let _ = validate_jsx_define(&log, &options.jsx_fragment, "fragment", true);
     let _ = validate_property_regex(&log, "mangle props", &options.mangle_props);
     let _ = validate_property_regex(&log, "reserve props", &options.reserve_props);
     if !options.global_name.is_empty() {
@@ -2980,6 +3068,7 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
         BuildFormat::CommonJs => config::Format::CommonJs,
         BuildFormat::EsModule => config::Format::EsModule,
     };
+    validate_keep_names(&log, options.keep_names, &target_features);
     if options.splitting && output_format != config::Format::EsModule {
         errors.push(build_option_error(
             "Splitting currently only works with the \"esm\" format",
@@ -3387,6 +3476,7 @@ fn build_with_output_state_core(
         &options.supported,
         options.platform,
     );
+    validate_keep_names(&log, options.keep_names, &target_features);
     let bundle = options.bundle;
     let write = options.write;
     let write_to_stdout = options.outdir.is_empty() && options.outfile.is_empty();
@@ -3617,19 +3707,17 @@ fn build_with_output_state_core(
             };
         }
         parts
-            .into_iter()
-            .map(|part| String::from_utf8_lossy(&part).into_owned())
-            .collect()
     };
     let defines = validate_defines(
         &log,
         &options.define,
         &options.pure,
         options.platform,
+        !is_transform,
         options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
     );
-    let jsx_factory = validate_jsx_define(&log, &options.jsx_factory, "jsx factory", false);
-    let jsx_fragment = validate_jsx_define(&log, &options.jsx_fragment, "jsx fragment", true);
+    let jsx_factory = validate_jsx_define(&log, &options.jsx_factory, "factory", false);
+    let jsx_fragment = validate_jsx_define(&log, &options.jsx_fragment, "fragment", true);
     if !options.tsconfig.is_empty() && !options.tsconfig_raw.is_empty() {
         log.add_error(
             None,
@@ -3959,8 +4047,6 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
             ..TransformResult::default()
         };
     }
-    let _ = validate_property_regex(&log, "mangle props", &options.mangle_props);
-    let _ = validate_property_regex(&log, "reserve props", &options.reserve_props);
     let log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
     let target_features = validate_target_features(
         &log,
@@ -3969,36 +4055,64 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         &options.supported,
         options.platform,
     );
-    if options.legal_comments == BuildLegalComments::Linked {
-        return TransformResult {
-            errors: vec![Message {
-                text: "Cannot transform with linked legal comments".into(),
-                kind: MessageKind::Error,
-                ..Message::default()
-            }],
-            ..TransformResult::default()
-        };
+    if options.keep_names
+        || options.sourcemap == BuildSourceMap::Linked
+        || options.legal_comments == BuildLegalComments::Linked
+        || !options.jsx_factory.is_empty()
+        || !options.jsx_fragment.is_empty()
+    {
+        // Collect scalar errors in Go's order before a transform can stop
+        // ahead of its linker preflight. Linked successes use the build log.
+        let _ = validate_defines(
+            &log,
+            &options.define,
+            &options.pure,
+            options.platform,
+            false,
+            false,
+        );
+        let _ = validate_jsx_define(&log, &options.jsx_factory, "factory", false);
+        let _ = validate_jsx_define(&log, &options.jsx_fragment, "fragment", true);
     }
+    if !options.global_name.is_empty() {
+        let _ = js_parser::parse_global_name(
+            log.clone(),
+            Source {
+                key_path: crate::internal::logger::Path {
+                    text: "(global name)".into(),
+                    ..crate::internal::logger::Path::default()
+                },
+                pretty_paths: PrettyPaths {
+                    abs: "(global name)".into(),
+                    rel: "(global name)".into(),
+                },
+                contents: Arc::from(options.global_name.as_bytes()),
+                ..Source::default()
+            },
+        );
+    }
+    let _ = validate_property_regex(&log, "mangle props", &options.mangle_props);
+    let _ = validate_property_regex(&log, "reserve props", &options.reserve_props);
+    validate_keep_names(&log, options.keep_names, &target_features);
     if options.sourcemap == BuildSourceMap::Linked {
-        return TransformResult {
-            errors: vec![Message {
-                text: "Cannot transform with linked source maps".into(),
-                kind: MessageKind::Error,
-                ..Message::default()
-            }],
-            ..TransformResult::default()
-        };
+        log.add_error(
+            None,
+            crate::internal::logger::Range::default(),
+            "Cannot transform with linked source maps",
+        );
+    } else if options.sourcemap != BuildSourceMap::None && options.sourcefile.is_empty() {
+        log.add_error(
+            None,
+            crate::internal::logger::Range::default(),
+            "Must use \"sourcefile\" with \"sourcemap\" to set the original file name",
+        );
     }
-    if options.sourcemap != BuildSourceMap::None && options.sourcefile.is_empty() {
-        return TransformResult {
-            errors: vec![Message {
-                text: "Must use \"sourcefile\" with \"sourcemap\" to set the original file name"
-                    .into(),
-                kind: MessageKind::Error,
-                ..Message::default()
-            }],
-            ..TransformResult::default()
-        };
+    if options.legal_comments == BuildLegalComments::Linked {
+        log.add_error(
+            None,
+            crate::internal::logger::Range::default(),
+            "Cannot transform with linked legal comments",
+        );
     }
     let sourcefile = if options.sourcefile.is_empty() {
         "<stdin>".to_string()
@@ -4017,31 +4131,6 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
             };
         };
         options.loader = loader;
-    }
-    if !options.global_name.is_empty() {
-        let (_, ok) = js_parser::parse_global_name(
-            log.clone(),
-            Source {
-                key_path: crate::internal::logger::Path {
-                    text: "(global name)".into(),
-                    ..crate::internal::logger::Path::default()
-                },
-                pretty_paths: PrettyPaths {
-                    abs: "(global name)".into(),
-                    rel: "(global name)".into(),
-                },
-                contents: Arc::from(options.global_name.as_bytes()),
-                ..Source::default()
-            },
-        );
-        if !ok {
-            let (errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
-            return TransformResult {
-                errors,
-                warnings,
-                ..TransformResult::default()
-            };
-        }
     }
     if log.has_errors() {
         let (errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
@@ -9628,14 +9717,14 @@ mod tests {
     }
 
     #[test]
-    fn defaults_node_env_for_browser_transforms() {
-        let development = code(transform(
+    fn preserves_node_env_in_transforms() {
+        let default = code(transform(
             "console.log(process.env.NODE_ENV)",
             TransformOptions::default(),
         ));
-        assert!(development.contains("\"development\""), "{development}");
+        assert_eq!(default, "console.log(process.env.NODE_ENV);\n");
 
-        let production = code(transform(
+        let minified = code(transform(
             "console.log(process.env.NODE_ENV)",
             TransformOptions {
                 minify_whitespace: true,
@@ -9644,7 +9733,7 @@ mod tests {
                 ..TransformOptions::default()
             },
         ));
-        assert!(production.contains("\"production\""), "{production}");
+        assert_eq!(minified, "console.log(process.env.NODE_ENV);\n");
 
         let node = code(transform(
             "console.log(process.env.NODE_ENV)",
@@ -9653,7 +9742,7 @@ mod tests {
                 ..TransformOptions::default()
             },
         ));
-        assert!(node.contains("process.env.NODE_ENV"), "{node}");
+        assert_eq!(node, "console.log(process.env.NODE_ENV);\n");
     }
 
     #[test]

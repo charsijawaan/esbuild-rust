@@ -146,6 +146,7 @@ fn cli_color(arguments: &[String]) -> bool {
 }
 
 fn main() {
+    esbuild_rs::internal::logger::set_api_kind(esbuild_rs::internal::logger::ApiKind::Cli);
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let mut service_requested = false;
     let mut send_pings = false;
@@ -2393,16 +2394,15 @@ mod tests {
     }
 
     #[test]
-    fn applies_platform_defaults_to_transforms() {
+    fn preserves_node_env_in_platform_transforms() {
         let Output::Code(browser) = run_with_stdin(&[], Some(b"console.log(process.env.NODE_ENV)"))
             .expect("browser transform succeeds")
         else {
             panic!("expected transformed code");
         };
-        assert!(
-            String::from_utf8(browser)
-                .expect("transform output is UTF-8")
-                .contains("\"development\"")
+        assert_eq!(
+            String::from_utf8(browser).expect("transform output is UTF-8"),
+            "console.log(process.env.NODE_ENV);\n"
         );
 
         let Output::Code(node) = run_with_stdin(

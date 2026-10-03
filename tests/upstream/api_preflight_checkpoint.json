@@ -1,0 +1,145 @@
+{
+  "reviewed_on": "2026-10-04",
+  "rust_base_commit": "308e473536fcef175e6763a1fed62ad7c624a767",
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+  "upstream_version": "0.28.1",
+  "rust_binary_sha256": "101bb0a72ff60fd35a273475478e338b9cb14f0c52e1b29a22eb0fd533ba1229",
+  "go_binary_sha256": "a5b888adb15b0a570c7fc904737de515b159119e7501491f452ee1b8c4cff2cf",
+  "node_version": "v24.15.0",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "wrapper_sha256": "8331fe1d8b3a07381f33cc425fcfaa94776e263113653f80ec3ba433e9657e73",
+  "original_suite_sha256": {
+    "scripts/js-api-tests.js": "5dc7e1a66de33536f727691ea9478b611a3610c039654e1acb636232bbb13998",
+    "scripts/plugin-tests.js": "dbc9066058cd6010ba06bfaf453137986efefd96a0a2b8c18531ff1c9fb01995"
+  },
+  "selection": [
+    "transformTests/tsconfigRawJSX",
+    "transformTests/iifeGlobalName",
+    "transformTests/iifeGlobalNameCompound",
+    "transformTests/iifeGlobalNameString",
+    "transformTests/iifeGlobalNameUnicodeEscape",
+    "transformTests/iifeGlobalNameUnicodeNoEscape",
+    "transformTests/iifeGlobalNameUnicodeEscapeNoLogicalAssignment",
+    "transformTests/iifeGlobalNameUnicodeNoEscapeNoLogicalAssignment",
+    "transformTests/iifeGlobalNameThis",
+    "transformTests/iifeGlobalNameImportMeta",
+    "transformTests/jsx",
+    "transformTests/jsxTransform",
+    "transformTests/jsxPreserve",
+    "transformTests/jsxRuntimeAutomatic",
+    "transformTests/jsxDev",
+    "transformTests/jsxImportSource",
+    "transformTests/jsxSideEffects",
+    "transformTests/defineProcessEnvNodeEnv",
+    "transformTests/defineBuiltInConstants",
+    "transformTests/defineIdentifierVsStringWarningIssue466Transform",
+    "transformTests/defineIdentifierVsStringWarningIssue466Build",
+    "transformTests/keepNamesUnsupported"
+  ],
+  "newly_passing": [
+    "transformTests/iifeGlobalNameUnicodeEscape",
+    "transformTests/iifeGlobalNameUnicodeNoEscape",
+    "transformTests/iifeGlobalNameUnicodeEscapeNoLogicalAssignment",
+    "transformTests/iifeGlobalNameUnicodeNoEscapeNoLogicalAssignment",
+    "transformTests/defineProcessEnvNodeEnv",
+    "transformTests/defineIdentifierVsStringWarningIssue466Transform",
+    "transformTests/defineIdentifierVsStringWarningIssue466Build",
+    "transformTests/keepNamesUnsupported"
+  ],
+  "results": {
+    "baseline_0": {
+      "completed": true,
+      "passed": 14,
+      "failed": 8,
+      "report": "/tmp/esbuild-parent-api-preflight-original-baseline-0.json",
+      "sha256": "564c1a54d6fad16492322cf788f68ff56591788311933986431b51daea818271"
+    },
+    "baseline_1": {
+      "completed": true,
+      "passed": 14,
+      "failed": 8,
+      "report": "/tmp/esbuild-parent-api-preflight-original-baseline-1.json",
+      "sha256": "2dcb0ab5a1b1552cb2d7b91602ef20e22fffdbb200610cf4b944cfb43f96d06e"
+    },
+    "rust_0": {
+      "completed": true,
+      "passed": 22,
+      "failed": 0,
+      "report": "/tmp/esbuild-parent-api-preflight-original-rust-0.json",
+      "sha256": "e1c6ce54df8eb66639aeb6072956cc33311853c7fb5d0b72b38a3f411d55e4e8"
+    },
+    "rust_1": {
+      "completed": true,
+      "passed": 22,
+      "failed": 0,
+      "report": "/tmp/esbuild-parent-api-preflight-original-rust-1.json",
+      "sha256": "9fe2934ca0cce0856ed8c43aeb0be5c86cf8f0451d1a61fbaeec63bb66ecf5d4"
+    },
+    "go_0": {
+      "completed": true,
+      "passed": 22,
+      "failed": 0,
+      "report": "/tmp/esbuild-parent-api-preflight-original-go-0.json",
+      "sha256": "df29fcbea5a81014761c150b612ce7fb4101bc00881d8a004bde5a22643c6d82"
+    },
+    "go_1": {
+      "completed": true,
+      "passed": 22,
+      "failed": 0,
+      "report": "/tmp/esbuild-parent-api-preflight-original-go-1.json",
+      "sha256": "15ccb1db831cd9db1df582f38cddc16ca1f6579be1e68f3432a6dbeebb128cde"
+    }
+  },
+  "normal": {
+    "exit_code": 0,
+    "passed": 1314,
+    "ignored": 3,
+    "log": "/tmp/esbuild-parent-api-preflight-normal-v3.log",
+    "sha256": "130fe8505ffa41ef8e481ef94a385c8ba1e6c727698c7ac58a0c115392b1f329"
+  },
+  "strict": {
+    "exit_code": 101,
+    "baseline_errors": 621,
+    "candidate_errors": 621,
+    "added": 0,
+    "removed": 0,
+    "comparison": "/tmp/esbuild-parent-api-preflight-clippy-v3-comparison.json",
+    "comparison_sha256": "caa39d37cbd5efebd62324ec0d633601fba2e5d2144e5170e7310a33ea1ecaec"
+  },
+  "independent_review": {
+    "path": "/tmp/esbuild-parent-api-preflight-integration-review.md",
+    "sha256": "f2be518c8ebb8b3c4018bae9783097e005e49faab5c1cda26900f097c3042e1e",
+    "source_verification": "/tmp/esbuild-parent-api-preflight-integration-review/source-verification.json",
+    "source_verification_sha256": "1f74a7d743931ac3ef9694c48adcfd9e644c05324ef9b5b5a32330d38475818d",
+    "comparison": "/tmp/esbuild-parent-api-preflight-integration-review/comparison.json",
+    "comparison_sha256": "9849ef78df1b258c9959496e038550fc1437cb851447dddcb2a3cc6a84201bd0",
+    "cases_per_worker": 28,
+    "exact_per_worker": 27,
+    "baseline_exact_per_worker": 7,
+    "runtime_passed_per_worker": 20,
+    "cli_exact_per_worker": true,
+    "inherited_full_output_failure": "unicode-import-meta-root retains native __copyProps braces difference",
+    "no_new_blocking_finding": true
+  },
+  "custom_expectation_correction": {
+    "tests": [
+      "api::tests::preserves_node_env_in_transforms",
+      "main::tests::preserves_node_env_in_platform_transforms"
+    ],
+    "reason": "Pinned Go applies automatic NODE_ENV defines to browser builds, not transforms. Source/options preserved; old incorrect development/production expectations replaced with exact Go transform output.",
+    "go_control": "/tmp/esbuild-parent-api-old-node-env-units-go-control-v2.json",
+    "go_control_sha256": "110d5303d2593b4cc6091b39659b5ff33bd1a2d833166fcd9b8fddcb3e731277",
+    "failed_logs": [
+      "/tmp/esbuild-parent-api-preflight-normal-v1.log",
+      "/tmp/esbuild-parent-api-preflight-normal-v2.log"
+    ]
+  },
+  "limitations": [
+    "No full expanded261 or CLI1462 replay in this batch.",
+    "No active captured indices or original upstream assertions changed.",
+    "Non-JS define validation without a preflight trigger remains a separate inherited gap.",
+    "Serving, distribution, WASM and full plugin coverage remain separate.",
+    "Strict Clippy still exits101 for621 inherited errors; no strict pass."
+  ]
+}

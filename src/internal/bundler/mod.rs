@@ -5894,7 +5894,10 @@ mod tests {
                 drop_labels: upstream_string_array_option(options_json, "DropLabels")
                     .unwrap_or_default(),
                 global_name: upstream_string_array_option(options_json, "GlobalName")
-                    .unwrap_or_default(),
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(String::into_bytes)
+                    .collect(),
                 extension_order: upstream_string_array_option(options_json, "ExtensionOrder")
                     .unwrap_or_default(),
                 write_to_stdout: upstream_bool_option(options_json, "WriteToStdout")

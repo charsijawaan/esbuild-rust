@@ -7707,7 +7707,7 @@ fn append_node_common_js_export_annotations(
 #[must_use]
 pub fn generate_global_name_prefix(options: &Options) -> String {
     let mut names = options.global_name.iter();
-    let mut prefix = names.next().expect("global name must not be empty").clone();
+    let root = names.next().expect("global name must not be empty");
     let mut names: Vec<_> = names.cloned().collect();
     let space = if options.minify_whitespace { "" } else { " " };
     let join = if options.minify_whitespace {
@@ -7716,25 +7716,26 @@ pub fn generate_global_name_prefix(options: &Options) -> String {
         ";\n"
     };
     let mut text = String::new();
-    let mut is_existing_object = prefix == "this";
-    if prefix == "import" && names.first().is_some_and(|name| name == "meta") {
-        prefix = "import.meta".into();
+    let mut is_existing_object = root == b"this";
+    let mut prefix = if root == b"import" && names.first().is_some_and(|name| name == b"meta") {
         names.remove(0);
         is_existing_object = true;
-    }
+        "import.meta".into()
+    } else if is_existing_object {
+        "this".into()
+    } else if can_use_global_name_identifier(root, options) {
+        escaped_global_name_identifier(root, options)
+    } else {
+        format!("this[{}]", quoted_global_name(root, options))
+    };
 
     if !names.is_empty()
         && !options
             .unsupported_js_features
             .contains(crate::internal::compat::JsFeature::LOGICAL_ASSIGNMENT)
     {
-        if !is_existing_object {
-            if can_use_global_name_identifier(&prefix) {
-                prefix = escaped_global_name_identifier(&prefix, options);
-                write!(text, "var {prefix}{join}").expect("writing to a string cannot fail");
-            } else {
-                prefix = format!("this[{}]", quoted_global_name(&prefix, options));
-            }
+        if !is_existing_object && can_use_global_name_identifier(root, options) {
+            write!(text, "var {prefix}{join}").expect("writing to a string cannot fail");
         }
         for name in names {
             let accessor = global_name_accessor(&name, options);
@@ -7748,13 +7749,9 @@ pub fn generate_global_name_prefix(options: &Options) -> String {
         return format!("{text}{prefix}{space}={space}");
     }
 
-    if is_existing_object {
-        text = format!("{prefix}{space}={space}");
-    } else if can_use_global_name_identifier(&prefix) {
-        prefix = escaped_global_name_identifier(&prefix, options);
+    if !is_existing_object && can_use_global_name_identifier(root, options) {
         text = format!("var {prefix}{space}={space}");
     } else {
-        prefix = format!("this[{}]", quoted_global_name(&prefix, options));
         text = format!("{prefix}{space}={space}");
     }
     for name in names {
@@ -7769,11 +7766,20 @@ pub fn generate_global_name_prefix(options: &Options) -> String {
     text
 }
 
-fn can_use_global_name_identifier(name: &str) -> bool {
-    js_ast::is_identifier(name) && !crate::internal::js_lexer::KEYWORDS.contains(&name)
+fn can_use_global_name_identifier(name: &[u8], options: &Options) -> bool {
+    let Ok(name) = std::str::from_utf8(name) else {
+        return false;
+    };
+    js_ast::is_identifier_es5_and_es_next(name)
+        && (!options.ascii_only
+            || !options
+                .unsupported_js_features
+                .contains(crate::internal::compat::JsFeature::UNICODE_ESCAPES)
+            || !crate::internal::helpers::contains_non_bmp_code_point(name.as_bytes()))
 }
 
-fn escaped_global_name_identifier(name: &str, options: &Options) -> String {
+fn escaped_global_name_identifier(name: &[u8], options: &Options) -> String {
+    let name = std::str::from_utf8(name).expect("global name identifier is valid UTF-8");
     if options.ascii_only {
         String::from_utf8(crate::internal::js_printer::quote_identifier(
             Vec::new(),
@@ -7786,16 +7792,16 @@ fn escaped_global_name_identifier(name: &str, options: &Options) -> String {
     }
 }
 
-fn quoted_global_name(name: &str, options: &Options) -> String {
+fn quoted_global_name(name: &[u8], options: &Options) -> String {
     String::from_utf8(crate::internal::helpers::quote_for_json(
-        name.as_bytes(),
+        name,
         options.ascii_only,
     ))
     .expect("quoted JSON is UTF-8")
 }
 
-fn global_name_accessor(name: &str, options: &Options) -> String {
-    if can_use_global_name_identifier(name) {
+fn global_name_accessor(name: &[u8], options: &Options) -> String {
+    if can_use_global_name_identifier(name, options) {
         format!(".{}", escaped_global_name_identifier(name, options))
     } else {
         format!("[{}]", quoted_global_name(name, options))
@@ -10835,7 +10841,7 @@ mod tests {
             to_common_js_ref,
             unbound_module_ref: module_ref,
         };
-        let tail = |format, global_name: Vec<String>| {
+        let tail = |format, global_name: Vec<Vec<u8>>| {
             String::from_utf8(generate_entry_point_tail(
                 &graph,
                 &Options {
