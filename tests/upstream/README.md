@@ -522,6 +522,12 @@ initialization. Decorator lowering retains its separate binding path. The normal
 suite passes 988 tests; the parser audit preserves all 7,061 active cases, and
 strict Clippy retains 623 existing errors without added diagnostics.
 
+The complete runtime audit at `2be1b17` is recorded in
+`end_to_end_default_class_checkpoint.json`: 1,400 passed, 62 failed, and no
+timeouts. Cases 949, 950, 1133, 1134, 1276, and 1277 are newly passing without
+regressions relative to `f0121ee`. Case 80 remains the shared environment failure,
+leaving 61 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
