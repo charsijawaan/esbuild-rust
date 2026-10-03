@@ -3247,7 +3247,7 @@ fn build_with_output_state_core(
     );
     let bundle = options.bundle;
     let write = options.write;
-    let write_to_stdout = write && options.outdir.is_empty() && options.outfile.is_empty();
+    let write_to_stdout = options.outdir.is_empty() && options.outfile.is_empty();
     let allow_overwrite = options.allow_overwrite;
     let file_system: Arc<dyn Fs> = match real_fs(RealFsOptions {
         abs_working_dir: options.abs_working_dir.clone(),
@@ -3678,6 +3678,7 @@ fn build_with_output_state_core(
         abs_output_dir: output_dir,
         abs_output_file: output_file,
         abs_output_base,
+        write_to_stdout,
         tsconfig_path,
         tsconfig_raw: options.tsconfig_raw,
         stdin,
@@ -3722,7 +3723,11 @@ fn build_with_output_state_core(
             .output_files
             .into_iter()
             .map(|output| BuildOutputFile {
-                path: output.abs_path,
+                path: if write_to_stdout {
+                    "<stdout>".into()
+                } else {
+                    output.abs_path
+                },
                 hash: output_file_hash(&output.contents),
                 contents: output.contents,
                 executable: output.is_executable,

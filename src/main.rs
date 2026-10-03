@@ -697,9 +697,11 @@ fn run_with_stdin_and_node_paths(
         || !outfile.is_empty()
         || !metafile_path.is_empty()
         || analyze != AnalyzeMode::Disabled
-        || input_paths.len() > 1
-        || input_paths.iter().any(|path| path.contains('='));
+        || !input_paths.is_empty();
     if use_build_api {
+        if bare_sourcemap && outdir.is_empty() && outfile.is_empty() {
+            sourcemap = BuildSourceMap::Inline;
+        }
         if !outdir.is_empty() && !outfile.is_empty() {
             return Err("Cannot use both \"--outfile\" and \"--outdir\"".into());
         }

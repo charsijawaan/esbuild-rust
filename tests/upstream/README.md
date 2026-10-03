@@ -682,6 +682,17 @@ no timeouts. Cases 1365, 1366, 1371, 1386, 1387, and 1392 are newly passing
 without regressions relative to `f0023f6`. Case 80 remains the shared environment
 failure, leaving 25 Rust-only failures.
 
+Single CLI file inputs now use the build API, including when output goes to
+stdout. Bare `--sourcemap` becomes inline without an output path, extension
+loaders apply to these inputs, and source-map paths are relative to the working
+directory. The API passes stdout topology into the bundler independently of
+whether output is written, returns `<stdout>` paths, and avoids input-overwrite
+errors for unwritten stdout output. CSS imports that need a separate output
+file are rejected. Regressions cover 18 CLI configurations checked against
+pinned Go, API output paths, source maps, and input preservation. The normal
+suite passes 1,002 tests, including the active parser fixtures; strict Clippy
+retains 623 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
