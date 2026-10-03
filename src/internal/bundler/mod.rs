@@ -2593,6 +2593,12 @@ fn find_nearest_tsconfig(
             };
 
             if !file_system.is_abs(text) && !text.starts_with('.') {
+                // Upstream uses require conditions for node_modules tsconfig
+                // exports. PnP exports retain their existing import-kind path.
+                let is_require = pnp.is_none_or(|pnp| {
+                    pnp.resolve_to_unqualified(text, &directory, file_system).status
+                        == resolver::PnpStatus::Skipped
+                });
                 if let Some(resolved) = resolver::resolve_file_or_package_with_context(
                     log,
                     file_system,
@@ -2601,7 +2607,7 @@ fn find_nearest_tsconfig(
                     &[],
                     Platform::Neutral,
                     None,
-                    false,
+                    is_require,
                     ResolverContext {
                         pnp,
                         ..ResolverContext::default()
@@ -6025,7 +6031,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 942 },
+            if selected_test.is_some() { 1 } else { 943 },
             "upstream basic bundler corpus case count"
         );
     }

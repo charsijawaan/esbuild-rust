@@ -400,3 +400,117 @@ fn context_rebuilds_revalidate_paths_after_config_changes() {
     }
     context.dispose();
 }
+
+#[test]
+fn tsconfig_package_exports_use_require_for_root_exact_and_pattern_subpaths() {
+    for (extends, package) in [
+        (
+            "@scope/config",
+            r#"{"exports":{"import":"./import.json","require":"./require.json","default":"./default.json"}}"#,
+        ),
+        (
+            "@scope/config/exact",
+            r#"{"exports":{"./exact":{"import":"./import.json","require":"./require.json","default":"./default.json"}}}"#,
+        ),
+        (
+            "@scope/config/a/b/c.json",
+            r#"{"exports":{"./*":{"import":"./import.json","require":"./require.json","default":"./default.json"}}}"#,
+        ),
+    ] {
+        let config = format!(r#"{{"extends":{extends:?}}}"#);
+        let fixture = ResolverFixture::new(&[
+            (
+                "entry.ts",
+                "import { value } from 'alias'; console.log(value);",
+            ),
+            ("tsconfig.json", &config),
+            ("node_modules/@scope/config/package.json", package),
+            ("node_modules/@scope/config/import.json", "FAILURE"),
+            ("node_modules/@scope/config/default.json", "FAILURE"),
+            (
+                "node_modules/@scope/config/require.json",
+                r#"{"compilerOptions":{"paths":{"alias":["./selected.ts"],"unused":["bad.ts"]}}}"#,
+            ),
+            (
+                "node_modules/@scope/config/selected.ts",
+                "export const value = 'require config';",
+            ),
+        ]);
+        // A completed root is cached within one scan, but each new build
+        // validates inherited paths again and reports the base source.
+        for _ in 0..2 {
+            let result = fixture.build("", HashMap::new());
+            assert!(output(&result).contains("require config"));
+            assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+            assert_eq!(result.warnings[0].text, invalid_path_warning("bad.ts"));
+            assert_eq!(
+                result.warnings[0].location.as_ref().unwrap().file,
+                "node_modules/@scope/config/require.json"
+            );
+        }
+    }
+}
+
+#[test]
+fn skipped_pnp_tsconfig_exports_use_node_modules_require_conditions() {
+    let fixture = ResolverFixture::new(&[
+        (
+            "entry.ts",
+            "import { value } from 'alias'; console.log(value);",
+        ),
+        ("tsconfig.json", r#"{"extends":"config/base"}"#),
+        (
+            ".pnp.data.json",
+            r#"{"ignorePatternData":".","packageRegistryData":[]}"#,
+        ),
+        (
+            "node_modules/config/package.json",
+            r#"{"exports":{"./base":{"import":"./import.json","require":"./require.json","default":"./default.json"}}}"#,
+        ),
+        ("node_modules/config/import.json", "FAILURE"),
+        ("node_modules/config/default.json", "FAILURE"),
+        (
+            "node_modules/config/require.json",
+            r#"{"compilerOptions":{"paths":{"alias":["./selected.ts"]}}}"#,
+        ),
+        (
+            "node_modules/config/selected.ts",
+            "export const value = 'node_modules require config';",
+        ),
+    ]);
+    let result = fixture.build("", HashMap::new());
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert!(output(&result).contains("node_modules require config"));
+}
+
+#[test]
+fn resolved_pnp_tsconfig_exports_preserve_import_conditions() {
+    let fixture = ResolverFixture::new(&[
+        (
+            "entry.ts",
+            "import { value } from 'alias'; console.log(value);",
+        ),
+        ("tsconfig.json", r#"{"extends":"config/base"}"#),
+        (
+            ".pnp.data.json",
+            r#"{"packageRegistryData":[[null,[[null,{"packageLocation":"./","packageDependencies":[["config","workspace:config"]],"linkType":"SOFT"}]]],["config",[["workspace:config",{"packageLocation":"./configs/","packageDependencies":[],"linkType":"SOFT"}]]]]}"#,
+        ),
+        (
+            "configs/package.json",
+            r#"{"exports":{"./base":{"require":"./require.json","import":"./import.json","default":"./default.json"}}}"#,
+        ),
+        ("configs/require.json", "FAILURE"),
+        ("configs/default.json", "FAILURE"),
+        (
+            "configs/import.json",
+            r#"{"compilerOptions":{"paths":{"alias":["./selected.ts"]}}}"#,
+        ),
+        (
+            "configs/selected.ts",
+            "export const value = 'PnP import config';",
+        ),
+    ]);
+    let result = fixture.build("", HashMap::new());
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert!(output(&result).contains("PnP import config"));
+}

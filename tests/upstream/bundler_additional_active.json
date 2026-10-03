@@ -103,6 +103,7 @@
   "TestTsconfigExtendsDotWithSlash",
   "TestTsconfigExtendsDotWithoutSlash",
   "TestTsconfigExtendsWithExports",
+  "TestTsconfigExtendsWithExportsRequire",
   "TestTsconfigExtendsWithExportsStar",
   "TestTsconfigExtendsWithExportsStarTrailing",
   "TestTsconfigIgnoredTargetSilent",
