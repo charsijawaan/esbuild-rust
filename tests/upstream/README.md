@@ -222,6 +222,17 @@ Relative to `f606229`, 18 cases are newly passing and none regressed. Go still
 passes 1,461 with the shared case-80 failure, leaving 168 Rust-only runtime
 failures alongside the separate 1,768 inactive fixture cases.
 
+Disabling `class-static-blocks` now also lowers the surrounding static fields
+when field syntax itself remains supported. All private members reachable from
+the moved initializers are marked for lowering, and class-lowering decisions
+honor `PRIVATE_SYMBOL_MUST_BE_LOWERED`. This preserves private scope for static
+method/field access, instance getters, and brand checks. The executable
+initialization regression now passes 32 combinations, including an ES2022
+static-block override, on Rust and pinned Go. The local suite remains at 966
+passing tests and the full parser audit at 7,037 matches, with no active
+regressions or new inactive matches. Strict Clippy adds no diagnostics relative
+to the 623-error checkpoint.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

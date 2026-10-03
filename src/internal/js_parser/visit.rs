@@ -5411,6 +5411,7 @@ fn visit_class(
     let mut private_static_brand = None;
     let mut private_instance_brand = None;
     let mut private_class_capture = None;
+    let lower_static_blocks = class_static_blocks_can_be_lowered(core, class);
     for property in &class.properties {
         if let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() {
             core.record_declared_symbol(private.reference);
@@ -5422,6 +5423,10 @@ fn visit_class(
                 .options
                 .unsupported_js_features
                 .contains(crate::internal::compat::symbol_feature(kind))
+                || lower_static_blocks
+                || core.symbols[symbol_index]
+                    .flags
+                    .contains(SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED)
                 || core
                     .lower_all_of_these_private_names
                     .get(&name)
@@ -6017,6 +6022,7 @@ fn lower_private_members(
 }
 
 fn class_private_static_members_need_lowering(core: &ParserCore, class: &Class) -> bool {
+    let lower_static_blocks = class_static_blocks_can_be_lowered(core, class);
     class.properties.iter().any(|property| {
         if !property.flags.contains(PropertyFlags::IS_STATIC) {
             return false;
@@ -6031,6 +6037,10 @@ fn class_private_static_members_need_lowering(core: &ParserCore, class: &Class) 
         core.options
             .unsupported_js_features
             .contains(crate::internal::compat::symbol_feature(symbol.kind))
+            || lower_static_blocks
+            || symbol
+                .flags
+                .contains(SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED)
             || core
                 .lower_all_of_these_private_names
                 .get(&symbol.original_name)
@@ -6040,9 +6050,11 @@ fn class_private_static_members_need_lowering(core: &ParserCore, class: &Class) 
 }
 
 fn class_public_static_fields_need_lowering(core: &ParserCore, class: &Class) -> bool {
-    core.options
+    (core
+        .options
         .unsupported_js_features
         .contains(JsFeature::CLASS_STATIC_FIELD)
+        || class_static_blocks_can_be_lowered(core, class))
         && class.properties.iter().any(|property| {
             property.kind == PropertyKind::Field
                 && property.flags.contains(PropertyFlags::IS_STATIC)
@@ -6064,6 +6076,7 @@ fn class_has_non_constructor_method(class: &Class) -> bool {
 }
 
 fn class_private_members_need_lowering(core: &ParserCore, class: &Class) -> bool {
+    let lower_static_blocks = class_static_blocks_can_be_lowered(core, class);
     class.properties.iter().any(|property| {
         let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
             return false;
@@ -6075,6 +6088,10 @@ fn class_private_members_need_lowering(core: &ParserCore, class: &Class) -> bool
         core.options
             .unsupported_js_features
             .contains(crate::internal::compat::symbol_feature(symbol.kind))
+            || lower_static_blocks
+            || symbol
+                .flags
+                .contains(SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED)
             || core
                 .lower_all_of_these_private_names
                 .get(&symbol.original_name)
@@ -6084,8 +6101,9 @@ fn class_private_members_need_lowering(core: &ParserCore, class: &Class) -> bool
 }
 
 fn class_private_member_lowering_flags(core: &ParserCore, class: &Class) -> (bool, bool) {
+    let lower_static_blocks = class_static_blocks_can_be_lowered(core, class);
     let mut lower_instance_fields = false;
-    let mut lower_static_fields = false;
+    let mut lower_static_fields = lower_static_blocks;
     for property in &class.properties {
         let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
             continue;
@@ -6098,6 +6116,10 @@ fn class_private_member_lowering_flags(core: &ParserCore, class: &Class) -> (boo
             .options
             .unsupported_js_features
             .contains(crate::internal::compat::symbol_feature(symbol.kind))
+            || lower_static_blocks
+            || symbol
+                .flags
+                .contains(SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED)
             || core
                 .lower_all_of_these_private_names
                 .get(&symbol.original_name)

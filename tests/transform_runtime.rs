@@ -378,6 +378,8 @@ fn lowered_static_blocks_and_fields_preserve_initialization_order() {
     let source = r#"
 const events = [];
 class Box {
+  #value = 55;
+  get #privateGetter() { return this.#value; }
   static first = (events.push(1), 11);
   static #second = (events.push(2), 22);
   static {
@@ -393,6 +395,8 @@ class Box {
       } catch { return null; }
     };
     this.ordinary = function() { return this; };
+    this.instanceValue = (new this).#privateGetter;
+    this.brands = #second in this && #method in this && !(#value in this);
   }
   static fourth = (events.push(4), 44);
   static #method() { return this.first + this.#second; }
@@ -401,7 +405,7 @@ const Captured = Box;
 Box = null;
 if (events.join(',') !== '1,2,3,4' || Captured.total !== 33 || Captured.fourth !== 44
   || Captured.saved() !== Captured || Captured.savedDeep() !== Captured
-  || Captured.ordinary.call(events) !== events)
+  || Captured.ordinary.call(events) !== events || Captured.instanceValue !== 55 || !Captured.brands)
   throw new Error('wrong static initialization');
 console.log('ok');
 "#;
@@ -409,12 +413,23 @@ console.log('ok');
         source.to_owned(),
         source.replace("class Box {", "let Box = class {"),
     ] {
-        for target in [Target::Es2015, Target::Es2021, Target::Es2022] {
+        for (target, lower_blocks) in [
+            (Target::Es2015, false),
+            (Target::Es2021, false),
+            (Target::Es2022, false),
+            (Target::Es2022, true),
+        ] {
             for minify in [false, true] {
+                let supported = if lower_blocks {
+                    std::collections::HashMap::from([("class-static-blocks".into(), false)])
+                } else {
+                    std::collections::HashMap::new()
+                };
                 let result = transform(
                     &source,
                     TransformOptions {
                         target,
+                        supported: supported.clone(),
                         minify_identifiers: minify,
                         minify_syntax: minify,
                         minify_whitespace: minify,
@@ -432,6 +447,7 @@ console.log('ok');
                         ..BuildStdin::default()
                     }),
                     target,
+                    supported,
                     minify_identifiers: minify,
                     minify_syntax: minify,
                     minify_whitespace: minify,
