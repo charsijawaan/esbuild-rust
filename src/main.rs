@@ -17,6 +17,8 @@ use esbuild_rs::{
     internal::{cli_helpers, logger::LogLevel},
 };
 
+mod cli_watch;
+
 fn parse_log_level(value: &str, argument: &str) -> Result<LogLevel, String> {
     match value {
         "verbose" => Ok(LogLevel::Verbose),
@@ -261,6 +263,12 @@ fn run_with_stdin_and_node_paths(
     let mut main_fields = Vec::new();
     let mut resolve_extensions = Vec::new();
     let mut conditions = None;
+    let mut watch = false;
+    let mut watch_forever = false;
+    let mut watch_delay = 0;
+    let is_build = arguments
+        .iter()
+        .any(|argument| !argument.starts_with('-') || argument == "--bundle");
     for argument in arguments {
         if argument == "--help" || argument == "-h" {
             return Ok(Output::Text(help_text()));
@@ -278,6 +286,32 @@ fn run_with_stdin_and_node_paths(
         if argument == "--bundle" {
             bundle = true;
             continue;
+        }
+        if is_build && argument == "--watch=forever" {
+            watch = true;
+            watch_forever = true;
+            continue;
+        }
+        if is_build {
+            if let Some(value) = parse_bool_flag(argument, "--watch") {
+                watch = value.map_err(|text| {
+                    let (text, note) = text.split_once("\n\n").unwrap_or((&text, ""));
+                    format_cli_flag_error(arguments, cli_helpers::make_error_with_note(text, note))
+                })?;
+                continue;
+            }
+            if let Some(value) = argument.strip_prefix("--watch-delay=") {
+                watch_delay = value.parse::<i64>().map_err(|_| {
+                    format_cli_flag_error(
+                        arguments,
+                        cli_helpers::make_error_with_note(
+                            format!("Invalid value {value:?} in {argument:?}"),
+                            "The watch delay must be an integer.",
+                        ),
+                    )
+                })?;
+                continue;
+            }
         }
         if argument == "--analyze" {
             analyze = AnalyzeMode::Enabled;
@@ -702,7 +736,14 @@ fn run_with_stdin_and_node_paths(
             return Err(format_cli_flag_error(
                 arguments,
                 cli_helpers::make_error_with_note(
-                    format!("Invalid {kind} flag: {argument:?}"),
+                    format!(
+                        "Invalid {kind} flag: {:?}",
+                        if argument == "--watch=forever" {
+                            "--watch"
+                        } else {
+                            argument
+                        }
+                    ),
                     "",
                 ),
             ));
@@ -791,7 +832,7 @@ fn run_with_stdin_and_node_paths(
         } else {
             None
         };
-        let result = build(BuildOptions {
+        let build_options = BuildOptions {
             log_override: options.log_override,
             bundle,
             entry_points,
@@ -857,7 +898,19 @@ fn run_with_stdin_and_node_paths(
             conditions,
             node_paths,
             ..BuildOptions::default()
-        });
+        };
+        if watch {
+            cli_watch::run(
+                build_options,
+                arguments,
+                watch_forever,
+                watch_delay,
+                metafile_path,
+                analyze,
+            )?;
+            return Ok(Output::Text(String::new()));
+        }
+        let result = build(build_options);
         if !result.errors.is_empty() {
             return Err(format_cli_messages(
                 arguments,
@@ -1152,6 +1205,8 @@ fn help_text() -> String {
          Usage: esbuild [options] [input-file]\n\n\
          Options:\n\
          \x20\x20--bundle\n\
+         \x20\x20--watch[=true|false|forever]\n\
+         \x20\x20--watch-delay=MILLISECONDS\n\
          \x20\x20--analyze[=verbose]\n\
          \x20\x20--color[=true|false]\n\
          \x20\x20--log-level=LEVEL\n\

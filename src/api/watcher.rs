@@ -71,7 +71,7 @@ impl Watcher {
         state.items_per_iteration = 0;
     }
 
-    pub(super) fn start(self: &Arc<Self>, rebuild: Arc<dyn Fn() + Send + Sync>) {
+    pub(super) fn start(self: &Arc<Self>, rebuild: Arc<dyn Fn(&str) + Send + Sync>) {
         // Holding this lock until the handle has been stored makes a concurrent
         // call to "stop" reliably take and join the newly-created worker.
         let mut worker = lock_unpoisoned(&self.worker);
@@ -210,7 +210,7 @@ impl Watcher {
     }
 }
 
-fn worker_loop(watcher: &Weak<Watcher>, rebuild: &Arc<dyn Fn() + Send + Sync>) {
+fn worker_loop(watcher: &Weak<Watcher>, rebuild: &Arc<dyn Fn(&str) + Send + Sync>) {
     loop {
         let Some(watcher) = watcher.upgrade() else {
             return;
@@ -219,14 +219,14 @@ fn worker_loop(watcher: &Weak<Watcher>, rebuild: &Arc<dyn Fn() + Send + Sync>) {
             return;
         }
 
-        if watcher.try_to_find_dirty_path().is_some() {
+        if let Some(path) = watcher.try_to_find_dirty_path() {
             if watcher.wait_or_stopped(watcher.delay) {
                 return;
             }
 
             // The watcher holds no mutex while rebuilding. The callback can
             // safely update watch data or stop the watcher itself.
-            rebuild();
+            rebuild(&path);
         }
     }
 }
@@ -410,7 +410,7 @@ mod tests {
         )]));
         watcher.start({
             let rebuilt = Arc::clone(&rebuilt);
-            Arc::new(move || {
+            Arc::new(move |_| {
                 let (lock, changed) = &*rebuilt;
                 *lock_unpoisoned(lock) = true;
                 changed.notify_all();

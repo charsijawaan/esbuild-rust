@@ -1,6 +1,22 @@
 //! Port of upstream `internal/cli_helpers`.
 
-use crate::api::Loader;
+use crate::api::{BuildContext, Loader, WatchError, WatchOptions};
+
+/// Receives the changed path (`None` for the initial build) and completion state.
+pub type WatchStatusCallback = std::sync::Arc<dyn Fn(Option<&str>, bool) + Send + Sync>;
+
+/// Starts the context watcher with CLI status notifications.
+///
+/// # Errors
+///
+/// Returns an error if the context is disposed or already watching.
+pub fn watch_context(
+    context: &BuildContext,
+    options: WatchOptions,
+    status: WatchStatusCallback,
+) -> Result<(), WatchError> {
+    context.watch_with_status(options, Some(status))
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErrorWithNote {

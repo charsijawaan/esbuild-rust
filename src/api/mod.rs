@@ -1579,6 +1579,14 @@ impl BuildContext {
     ///
     /// Returns an error if this context is disposed or watch mode is already enabled.
     pub fn watch(&self, options: WatchOptions) -> Result<(), WatchError> {
+        self.watch_with_status(options, None)
+    }
+
+    pub(crate) fn watch_with_status(
+        &self,
+        options: WatchOptions,
+        status: Option<crate::internal::cli_helpers::WatchStatusCallback>,
+    ) -> Result<(), WatchError> {
         let (watcher, previous_build) = {
             let mut state = self
                 .inner
@@ -1602,9 +1610,16 @@ impl BuildContext {
         };
 
         let weak_inner = Arc::downgrade(&self.inner);
-        watcher.start(Arc::new(move || {
+        let rebuild_status = status.clone();
+        watcher.start(Arc::new(move |path| {
             if let Some(inner) = weak_inner.upgrade() {
+                if let Some(status) = &rebuild_status {
+                    status(Some(path), false);
+                }
                 let _ = BuildContext { inner }.rebuild();
+                if let Some(status) = &rebuild_status {
+                    status(Some(path), true);
+                }
             }
         }));
 
@@ -1615,6 +1630,9 @@ impl BuildContext {
             }
             if let Some(inner) = weak_inner.upgrade() {
                 let _ = BuildContext { inner }.rebuild();
+                if let Some(status) = &status {
+                    status(None, true);
+                }
             }
         });
         Ok(())

@@ -793,6 +793,17 @@ timeouts. Cases 1320 and 1321 are newly passing without regressions relative to
 `53b1b17`. Case 80 remains the shared environment failure, leaving 11 Rust-only
 failures.
 
+The CLI now supports `--watch`, boolean watch flags, `--watch=forever`, and
+`--watch-delay`. It reuses the context API's polling watcher and compiler caches,
+including dependency changes, failed-build recovery, output cleanup, and
+metafile updates after successful builds. Status messages preserve color,
+log-level, delay, and log path settings. Ordinary watch mode exits when
+non-terminal stdin closes; forever mode keeps watching. Eight stream
+configurations and dependency/error/recovery scenarios were independently
+checked against pinned Go; nine flag configurations match exactly. The normal
+suite passes 1,024 tests; strict Clippy retains 621 existing errors without
+added diagnostics. Persistent property-mangle cache files remain separate work.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
