@@ -590,6 +590,12 @@ Explored pinned-Go output shares gaps for native optional `super` calls in moved
 methods and implicit receivers in lowered async arrows; these are not claimed
 as covered by this regression.
 
+The complete runtime audit at `8b5708f` is recorded in
+`end_to_end_private_super_checkpoint.json`: 1,419 passed, 43 failed, and no
+timeouts. Cases 1241–1244, 1247, and 1248 are newly passing without regressions
+relative to `fe9852b`. Case 80 remains the shared environment failure, leaving
+42 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
