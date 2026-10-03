@@ -556,6 +556,12 @@ tests, the parser audit preserves all 7,061 active cases, and strict Clippy
 retains 623 existing errors without added diagnostics. Supported private brand
 checks inside decorators have a separate gap in explored pinned-Go output too.
 
+The complete runtime audit at `3e98ebf` is recorded in
+`end_to_end_private_decorator_checkpoint.json`: 1,409 passed, 53 failed, and no
+timeouts. Cases 891 and 1075 are newly passing without regressions relative to
+`a5403e2`. Case 80 remains the shared environment failure, leaving 52 Rust-only
+failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
