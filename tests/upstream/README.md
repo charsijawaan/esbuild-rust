@@ -1065,6 +1065,15 @@ compare 27 pinned Go configurations, preserving inherited warning lifetime,
 root/exact/wildcard exports, rebuild scope, and PnP behavior. The isolated normal
 suite passes 1,153 tests; strict Clippy retains the same 621 diagnostics.
 
+CSS nesting lowering now applies Go's growth-only selector and recursive-term
+limits before expanding child rules. Both original expansion-limit API tests
+pass unchanged against Rust and Go in both worker modes. Eight regressions
+cover the 65,280 boundary, nongrowing large selectors, recursive pseudo-class
+terms, diagnostic precedence, and source locations. The isolated normal suite
+passes 1,161 tests; strict Clippy retains the same 621 diagnostics. The guard
+matches Go's checks after substitution and does not bound allocations before
+a single cartesian expansion. Captured-fixture counts are unchanged.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

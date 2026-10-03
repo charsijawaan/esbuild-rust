@@ -3,7 +3,7 @@
 This is an experimental, AI-generated Rust port of esbuild. It is incomplete,
 unaudited, and not an official esbuild project.
 
-Status reviewed on 2026-10-04 through tsconfig package export conditions, following
+Status reviewed on 2026-10-04 through CSS nesting expansion limits, following
 the native stateless service at `be18e17`. All comparisons target
 `6ff1d8b0d8c134e867a397eef39702a223ebef9e` (esbuild 0.28.1), as recorded in
 [UPSTREAM.md](UPSTREAM.md). Separate plugin, context, cancellation, and compiler
@@ -119,8 +119,8 @@ original upstream behavior before classifying them.
 
 ## Validation limits
 
-The latest recorded normal suite passed **1,153 Rust tests**, many of which
-iterate over captured cases; this is not 1,153 additional upstream cases.
+The latest recorded normal suite passed **1,161 Rust tests**, many of which
+iterate over captured cases; this is not 1,161 additional upstream cases.
 The exhaustive parser audit is separately ignored in normal runs. Strict
 Clippy remains blocked by **621 previously recorded errors**. See
 [tests/upstream/README.md](tests/upstream/README.md) for the committed checks,
@@ -133,3 +133,20 @@ runtime coverage, the wider API/plugin/WASM suites, security review, and
 performance benchmarks remain incomplete. The older 20-scenario release
 matrix in [EVALUATION.md](EVALUATION.md) is historical evidence, not a fresh
 release or production-readiness assessment.
+
+## Keeping build caches small
+
+Parallel parity work uses one reusable Cargo target per task. Disable debug
+data and incremental caches for these verification builds:
+
+```sh
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --all-targets --locked
+```
+
+After a task finishes, preserve its source, patches, reports, manifests, and
+frozen acceptance binaries before removing its stale `target` directory. Avoid
+copying target directories into new source snapshots. `cargo clean` removes
+generated build output in the selected checkout; do not clean a target while
+another task is using it. These settings affect Rust debugging/build caches,
+not the JavaScript or CSS emitted by esbuild.

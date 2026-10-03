@@ -3911,6 +3911,29 @@ fn inline_no_op_nesting_rules(rules: &mut Vec<Rule>) {
     *rules = retained;
 }
 
+fn compound_selector_term_count(selector: &CompoundSelector) -> usize {
+    selector
+        .subclass_selectors
+        .iter()
+        .map(|subclass| {
+            1 + match &subclass.data {
+                SubclassData::PseudoWithSelectorList(list) => {
+                    complex_selector_term_count(&list.selectors)
+                }
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
+fn complex_selector_term_count(selectors: &[ComplexSelector]) -> usize {
+    selectors
+        .iter()
+        .flat_map(|selector| &selector.selectors)
+        .map(compound_selector_term_count)
+        .sum()
+}
+
 #[derive(Clone)]
 struct LowerNestingContext {
     parent_selectors_with_pseudo: Vec<ComplexSelector>,
@@ -4015,6 +4038,23 @@ impl Parser {
         remaining
     }
 
+    fn add_expansion_error(&self, loc: Loc, count: usize) {
+        let mut tracker = LineColumnTracker::new(Some(&self.source));
+        self.log.add_error_with_notes(
+            Some(&mut tracker),
+            Range { loc, len: 0 },
+            "CSS nesting is causing too much expansion",
+            vec![MsgData {
+                text: format!(
+                    "CSS nesting expansion was terminated because a rule was generated with {count} selectors. \
+                     This limit exists to prevent esbuild from using too much time and/or memory. \
+                     Please change your CSS to use fewer levels of nesting."
+                ),
+                ..MsgData::default()
+            }],
+        );
+    }
+
     fn lower_nesting_child(
         &mut self,
         rule: Rule,
@@ -4023,6 +4063,9 @@ impl Parser {
         let loc = rule.loc;
         match rule.data {
             RuleData::Selector(mut selector) => {
+                let old_selectors_len = selector.selectors.len();
+                let old_selectors_complexity = complex_selector_term_count(&selector.selectors);
+
                 for complex in &mut selector.selectors {
                     if complex.is_relative() {
                         complex.selectors.insert(
@@ -4099,6 +4142,19 @@ impl Parser {
                         }
                     }
                     selector.selectors = selectors;
+                }
+
+                // Match Go's growth-only limits before recursively expanding child rules.
+                let selectors_len = selector.selectors.len();
+                if selectors_len > old_selectors_len && selectors_len > 0xFF00 {
+                    self.add_expansion_error(loc, selectors_len);
+                    return None;
+                }
+                let selectors_complexity = complex_selector_term_count(&selector.selectors);
+                if selectors_complexity > old_selectors_complexity && selectors_complexity > 0xFF00
+                {
+                    self.add_expansion_error(loc, selectors_complexity);
+                    return None;
                 }
 
                 let lowered = std::mem::take(&mut context.lowered_rules);
