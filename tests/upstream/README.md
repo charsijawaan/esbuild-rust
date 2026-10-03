@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,055 | 1,588 | 8,643 |
+| JS/TS parser and parser lowering | 7,056 | 1,587 | 8,643 |
 | Bundler | 918 | 153 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,297 | 1,741 | 14,038 |
+| Total | 12,298 | 1,740 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -368,6 +368,17 @@ The complete runtime audit at `c403793` is recorded in
 timeouts. It gains 23 original cases without regressions relative to
 `5cbf3c3`. Case 80 remains the shared environment failure, leaving 101
 Rust-only failures.
+
+TypeScript `export =` now lowers to an assignment using the CommonJS module
+symbol, so local bindings named `module` remain distinct from renamed wrapper
+parameters. Export assignments also move after other statements when tree
+shaking is disabled. An executable regression covers seven sources with
+shadowed bindings, source scopes, declaration ordering, minification, and
+CommonJS/ESM/IIFE output through 70 Rust API/CLI combinations. These sources
+also pass 56 pinned-Go transform/bundle combinations. The original
+parser ordering fixture now matches exactly and is active. The normal suite
+passes 978 tests; the parser audit has 7,056 matches without active regressions,
+and strict Clippy retains 623 existing errors without added diagnostics.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.

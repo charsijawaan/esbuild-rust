@@ -4546,11 +4546,24 @@ mod tests {
             path.declarations[0].value_or_nil.data.as_deref(),
             Some(ExprData::Dot(_))
         ));
+        let Some(StmtData::Expr(export)) = ast.parts[1].statements[2].data.as_deref() else {
+            panic!("expected lowered export assignment");
+        };
+        let Some(ExprData::Binary(assignment)) = export.value.data.as_deref() else {
+            panic!("expected export assignment expression");
+        };
+        assert_eq!(assignment.op, crate::internal::js_ast::OpCode::BinaryAssign);
         assert!(matches!(
-            ast.parts[1].statements[2].data.as_deref(),
-            Some(StmtData::ExportEquals(export))
-                if matches!(export.value.data.as_deref(), Some(ExprData::Object(_)))
+            assignment.right.data.as_deref(),
+            Some(ExprData::Object(_))
         ));
+        let Some(ExprData::Dot(target)) = assignment.left.data.as_deref() else {
+            panic!("expected CommonJS exports property");
+        };
+        assert_eq!(target.name, "exports");
+        assert!(
+            matches!(target.target.data.as_deref(), Some(ExprData::Identifier(module)) if module.reference == ast.module_ref)
+        );
         assert_eq!(
             ast.exports_kind,
             crate::internal::js_ast::ExportsKind::CommonJs

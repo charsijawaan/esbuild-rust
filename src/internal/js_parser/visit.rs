@@ -1758,7 +1758,9 @@ fn lower_for_await_loop(
 #[allow(clippy::too_many_lines)]
 fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_identifiers: bool) {
     let old_control_flow_dead = core.is_control_flow_dead;
+    let mut export_assignments = Vec::new();
     for statement in statements.iter_mut() {
+        let is_export_equals = matches!(statement.data.as_deref(), Some(StmtData::ExportEquals(_)));
         let was_control_flow_dead = core.is_control_flow_dead;
         let is_top_level_scope = core.is_current_scope_module_scope();
         let preserves_const_local_prefix = matches!(
@@ -1880,8 +1882,22 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 }
             }
             Some(StmtData::ExportEquals(export)) => {
-                core.record_usage(core.module_ref);
                 visit_expr(core, &mut export.value, resolve_identifiers);
+                let target = Expr::new(
+                    statement.loc,
+                    ExprData::Dot(DotExpr {
+                        target: temp_identifier(statement.loc, core.module_ref),
+                        name: "exports".into(),
+                        name_loc: statement.loc,
+                        ..DotExpr::default()
+                    }),
+                );
+                let value = std::mem::take(&mut export.value);
+                statement.data = Some(Box::new(StmtData::Expr(ExprStmt {
+                    value: assign(target, value),
+                    ..ExprStmt::default()
+                })));
+                core.record_usage(core.module_ref);
             }
             Some(StmtData::LazyExport(export)) => {
                 visit_expr(core, &mut export.value, resolve_identifiers);
@@ -2987,8 +3003,17 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
         {
             statement.data = None;
         }
+        if is_export_equals {
+            // Visit in parse order so source scopes are replayed correctly, but
+            // emit TypeScript export assignments after the other statements.
+            export_assignments.push(std::mem::take(statement));
+        }
     }
     core.is_control_flow_dead = old_control_flow_dead;
+    if !export_assignments.is_empty() {
+        statements.retain(|statement| statement.data.is_some());
+        statements.append(&mut export_assignments);
+    }
     flatten_synthetic_statement_blocks(statements);
     if core.options.minify_syntax {
         if !old_control_flow_dead {
