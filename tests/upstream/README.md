@@ -858,6 +858,14 @@ independently checked against pinned Go. The normal suite passes 1,045 tests,
 the parser audit passes 7,068 cases without regressions, and strict Clippy retains
 621 existing errors without added diagnostics.
 
+The complete runtime audit at `02230a5` is recorded in
+`end_to_end_injection_checkpoint.json`: 1,461 passed, one failed, and no timeouts.
+Cases 269 and 313 are newly passing without regressions relative to `f1b8b91`.
+The Rust and pinned Go results now match across all 1,462 registered cases on
+this Node/macOS environment; case 80 remains their shared environment failure.
+This runtime result does not establish parity for the separate JavaScript API,
+plugin, WASM, platform, or inactive parser/bundler suites.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
