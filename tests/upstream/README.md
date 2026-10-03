@@ -1014,8 +1014,9 @@ ESBUILD_WORKER_THREADS=0 node scripts/audit_upstream_service_tests.mjs \
   /tmp/service-core-no-workers.json core
 ```
 
-Contexts, JavaScript plugins, cancellation, watch, and serve still return explicit
-unsupported errors in this committed service slice. Text fields require valid
+At this historical stateless checkpoint, contexts, JavaScript plugins,
+cancellation, watch, and serve returned explicit unsupported errors. The later
+plugin/context/watch checkpoint below implements the first four. Text fields require valid
 UTF-8 while binary source inputs retain their bytes. Explicit empty `mainFields`
 and full debug/verbose compilation traces remain native API limits. This bounded
 service acceptance adds no captured-fixture coverage or whole-API percentage.
@@ -1147,7 +1148,44 @@ when linking also failed. Canceled empty outputs remove tracked files and clear
 output hashes. Twelve deterministic API tests and a compiler-admission regression
 cover these boundaries, coalescing, acknowledgment, disposal, and recovery.
 The library suite passes 956 tests, including all active parser and bundler
-captures. JavaScript service cancellation requires the separate context bridge.
+captures. The JavaScript service context bridge described below uses this native
+cancellation implementation.
+
+The native service now bridges JavaScript plugin callbacks and retained build
+contexts through its existing single reader/writer. Reader admission captures
+rebuild/resolve leases; dispose rejects new rebuilds while nested plugin resolve
+remains usable until admitted callbacks and the native build finish. Cancellation
+acknowledges the active native flight and waits through the JavaScript onEnd
+acknowledgment. Watch uses the same context and callback lifetime rules for
+background builds, disk edits, error recovery, and plugin watch paths.
+
+The combined frozen executable passes all 59 selected unchanged original
+functions in each worker mode: 22 core functions, 26 additional plugin/context/
+cancellation/lifecycle functions, and 11 watch functions. These selections are
+separate from fixture coverage and the full API/plugin suite inventory. The
+normal suite passes 1,257 tests; strict all-target Clippy exits 101 with the same
+621 existing diagnostic identities and no new suppression. Private plugin
+constructor helpers replace the earlier proposal's length allowance.
+
+Six focused watch lifecycle probes pass in each worker mode, including paused
+onStart/onEnd callbacks, nested resolve during disposal, coalescing, acknowledgment,
+and recovery. Three common framed transport probes and four native EOF cleanup
+probes pass. The EOF probes are native behavior checks: pinned Go can keep
+context/watch processes alive or deadlock after host disconnect. Native cleanup
+wakes callback waiters, drains work, and disposes retained contexts. Duplicate
+raw dispose replies also remain a documented difference. Watch build diagnostics
+are forwarded; info/debug/verbose status notices remain absent. Serve is still
+explicitly unsupported in this committed slice.
+
+Run the focused watch checks against a completed frozen executable and an
+original service report containing the pinned wrapper path:
+
+```sh
+ESBUILD_WORKER_THREADS=1 node scripts/test_service_watch.mjs \
+  /path/to/rust-binary /tmp/original-service.json /tmp/watch-probes.json
+python3 scripts/test_service_watch_transport.py \
+  /path/to/rust-binary rust /tmp/watch-transport.json
+```
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.

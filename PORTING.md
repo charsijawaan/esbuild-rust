@@ -3,11 +3,11 @@
 This is an experimental, AI-generated Rust port of esbuild. It is incomplete,
 unaudited, and not an official esbuild project.
 
-Status reviewed on 2026-10-04 through define and dynamic-import lowering, following
-the native stateless service at `be18e17`. All comparisons target
+Status reviewed on 2026-10-04 through JavaScript plugins, contexts, cancellation,
+and watch in the native service. All comparisons target
 `6ff1d8b0d8c134e867a397eef39702a223ebef9e` (esbuild 0.28.1), as recorded in
-[UPSTREAM.md](UPSTREAM.md). Separate plugin, context, cancellation, and compiler
-proposals are excluded until verified and committed.
+[UPSTREAM.md](UPSTREAM.md). Separate serving and compiler proposals are excluded
+until verified and committed.
 
 ## What the percentages mean
 
@@ -55,9 +55,10 @@ all 1,462 registered cases in that run. Other environments remain unverified.
 
 [The source-level inventory](tests/upstream/test_inventory.json) separately
 records 1,271 JavaScript API registrations, 97 plugin registrations, and 13 WASM
-registrations. The original Node wrapper now passes 22 selected core API
-registrations and the original binary-stdin build in both worker modes through
-the native service. This bounded selection does not establish the wider suites
+registrations. The original Node wrapper passes 59 selected core, plugin,
+context, cancellation, and watch registrations in both worker modes through
+the native service. The original binary-stdin build also passes. This bounded
+selection does not establish the wider suites
 as passing. Seven Go utility test files still require a correspondence audit
 (`compat`, `fs`, `helpers/dataurl`, `js_ast`, `logger`, `resolver/yarnpnp`, and
 `runtime`). Browser, Deno, Test262, decorator, fuzzer, and other scripts are
@@ -72,7 +73,7 @@ package parity.
 | Area | Current implementation and evidence |
 | --- | --- |
 | Injection | Native `BuildOptions.inject` and CLI `--inject:FILE` (`02230a5`); unbound/dotted names, shadowing, live bindings, defines, splitting, tree shaking, and rebuilds. Nine bundler cases and four parser cases were activated; runtime cases 269 and 313 now pass. [API tests](tests/injection.rs), [CLI tests](tests/injection_cli.rs). |
-| Watch | Native contexts support rebuild/watch/dispose. CLI `--watch`, `--watch=forever`, and `--watch-delay` use that context (`578cdb6`), with stdin lifetime, error recovery, dependency edits, and output updates. All three original CLI watch cases pass at the latest checkpoint. [Implementation](src/cli_watch.rs), [tests](tests/cli_watch.rs). |
+| Watch | Native contexts support rebuild/watch/dispose. CLI `--watch`, `--watch=forever`, and `--watch-delay` use that context (`578cdb6`), with stdin lifetime, error recovery, dependency edits, and output updates. The Node service now bridges background rebuilds and plugin acknowledgments; 11 selected original watch functions pass in both worker modes. [CLI implementation](src/cli_watch.rs), [service implementation](src/service/watch.rs), [lifecycle probes](scripts/test_service_watch.mjs). |
 | Property mangling | API and CLI expose property patterns, reservations, quoted-property control (`5cbf3c3`), and reusable caches (`40167fe`). API build/transform results return caches; CLI builds persist `--mangle-cache=FILE`. [Mangling tests](tests/property_mangling.rs), [cache tests](tests/mangle_cache.rs). |
 | Resource management | `using` / `await using` lowering (`f1b8b91`) handles disposal order, abrupt exits, async disposal, module hoisting, and TypeScript scopes. All five captured resource-management bundler fixtures are active; six original runtime cases were fixed. [Implementation](src/internal/js_parser/lower_using.rs), [tests](tests/using_lowering.rs). |
 | Diagnostics | CLI color, log-level filtering, and log overrides are implemented; native build/transform options expose `log_override`. [CLI tests](tests/cli_diagnostics.rs), [API implementation](src/api/mod.rs). Logging parity remains bounded as described below. |
@@ -111,10 +112,10 @@ JavaScript or Go API distribution.
 | Surface | Current boundary |
 | --- | --- |
 | `internal/*` compiler packages | Parser/printer, resolver, linker, bundler, runtime helpers, minification, CSS, and source maps are implemented to varying degrees. The fixture backlog prevents a blanket package-parity claim. |
-| `cmd/esbuild`, `pkg/cli` | Native CLI includes watch and a stateless framed service for build/transform, formatting, and analysis. Serve and service contexts/plugins remain unsupported; CLI/protocol compatibility is not complete. |
+| `cmd/esbuild`, `pkg/cli` | Native CLI includes watch and a framed service for build/transform, formatting, analysis, JavaScript plugins, contexts, cancellation, and watch. Serve remains unsupported; CLI/protocol compatibility is not complete. |
 | `pkg/api` | Native Rust build/transform/context APIs, message formatting, metafile analysis, and plugin callbacks. Rebuild/watch/cancel/dispose exist; serve remains unsupported. The 33 captured Go helper cases do not verify the whole API. |
-| Plugins | Native setup, resolve/load, lifecycle callbacks, nested resolution, plugin data, and watch paths exist. The upstream JavaScript plugin host and its service-protocol integration are not ported. |
-| Host/distribution | The native stateless service works with the pinned original Node wrapper in bounded tests. Wrappers are not distributed here; WebAssembly, npm/platform packages, and release/distribution tooling remain unported. |
+| Plugins | Native setup, resolve/load, lifecycle callbacks, nested resolution, plugin data, and watch paths are bridged to the pinned original Node wrapper. Callback transport and context lifetimes have bounded original and focused tests; the full plugin suite remains unverified. |
+| Host/distribution | The native service works with the pinned original Node wrapper in bounded tests. Wrappers are not distributed here; WebAssembly, npm/platform packages, and release/distribution tooling remain unported. |
 
 Remaining native work includes the inactive suites above and wider syntax,
 TypeScript/decorator, minifier, resolver, diagnostic, and source-map parity.
@@ -127,16 +128,21 @@ original upstream behavior before classifying them.
 
 ## Validation limits
 
-The latest recorded normal suite passed **1,221 Rust tests**, many of which
-iterate over captured cases; this is not 1,221 additional upstream cases.
+The latest recorded normal suite passed **1,257 Rust tests**, many of which
+iterate over captured cases; this is not 1,257 additional upstream cases.
 The exhaustive parser audit is separately ignored in normal runs. Strict
 Clippy remains blocked by **621 previously recorded errors**. See
 [tests/upstream/README.md](tests/upstream/README.md) for the committed checks,
 fixture selection rules, audit commands, and runtime checkpoint history.
 
-The service integration reran the normal suite, original core selections in
-both worker modes, native Go/JavaScript codec comparisons, and diagnostic
-probes. Cross-platform filesystem and
+The service integration reran the normal suite and 59 original functions in
+both worker modes, plus watcher callback/disposal and framed-transport probes.
+Strict Clippy retains the same 621 diagnostic identities; the plugin constructor
+was split into private helpers to remove its new length suppression.
+Native host disconnect cleanup deliberately wakes blocked callbacks and disposes
+retained contexts, while pinned Go can retain these processes after EOF. Raw
+duplicate-dispose behavior also differs. Watch build diagnostics are forwarded,
+but info/debug/verbose watcher status notices remain absent. Cross-platform filesystem and
 runtime coverage, the wider API/plugin/WASM suites, security review, and
 performance benchmarks remain incomplete. The older 20-scenario release
 matrix in [EVALUATION.md](EVALUATION.md) is historical evidence, not a fresh

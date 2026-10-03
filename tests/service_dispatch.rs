@@ -309,31 +309,28 @@ fn transform_files_preserve_binary_input_and_remove_temporary_input() {
 }
 
 #[test]
-fn unsupported_capabilities_return_explicit_errors() {
+fn unknown_context_watch_and_unsupported_serve_return_explicit_errors() {
     let mut host = Host::start(false);
-    let mut context = build();
-    set(&mut context, "context", Value::Bool(true));
-    host.request(0, context);
-    let mut plugins = build();
-    set(
-        &mut plugins,
-        "plugins",
-        Value::Array(vec![Value::object([("name", Value::from("test"))])]),
-    );
-    host.request(1, plugins);
-    for (id, command) in (2..).zip(["rebuild", "watch", "cancel", "dispose", "resolve", "serve"]) {
-        host.request(id, Value::object([("command", Value::from(command))]));
+    for (id, command) in (1..).zip(["watch", "serve"]) {
+        host.request(
+            id,
+            Value::object([
+                ("command", Value::from(command)),
+                ("key", Value::Int(999)),
+            ]),
+        );
     }
     host.eof();
-    for _ in 0..8 {
-        let response = host.packet().value;
-        assert!(
-            response
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap()
-                .contains("not implemented yet")
-        );
+    for _ in 0..2 {
+        let packet = host.packet();
+        let response = packet.value;
+        let error = response.get("error").and_then(Value::as_str).unwrap();
+        if packet.id == 1 {
+            assert_eq!(error, "Cannot watch");
+        } else {
+            assert_eq!(packet.id, 2);
+            assert!(error.contains("not implemented yet"));
+        }
         assert!(response.get("errors").is_none());
     }
     host.wait();

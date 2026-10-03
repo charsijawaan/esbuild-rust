@@ -12,6 +12,23 @@ use super::{options::LogSettings, protocol::Value};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct WireIndex(u32);
 
+pub(super) fn decode_plugin_data(value: Option<&Value>) -> Result<Option<api::PluginData>, String> {
+    let Some(value) = value.filter(|value| !matches!(value, Value::Null)) else {
+        return Ok(None);
+    };
+    let index = value
+        .as_int()
+        .ok_or_else(|| "Invalid service pluginData: expected an opaque integer".to_string())?;
+    let index = u32::try_from(index & i64::from(u32::MAX)).expect("index is masked to 32 bits");
+    Ok(Some(Arc::new(WireIndex(index))))
+}
+
+pub(super) fn encode_plugin_data(value: Option<&api::PluginData>) -> Value {
+    value
+        .and_then(|value| value.downcast_ref::<WireIndex>())
+        .map_or(Value::Null, |index| Value::Int(i64::from(index.0)))
+}
+
 pub(super) fn text_field(value: &Value, key: &str) -> Result<String, String> {
     value
         .get(key)

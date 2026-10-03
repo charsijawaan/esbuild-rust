@@ -9,6 +9,9 @@
 pub mod dispatch;
 mod messages;
 pub mod options;
+pub mod plugins;
+mod contexts;
+mod watch;
 pub mod protocol;
 
 pub use dispatch::{VERSION, run_service};

@@ -1,4 +1,4 @@
-//! Stateless native stdin/stdout service dispatch.
+//! Native stdin/stdout service dispatch and context lifecycle.
 //!
 //! Source: pinned `cmd/esbuild/service.go`. Compilation runs independently of
 //! the reader and writer; stdin EOF drains admitted jobs and their responses.
@@ -15,12 +15,14 @@ use std::{
 use crate::{api, internal::logger};
 
 use super::{
+    contexts::{Cancel, Contexts, Operation},
     messages::{
         array_field, bool_field, decode_mangle_cache, decode_message, decode_messages,
         encode_mangle_cache, encode_messages, encode_output_files, internal_message, log_messages,
         string_array, text_field,
     },
     options::{parse_build_flags, parse_transform_flags},
+    plugins::{PluginBridge, ResolveCallbacks, SendRequest, build_key, prepare_resolve},
     protocol::{FrameDecoder, Object, Packet, Value, decode_packet, encode_frame, encode_packet},
 };
 
@@ -38,6 +40,8 @@ struct Service {
     callbacks: Mutex<Callbacks>,
     closed: Mutex<bool>,
     changed: Condvar,
+    plugin_resolve: ResolveCallbacks,
+    contexts: Contexts,
 }
 
 impl Service {
@@ -186,6 +190,8 @@ fn run_with_io<R: Read, W: Write + Send + 'static>(
         callbacks: Mutex::new(Callbacks::default()),
         closed: Mutex::new(false),
         changed: Condvar::new(),
+        plugin_resolve: ResolveCallbacks::default(),
+        contexts: Contexts::default(),
     });
     service
         .outgoing
@@ -217,10 +223,13 @@ fn run_with_io<R: Read, W: Write + Send + 'static>(
                     service.receive_response(packet)?;
                     continue;
                 }
+                // Capture operation leases and callbacks before scheduling. A
+                // subsequent dispose invalidates new admission immediately.
+                let admission = admit_request(&service, &packet.value);
                 let service = service.clone();
                 jobs.push(thread::spawn(move || {
                     let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        handle_request(&packet.value)
+                        handle_admitted(&service, &packet.value, admission?)
                     }))
                     .unwrap_or_else(|_| {
                         Err("Internal error: native service request panicked".into())
@@ -241,6 +250,7 @@ fn run_with_io<R: Read, W: Write + Send + 'static>(
         let _ = pinger.join();
     }
     join_jobs(&mut jobs, true);
+    service.contexts.shutdown();
     drop(service);
     let write_result = writer
         .join()
@@ -256,15 +266,84 @@ fn empty_response() -> Value {
     Value::Object(Object::new())
 }
 
+enum Admission {
+    Regular,
+    Resolve(super::plugins::PreparedResolve, Option<Operation>),
+    Rebuild(Operation),
+    Watch(Operation),
+    Cancel(Option<Cancel>),
+    Dispose(u32, Option<Arc<super::contexts::Context>>),
+}
+
+fn handle_admitted(
+    service: &Arc<Service>,
+    request: &Value,
+    admission: Admission,
+) -> Result<Value, String> {
+    match admission {
+        Admission::Regular => handle_request(service, request),
+        Admission::Resolve(resolve, _lease) => Ok(resolve.run()),
+        Admission::Rebuild(lease) => {
+            let result = lease.native.rebuild();
+            log_messages(lease.log_settings(), &result.errors, &result.warnings);
+            Ok(diagnostics_response(&result))
+        }
+        Admission::Watch(lease) => super::watch::start(&lease, request),
+        Admission::Cancel(cancel) => {
+            if let Some(cancel) = cancel {
+                cancel.run();
+            }
+            Ok(empty_response())
+        }
+        Admission::Dispose(key, context) => {
+            if let Some(context) = context {
+                service.contexts.finish_dispose(key, &context);
+            }
+            Ok(empty_response())
+        }
+    }
+}
+
+fn admit_request(service: &Service, request: &Value) -> Result<Admission, String> {
+    match request.get("command").and_then(Value::as_str) {
+        Some("rebuild") => Ok(Admission::Rebuild(
+            service.contexts.rebuild(build_key(request)?)?,
+        )),
+        Some("watch") => Ok(Admission::Watch(
+            service.contexts.watch(build_key(request)?)?,
+        )),
+        Some("cancel") => Ok(Admission::Cancel(
+            service.contexts.cancel(build_key(request)?),
+        )),
+        Some("resolve") => {
+            let lease = service.contexts.resolve(build_key(request)?);
+            let resolve = prepare_resolve(&service.plugin_resolve, request)?;
+            Ok(Admission::Resolve(resolve, lease))
+        }
+        Some("dispose") => {
+            let key = build_key(request)?;
+            Ok(Admission::Dispose(key, service.contexts.begin_dispose(key)))
+        }
+        _ => Ok(Admission::Regular),
+    }
+}
+
+fn diagnostics_response(result: &api::BuildResult) -> Value {
+    Value::object([
+        ("errors", encode_messages(&result.errors)),
+        ("warnings", encode_messages(&result.warnings)),
+    ])
+}
+
 fn request_flags(request: &Value) -> Result<Vec<String>, String> {
     string_array(array_field(request, "flags")?)
 }
 
-fn handle_request(request: &Value) -> Result<Value, String> {
+fn handle_request(service: &Arc<Service>, request: &Value) -> Result<Value, String> {
     let command = text_field(request, "command")?;
     match command.as_str() {
         "transform" => handle_transform(request),
-        "build" => handle_build(request),
+        "build" => handle_build(service, request),
         "error" => {
             let flags = request_flags(request)?;
             let message = decode_message(
@@ -319,7 +398,7 @@ fn handle_request(request: &Value) -> Result<Value, String> {
             );
             Ok(Value::object([("result", Value::from(result))]))
         }
-        "rebuild" | "watch" | "cancel" | "dispose" | "resolve" | "serve" => Err(format!(
+        "serve" => Err(format!(
             "The {command:?} command is not implemented yet by the native service"
         )),
         _ => Err(format!("Invalid command: {command}")),
@@ -383,16 +462,18 @@ fn handle_transform(request: &Value) -> Result<Value, String> {
     Ok(Value::Object(response))
 }
 
-fn handle_build(request: &Value) -> Result<Value, String> {
-    if bool_field(request, "context")? {
-        return Err("The context API is not implemented yet by the native service".into());
-    }
-    if request.get("plugins").is_some_and(|plugins| {
-        !matches!(plugins, Value::Null)
-            && plugins.as_array().is_none_or(|plugins| !plugins.is_empty())
-    }) {
-        return Err("JavaScript plugins are not implemented yet by the native service".into());
-    }
+fn plugin_send_request(service: &Arc<Service>) -> SendRequest {
+    let service = Arc::downgrade(service);
+    Arc::new(move |value| {
+        service
+            .upgrade()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "The service was stopped"))?
+            .send_request(value)
+    })
+}
+
+fn handle_build(service: &Arc<Service>, request: &Value) -> Result<Value, String> {
+    let is_context = bool_field(request, "context")?;
     let write = bool_field(request, "write")?;
     let parsed = parse_build_flags(&request_flags(request)?)?;
     let mut options = parsed.options;
@@ -418,38 +499,117 @@ fn handle_build(request: &Value) -> Result<Value, String> {
         }
     }
     let write_to_stdout = write && options.outfile.is_empty() && options.outdir.is_empty();
-    let metafile = options.metafile;
-    let mangle_cache = options.mangle_cache.is_some();
+    let response_options = ResponseOptions {
+        output: if write_to_stdout {
+            OutputMode::Stdout
+        } else if write {
+            OutputMode::WriteFiles
+        } else {
+            OutputMode::ReturnFiles
+        },
+        metafile: options.metafile,
+        mangle_cache: options.mangle_cache.is_some(),
+    };
     options.write = write && !write_to_stdout;
+    let no_plugins = Value::Array(Vec::new());
+    let creation = is_context
+        .then(|| {
+            service
+                .contexts
+                .create(build_key(request)?, parsed.log_settings.clone())
+        })
+        .transpose()?;
+    let bridge = request
+        .get("plugins")
+        .or(is_context.then_some(&no_plugins))
+        .map(|plugins| {
+            PluginBridge::new(
+                build_key(request)?,
+                plugins,
+                plugin_send_request(service),
+                service.plugin_resolve.clone(),
+            )
+        })
+        .transpose()?
+        .map(Arc::new);
+    if let Some(bridge) = bridge.as_ref().filter(|_| request.get("plugins").is_some()) {
+        options.plugins.push(bridge.plugin());
+    }
+    if is_context {
+        let creation = creation.expect("context has a creation guard");
+        let bridge = bridge.expect("context always has an onEnd bridge");
+        options
+            .plugins
+            .push(creation.context.cancel_on_start_plugin());
+        options.plugins.extend(super::watch::context_plugins(
+            &creation.context,
+            &bridge,
+            write_to_stdout,
+            move |result| build_result_response(result, response_options),
+        ));
+        return match api::context(options) {
+            Ok(native) => {
+                creation.complete(native, bridge);
+                Ok(diagnostics_response(&api::BuildResult::default()))
+            }
+            Err(error) => {
+                log_messages(&parsed.log_settings, &error.errors, &[]);
+                Ok(diagnostics_response(&api::BuildResult {
+                    errors: error.errors,
+                    ..api::BuildResult::default()
+                }))
+            }
+        };
+    }
     let result = api::build(options);
+    // Remove the build key before releasing the standalone build response.
+    drop(bridge);
     log_messages(&parsed.log_settings, &result.errors, &result.warnings);
+    Ok(build_result_response(&result, response_options))
+}
+
+#[derive(Clone, Copy)]
+struct ResponseOptions {
+    output: OutputMode,
+    metafile: bool,
+    mangle_cache: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    ReturnFiles,
+    WriteFiles,
+    Stdout,
+}
+
+fn build_result_response(result: &api::BuildResult, options: ResponseOptions) -> Value {
     let mut response = Object::from([
         (b"errors".to_vec(), encode_messages(&result.errors)),
         (b"warnings".to_vec(), encode_messages(&result.warnings)),
     ]);
-    if metafile {
+    if options.metafile {
         response.insert(
             b"metafile".to_vec(),
-            Value::Bytes(result.metafile.into_bytes()),
+            Value::Bytes(result.metafile.as_bytes().to_vec()),
         );
     }
-    if mangle_cache {
+    if options.mangle_cache {
         response.insert(
             b"mangleCache".to_vec(),
             encode_mangle_cache(result.mangle_cache.as_ref()),
         );
     }
-    if write_to_stdout && result.output_files.len() == 1 {
+    if options.output == OutputMode::Stdout && result.output_files.len() == 1 {
         response.insert(
             b"writeToStdout".to_vec(),
             Value::Bytes(result.output_files[0].contents.clone()),
         );
     }
-    if !write {
+    if options.output == OutputMode::ReturnFiles {
         response.insert(
             b"outputFiles".to_vec(),
-            encode_output_files(result.output_files),
+            encode_output_files(result.output_files.clone()),
         );
     }
-    Ok(Value::Object(response))
+    Value::Object(response)
 }
