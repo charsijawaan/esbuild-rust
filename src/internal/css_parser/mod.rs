@@ -183,6 +183,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> Ast {
         local_symbols: Vec::new(),
         local_scope: HashMap::new(),
         global_scope: HashMap::new(),
+        symbol_mode: options.symbol_mode,
         make_local_symbols: options.symbol_mode == SymbolMode::Local,
         composes: HashMap::new(),
         composes_target: None,
@@ -261,6 +262,7 @@ struct Parser {
     local_symbols: Vec<LocRef>,
     local_scope: HashMap<String, LocRef>,
     global_scope: HashMap<String, LocRef>,
+    symbol_mode: SymbolMode,
     make_local_symbols: bool,
     composes: HashMap<Ref, Composes>,
     composes_target: Option<Ref>,
@@ -607,7 +609,9 @@ impl Parser {
             lower_inset_declarations(&mut rules, self.minify_whitespace);
         }
         insert_prefixed_declarations(&mut rules, &self.css_prefix_data);
-        inline_empty_local_and_global_rules(&mut rules);
+        if self.selector_nesting_depth > 0 {
+            inline_empty_local_and_global_rules(&mut rules);
+        }
         if self.minify_syntax {
             mangle_border_radius_declarations(&mut rules, self.minify_whitespace);
             mangle_box_declarations(&mut rules, !lower_inset);
@@ -1874,7 +1878,13 @@ impl Parser {
         let warn_for_unclosed_outer =
             unclosed_block_only_needs_outer_close(&self.tokens, self.index);
         self.index += 1;
+        // Bare module annotations apply to this selector and its declarations,
+        // including nested rules, but must not affect the next selector rule.
+        let old_make_local_symbols = self.make_local_symbols;
         let mut selectors = self.parse_complex_selectors(&prelude);
+        if selectors.is_none() {
+            self.make_local_symbols = old_make_local_symbols;
+        }
         if selectors.is_none()
             && prelude
                 .last()
@@ -1957,6 +1967,7 @@ impl Parser {
         }
         self.composes_target = old_composes_target;
         self.composes_problem_range = old_composes_problem_range;
+        self.make_local_symbols = old_make_local_symbols;
         if let Some(selectors) = selectors {
             Rule {
                 loc,
@@ -1986,9 +1997,13 @@ impl Parser {
                 if start == index {
                     return None;
                 }
-                selectors.push(
-                    self.parse_complex_selector(&tokens[start..index], selectors.is_empty())?,
-                );
+                let selector =
+                    self.parse_complex_selector(&tokens[start..index], selectors.is_empty())?;
+                selectors.push(if self.symbol_mode == SymbolMode::Disabled {
+                    selector
+                } else {
+                    flatten_local_and_global_selectors(selector)
+                });
                 start = index + 1;
             }
         }
@@ -2262,7 +2277,7 @@ impl Parser {
                     }
                     if !is_element
                         && name.kind == TokenKind::Function
-                        && matches!(name.text.to_ascii_lowercase().as_str(), "global" | "local")
+                        && matches!(name.text.as_str(), "global" | "local")
                     {
                         if let Some(comma) = name
                             .children
@@ -2284,40 +2299,42 @@ impl Parser {
                             );
                         }
                         let old_make_local_symbols = self.make_local_symbols;
-                        self.make_local_symbols = name.text.eq_ignore_ascii_case("local");
+                        if self.symbol_mode != SymbolMode::Disabled {
+                            self.make_local_symbols = name.text == "local";
+                        }
                         let parsed = self
                             .parse_complex_selectors(name.children.as_deref().unwrap_or_default());
                         self.make_local_symbols = old_make_local_symbols;
                         let parsed = parsed?;
-                        if parsed.len() != 1 || parsed[0].selectors.len() != 1 {
+                        if parsed.len() != 1 {
                             return None;
                         }
-                        let mut inner = parsed.into_iter().next()?.selectors.into_iter().next()?;
-                        if inner.combinator.byte != 0
-                            || compound.type_selector.is_some() && inner.type_selector.is_some()
-                        {
-                            return None;
-                        }
-                        if compound.type_selector.is_none() {
-                            compound.type_selector = inner.type_selector.take();
-                        }
-                        compound
-                            .nesting_selector_locs
-                            .append(&mut inner.nesting_selector_locs);
-                        compound
-                            .subclass_selectors
-                            .append(&mut inner.subclass_selectors);
+                        compound.subclass_selectors.push(SubclassSelector {
+                            data: SubclassData::PseudoWithSelectorList(
+                                PseudoClassWithSelectorList {
+                                    kind: if name.text == "local" {
+                                        PseudoClassKind::Local
+                                    } else {
+                                        PseudoClassKind::Global
+                                    },
+                                    selectors: parsed,
+                                    ..PseudoClassWithSelectorList::default()
+                                },
+                            ),
+                            range: Range {
+                                loc: token.loc,
+                                len: i32::try_from(name.text.len() + 2).unwrap_or(i32::MAX),
+                            },
+                        });
                         index = name_index + 1;
                         continue;
                     }
                     if !is_element
                         && name.kind == TokenKind::Ident
-                        && matches!(name.text.to_ascii_lowercase().as_str(), "global" | "local")
+                        && self.symbol_mode != SymbolMode::Disabled
+                        && matches!(name.text.as_str(), "global" | "local")
                     {
-                        compound.nesting_selector_locs.push(token.loc);
-                        compound.was_empty_from_local_or_global = true;
-                        index = name_index + 1;
-                        continue;
+                        self.make_local_symbols = name.text == "local";
                     }
                     if !is_element && name.kind == TokenKind::Function {
                         let lower = name.text.to_ascii_lowercase();
@@ -2363,11 +2380,14 @@ impl Parser {
                                     "Unexpected \")\"",
                                 );
                             }
-                            let selectors = if children.is_empty() {
-                                Vec::new()
+                            let old_make_local_symbols = self.make_local_symbols;
+                            let parsed = if children.is_empty() {
+                                Some(Vec::new())
                             } else {
-                                self.parse_complex_selectors(children)?
+                                self.parse_complex_selectors(children)
                             };
+                            self.make_local_symbols = old_make_local_symbols;
+                            let selectors = parsed?;
                             compound.subclass_selectors.push(SubclassSelector {
                                 data: SubclassData::PseudoWithSelectorList(
                                     PseudoClassWithSelectorList {
@@ -2687,7 +2707,7 @@ impl Parser {
                 self.minify_whitespace,
             );
         }
-        if self.make_local_symbols && key_text.eq_ignore_ascii_case("composes") {
+        if self.symbol_mode != SymbolMode::Disabled && key_text.eq_ignore_ascii_case("composes") {
             self.process_composes(&value, key_token.range);
             self.index = value_end;
             if self.current_kind() == TokenKind::Semicolon {
@@ -3575,6 +3595,108 @@ fn compound_is_empty(compound: &CompoundSelector) -> bool {
     compound.type_selector.is_none()
         && compound.subclass_selectors.is_empty()
         && compound.nesting_selector_locs.is_empty()
+}
+
+// Port of css_parser_selector.go's module selector flattening. Module
+// annotations splice complex selectors into their surroundings instead of
+// behaving like CSS pseudo-classes: div:local(.a .b):hover => div.a .b:hover.
+fn flatten_local_and_global_selectors(mut selector: ComplexSelector) -> ComplexSelector {
+    let contains_annotation = selector.selectors.iter().any(|compound| {
+        compound
+            .subclass_selectors
+            .iter()
+            .any(|subclass| match &subclass.data {
+                SubclassData::PseudoClass(pseudo) => {
+                    !pseudo.is_element
+                        && !pseudo.has_args
+                        && matches!(pseudo.name.as_str(), "local" | "global")
+                }
+                SubclassData::PseudoWithSelectorList(pseudo) => {
+                    matches!(pseudo.kind, PseudoClassKind::Local | PseudoClassKind::Global)
+                }
+                _ => false,
+            })
+    });
+    if !contains_annotation {
+        return selector;
+    }
+
+    let loc = selector.selectors[0].range().loc;
+    let mut selectors = Vec::new();
+    for mut compound in selector.selectors {
+        for subclass in std::mem::take(&mut compound.subclass_selectors) {
+            match subclass.data {
+                SubclassData::PseudoClass(ref pseudo)
+                    if !pseudo.is_element
+                        && !pseudo.has_args
+                        && matches!(pseudo.name.as_str(), "local" | "global") => {}
+                SubclassData::PseudoWithSelectorList(mut pseudo)
+                    if matches!(pseudo.kind, PseudoClassKind::Local | PseudoClassKind::Global) =>
+                {
+                    let mut inner = pseudo.selectors.remove(0).selectors.into_iter();
+                    let first = inner.next().expect("module annotation has a selector");
+                    let mut rest: Vec<_> = if first.combinator.byte == 0 {
+                        merge_compound_selectors(&mut compound, first);
+                        inner.collect()
+                    } else {
+                        std::iter::once(first).chain(inner).collect()
+                    };
+                    if let Some(last) = rest.pop() {
+                        if !compound.is_invalid_because_empty() {
+                            selectors.push(compound);
+                        }
+                        selectors.extend(rest);
+                        compound = last;
+                    }
+                }
+                data => compound.subclass_selectors.push(SubclassSelector {
+                    data,
+                    range: subclass.range,
+                }),
+            }
+        }
+        if !compound.is_invalid_because_empty() {
+            selectors.push(compound);
+        }
+    }
+    if selectors.is_empty() {
+        selectors.push(CompoundSelector {
+            nesting_selector_locs: vec![loc],
+            was_empty_from_local_or_global: true,
+            ..CompoundSelector::default()
+        });
+    }
+    selector.selectors = selectors;
+    selector
+}
+
+fn merge_compound_selectors(target: &mut CompoundSelector, mut source: CompoundSelector) {
+    if target.nesting_selector_locs.is_empty() {
+        target.nesting_selector_locs = source.nesting_selector_locs;
+    }
+    if let Some(name) = source.type_selector {
+        if target.type_selector.is_none() {
+            target.type_selector = Some(name);
+        } else {
+            // div:local(span) must require both types instead of inventing divspan.
+            target.subclass_selectors.push(SubclassSelector {
+                range: name.range(),
+                data: SubclassData::PseudoWithSelectorList(PseudoClassWithSelectorList {
+                    kind: PseudoClassKind::Is,
+                    selectors: vec![ComplexSelector {
+                        selectors: vec![CompoundSelector {
+                            type_selector: Some(name),
+                            ..CompoundSelector::default()
+                        }],
+                    }],
+                    ..PseudoClassWithSelectorList::default()
+                }),
+            });
+        }
+    }
+    target
+        .subclass_selectors
+        .append(&mut source.subclass_selectors);
 }
 
 fn merge_adjacent_selector_rules(rules: &mut Vec<Rule>) {

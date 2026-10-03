@@ -5900,7 +5900,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 933 },
+            if selected_test.is_some() { 1 } else { 938 },
             "upstream basic bundler corpus case count"
         );
     }
