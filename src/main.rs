@@ -835,6 +835,7 @@ fn run_with_stdin_and_node_paths(
             Some(BuildStdin {
                 contents: String::from_utf8(contents)
                     .map_err(|_| "Stdin must be valid UTF-8".to_string())?,
+                contents_bytes: None,
                 resolve_dir: env::current_dir()
                     .ok()
                     .and_then(|path| path.to_str().map(str::to_string))

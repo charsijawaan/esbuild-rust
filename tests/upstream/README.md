@@ -959,6 +959,19 @@ are separate from the nine original fixture gains. The isolated normal suite
 passes 1,072 tests, the exhaustive parser audit passes 7,116 cases without
 regressions, and strict Clippy retains 621 existing errors without additions.
 
+The complete isolated runtime audit at `28438b2` is recorded in
+`end_to_end_class_parameter_checkpoint.json`: 1,461 passed, one shared Go/Rust
+failure at case 80, and no timeouts or regressions relative to `ae2ae77`.
+
+Native stdin and plugin load results now accept exact bytes through the additive
+`contents_bytes` field. Present bytes override text, including an empty vector;
+an absent plugin result still defers loading. Five regressions compare 49 native
+Go API scenarios, covering binary loaders, output bytes and hashes, metafiles,
+plugin data, and rebuild lifetimes. The isolated normal suite passes 1,077 tests
+and strict Clippy retains 621 existing errors without additions. This adds no
+captured-fixture or original JavaScript API coverage claim. CLI and formatted
+transform byte forwarding remain separate follow-up work.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

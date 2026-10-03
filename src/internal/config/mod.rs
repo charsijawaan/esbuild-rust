@@ -470,6 +470,8 @@ impl Format {
 #[derive(Clone, Debug, Default)]
 pub struct StdinInfo {
     pub contents: String,
+    /// When present, use these bytes instead of the UTF-8 text contents.
+    pub contents_bytes: Option<Vec<u8>>,
     pub source_file: String,
     pub abs_resolve_dir: String,
     pub loader: Loader,
@@ -844,6 +846,8 @@ pub struct OnLoadArgs {
 pub struct OnLoadResult {
     pub plugin_name: String,
     pub contents: Option<String>,
+    /// When present, use these bytes instead of the UTF-8 text contents.
+    pub contents_bytes: Option<Vec<u8>>,
     pub abs_resolve_dir: String,
     pub plugin_data: Option<PluginData>,
     pub messages: Vec<crate::internal::logger::Msg>,

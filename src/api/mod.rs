@@ -1006,6 +1006,9 @@ pub struct OnLoadResult {
     pub errors: Vec<Message>,
     pub warnings: Vec<Message>,
     pub contents: Option<String>,
+    /// Exact input bytes. When present, these override `contents`, including
+    /// an empty byte vector. When both are absent, the callback defers loading.
+    pub contents_bytes: Option<Vec<u8>>,
     pub resolve_dir: String,
     pub loader: Loader,
     pub plugin_data: Option<PluginData>,
@@ -1249,6 +1252,7 @@ impl PluginBuild<'_> {
                 config::OnLoadResult {
                     plugin_name: response.plugin_name,
                     contents: response.contents,
+                    contents_bytes: response.contents_bytes,
                     abs_resolve_dir,
                     plugin_data: response.plugin_data,
                     messages,
@@ -1425,6 +1429,9 @@ pub struct BuildEntryPoint {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BuildStdin {
     pub contents: String,
+    /// Exact input bytes. When present, these override `contents`, including
+    /// an empty byte vector. Otherwise, the UTF-8 bytes of `contents` are used.
+    pub contents_bytes: Option<Vec<u8>>,
     pub resolve_dir: String,
     pub sourcefile: String,
     pub loader: Loader,
@@ -3592,6 +3599,7 @@ fn build_with_output_state_core(
     };
     let stdin = options.stdin.map(|stdin| config::StdinInfo {
         contents: stdin.contents,
+        contents_bytes: stdin.contents_bytes,
         source_file: stdin.sourcefile,
         abs_resolve_dir: if stdin.resolve_dir.is_empty() {
             String::new()
@@ -6730,6 +6738,7 @@ mod tests {
                 contents:
                     "import {value} from './dependency.ts'; const result: number = value; console.log(result)"
                         .into(),
+                contents_bytes: None,
                 resolve_dir: ".".into(),
                 sourcefile: "virtual-entry.ts".into(),
                 loader: Loader::Ts,

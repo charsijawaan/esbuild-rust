@@ -1925,10 +1925,13 @@ fn load_file_with_plugins(
                 }
                 return None;
             }
-            let Some(contents) = plugin_result.contents else {
+            let Some(contents) = plugin_result
+                .contents_bytes
+                .or_else(|| plugin_result.contents.map(String::into_bytes))
+            else {
                 continue;
             };
-            source.contents = Arc::from(contents.into_bytes());
+            source.contents = Arc::from(contents);
             let loader = if plugin_result.loader == Loader::None {
                 Loader::Js
             } else {
@@ -3213,7 +3216,9 @@ pub fn scan_bundle(
             index: source_index,
             key_path,
             pretty_paths,
-            contents: Arc::from(stdin.contents.into_bytes()),
+            contents: Arc::from(
+                stdin.contents_bytes.unwrap_or_else(|| stdin.contents.into_bytes()),
+            ),
             ..Source::default()
         };
         let mut file_options = options.clone();
@@ -5712,6 +5717,7 @@ mod tests {
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
+                    contents_bytes: None,
                     source_file: stdin
                         .get("SourceFile")
                         .and_then(serde_json::Value::as_str)
