@@ -1,0 +1,136 @@
+{
+  "reviewed_on": "2026-10-04",
+  "rust_commit": "fc1f46b04b911c8f9256d563e84b2a18cf3f2161",
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+  "upstream_version": "0.28.1",
+  "rust_binary_sha256": "6a7f28d287662e9b87a72d5574c6f645d38f1aee7e9d5b8108953eb4bfba6f0f",
+  "go_binary_sha256": "a5b888adb15b0a570c7fc904737de515b159119e7501491f452ee1b8c4cff2cf",
+  "node_version": "v24.15.0",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "wrapper_sha256": "8331fe1d8b3a07381f33cc425fcfaa94776e263113653f80ec3ba433e9657e73",
+  "original_suite_sha256": {
+    "scripts/js-api-tests.js": "5dc7e1a66de33536f727691ea9478b611a3610c039654e1acb636232bbb13998",
+    "scripts/plugin-tests.js": "dbc9066058cd6010ba06bfaf453137986efefd96a0a2b8c18531ff1c9fb01995"
+  },
+  "selection": [
+    "transformTests/ignoreUndefinedOptions",
+    "transformTests/throwOnBadOptions",
+    "transformTests/transformLoaderBase64",
+    "transformTests/jsCharsetUTF8",
+    "transformTests/mangleCacheTransform",
+    "transformTests/transformLegalCommentsJS",
+    "transformTests/sourceMapExternalWithName",
+    "apiSyncTests/transformThrow",
+    "buildTests/errorIfEntryPointsNotArray",
+    "buildTests/errorIfBadWorkingDirectory",
+    "buildTests/mangleCacheBuild",
+    "buildTests/writeFalse",
+    "buildTests/workingDirTest",
+    "buildTests/customEntryPointOutputPathsRel",
+    "buildTests/sourceMapTrue",
+    "apiSyncTests/buildSync",
+    "apiSyncTests/buildSyncOutputFiles",
+    "apiSyncTests/transformSyncJSMap",
+    "apiSyncTests/transformSyncCSS",
+    "formatTests/formatMessages",
+    "analyzeTests/analyzeMetafile",
+    "serialTests/startStop",
+    "pluginTests/modifyInitialOptionsAsync",
+    "pluginTests/basicLoader",
+    "pluginTests/basicResolver",
+    "pluginTests/resolversCalledInSequence",
+    "pluginTests/loadersCalledInSequence",
+    "pluginTests/pluginDataResolveToLoad",
+    "pluginTests/specificDetailForOnResolvePluginReturnError",
+    "pluginTests/callResolveBuiltInHandler",
+    "pluginTests/callResolvePluginHandler",
+    "pluginTests/callResolveTooLateError",
+    "pluginTests/invalidRegExp",
+    "syncTests/onStartCallbackWithDelay",
+    "syncTests/onEndCallback",
+    "syncTests/onEndCallbackMutateContents",
+    "syncTests/pluginOnDisposeWithUnusedContext",
+    "syncTests/pluginOnDisposeWithRebuild",
+    "buildTests/rebuildBasic",
+    "buildTests/rebuildIndependent",
+    "buildTests/rebuildParallel",
+    "buildTests/rebuildMerging",
+    "buildTests/rebuildCancel",
+    "buildTests/rapidRebuildCancel",
+    "syncTests/onStartCallback",
+    "childProcessTests/testIncrementalChildProcessExit",
+    "syncTests/pluginOnDisposeAfterSuccessfulBuild",
+    "syncTests/pluginOnDisposeAfterFailedBuild",
+    "watchTests/watchTwice",
+    "watchTests/watchEditSession",
+    "watchTests/watchWriteFalse",
+    "watchTests/watchMetafile",
+    "watchTests/watchMangleCache",
+    "watchTests/watchNodePaths",
+    "watchTests/watchDelay",
+    "syncTests/pluginWithWatchMode",
+    "syncTests/pluginWithWatchFiles",
+    "syncTests/pluginWithWatchDir",
+    "syncTests/onStartOnEndWatchMode"
+  ],
+  "results": {
+    "rust_workers": {
+      "completed": true,
+      "passed": 59,
+      "failed": 0,
+      "raw_report": "/tmp/esbuild-parent-plugin-context-watch-original-final-1.json",
+      "raw_report_sha256": "34abfdeead05d2676482d6bf700a32eefca2f3325ec6d4a49fac18424c0a86c1"
+    },
+    "rust_no_workers": {
+      "completed": true,
+      "passed": 59,
+      "failed": 0,
+      "raw_report": "/tmp/esbuild-parent-plugin-context-watch-original-final-0.json",
+      "raw_report_sha256": "eedec7637161d46933249531d241d7f0b1a2ef1359769458a37607f1e60cf5ce"
+    },
+    "go_workers": {
+      "completed": true,
+      "passed": 59,
+      "failed": 0,
+      "raw_report": "/tmp/esbuild-parent-plugin-context-watch-original-final-go-1.json",
+      "raw_report_sha256": "214b88d6e543759ef61578e402a540186ace5059ca29642272a09a9efb357bd1"
+    },
+    "go_no_workers": {
+      "completed": true,
+      "passed": 59,
+      "failed": 0,
+      "raw_report": "/tmp/esbuild-parent-plugin-context-watch-original-final-go-0.json",
+      "raw_report_sha256": "10f318a2e7620e13188d4892ad4da878523ff91e0d60eba3c4dfb2ea0d8183cc"
+    }
+  },
+  "normal_suite": {
+    "passed": 1257,
+    "exit_code": 0
+  },
+  "strict_clippy": {
+    "errors": 621,
+    "exit_code": 101,
+    "added_diagnostic_identities": 0,
+    "removed_diagnostic_identities": 0,
+    "new_suppressions": 0
+  },
+  "focused_watch": {
+    "workers": {
+      "passed": 6,
+      "failed": 0
+    },
+    "no_workers": {
+      "passed": 6,
+      "failed": 0
+    },
+    "common_transport": 3,
+    "native_only_eof_cleanup": 4
+  },
+  "limitations": [
+    "Bounded selection; full API/plugin/WASM suites remain unverified.",
+    "Native host-disconnect cleanup and duplicate raw dispose differ from pinned Go.",
+    "Watch info/debug/verbose status notices remain absent.",
+    "Serve remains unsupported."
+  ]
+}

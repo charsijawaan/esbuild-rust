@@ -1159,7 +1159,9 @@ acknowledges the active native flight and waits through the JavaScript onEnd
 acknowledgment. Watch uses the same context and callback lifetime rules for
 background builds, disk edits, error recovery, and plugin watch paths.
 
-The combined frozen executable passes all 59 selected unchanged original
+`service_context_watch_checkpoint.json` records the combined frozen executable,
+its source commit and binary hashes, exact function selection, both worker-mode
+reports, and the validation limits. It passes all 59 selected unchanged original
 functions in each worker mode: 22 core functions, 26 additional plugin/context/
 cancellation/lifecycle functions, and 11 watch functions. These selections are
 separate from fixture coverage and the full API/plugin suite inventory. The
