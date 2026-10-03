@@ -894,7 +894,6 @@ impl Printer<'_> {
                 }
             }
             for (compound_index, compound) in complex.selectors.iter().enumerate() {
-                self.add_source_mapping(compound.combinator.loc, "");
                 if compound.combinator.byte == 0 {
                     if compound_index > 0 {
                         self.print_whitespace();
@@ -903,6 +902,7 @@ impl Printer<'_> {
                     if compound_index > 0 && !self.options.minify_whitespace {
                         self.print_whitespace();
                     }
+                    self.add_source_mapping(compound.combinator.loc, "");
                     self.css.push(compound.combinator.byte);
                     if !self.options.minify_whitespace {
                         self.print_whitespace();
@@ -1003,7 +1003,13 @@ impl Printer<'_> {
                 if (!selector.index.a.is_empty() || !selector.index.b.is_empty())
                     && !selector.selectors.is_empty()
                 {
-                    self.css.extend_from_slice(b" of ");
+                    if self.options.minify_whitespace
+                        && selector.selectors[0].selectors[0].type_selector.is_none()
+                    {
+                        self.css.extend_from_slice(b" of");
+                    } else {
+                        self.css.extend_from_slice(b" of ");
+                    }
                 }
                 self.print_complex_selectors(&selector.selectors, false);
                 self.css.push(b')');

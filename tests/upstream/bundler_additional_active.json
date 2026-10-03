@@ -35,6 +35,7 @@
   "TestInjectWithStringExportNameBundle",
   "TestInjectWithStringExportNameNoBundle",
   "TestInjectWithStringReExportNameNoBundle",
+  "TestImportCSSFromJSNthIndexLocal",
   "TestImportMissingNeitherES6NorCommonJS",
   "TestImportNamespaceUndefinedPropertyEmptyFile",
   "TestImportNamespaceUndefinedPropertySideEffectFreeFile",

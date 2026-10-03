@@ -16,10 +16,11 @@ use crate::internal::{
         AttributeSelector, BadDeclarationRule, ClassSelector, Combinator, CommentRule,
         ComplexSelector, Composes, CompoundSelector, CrossFileEqualityCheck, Declaration,
         DeclarationRule, HashSelector, ImportConditions, ImportedComposesName, KNOWN_DECLARATIONS,
-        KeyframeBlock, KnownAtRule, MediaQuery, NameToken, NamespacedName, PercentageFlags,
-        PseudoClassKind, PseudoClassSelector, PseudoClassWithSelectorList, QualifiedRule, Rule,
-        RuleData, SelectorRule, SubclassData, SubclassSelector, Token, UnknownAtRule,
-        WhitespaceFlags, media_queries_equal, rules_equal, tokens_are_comma_separated,
+        KeyframeBlock, KnownAtRule, MediaQuery, NameToken, NamespacedName, NthIndex,
+        PercentageFlags, PseudoClassKind, PseudoClassSelector, PseudoClassWithSelectorList,
+        QualifiedRule, Rule, RuleData, SelectorRule, SubclassData, SubclassSelector, Token,
+        UnknownAtRule, WhitespaceFlags, media_queries_equal, rules_equal,
+        tokens_are_comma_separated,
     },
     css_lexer::{self, TokenKind, is_name_continue, would_start_identifier_without_escapes},
     helpers::{F64, lerp, max2},
@@ -2342,18 +2343,33 @@ impl Parser {
                             lower.as_str(),
                             "nth-child" | "nth-last-child" | "nth-of-type" | "nth-last-of-type"
                         ) {
+                            let children = name.children.as_deref().unwrap_or_default();
                             let args = self.process_nth_pseudo_args(
-                                name.children.as_deref().unwrap_or_default(),
+                                children,
                                 matches!(lower.as_str(), "nth-child" | "nth-last-child"),
                                 name.loc,
                             );
+                            let kind = match lower.as_str() {
+                                "nth-child" => PseudoClassKind::NthChild,
+                                "nth-last-child" => PseudoClassKind::NthLastChild,
+                                "nth-of-type" => PseudoClassKind::NthOfType,
+                                _ => PseudoClassKind::NthLastOfType,
+                            };
+                            let data = self
+                                .parse_nth_selector_list(&args, children, kind)
+                                .map_or_else(
+                                    || {
+                                        SubclassData::PseudoClass(PseudoClassSelector {
+                                            name: name.text.clone(),
+                                            args,
+                                            is_element: false,
+                                            has_args: true,
+                                        })
+                                    },
+                                    SubclassData::PseudoWithSelectorList,
+                                );
                             compound.subclass_selectors.push(SubclassSelector {
-                                data: SubclassData::PseudoClass(PseudoClassSelector {
-                                    name: name.text.clone(),
-                                    args,
-                                    is_element: false,
-                                    has_args: true,
-                                }),
+                                data,
                                 range: Range {
                                     loc: token.loc,
                                     len: i32::try_from(name.text.len() + 2).unwrap_or(i32::MAX),
@@ -2485,6 +2501,56 @@ impl Parser {
         }
     }
 
+    fn parse_nth_selector_list(
+        &mut self,
+        args: &[Token],
+        original_args: &[Token],
+        kind: PseudoClassKind,
+    ) -> Option<PseudoClassWithSelectorList> {
+        if !matches!(
+            kind,
+            PseudoClassKind::NthChild | PseudoClassKind::NthLastChild
+        ) {
+            return None;
+        }
+        let [formula, of, suffix @ ..] = args else {
+            return None;
+        };
+        // A delimiter here is the normalized An+B token emitted after successful
+        // validation. Invalid formulas must retain their original raw arguments.
+        if formula.kind != TokenKind::Delim
+            || of.kind != TokenKind::Ident
+            || !of.text.eq_ignore_ascii_case("of")
+            || suffix.is_empty()
+            || suffix.iter().enumerate().any(|(index, token)| {
+                matches!(
+                    token.kind,
+                    TokenKind::DelimPlus | TokenKind::DelimTilde | TokenKind::DelimGreaterThan
+                ) && (index == 0 || suffix[index - 1].kind == TokenKind::Comma)
+            })
+        {
+            return None;
+        }
+
+        let mut index = nth_index_for_selector_list(original_args);
+        if self.minify_syntax {
+            index.minify();
+        }
+
+        // As in Go's parsePseudoClassSelector, module annotations apply within
+        // the "of" list (including across commas) and stop at its closing paren.
+        let mut suffix = suffix.to_vec();
+        restore_selector_whitespace(&mut suffix, &self.tokens);
+        let old_make_local_symbols = self.make_local_symbols;
+        let selectors = self.parse_complex_selectors(&suffix);
+        self.make_local_symbols = old_make_local_symbols;
+        Some(PseudoClassWithSelectorList {
+            selectors: selectors?,
+            index,
+            kind,
+        })
+    }
+
     fn process_nth_pseudo_args(
         &mut self,
         args: &[Token],
@@ -2612,7 +2678,7 @@ impl Parser {
                 }
                 let is_invalid_relative_prefix = matches!(
                     suffix[index].kind,
-                    TokenKind::DelimPlus | TokenKind::DelimTilde
+                    TokenKind::DelimPlus | TokenKind::DelimTilde | TokenKind::DelimGreaterThan
                 ) && (index == 0
                     || index > 0 && suffix[index - 1].kind == TokenKind::Comma);
                 if is_invalid_relative_prefix {
@@ -3473,6 +3539,70 @@ fn first_range(token: &Token) -> Range {
     Range {
         loc: token.loc,
         len: i32::try_from(token.text.len()).unwrap_or(i32::MAX),
+    }
+}
+
+// Generic value-token conversion may omit lexically unnecessary whitespace.
+// Selector parsing needs that whitespace to distinguish descendant selectors
+// from a single compound, including inside nested pseudo-class functions.
+fn restore_selector_whitespace(tokens: &mut [Token], source_tokens: &[css_lexer::Token]) {
+    for token in tokens {
+        if let Ok(index) =
+            source_tokens.binary_search_by_key(&token.loc.start, |source| source.range.loc.start)
+            && index > 0
+            && source_tokens[index - 1].kind == TokenKind::Whitespace
+        {
+            token.whitespace |= WhitespaceFlags::BEFORE;
+        }
+        if let Some(children) = &mut token.children {
+            restore_selector_whitespace(children, source_tokens);
+        }
+    }
+}
+
+// Validation happens before this helper. Keep the two integer terms as strings,
+// as Go's parseNthIndex does, so explicit zero offsets and negative zero survive.
+fn nth_index_for_selector_list(args: &[Token]) -> NthIndex {
+    let formula = args
+        .iter()
+        .take_while(|token| {
+            token.kind != TokenKind::Ident || !token.text.eq_ignore_ascii_case("of")
+        })
+        .map(|token| token.text.as_str())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if matches!(formula.as_str(), "odd" | "even") {
+        return NthIndex {
+            b: formula,
+            ..NthIndex::default()
+        };
+    }
+    let integer = |text: &str| {
+        let (sign, digits) = text.strip_prefix('-').map_or_else(
+            || ("", text.strip_prefix('+').unwrap_or(text)),
+            |digits| ("-", digits),
+        );
+        let digits = digits.trim_start_matches('0');
+        format!("{sign}{}", if digits.is_empty() { "0" } else { digits })
+    };
+    if let Some((coefficient, offset)) = formula.split_once('n') {
+        NthIndex {
+            a: match coefficient {
+                "" | "+" => "1".into(),
+                "-" => "-1".into(),
+                _ => integer(coefficient),
+            },
+            b: if offset.is_empty() {
+                String::new()
+            } else {
+                integer(offset)
+            },
+        }
+    } else {
+        NthIndex {
+            b: integer(&formula),
+            ..NthIndex::default()
+        }
     }
 }
 

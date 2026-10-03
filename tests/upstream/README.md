@@ -10,9 +10,9 @@ The captured corpus currently contains 14,038 concrete cases:
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
 | JS/TS parser and parser lowering | 7,116 | 1,527 | 8,643 |
-| Bundler | 944 | 127 | 1,071 |
+| Bundler | 945 | 126 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,384 | 1,654 | 14,038 |
+| Total | 12,385 | 1,653 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -1074,6 +1074,17 @@ passes 1,161 tests; strict Clippy retains the same 621 diagnostics. The guard
 matches Go's checks after substitution and does not bound allocations before
 a single cartesian expansion. Captured-fixture counts are unchanged.
 
+CSS `nth-child` and `nth-last-child` of-lists now contain typed selectors with
+scoped module annotations, preserving descendant whitespace and minified
+token boundaries. Original bundler fixture 16 is newly active with unchanged
+JS and CSS snapshots; all 3,070 CSS parser/printer captures pass. Global-CSS
+transforms also rename explicitly local symbols. Absent combinators no longer
+emit phantom source-map segments. Thirteen regressions pass, including 219
+independent Go code/diagnostic/file comparisons and 17 focused map comparisons.
+Global-CSS map checks retain the known brace-location mismatch and compare
+metadata separately; full CSS mapping parity remains incomplete. The isolated
+normal suite passes 1,174 tests with the same 621 Clippy diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -1229,7 +1240,7 @@ instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 Files containing invalid UTF-8 are additionally stored in a base64 sidecar so
 binary-loader snapshots retain the exact upstream bytes.
 
-The active bundler tranche exact-compares 858 Unix snapshots and 85
+The active bundler tranche exact-compares 859 Unix snapshots and 85
 diagnostic-only cases from the default, DCE, import-star, TypeScript import-star,
 lowering, TypeScript, package-json,
 tsconfig, loader, CSS, code-splitting, Yarn PnP, import-phase, and entry-point glob suites that use
@@ -1263,7 +1274,7 @@ compatibility, missing or global `composes` names, output paths, and external
 patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
-when selecting an inactive case. `bundler_additional_active.json` enables 111
+when selecting an inactive case. `bundler_additional_active.json` enables 112
 reviewed cases beyond the original option-based selection. This includes all five
 captured explicit resource-management fixtures: synchronous and asynchronous
 disposal, `for of` and `for await` iterations, unsupported async targets, module
@@ -1271,7 +1282,7 @@ declaration hoisting, and TypeScript namespace exports. Their original option
 bits and output snapshots are unchanged. It also includes nine injection cases
 covering duplicate paths, import order, TypeScript, JSX dotted names, `import.meta`,
 string export names, non-bundled builds, and copied files. It also covers bundled
-and non-bundled import-assignment diagnostics. So 12,384 concrete upstream cases
+and non-bundled import-assignment diagnostics. So 12,385 concrete upstream cases
 are currently active in `cargo test`; the remaining 128 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

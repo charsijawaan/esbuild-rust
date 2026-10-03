@@ -4454,7 +4454,7 @@ fn transform_css(
     );
     let mut symbols = SymbolMap::new(1);
     symbols.symbols_for_source[0].clone_from(&tree.symbols);
-    let local_names = if options.loader == Loader::LocalCss {
+    let local_names = if matches!(options.loader, Loader::LocalCss | Loader::GlobalCss) {
         local_css_names(
             &tree,
             &symbols,
