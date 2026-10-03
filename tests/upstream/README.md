@@ -216,6 +216,12 @@ The normal suite passes 966 tests; the full parser audit preserves all prior
 active cases. Strict Clippy has 623 pre-existing error diagnostics, with two
 removed by the helper refactor and none added relative to the baseline.
 
+The full runtime audit at `85f9b74` is recorded in
+`end_to_end_class_checkpoint.json`: 1,293 passed, 169 failed, and no timeouts.
+Relative to `f606229`, 18 cases are newly passing and none regressed. Go still
+passes 1,461 with the shared case-80 failure, leaving 168 Rust-only runtime
+failures alongside the separate 1,768 inactive fixture cases.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
