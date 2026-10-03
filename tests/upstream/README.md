@@ -540,6 +540,12 @@ parameters. The normal suite passes 989 tests, the parser audit preserves all
 diagnostics. Decorator expressions that reference supported private syntax still
 need parse-time lowering flags.
 
+The complete runtime audit at `a5403e2` is recorded in
+`end_to_end_member_decorator_checkpoint.json`: 1,407 passed, 55 failed, and no
+timeouts. Seven original cases are newly passing without regressions relative to
+`2be1b17`. Case 80 remains the shared environment failure, leaving 54 Rust-only
+failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
