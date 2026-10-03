@@ -2161,9 +2161,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     || lower_public_static
                     || lower_public_static_due_to_private_members;
                 let has_experimental_class_decorators =
-                    core.options.ts.config.experimental_decorators
-                        == crate::internal::config::MaybeBool::True
-                        && !class.class.decorators.is_empty();
+                    class_has_experimental_class_decorators(core, &class.class);
+                let has_experimental_member_decorators =
+                    class_has_experimental_member_decorators(core, &class.class);
                 let convert_to_expression_before_visit = (is_top_level_scope
                     && core.options.mode == crate::internal::config::Mode::Bundle)
                     || has_experimental_class_decorators
@@ -2179,14 +2179,19 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         merge_inner_name: !(convert_to_expression_before_visit
                             || lower_public_static_due_to_private_members
                             || lower_public_static_fields
+                            || has_experimental_member_decorators
                             || lower_private_members),
+                        experimental_decorator_binding: ExperimentalDecoratorBinding::Inner,
                         capture_static_initialization: convert_to_expression_before_visit
                             && (lower_static_blocks || lower_static_members),
                         ..ClassVisitOptions::default()
                     },
                 );
                 let capture_lowered_inner_name =
-                    (lower_private_members || lower_public_static_fields) && inner_name.is_some();
+                    (lower_private_members
+                        || lower_public_static_fields
+                        || has_experimental_member_decorators)
+                        && inner_name.is_some();
                 let convert_to_expression = convert_to_expression_before_visit
                     || (lower_public_static_due_to_private_members && inner_name.is_some())
                     || capture_lowered_inner_name;
@@ -5743,11 +5748,19 @@ fn mark_inlinable_function_declaration(core: &mut ParserCore, function: &Functio
     }
 }
 
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum ExperimentalDecoratorBinding {
+    #[default]
+    Outer,
+    Inner,
+}
+
 #[derive(Clone, Copy, Default)]
 struct ClassVisitOptions {
     merge_inner_name: bool,
     capture_private_class_expression: bool,
     capture_static_initialization: bool,
+    experimental_decorator_binding: ExperimentalDecoratorBinding,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -5761,7 +5774,11 @@ fn visit_class(
         merge_inner_name,
         capture_private_class_expression,
         capture_static_initialization,
+        experimental_decorator_binding,
     } = options;
+    let capture_experimental_member_decorators =
+        experimental_decorator_binding == ExperimentalDecoratorBinding::Inner;
+    let has_experimental_class_decorators = class_has_experimental_class_decorators(core, class);
     let class_post_start = core.class_post_statements.len();
     let top_level_temp_start = core.top_level_temp_refs.len();
     lower_type_script_constructor_parameter_fields(core, class);
@@ -6135,7 +6152,20 @@ fn visit_class(
         lower_public_static_fields,
     );
     preserve_type_script_omitted_computed_field_keys(core, class, resolve_identifiers);
-    lower_type_script_experimental_decorators(core, class, outer_class_name, &decorator_keys);
+    let decorator_post_start = core.class_post_statements.len();
+    let capture_member_decorators = capture_experimental_member_decorators
+        && !has_experimental_class_decorators;
+    let decorator_target = if capture_member_decorators {
+        used_inner_name.or(outer_class_name)
+    } else {
+        outer_class_name
+    };
+    lower_type_script_experimental_decorators(core, class, decorator_target, &decorator_keys);
+    let member_decorator_statements = if capture_member_decorators {
+        core.class_post_statements.split_off(decorator_post_start)
+    } else {
+        Vec::new()
+    };
     let constructor_was_present = class_constructor_index(class).is_some();
     let static_field_locations = class
         .properties
@@ -6199,6 +6229,7 @@ fn visit_class(
         static_initializers.sort_by_key(|statement| statement.loc.start);
         core.class_post_statements.extend(static_initializers);
     }
+    core.class_post_statements.extend(member_decorator_statements);
     if let Some(constructor_index) = class_constructor_index(class) {
         if let Some(ExprData::Function(function)) = class.properties[constructor_index]
             .value_or_nil
@@ -6217,8 +6248,9 @@ fn visit_class(
         class.name = None;
     }
     let merge_inner_name = merge_inner_name
-        || core.options.ts.config.experimental_decorators
+        || (core.options.ts.config.experimental_decorators
             == crate::internal::config::MaybeBool::True
+            && (!capture_experimental_member_decorators || has_experimental_class_decorators))
         || class.should_lower_standard_decorators;
     let inner_name = if merge_inner_name
         && let (Some(inner), Some(outer)) = (used_inner_name, outer_class_name)
@@ -6547,6 +6579,32 @@ fn class_public_static_fields_need_lowering(core: &ParserCore, class: &Class) ->
                     property.key.data.as_deref(),
                     Some(ExprData::PrivateIdentifier(_))
                 )
+        })
+}
+
+fn class_has_experimental_class_decorators(core: &ParserCore, class: &Class) -> bool {
+    core.options.ts.config.experimental_decorators == crate::internal::config::MaybeBool::True
+        && (!class.decorators.is_empty()
+            || class_constructor_index(class).is_some_and(|index| {
+                matches!(
+                    class.properties[index].value_or_nil.data.as_deref(),
+                    Some(ExprData::Function(function))
+                        if function.function.args.iter().any(|argument| !argument.decorators.is_empty())
+                )
+            }))
+}
+
+fn class_has_experimental_member_decorators(core: &ParserCore, class: &Class) -> bool {
+    let constructor_index = class_constructor_index(class);
+    core.options.ts.config.experimental_decorators == crate::internal::config::MaybeBool::True
+        && class.properties.iter().enumerate().any(|(index, property)| {
+            !property.decorators.is_empty()
+                || (constructor_index != Some(index)
+                    && matches!(
+                        property.value_or_nil.data.as_deref(),
+                        Some(ExprData::Function(function))
+                            if function.function.args.iter().any(|argument| !argument.decorators.is_empty())
+                    ))
         })
 }
 

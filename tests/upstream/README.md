@@ -528,6 +528,18 @@ timeouts. Cases 949, 950, 1133, 1134, 1276, and 1277 are newly passing without
 regressions relative to `f0121ee`. Case 80 remains the shared environment failure,
 leaving 61 Rust-only failures.
 
+TypeScript member decorators on class declarations now preserve the original
+class binding and run after static initialization. A captured class is separate
+from the mutable outer declaration, so callbacks and class-body references see
+the initialized original value. Class decorators and constructor parameter
+decorators retain their mutation path. An executable regression passes 32
+Rust/pinned-Go transform/bundle combinations covering native/lowered static
+fields, reassignment, initialized private decorator arguments, and constructor
+parameters. The normal suite passes 989 tests, the parser audit preserves all
+7,061 active cases, and strict Clippy retains 623 existing errors without added
+diagnostics. Decorator expressions that reference supported private syntax still
+need parse-time lowering flags.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
