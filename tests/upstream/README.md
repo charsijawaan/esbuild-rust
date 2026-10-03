@@ -658,6 +658,12 @@ The normal suite passes 996 tests, the parser audit preserves all 7,064 active
 cases, and strict Clippy retains 623 existing errors without added diagnostics.
 General static-block lowering remains separate work.
 
+The complete runtime audit at `f0023f6` is recorded in
+`end_to_end_class_replacement_checkpoint.json`: 1,430 passed, 32 failed, and no
+timeouts. Cases 878, 971, 1062, and 1155 are newly passing without regressions
+relative to `a16378b`. Case 80 remains the shared environment failure, leaving
+31 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
