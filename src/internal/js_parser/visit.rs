@@ -1268,22 +1268,27 @@ fn class_has_static_name(class: &Class) -> bool {
 
 fn class_has_keep_name_static_block(class: &Class) -> bool {
     class.properties.iter().any(|property| {
-        let Some(block) = &property.class_static_block else {
-            return false;
-        };
-        let [statement] = block.block.statements.as_slice() else {
-            return false;
-        };
-        let Some(StmtData::Expr(statement)) = statement.data.as_deref() else {
-            return false;
-        };
-        let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
-            return false;
-        };
-        matches!(call.args.as_slice(), [first, second]
+        property
+            .class_static_block
+            .as_deref()
+            .is_some_and(is_generated_class_name_static_block)
+    })
+}
+
+fn is_generated_class_name_static_block(block: &crate::internal::js_ast::ClassStaticBlock) -> bool {
+    let [statement] = block.block.statements.as_slice() else {
+        return false;
+    };
+    let Some(StmtData::Expr(statement)) = statement.data.as_deref() else {
+        return false;
+    };
+    let Some(ExprData::Call(call)) = statement.value.data.as_deref() else {
+        return false;
+    };
+    statement.is_from_class_or_fn_that_can_be_removed_if_unused
+        && matches!(call.args.as_slice(), [first, second]
             if matches!(first.data.as_deref(), Some(ExprData::This))
                 && matches!(second.data.as_deref(), Some(ExprData::String(_))))
-    })
 }
 
 fn insert_class_name_static_block(core: &mut ParserCore, class: &mut Class, name: &str) -> bool {
@@ -2029,6 +2034,21 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
             Some(StmtData::Class(class)) => {
                 let pre_start = core.class_pre_statements.len();
                 let post_start = core.class_post_statements.len();
+                let lower_private_members = class_private_members_need_lowering(core, &class.class);
+                let kept_class_name = if lower_private_members
+                    && core.options.keep_names
+                    && let Some(name) = class.class.name
+                {
+                    let original_name = symbol_name(core, name.reference);
+                    let kept = insert_class_name_static_block(core, &mut class.class, &original_name);
+                    if kept {
+                        core.symbols[usize::try_from(name.reference.inner_index).expect("symbol index")]
+                            .flags |= SymbolFlags::DID_KEEP_NAME;
+                    }
+                    kept
+                } else {
+                    false
+                };
                 let lower_static_blocks = class_static_blocks_can_be_lowered(core, &class.class);
                 let lower_private_static = (class.class.extends_or_nil.data.is_some()
                     || class_has_non_constructor_method(&class.class))
@@ -2065,14 +2085,17 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     resolve_identifiers,
                     ClassVisitOptions {
                         merge_inner_name: !(convert_to_expression_before_visit
-                            || lower_public_static_due_to_private_members),
+                            || lower_public_static_due_to_private_members
+                            || lower_private_members),
                         capture_static_initialization: convert_to_expression_before_visit
                             && (lower_static_blocks || lower_static_members),
                         ..ClassVisitOptions::default()
                     },
                 );
+                let capture_private_inner_name = lower_private_members && inner_name.is_some();
                 let convert_to_expression = convert_to_expression_before_visit
-                    || (lower_public_static_due_to_private_members && inner_name.is_some());
+                    || (lower_public_static_due_to_private_members && inner_name.is_some())
+                    || capture_private_inner_name;
                 if convert_to_expression && let Some(name) = class.class.name {
                     let is_export = class.is_export;
                     let local_kind = if is_top_level_scope
@@ -2082,11 +2105,18 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     } else {
                         LocalKind::Let
                     };
-                    let capture_ref = (lower_static_blocks || lower_static_members).then(|| {
-                        inner_name
-                            .unwrap_or_else(|| generate_class_capture_ref(core, name.reference))
-                    });
+                    let capture_ref =
+                        (lower_static_blocks || lower_static_members || capture_private_inner_name)
+                            .then(|| {
+                                inner_name.unwrap_or_else(|| {
+                                    generate_class_capture_ref(core, name.reference)
+                                })
+                            });
                     if let Some(capture_ref) = capture_ref {
+                        if kept_class_name {
+                            core.symbols[usize::try_from(capture_ref.inner_index).expect("symbol index")]
+                                .flags |= SymbolFlags::DID_KEEP_NAME;
+                        }
                         if let Some(scope) = &core.current_scope {
                             let mut scope = scope
                                 .lock()
@@ -2134,7 +2164,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                                 }),
                             ),
                         }],
-                        kind: if lower_static_members && capture_ref.is_some() {
+                        kind: if (lower_static_members || capture_private_inner_name)
+                            && capture_ref.is_some()
+                        {
                             LocalKind::Const
                         } else {
                             local_kind
@@ -2160,7 +2192,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                                 ..LocalStmt::default()
                             }),
                         );
-                        if lower_static_members || lower_static_blocks {
+                        if lower_static_members || lower_static_blocks || capture_private_inner_name {
                             core.class_post_statements.push(outer_declaration);
                         } else {
                             append_to_statement.push(outer_declaration);
@@ -5816,7 +5848,9 @@ fn visit_class(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .forbid_arguments = false;
-        if let Some(static_block) = &mut property.class_static_block {
+        if let Some(static_block) = &mut property.class_static_block
+            && !is_generated_class_name_static_block(static_block)
+        {
             let old_loop_depth = std::mem::take(&mut core.visit_loop_depth);
             let old_switch_depth = std::mem::take(&mut core.visit_switch_depth);
             let old_try_body_depth = std::mem::take(&mut core.visit_try_body_depth);

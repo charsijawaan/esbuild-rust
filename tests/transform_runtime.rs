@@ -548,6 +548,95 @@ console.log('ok');
 }
 
 #[test]
+fn lowered_private_members_retain_the_original_class_binding() {
+    let source = r#"
+let saved, active;
+class Box {
+  static observedName = this.name;
+  #initial = Box;
+  #method() { return Box; }
+  get #reader() { return Box; }
+  set #writer(value) { saved = [Box, value]; }
+  read() { return [this.#initial, this.#method(), this.#reader]; }
+  write(value) { this.#writer = value; }
+}
+const Original = Box;
+Box = null;
+const box = new Original;
+if (box.read().some(value => value !== Original)) throw 'wrong class binding';
+box.write(17);
+if (saved[0] !== Original || saved[1] !== 17) throw 'wrong setter binding';
+class Compound {
+  get #field() { active = new Compound; return this.result; }
+  set #field(value) { this.result = value; }
+  multiply() { active = this; active.result = 2; active.#field *= 3; }
+}
+const OriginalCompound = Compound;
+Compound = null;
+const compound = new OriginalCompound;
+compound.multiply();
+if (compound === active || compound.result !== 6 || active.result !== undefined)
+  throw 'wrong compound receiver';
+if (Original.name !== 'Box' || Original.observedName !== 'Box'
+  || OriginalCompound.name !== 'Compound') throw 'wrong name';
+console.log('ok');
+"#;
+    for (target, lower_private, lower_blocks) in [
+        (Target::Es2015, false, false),
+        (Target::Es2022, false, false),
+        (Target::Es2022, true, false),
+        (Target::Es2022, true, true),
+    ] {
+        for minify in [false, true] {
+            let mut supported = if lower_private {
+                std::collections::HashMap::from([
+                    ("class-private-field".into(), false),
+                    ("class-private-method".into(), false),
+                    ("class-private-accessor".into(), false),
+                ])
+            } else {
+                std::collections::HashMap::new()
+            };
+            if lower_blocks {
+                supported.insert("class-static-blocks".into(), false);
+            }
+            let result = transform(
+                source,
+                TransformOptions {
+                    target,
+                    supported: supported.clone(),
+                    keep_names: true,
+                    minify_identifiers: minify,
+                    minify_syntax: minify,
+                    minify_whitespace: minify,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.code);
+            let result = build(BuildOptions {
+                bundle: true,
+                format: BuildFormat::CommonJs,
+                platform: BuildPlatform::Node,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    ..BuildStdin::default()
+                }),
+                target,
+                supported,
+                keep_names: true,
+                minify_identifiers: minify,
+                minify_syntax: minify,
+                minify_whitespace: minify,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.output_files[0].contents);
+        }
+    }
+}
+
+#[test]
 fn lowered_private_optional_calls_preserve_receivers_and_short_circuiting() {
     let source = r#"
 let visits = 0, argumentsEvaluated = 0, getterReads = 0, mutableReceiver;

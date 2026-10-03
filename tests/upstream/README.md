@@ -268,6 +268,17 @@ The full runtime audit at `9ae1ea0` is recorded in
 timeouts. Cases 924 and 1108 are newly passing relative to `5127194`, with no
 regressions. Excluding the shared case-80 failure leaves 162 Rust-only failures.
 
+Named declarations with lowered private members now capture their inner class
+binding outside the class expression. Extracted getters, setters, and methods
+can use that binding even after the outer name is reassigned. With `keep_names`,
+the source name is restored before static initialization; generated name blocks
+do not consume a parsed static-block scope. A new executable regression passes
+16 transform/bundle, target, minification, and feature-override combinations on
+Rust and pinned Go, including compound assignments whose getter changes the
+receiver variable. The local suite passes 969 tests and the full parser audit
+retains 7,040 matches without active regressions or new inactive matches.
+Strict Clippy retains 623 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
