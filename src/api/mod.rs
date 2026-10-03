@@ -714,6 +714,17 @@ pub enum BuildPlatform {
     Neutral,
 }
 
+fn effective_package_conditions(
+    conditions: Option<&[String]>,
+    platform: BuildPlatform,
+) -> Vec<String> {
+    match conditions {
+        Some(conditions) => conditions.to_vec(),
+        None if platform != BuildPlatform::Neutral => vec!["module".into()],
+        None => Vec::new(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BuildSourceMap {
     #[default]
@@ -1314,7 +1325,9 @@ pub struct BuildOptions {
     pub keep_names: bool,
     pub main_fields: Vec<String>,
     pub resolve_extensions: Vec<String>,
-    pub conditions: Vec<String>,
+    /// `None` enables the default `module` condition for browser and Node builds.
+    /// `Some(Vec::new())` disables that implicit condition.
+    pub conditions: Option<Vec<String>>,
     pub node_paths: Vec<String>,
     pub plugins: Vec<Plugin>,
 }
@@ -1386,7 +1399,7 @@ impl Default for BuildOptions {
             keep_names: false,
             main_fields: Vec::new(),
             resolve_extensions: Vec::new(),
-            conditions: Vec::new(),
+            conditions: None,
             node_paths: Vec::new(),
             plugins: Vec::new(),
         }
@@ -2904,7 +2917,7 @@ fn activate_plugin_resolve(
         },
         extension_order: options.resolve_extensions.clone(),
         main_fields: options.main_fields.clone(),
-        conditions: options.conditions.clone(),
+        conditions: effective_package_conditions(options.conditions.as_deref(), options.platform),
         abs_node_paths,
         external_settings,
         external_packages: options.packages == Packages::External,
@@ -3654,7 +3667,7 @@ fn build_with_output_state_core(
         output_extension_css,
         extension_order: options.resolve_extensions,
         main_fields: options.main_fields,
-        conditions: options.conditions,
+        conditions: effective_package_conditions(options.conditions.as_deref(), options.platform),
         abs_node_paths,
         global_name,
         public_path: options.public_path,
@@ -7442,7 +7455,7 @@ mod tests {
             loader: HashMap::from([(".custom".into(), Loader::Js)]),
             main_fields: vec!["main".into()],
             resolve_extensions: vec![".custom".into(), ".js".into()],
-            conditions: vec!["custom".into()],
+            conditions: Some(vec!["custom".into()]),
             ..BuildOptions::default()
         });
 

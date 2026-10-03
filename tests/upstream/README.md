@@ -664,6 +664,18 @@ timeouts. Cases 878, 971, 1062, and 1155 are newly passing without regressions
 relative to `a16378b`. Case 80 remains the shared environment failure, leaving
 31 Rust-only failures.
 
+Package export conditions now preserve the distinction between an omitted list
+and an explicitly empty list, matching pinned Go's API normalization. Browser
+and Node builds enable `module` only when conditions are omitted; neutral builds
+do not. The Rust API's `BuildOptions.conditions` is now `Option<Vec<String>>`:
+use `None` for defaults and `Some(vec![...])` for an explicit list, including
+`Some(Vec::new())` to disable the implicit condition. CLI `--conditions=` and
+plugin `build.resolve` follow the same rules. Executable regressions cover 24
+API and 24 CLI configurations, plus 12 plugin resolution configurations; the
+24 CLI expectations were independently checked with pinned Go. The normal
+suite passes 999 tests, including the active parser fixtures, and strict Clippy
+retains 623 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

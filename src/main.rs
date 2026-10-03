@@ -241,7 +241,7 @@ fn run_with_stdin_and_node_paths(
     let mut css_footer = String::new();
     let mut main_fields = Vec::new();
     let mut resolve_extensions = Vec::new();
-    let mut conditions = Vec::new();
+    let mut conditions = None;
     for argument in arguments {
         if argument == "--help" || argument == "-h" {
             return Ok(Output::Text(help_text()));
@@ -522,11 +522,13 @@ fn run_with_stdin_and_node_paths(
             continue;
         }
         if let Some(value) = argument.strip_prefix("--conditions=") {
-            conditions = value
-                .split(',')
-                .filter(|condition| !condition.is_empty())
-                .map(str::to_string)
-                .collect();
+            conditions = Some(
+                value
+                    .split(',')
+                    .filter(|condition| !condition.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            );
             continue;
         }
         if let Some(value) = argument.strip_prefix("--external:") {
