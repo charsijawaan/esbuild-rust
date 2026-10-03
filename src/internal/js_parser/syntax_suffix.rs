@@ -253,6 +253,7 @@ fn parse_high_precedence_suffix_chain_impl(
                 lexer.next();
                 if lexer.token == Token::PrivateIdentifier {
                     let name_loc = lexer.loc();
+                    core.report_private_name_usage(&lexer.identifier.string);
                     let reference = core.store_name_in_ref(lexer.identifier.clone());
                     lexer.next();
                     left = Expr::new(
@@ -351,6 +352,7 @@ fn parse_high_precedence_suffix_chain_impl(
                     _ => {
                         let name_loc = lexer.loc();
                         if lexer.token == Token::PrivateIdentifier {
+                            core.report_private_name_usage(&lexer.identifier.string);
                             let reference = core.store_name_in_ref(lexer.identifier.clone());
                             lexer.next();
                             left = Expr::new(

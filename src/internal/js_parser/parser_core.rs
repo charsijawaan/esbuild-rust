@@ -114,6 +114,7 @@ pub(crate) struct ParserCore {
     pub(crate) live_top_level_await_keyword: Range,
     pub(crate) fn_or_arrow_data_parse: FnOrArrowDataParse,
     pub(crate) lower_all_of_these_private_names: HashMap<String, bool>,
+    pub(crate) parse_experimental_decorator_nesting: usize,
     pub(crate) lowered_private_storage: HashMap<Ref, LoweredPrivateStorage>,
     pub(crate) class_name_hint: Option<String>,
     pub(crate) hoisted_ref_for_sloppy_mode_block_fn: HashMap<Ref, Ref>,
@@ -213,6 +214,7 @@ impl ParserCore {
             live_top_level_await_keyword: Range::default(),
             fn_or_arrow_data_parse: FnOrArrowDataParse::default(),
             lower_all_of_these_private_names: HashMap::new(),
+            parse_experimental_decorator_nesting: 0,
             lowered_private_storage: HashMap::new(),
             class_name_hint: None,
             hoisted_ref_for_sloppy_mode_block_fn: HashMap::new(),
@@ -429,6 +431,13 @@ impl ParserCore {
             reference,
             is_top_level,
         });
+    }
+
+    pub(crate) fn report_private_name_usage(&mut self, name: &[u8]) {
+        if self.parse_experimental_decorator_nesting > 0 {
+            self.lower_all_of_these_private_names
+                .insert(String::from_utf8_lossy(name).into_owned(), true);
+        }
     }
 
     pub(crate) fn follow_symbol_link(&self, mut reference: Ref) -> Ref {

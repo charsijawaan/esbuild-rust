@@ -546,6 +546,16 @@ timeouts. Seven original cases are newly passing without regressions relative to
 `2be1b17`. Case 80 remains the shared environment failure, leaving 54 Rust-only
 failures.
 
+Experimental decorator parsing now records private-name usage before visitation,
+matching pinned Go's conservative file-wide lowering flags. Private property
+access and declarations inside decorator expressions trigger lowering even when
+the target supports private syntax. The expanded regression passes 36
+Rust/pinned-Go combinations, including native ES2022 private fields, optional
+private access, and references inside arrows. The normal suite still passes 989
+tests, the parser audit preserves all 7,061 active cases, and strict Clippy
+retains 623 existing errors without added diagnostics. Supported private brand
+checks inside decorators have a separate gap in explored pinned-Go output too.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

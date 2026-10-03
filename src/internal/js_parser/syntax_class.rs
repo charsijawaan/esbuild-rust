@@ -156,7 +156,10 @@ pub(crate) fn parse_decorators(core: &mut ParserCore, lexer: &mut Lexer) -> Vec<
         let value = if core.options.ts.parse
             && core.options.ts.config.experimental_decorators == MaybeBool::True
         {
-            parse_experimental_decorator(core, lexer)
+            core.parse_experimental_decorator_nesting += 1;
+            let value = parse_experimental_decorator(core, lexer);
+            core.parse_experimental_decorator_nesting -= 1;
+            value
         } else {
             parse_expression(core, lexer, Precedence::New, true)
         };
@@ -318,6 +321,7 @@ fn parse_class_property(
     } else {
         match lexer.token {
             Token::PrivateIdentifier => {
+                core.report_private_name_usage(&lexer.identifier.string);
                 let reference = core.store_name_in_ref(lexer.identifier.clone());
                 let key = Expr::new(
                     lexer.loc(),

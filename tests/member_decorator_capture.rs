@@ -45,8 +45,8 @@ const method = value => { assert.equal(value, 12); return (target, key) => { eve
 const parameter = value => { assert.equal(value, 12); return (target, key, index) => { events.push(index); }; };
 class Foo {
   static #value = 12;
-  @method(Foo.#value)
-  instance(@parameter(Foo.#value) value) { return Foo; }
+  @method(Foo?.#value)
+  instance(@parameter((() => Foo.#value)()) value) { return Foo; }
 }
 const original = Foo;
 Foo = class Replacement {};
@@ -94,6 +94,7 @@ fn member_decorators_use_the_initialized_original_class() {
         let configurations = if private {
             vec![
                 (Target::Es2015, std::collections::HashMap::new()),
+                (Target::Es2022, std::collections::HashMap::new()),
                 (
                     Target::Es2022,
                     std::collections::HashMap::from([("class-private-static-field".into(), false)]),
