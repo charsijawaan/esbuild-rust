@@ -238,8 +238,17 @@ fn capture_value_with_possible_side_effects(
     loc: Loc,
     value: Expr,
 ) -> ([Expr; 2], CaptureValueWrapper) {
+    capture_value_with_mutability(core, loc, value, false)
+}
+
+fn capture_value_with_mutability(
+    core: &mut ParserCore,
+    loc: Loc,
+    value: Expr,
+    value_could_be_mutated: bool,
+) -> ([Expr; 2], CaptureValueWrapper) {
     match value.data.as_deref() {
-        Some(ExprData::Identifier(identifier)) => {
+        Some(ExprData::Identifier(identifier)) if !value_could_be_mutated => {
             let reference = identifier.reference;
             core.record_usage(reference);
             return (
@@ -10863,39 +10872,18 @@ fn visit_expr_with_target_and_context(
                     .insert(0, Expr::new(expression.loc, ExprData::This));
                 call.kind = CallKind::TargetWasOriginallyPropertyAccess;
             }
-            let is_lowered_private_method = matches!(
-                call.target.data.as_deref(),
-                Some(ExprData::Call(private_method))
-                    if is_identifier_named(core, &private_method.target, "__privateMethod")
-                        && !private_method.args.is_empty()
-            );
-            if is_lowered_private_method {
-                let receiver = match call.target.data.as_deref_mut() {
-                    Some(ExprData::Call(private_method)) => {
-                        std::mem::take(&mut private_method.args[0])
-                    }
-                    _ => unreachable!(),
-                };
-                let (helper_receiver, this_arg) =
-                    if matches!(receiver.data.as_deref(), Some(ExprData::This)) {
-                        (receiver.clone(), receiver)
-                    } else {
-                        let reference = core.generate_temp_ref(true);
-                        core.record_usage(reference);
-                        core.record_usage(reference);
-                        (
-                            assign(temp_identifier(expression.loc, reference), receiver),
-                            temp_identifier(expression.loc, reference),
-                        )
-                    };
-                if let Some(ExprData::Call(private_method)) = call.target.data.as_deref_mut() {
-                    private_method.args[0] = helper_receiver;
-                }
-                let private_method = std::mem::take(&mut call.target);
+            if let Some((receiver, private)) = lowered_private_access(core, &call.target) {
+                let ([helper_receiver, this_arg], wrapper) = capture_value_with_mutability(
+                    core,
+                    receiver.loc,
+                    receiver,
+                    true,
+                );
+                let target = lower_private_get(core, expression.loc, helper_receiver, private);
                 call.target = Expr::new(
                     expression.loc,
                     ExprData::Dot(DotExpr {
-                        target: private_method,
+                        target,
                         name: "call".into(),
                         name_loc: expression.loc,
                         ..DotExpr::default()
@@ -10903,6 +10891,9 @@ fn visit_expr_with_target_and_context(
                 );
                 call.args.insert(0, this_arg);
                 call.kind = CallKind::TargetWasOriginallyPropertyAccess;
+                *data = *wrapper.wrap(Expr::new(expression.loc, ExprData::Call(call.clone())))
+                    .data.expect("lowered private call");
+                return;
             }
             if core.options.minify_syntax && !core.is_control_flow_dead {
                 let reference = match call.target.data.as_deref() {
@@ -11290,6 +11281,8 @@ fn visit_expr_with_target_and_context(
                 }
             }
             if assign_target == AssignTarget::None
+                && !context.is_call_target
+                && !context.is_template_tag
                 && let Some((target, storage)) = lowered_private_index(core, index)
                 && let Some(lowered) = lower_private_get(core, expression.loc, target, storage).data
             {
@@ -11632,6 +11625,35 @@ fn visit_expr_with_target_and_context(
                     ..ExprVisitContext::default()
                 },
             );
+            if let Some((receiver, private)) = lowered_private_access(core, &template.tag_or_nil) {
+                // A getter can mutate a receiver variable before the tag runs.
+                // Capture it once before obtaining the function to bind.
+                let ([helper_receiver, this_arg], wrapper) = capture_value_with_mutability(
+                    core,
+                    receiver.loc,
+                    receiver,
+                    true,
+                );
+                let target = lower_private_get(core, expression.loc, helper_receiver, private);
+                template.tag_or_nil = wrapper.wrap(Expr::new(
+                    expression.loc,
+                    ExprData::Call(CallExpr {
+                        target: Expr::new(
+                            expression.loc,
+                            ExprData::Dot(DotExpr {
+                                target,
+                                name: "bind".into(),
+                                name_loc: expression.loc,
+                                ..DotExpr::default()
+                            }),
+                        ),
+                        args: vec![this_arg],
+                        kind: CallKind::TargetWasOriginallyPropertyAccess,
+                        ..CallExpr::default()
+                    }),
+                ));
+                template.tag_was_originally_property_access = true;
+            }
             if is_runtime_helper_call(core, &template.tag_or_nil, "__superGet") {
                 let target = std::mem::take(&mut template.tag_or_nil);
                 template.tag_or_nil = Expr::new(

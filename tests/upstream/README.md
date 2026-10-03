@@ -132,6 +132,18 @@ remaining 202 Rust-only runtime failures are separate from the captured fixture
 backlog of 1,629 parser/lowering and 162 bundler cases (1,791 total). The wider
 API/plugin/WASM inventory remains separate.
 
+Private calls and tagged templates preserve their receivers while lowering,
+including function-valued private fields and getters. The original runtime
+slice 1250–1266 now passes 17/17, fixing case 1254 without changing its assertion.
+An executable regression checks method/field/getter calls and tags, static
+members in class expressions, receiver mutation, single receiver evaluation,
+and parameter-scope captures across ES2015/ES2017/ES2022 and minification.
+The normal suite passes 958 tests. A full parser audit preserves all 7,014 active
+cases; inactive exact matches still need individual review before activation.
+Named class declarations with lowered static private members have a separate
+initialization-order bug: generated brand/field initializers can reference the
+outer class binding before initialization. That is the next resume point.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

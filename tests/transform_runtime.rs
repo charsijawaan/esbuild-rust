@@ -201,3 +201,72 @@ Promise.all([
         execute_node(&result.code);
     }
 }
+
+#[test]
+fn lowered_private_calls_and_template_tags_preserve_receivers() {
+    let source = r#"
+const assert = require('node:assert/strict');
+let receiver, replacement;
+const Box = class {
+  #method() { return this; }
+  #field = function() { return this; };
+  get #getter() { receiver = replacement; return function() { return this; }; }
+  static #staticMethod() { return this; }
+  static #staticField = function() { return this; };
+  static get #staticGetter() { return this.#staticField; }
+  static check() {
+    assert.equal(this.#staticMethod(), this);
+    assert.equal(this.#staticMethod``, this);
+    assert.equal(this.#staticField(), this);
+    assert.equal(this.#staticField``, this);
+    assert.equal(this.#staticGetter(), this);
+    assert.equal(this.#staticGetter``, this);
+  }
+  defaultCall(value, result = value.#method()) { return result; }
+  defaultTag(value, result = value.#method``) { return result; }
+  check() {
+    assert.equal(this.#method(), this);
+    assert.equal(this.#method``, this);
+    assert.equal(this.#field(), this);
+    assert.equal(this.#field``, this);
+    receiver = this;
+    assert.equal(receiver.#getter(), this);
+    assert.equal(receiver, replacement);
+    receiver = this;
+    assert.equal(receiver.#getter``, this);
+    assert.equal(receiver, replacement);
+    receiver = this;
+    assert.equal(receiver.#field(receiver = replacement), this);
+    let visits = 0;
+    const choose = () => { visits++; return this; };
+    assert.equal(choose().#method(), this);
+    assert.equal(choose().#method``, this);
+    assert.equal(choose().#field(), this);
+    assert.equal(choose().#field``, this);
+    assert.equal(visits, 4);
+    assert.equal(this.defaultCall(this), this);
+    assert.equal(this.defaultTag(this), this);
+  }
+}
+replacement = new Box();
+new Box().check();
+Box.check();
+console.log('ok');
+"#;
+    for target in [Target::Es2015, Target::Es2017, Target::Es2022] {
+        for minify in [false, true] {
+            let result = transform(
+                source,
+                TransformOptions {
+                    target,
+                    minify_identifiers: minify,
+                    minify_syntax: minify,
+                    minify_whitespace: minify,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.code);
+        }
+    }
+}
