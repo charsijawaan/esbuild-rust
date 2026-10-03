@@ -124,9 +124,13 @@ The normal local suite now passes 957 tests (906 library, 42 CLI, and nine
 integration). Strict Clippy remains blocked by pre-existing repository lints,
 verified separately against untouched `965fee5`; no lint suppression was added.
 
-The captured fixture backlog is 1,629 parser/lowering and 162 bundler cases
-(1,791 total); the wider API/plugin/WASM inventory remains separate. Complete
-runtime results following this fix will be recorded after the ongoing audit.
+The complete runtime audit at `10ddb1a` is recorded separately in
+`end_to_end_transform_checkpoint.json`: Rust passed 1,259 of 1,462, failed 203,
+and had no timeouts; Go passed 1,461 with its same failure at case 80. Relative
+to `0473d7c`, case 1266 is newly passing and there are no regressions. The
+remaining 202 Rust-only runtime failures are separate from the captured fixture
+backlog of 1,629 parser/lowering and 162 bundler cases (1,791 total). The wider
+API/plugin/WASM inventory remains separate.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
