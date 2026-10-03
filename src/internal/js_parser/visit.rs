@@ -5702,6 +5702,7 @@ fn visit_class(
                                 method: None,
                             });
                         let base = name.strip_prefix('#').unwrap_or(&name);
+                        allocate_lowered_auto_accessor_methods(core, property, base, &mut lowered);
                         match property.kind {
                             PropertyKind::Getter => {
                                 if lowered.getter.is_none() {
@@ -5747,6 +5748,7 @@ fn visit_class(
                                 method: None,
                             });
                         let base = name.strip_prefix('#').unwrap_or(&name);
+                        allocate_lowered_auto_accessor_methods(core, property, base, &mut lowered);
                         let reference = match property.kind {
                             PropertyKind::Getter if lowered.getter.is_none() => Some((
                                 core.generate_class_member_temp_ref(format!("{base}_get")),
@@ -5810,7 +5812,10 @@ fn visit_class(
             &mut core.visit_super_home_is_class_instance,
             !property.flags.contains(PropertyFlags::IS_STATIC),
         );
-        let lower_static_field = property.kind == PropertyKind::Field
+        let lower_static_field = matches!(
+            property.kind,
+            PropertyKind::Field | PropertyKind::AutoAccessor
+        )
             && property.flags.contains(PropertyFlags::IS_STATIC)
             && (lower_all_static_fields_due_to_private_members
                 || core
@@ -5876,6 +5881,7 @@ fn visit_class(
             core.visit_this_is_nested = old_this_is_nested;
         }
     }
+    rewrite_auto_accessors(core, class);
     // Converted declarations initialize their outer binding after static
     // initialization. Generated static initializers must use the captured
     // class value even when user code never references the inner name.
@@ -5922,6 +5928,15 @@ fn visit_class(
         })
         .map(|property| property.loc)
         .collect::<HashSet<_>>();
+    let instance_field_locations = class
+        .properties
+        .iter()
+        .filter(|property| {
+            property.kind == PropertyKind::Field
+                && !property.flags.contains(PropertyFlags::IS_STATIC)
+        })
+        .map(|property| property.loc)
+        .collect::<HashSet<_>>();
     lower_private_members(
         core,
         class,
@@ -5947,6 +5962,8 @@ fn visit_class(
         class_post_start,
     );
     lower_type_script_class_field_assignments(core, class, constructor_was_present);
+    restore_lowered_class_field_order(core, class, &instance_field_locations);
+    restore_lowered_field_statement_order(core, class_post_start, &static_field_locations);
     if class_static_blocks_can_be_lowered(core, class)
         && let Some(class_ref) = private_class_capture.or(used_inner_name).or(outer_class_name)
     {
@@ -6258,6 +6275,9 @@ fn class_private_static_members_need_lowering(core: &ParserCore, class: &Class) 
         if !property.flags.contains(PropertyFlags::IS_STATIC) {
             return false;
         }
+        if auto_accessor_storage_needs_lowering(core, class, property) {
+            return true;
+        }
         let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
             return false;
         };
@@ -6292,7 +6312,10 @@ fn class_public_static_fields_need_lowering(core: &ParserCore, class: &Class) ->
                 .contains(JsFeature::CLASS_STATIC_BLOCKS))
         || class_static_blocks_can_be_lowered(core, class))
         && class.properties.iter().any(|property| {
-            property.kind == PropertyKind::Field
+            matches!(
+                property.kind,
+                PropertyKind::Field | PropertyKind::AutoAccessor
+            )
                 && property.flags.contains(PropertyFlags::IS_STATIC)
                 && !matches!(
                     property.key.data.as_deref(),
@@ -6314,6 +6337,9 @@ fn class_has_non_constructor_method(class: &Class) -> bool {
 fn class_private_members_need_lowering(core: &ParserCore, class: &Class) -> bool {
     let lower_static_blocks = class_static_blocks_can_be_lowered(core, class);
     class.properties.iter().any(|property| {
+        if auto_accessor_storage_needs_lowering(core, class, property) {
+            return true;
+        }
         let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
             return false;
         };
@@ -6341,6 +6367,10 @@ fn class_private_member_lowering_flags(core: &ParserCore, class: &Class) -> (boo
     let mut lower_instance_fields = false;
     let mut lower_static_fields = lower_static_blocks;
     for property in &class.properties {
+        if auto_accessor_storage_needs_lowering(core, class, property) {
+            lower_static_fields = true;
+            lower_instance_fields |= !property.flags.contains(PropertyFlags::IS_STATIC);
+        }
         let Some(ExprData::PrivateIdentifier(private)) = property.key.data.as_deref() else {
             continue;
         };
@@ -6447,6 +6477,57 @@ fn lower_class_static_blocks(
         false
     });
     lowered
+}
+
+fn restore_lowered_class_field_order(
+    core: &ParserCore,
+    class: &mut Class,
+    locations: &HashSet<Loc>,
+) {
+    if let Some(index) = class_constructor_index(class)
+        && let Some(ExprData::Function(function)) =
+            class.properties[index].value_or_nil.data.as_deref_mut()
+    {
+        sort_lowered_field_statements(
+            core,
+            &mut function.function.body.block.statements,
+            locations,
+        );
+    }
+}
+
+fn restore_lowered_field_statement_order(
+    core: &mut ParserCore,
+    start: usize,
+    locations: &HashSet<Loc>,
+) {
+    let mut statements = core.class_post_statements.split_off(start);
+    sort_lowered_field_statements(core, &mut statements, locations);
+    core.class_post_statements.extend(statements);
+}
+
+fn sort_lowered_field_statements(
+    core: &ParserCore,
+    statements: &mut [Stmt],
+    locations: &HashSet<Loc>,
+) {
+    let indices = statements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            (locations.contains(&statement.loc)
+                && is_lowered_class_static_field_initializer(core, statement))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let mut initializers = indices
+        .iter()
+        .map(|&index| std::mem::take(&mut statements[index]))
+        .collect::<Vec<_>>();
+    initializers.sort_by_key(|statement| statement.loc.start);
+    for (index, initializer) in indices.into_iter().zip(initializers) {
+        statements[index] = initializer;
+    }
 }
 
 fn is_lowered_class_static_field_initializer(core: &ParserCore, statement: &Stmt) -> bool {
@@ -8273,6 +8354,265 @@ fn lower_type_script_class_field_assignments(
     }
 }
 
+fn allocate_lowered_auto_accessor_methods(
+    core: &mut ParserCore,
+    property: &Property,
+    name: &str,
+    lowered: &mut LoweredPrivateStorage,
+) {
+    if property.kind == PropertyKind::AutoAccessor {
+        lowered
+            .getter
+            .get_or_insert_with(|| core.generate_class_member_temp_ref(format!("{name}_get")));
+        lowered
+            .setter
+            .get_or_insert_with(|| core.generate_class_member_temp_ref(format!("{name}_set")));
+    }
+}
+
+fn auto_accessor_storage_needs_lowering(
+    core: &ParserCore,
+    class: &Class,
+    property: &Property,
+) -> bool {
+    if property.kind != PropertyKind::AutoAccessor {
+        return false;
+    }
+    let features = if property.flags.contains(PropertyFlags::IS_STATIC) {
+        JsFeature::CLASS_STATIC_FIELD | JsFeature::CLASS_PRIVATE_STATIC_FIELD
+    } else {
+        JsFeature::CLASS_FIELD | JsFeature::CLASS_PRIVATE_FIELD
+    };
+    core.options.unsupported_js_features.contains(features)
+        || class_static_blocks_can_be_lowered(core, class)
+}
+
+fn auto_accessor_storage_name(core: &ParserCore, key: &Expr, count: &mut usize) -> String {
+    match key.data.as_deref() {
+        Some(ExprData::String(name)) => format!("#{}", String::from_utf16_lossy(&name.value)),
+        Some(ExprData::PrivateIdentifier(private)) => {
+            let name = symbol_name(core, private.reference);
+            format!("#_{}", name.strip_prefix('#').unwrap_or(&name))
+        }
+        _ => {
+            let name =
+                crate::internal::ast::DEFAULT_NAME_MINIFIER_JS.number_to_minified_name(*count);
+            *count += 1;
+            format!("#{name}")
+        }
+    }
+}
+
+fn auto_accessor_method(
+    property: &Property,
+    key: Expr,
+    argument: Option<Ref>,
+    value: Expr,
+) -> Property {
+    let loc = key.loc;
+    let statement = if argument.is_some() {
+        StmtData::Expr(ExprStmt {
+            value,
+            ..ExprStmt::default()
+        })
+    } else {
+        StmtData::Return(ReturnStmt {
+            value_or_nil: value,
+        })
+    };
+    Property {
+        key,
+        value_or_nil: Expr::new(
+            loc,
+            ExprData::Function(FunctionExpr {
+                function: Function {
+                    args: argument
+                        .into_iter()
+                        .map(|reference| Arg {
+                            binding: identifier_binding(loc, reference),
+                            ..Arg::default()
+                        })
+                        .collect(),
+                    body: FunctionBody {
+                        loc,
+                        block: BlockStmt {
+                            statements: vec![Stmt::new(loc, statement)],
+                            ..BlockStmt::default()
+                        },
+                    },
+                    ..Function::default()
+                },
+                ..FunctionExpr::default()
+            }),
+        ),
+        decorators: if argument.is_none() {
+            property.decorators.clone()
+        } else {
+            Vec::new()
+        },
+        loc: property.loc,
+        kind: if argument.is_some() {
+            PropertyKind::Setter
+        } else {
+            PropertyKind::Getter
+        },
+        flags: property.flags,
+        ..Property::default()
+    }
+}
+
+fn generate_auto_accessor_symbols(
+    core: &mut ParserCore,
+    name: String,
+    is_static: bool,
+) -> (Ref, Ref) {
+    let storage = core.new_symbol(
+        if is_static {
+            SymbolKind::PrivateStaticField
+        } else {
+            SymbolKind::PrivateField
+        },
+        name,
+    );
+    let argument = core.new_symbol(SymbolKind::Other, "_");
+    core.record_declared_symbol(storage);
+    core.record_declared_symbol(argument);
+    let scope = core
+        .current_scope
+        .as_ref()
+        .expect("class body scope")
+        .clone();
+    let argument_scope =
+        std::sync::Arc::new(std::sync::Mutex::new(crate::internal::js_ast::Scope {
+            kind: ScopeKind::FunctionBody,
+            parent: Some(std::sync::Arc::downgrade(&scope)),
+            generated: vec![argument],
+            ..crate::internal::js_ast::Scope::default()
+        }));
+    let mut scope = scope
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    scope.generated.push(storage);
+    scope.children.push(argument_scope);
+    (storage, argument)
+}
+
+fn auto_accessor_storage_access(
+    core: &mut ParserCore,
+    loc: Loc,
+    storage: Ref,
+    argument: Ref,
+    must_lower: bool,
+) -> (Expr, Expr) {
+    core.record_usage(argument);
+    let receiver = Expr::new(loc, ExprData::This);
+    let value = temp_identifier(loc, argument);
+    if must_lower {
+        core.symbols[storage.inner_index as usize].flags |=
+            SymbolFlags::PRIVATE_SYMBOL_MUST_BE_LOWERED;
+        let name = symbol_name(core, storage);
+        let lowered = LoweredPrivateStorage {
+            storage: core.generate_auto_accessor_storage_ref(&name),
+            getter: None,
+            setter: None,
+            method: None,
+        };
+        core.lowered_private_storage.insert(storage, lowered);
+        return (
+            lower_private_get(core, loc, receiver.clone(), lowered),
+            lower_private_set(core, loc, receiver, lowered, value),
+        );
+    }
+    core.record_usage(storage);
+    core.record_usage(storage);
+    let access = Expr::new(
+        loc,
+        ExprData::Index(IndexExpr {
+            target: receiver,
+            index: Expr::new(
+                loc,
+                ExprData::PrivateIdentifier(crate::internal::js_ast::PrivateIdentifierExpr {
+                    reference: storage,
+                }),
+            ),
+            ..IndexExpr::default()
+        }),
+    );
+    (access.clone(), assign(access, value))
+}
+
+fn rewrite_auto_accessors(core: &mut ParserCore, class: &mut Class) {
+    let (lower_instance, lower_static) = class_private_member_lowering_flags(core, class);
+    let unsupported = core.options.unsupported_js_features;
+    let mut count = 0;
+    let mut properties = Vec::with_capacity(class.properties.len());
+    for mut property in std::mem::take(&mut class.properties) {
+        let is_static = property.flags.contains(PropertyFlags::IS_STATIC);
+        let must_lower = if is_static {
+            lower_static || unsupported.contains(JsFeature::CLASS_STATIC_FIELD)
+        } else {
+            lower_instance || unsupported.contains(JsFeature::CLASS_FIELD)
+        };
+        if property.kind != PropertyKind::AutoAccessor
+            || (!property.decorators.is_empty() && class.should_lower_standard_decorators)
+            || (!must_lower && !unsupported.contains(JsFeature::DECORATORS))
+        {
+            properties.push(property);
+            continue;
+        }
+        let name = auto_accessor_storage_name(core, &property.key, &mut count);
+        let setter_key = if property.flags.contains(PropertyFlags::IS_COMPUTED)
+            && !matches!(
+                property.key.data.as_deref(),
+                Some(ExprData::String(_) | ExprData::Number(_))
+            ) {
+            let reference = generate_class_computed_key_temp(core, property.key.loc);
+            let key = computed_key_temp(core, property.key.loc, reference);
+            property.key = assign(key.clone(), std::mem::take(&mut property.key));
+            key
+        } else {
+            property.key.clone()
+        };
+        let (storage, argument) = generate_auto_accessor_symbols(core, name.clone(), is_static);
+        let loc = property.key.loc;
+        let private_key = Expr::new(
+            loc,
+            ExprData::PrivateIdentifier(crate::internal::js_ast::PrivateIdentifierExpr {
+                reference: storage,
+            }),
+        );
+        let mut storage_property = Property {
+            loc: property.loc,
+            kind: PropertyKind::Field,
+            flags: if is_static {
+                PropertyFlags::IS_STATIC
+            } else {
+                PropertyFlags::default()
+            },
+            key: private_key.clone(),
+            initializer_or_nil: std::mem::take(&mut property.initializer_or_nil),
+            ..Property::default()
+        };
+        if storage_property.initializer_or_nil.data.is_none() {
+            storage_property.initializer_or_nil = std::mem::take(&mut property.value_or_nil);
+        }
+        let (get, set) = auto_accessor_storage_access(core, loc, storage, argument, must_lower);
+        properties.push(storage_property);
+        properties.push(auto_accessor_method(
+            &property,
+            property.key.clone(),
+            None,
+            get,
+        ));
+        properties.push(auto_accessor_method(
+            &property,
+            setter_key,
+            Some(argument),
+            set,
+        ));
+    }
+    class.properties = properties;
+}
 fn rewrite_type_script_auto_accessors(core: &mut ParserCore, class: &mut Class) -> Vec<Stmt> {
     let mut assignments = Vec::new();
     let mut properties = Vec::with_capacity(class.properties.len());

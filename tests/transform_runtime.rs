@@ -933,3 +933,133 @@ console.log('ok');
         }
     }
 }
+
+#[test]
+fn lowered_auto_accessors_preserve_keys_order_and_factory_storage() {
+    let source = r#"
+const assert = require('node:assert/strict');
+const events = [];
+const init = (name, value) => (events.push(name), value);
+const key = name => (events.push('key:' + name), name);
+const symbol = Symbol('computed');
+function factory(value) {
+  return class Box {
+    first = init('first', value);
+    accessor item = init('item', value + 1);
+    accessor #secret = init('secret', value + 2);
+    accessor [key('computed')] = init('computed', value + 3);
+    accessor [symbol];
+    static accessor total = init('total', value + 4);
+    static accessor #hidden = init('hidden', value + 5);
+    static accessor [key('staticComputed')] = init('staticComputed', value + 6);
+    last = init('last', value + 7);
+    read(other = this) { return other.#secret; }
+    write(value) { this.#secret = value; }
+    static read(other = this) { return other.#hidden; }
+    static write(value) { this.#hidden = value; }
+  };
+}
+const First = factory(10), Second = factory(20);
+assert.deepEqual(events, ['key:computed', 'key:staticComputed', 'total', 'hidden', 'staticComputed',
+  'key:computed', 'key:staticComputed', 'total', 'hidden', 'staticComputed']);
+events.length = 0;
+const first = new First, again = new First, second = new Second;
+assert.deepEqual(events, ['first', 'item', 'secret', 'computed', 'last',
+  'first', 'item', 'secret', 'computed', 'last', 'first', 'item', 'secret', 'computed', 'last']);
+assert.equal(first.item, 11);
+assert.equal(first.read(), 12);
+assert.equal(first.computed, 13);
+assert.equal(first[symbol], undefined);
+assert.equal(First.total, 14);
+assert.equal(First.read(), 15);
+assert.equal(First.staticComputed, 16);
+first.item = 30;
+first.write(31);
+first.computed = 32;
+first[symbol] = 33;
+First.total = 34;
+First.write(35);
+assert.equal(first.item, 30);
+assert.equal(first.read(), 31);
+assert.equal(first.computed, 32);
+assert.equal(first[symbol], 33);
+assert.equal(again.item, 11);
+assert.equal(second.read(), 22);
+assert.equal(First.total, 34);
+assert.equal(First.read(), 35);
+assert.equal(Second.read(), 25);
+assert.throws(() => first.read(second), TypeError);
+assert.throws(() => First.read(Second), TypeError);
+const descriptor = Object.getOwnPropertyDescriptor(First.prototype, 'item');
+assert.equal(descriptor.enumerable, false);
+assert.equal(descriptor.configurable, true);
+assert.equal(typeof descriptor.get, 'function');
+assert.equal(typeof descriptor.set, 'function');
+assert.equal(Object.hasOwn(first, 'item'), false);
+class Derived extends First {
+  accessor extra = 40;
+  constructor() { super(); this.extra++; }
+}
+assert.equal(new Derived().extra, 41);
+const Anonymous = class { static accessor value = 42; };
+assert.equal(Anonymous.value, 42);
+class Base {
+  static get value() { return this.tag; }
+  get value() { return this.tag; }
+}
+class WithSuper extends Base {
+  static tag = 43;
+  static accessor inherited = super.value;
+  static accessor self = this;
+  tag = 44;
+  accessor inherited = super.value;
+}
+assert.equal(WithSuper.inherited, 43);
+assert.equal(WithSuper.self, WithSuper);
+assert.equal(new WithSuper().inherited, 44);
+console.log('ok');
+"#;
+    for (target, feature) in [
+        (Target::Es2015, None),
+        (Target::Es2022, None),
+        (Target::Es2022, Some("class-field")),
+        (Target::Es2022, Some("class-static-field")),
+        (Target::Es2022, Some("class-private-field")),
+    ] {
+        for minify in [false, true] {
+            let supported = feature
+                .map(|feature| std::collections::HashMap::from([(feature.into(), false)]))
+                .unwrap_or_default();
+            let result = transform(
+                source,
+                TransformOptions {
+                    target,
+                    supported: supported.clone(),
+                    minify_identifiers: minify,
+                    minify_syntax: minify,
+                    minify_whitespace: minify,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.code);
+            let result = build(BuildOptions {
+                bundle: true,
+                format: BuildFormat::CommonJs,
+                platform: BuildPlatform::Node,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    ..BuildStdin::default()
+                }),
+                target,
+                supported,
+                minify_identifiers: minify,
+                minify_syntax: minify,
+                minify_whitespace: minify,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.output_files[0].contents);
+        }
+    }
+}
