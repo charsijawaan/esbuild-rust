@@ -779,6 +779,14 @@ The complete runtime audit at `53b1b17` is recorded in
 Case 1409 is newly passing without regressions relative to `5d96242`.
 Case 80 remains the shared environment failure, leaving 13 Rust-only failures.
 
+Split chunks now include emitted cross-chunk import bindings when assigning
+local symbol names. The unsorted dependency map has already been consumed at
+that stage, which previously left colliding re-exported imports with identical
+names. Eight configurations execute with the same values and live bindings as
+pinned Go, including dynamic imports, minification, preserved function names,
+and custom nested chunk paths. The normal suite passes 1,019 tests; strict
+Clippy retains 621 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

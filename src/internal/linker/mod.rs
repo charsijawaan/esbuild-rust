@@ -6762,9 +6762,9 @@ pub fn rename_symbols_in_chunk(
     }
 
     let mut cross_chunk_refs = chunk
-        .imports_from_other_chunks
-        .values()
-        .flatten()
+        .sorted_cross_chunk_imports
+        .iter()
+        .flat_map(|import| &import.sorted_import_items)
         .map(|item| graph.symbols.follow_symbols_const(item.reference))
         .collect::<Vec<_>>();
     cross_chunk_refs.sort_by_key(|reference| {
