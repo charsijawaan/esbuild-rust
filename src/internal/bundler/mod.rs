@@ -685,6 +685,16 @@ pub fn bundle_javascript_with_mangle_cache(
             _ => {}
         }
     }
+    for (source_index, issue) in &compiled.scan_result.ambiguous_re_exports {
+        linker::log_ambiguous_re_export(
+            log,
+            options,
+            &scanned.files[*source_index as usize].input_file.source,
+            &scanned.files[issue.source_index as usize].input_file.source,
+            &scanned.files[issue.other_source_index as usize].input_file.source,
+            issue,
+        );
+    }
     for issue in &compiled.scan_result.arbitrary_namespace_issues {
         let Some(file) = scanned.files.get(issue.source_index as usize) else {
             continue;
@@ -6015,7 +6025,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 941 },
+            if selected_test.is_some() { 1 } else { 942 },
             "upstream basic bundler corpus case count"
         );
     }

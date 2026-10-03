@@ -36,7 +36,7 @@ use crate::internal::{
     },
     helpers::{
         BitSet, Joiner, encode_string_as_shortest_data_url, escape_closing_tag, quote_for_json,
-        string_array_arrays_equal, string_to_utf16, utf16_to_string,
+        quote_go_string, string_array_arrays_equal, string_to_utf16, utf16_to_string,
     },
     js_ast::{self, ExportsKind},
     logger::{Log, Path, Range},
@@ -215,6 +215,60 @@ pub struct AmbiguousReExport {
     pub name_loc: crate::internal::logger::Loc,
     pub other_source_index: u32,
     pub other_name_loc: crate::internal::logger::Loc,
+}
+
+/// Report a filtered export-star collision using the definition ranges recorded
+/// while resolving export aliases. The main message has no source location.
+///
+/// # Panics
+///
+/// Panics if recorded definition locations are outside their source files.
+pub fn log_ambiguous_re_export(
+    log: &Log,
+    options: &Options,
+    reexport_source: &crate::internal::logger::Source,
+    first_source: &crate::internal::logger::Source,
+    second_source: &crate::internal::logger::Source,
+    issue: &AmbiguousReExport,
+) {
+    let mut first_tracker = crate::internal::logger::LineColumnTracker::new(Some(first_source));
+    let mut second_tracker = crate::internal::logger::LineColumnTracker::new(Some(second_source));
+    let alias = quote_go_string(issue.alias.as_bytes());
+    let reexport_path = quote_go_string(
+        reexport_source
+            .pretty_paths
+            .select(options.log_path_style)
+            .as_bytes(),
+    );
+    let first_path = quote_go_string(
+        first_source
+            .pretty_paths
+            .select(options.log_path_style)
+            .as_bytes(),
+    );
+    let second_path = quote_go_string(
+        second_source
+            .pretty_paths
+            .select(options.log_path_style)
+            .as_bytes(),
+    );
+    log.add_id_with_notes(
+        crate::internal::logger::MsgId::BundlerAmbiguousReexport,
+        crate::internal::logger::MsgKind::Debug,
+        None,
+        Range::default(),
+        format!("Re-export of {alias} in {reexport_path} is ambiguous and has been removed"),
+        vec![
+            first_tracker.msg_data(
+                crate::internal::js_lexer::range_of_identifier(first_source, issue.name_loc),
+                format!("One definition of {alias} comes from {first_path} here:"),
+            ),
+            second_tracker.msg_data(
+                crate::internal::js_lexer::range_of_identifier(second_source, issue.other_name_loc),
+                format!("Another definition of {alias} comes from {second_path} here:"),
+            ),
+        ],
+    );
 }
 
 #[derive(Clone, Copy, Debug, Default)]

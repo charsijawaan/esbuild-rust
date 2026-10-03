@@ -11,7 +11,7 @@ proposals are excluded until verified and committed.
 
 ## What the percentages mean
 
-- **Captured fixtures: 88.20% active** (12,382 / 14,038). These cases compare
+- **Captured fixtures: 88.21% active** (12,383 / 14,038). These cases compare
   original upstream output or diagnostics exactly in the normal test suite.
   This measures the captured corpus, not all upstream behavior.
 - **Original CLI/runtime suite: 99.93% passing** (1,461 / 1,462), matching
@@ -36,9 +36,9 @@ outside the port.
 | --- | ---: | ---: | ---: |
 | Lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
 | JS/TS parser and lowering | 7,116 | 1,527 | 8,643 |
-| Bundler | 942 | 129 | 1,071 |
+| Bundler | 943 | 128 | 1,071 |
 | Go API formatting/directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,382 | 1,656 | 14,038 |
+| Total | 12,383 | 1,655 | 14,038 |
 
 The parser backlog comprises 879 cases from `js_parser_test.go`, 555 from
 `ts_parser_test.go`, and 93 from `js_parser_lower_test.go`, calculated from
@@ -119,8 +119,8 @@ original upstream behavior before classifying them.
 
 ## Validation limits
 
-The latest recorded normal suite passed **1,134 Rust tests**, many of which
-iterate over captured cases; this is not 1,134 additional upstream cases.
+The latest recorded normal suite passed **1,142 Rust tests**, many of which
+iterate over captured cases; this is not 1,142 additional upstream cases.
 The exhaustive parser audit is separately ignored in normal runs. Strict
 Clippy remains blocked by **621 previously recorded errors**. See
 [tests/upstream/README.md](tests/upstream/README.md) for the committed checks,

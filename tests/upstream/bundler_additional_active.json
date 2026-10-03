@@ -1,4 +1,5 @@
 [
+  "TestAmbiguousReexportMsg",
   "TestAssignToImport",
   "TestAssignToImportNoBundle",
   "TestCSSAssetPathsWithSpacesBundle",
