@@ -840,6 +840,12 @@ independently checked with pinned Go. The normal suite passes 1,037 tests, the
 parser audit retains 7,064 passes without regressions, and strict Clippy retains
 621 existing errors without added diagnostics.
 
+The complete runtime audit at `f1b8b91` is recorded in
+`end_to_end_using_checkpoint.json`: 1,459 passed, three failed, and no timeouts.
+Cases 1450, 1452, 1454, 1456, 1457, and 1458 are newly passing without
+regressions relative to `40167fe`. Case 80 remains the shared environment
+failure, leaving two Rust-only failures for injected bindings.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
