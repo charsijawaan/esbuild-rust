@@ -13122,6 +13122,67 @@ mod tests {
     }
 
     #[test]
+    fn constant_assignment_diagnostics_keep_the_source_class_name() {
+        for source in [
+            "class Foo { static #foo = Foo = class Bar {} }",
+            "class Foo { static #foo() { Foo = class Bar {} } static run() { this.#foo() } }",
+            r"class F\u006Fo { static #foo() { F\u006Fo = class Bar {} } }",
+        ] {
+            for target in [Target::Es2015, Target::Es2022] {
+                for minify in [false, true] {
+                    let result = transform(
+                        source,
+                        TransformOptions {
+                            target,
+                            minify_identifiers: minify,
+                            minify_syntax: minify,
+                            minify_whitespace: minify,
+                            ..TransformOptions::default()
+                        },
+                    );
+                    assert!(result.errors.is_empty(), "{:?}", result.errors);
+                    assert_eq!(result.warnings.len(), 1);
+                    let warning = &result.warnings[0];
+                    assert_eq!(warning.id, "assign-to-constant");
+                    assert_eq!(
+                        warning.text,
+                        "This assignment will throw because \"Foo\" is a constant"
+                    );
+                    assert_eq!(
+                        warning.notes[0].text,
+                        "The symbol \"Foo\" was declared a constant here:"
+                    );
+                    let name = if source.contains('\\') {
+                        r"F\u006Fo"
+                    } else {
+                        "Foo"
+                    };
+                    let location = warning.location.as_ref().unwrap();
+                    assert_eq!(location.column, source.find(&format!("{name} =")).unwrap());
+                    assert_eq!(location.length, name.len());
+                    let declaration = warning.notes[0].location.as_ref().unwrap();
+                    assert_eq!(declaration.column, source.find(name).unwrap());
+                    assert_eq!(declaration.length, name.len());
+                }
+            }
+            let result = build(BuildOptions {
+                bundle: true,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    ..BuildStdin::default()
+                }),
+                ..BuildOptions::default()
+            });
+            assert_eq!(result.errors.len(), 1);
+            assert_eq!(
+                result.errors[0].text,
+                "Cannot assign to \"Foo\" because it is a constant"
+            );
+            assert!(result.output_files.is_empty());
+        }
+    }
+
+    #[test]
     fn returns_diagnostics_and_suppresses_code_on_errors() {
         let result = transform(
             "const = 1",

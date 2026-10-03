@@ -1867,11 +1867,13 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     core,
                     &mut class.class,
                     resolve_identifiers,
-                    !(convert_to_expression_before_visit
-                        || lower_public_static_due_to_private_members),
-                    false,
-                    convert_to_expression_before_visit
-                        && (lower_static_blocks || lower_static_members),
+                    ClassVisitOptions {
+                        merge_inner_name: !(convert_to_expression_before_visit
+                            || lower_public_static_due_to_private_members),
+                        capture_static_initialization: convert_to_expression_before_visit
+                            && (lower_static_blocks || lower_static_members),
+                        ..ClassVisitOptions::default()
+                    },
                 );
                 let convert_to_expression = convert_to_expression_before_visit
                     || (lower_public_static_due_to_private_members && inner_name.is_some());
@@ -2104,9 +2106,10 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                             core,
                             &mut class.class,
                             resolve_identifiers,
-                            !convert_to_expression,
-                            false,
-                            false,
+                            ClassVisitOptions {
+                                merge_inner_name: !convert_to_expression,
+                                ..ClassVisitOptions::default()
+                            },
                         );
                         if convert_to_expression {
                             let mut class_expression = class.class.clone();
@@ -5305,15 +5308,25 @@ fn mark_inlinable_function_declaration(core: &mut ParserCore, function: &Functio
     }
 }
 
+#[derive(Default)]
+struct ClassVisitOptions {
+    merge_inner_name: bool,
+    capture_private_class_expression: bool,
+    capture_static_initialization: bool,
+}
+
 #[allow(clippy::too_many_lines)]
 fn visit_class(
     core: &mut ParserCore,
     class: &mut Class,
     resolve_identifiers: bool,
-    merge_inner_name: bool,
-    capture_private_class_expression: bool,
-    capture_static_initialization: bool,
+    options: ClassVisitOptions,
 ) -> (Option<Ref>, Option<Ref>) {
+    let ClassVisitOptions {
+        merge_inner_name,
+        capture_private_class_expression,
+        capture_static_initialization,
+    } = options;
     let class_post_start = core.class_post_statements.len();
     let top_level_temp_start = core.top_level_temp_refs.len();
     lower_type_script_constructor_parameter_fields(core, class);
@@ -10059,7 +10072,7 @@ fn visit_expr_with_target_and_context(
                 return;
             }
             let mut declare_loc = expression.loc;
-            if ParserCore::is_stored_name_ref(identifier.reference) {
+            let original_name = if ParserCore::is_stored_name_ref(identifier.reference) {
                 let name = String::from_utf8_lossy(core.load_name_from_ref(identifier.reference))
                     .into_owned();
                 if crate::internal::js_lexer::is_strict_mode_reserved_word(&name) {
@@ -10076,9 +10089,11 @@ fn visit_expr_with_target_and_context(
                 identifier.reference = result.reference;
                 identifier.must_keep_due_to_with_stmt = result.is_inside_with_scope;
                 declare_loc = result.declare_loc;
+                Some(name)
             } else {
                 core.record_usage(identifier.reference);
-            }
+                None
+            };
             if core.visit_arguments_ref == Some(identifier.reference)
                 && core.visit_inside_async_arrow
                 && core
@@ -10164,7 +10179,8 @@ fn visit_expr_with_target_and_context(
                 let symbol_index =
                     usize::try_from(identifier.reference.inner_index).expect("symbol index");
                 let symbol_kind = core.symbols[symbol_index].kind;
-                let symbol_name = core.symbols[symbol_index].original_name.clone();
+                let symbol_name = original_name
+                    .unwrap_or_else(|| core.symbols[symbol_index].original_name.clone());
                 let range =
                     crate::internal::js_lexer::range_of_identifier(&core.source, expression.loc);
                 match symbol_kind {
@@ -12014,9 +12030,11 @@ fn visit_expr_with_target_and_context(
                 core,
                 &mut class.class,
                 resolve_identifiers,
-                true,
-                lower_private_members || lower_public_static,
-                false,
+                ClassVisitOptions {
+                    merge_inner_name: true,
+                    capture_private_class_expression: lower_private_members || lower_public_static,
+                    ..ClassVisitOptions::default()
+                },
             );
             if let Some(name) = name_to_keep {
                 insert_class_name_static_block(core, &mut class.class, &name);

@@ -190,6 +190,16 @@ are active. The full parser audit preserves every prior active case, and the
 normal suite passes 964 tests. Original runtime slices 838–840, 931–933,
 1022–1024, and 1115–1117 pass 12/12, fixing eight duplicate-member cases.
 
+Constant-assignment diagnostics retain the identifier's source name before
+symbol resolution, so class warnings and notes report `Foo` instead of the
+generated `_Foo`. Local API regressions cover native/lowered targets,
+minification, escaped identifiers, warning locations, and bundle-mode errors.
+Original runtime cases 851–852, 944–945, 1035–1036, and 1128–1129 pass 8/8.
+The normal suite passes 965 tests and the full parser audit preserves all
+7,030 active cases. Class visitation uses named options for its lowering flags;
+strict Clippy still has the same 625 pre-existing error diagnostics as untouched
+`965fee5`, with no new diagnostic categories or lint suppression.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
