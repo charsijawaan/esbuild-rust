@@ -676,6 +676,12 @@ API and 24 CLI configurations, plus 12 plugin resolution configurations; the
 suite passes 999 tests, including the active parser fixtures, and strict Clippy
 retains 623 existing errors without added diagnostics.
 
+The complete runtime audit at `0a062a2` is recorded in
+`end_to_end_package_conditions_checkpoint.json`: 1,436 passed, 26 failed, and
+no timeouts. Cases 1365, 1366, 1371, 1386, 1387, and 1392 are newly passing
+without regressions relative to `f0023f6`. Case 80 remains the shared environment
+failure, leaving 25 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
