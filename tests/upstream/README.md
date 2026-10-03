@@ -1139,6 +1139,16 @@ regressions. Existing debug stderr, source-map, and dynamic-scope binding gaps
 remain outside this bounded port. The normal suite passes 1,221 tests; strict
 Clippy retains the same 621 diagnostics.
 
+Native context cancellation uses a token per rebuild flight. Cancel waits for
+that flight, including lifecycle callbacks, and does not poison later rebuilds.
+Cancellation before compiler admission prevents compilation; cancellation after
+an admitted compile preserves its output and adds the cancellation error, even
+when linking also failed. Canceled empty outputs remove tracked files and clear
+output hashes. Twelve deterministic API tests and a compiler-admission regression
+cover these boundaries, coalescing, acknowledgment, disposal, and recovery.
+The library suite passes 956 tests, including all active parser and bundler
+captures. JavaScript service cancellation requires the separate context bridge.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

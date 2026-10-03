@@ -112,7 +112,7 @@ JavaScript or Go API distribution.
 | --- | --- |
 | `internal/*` compiler packages | Parser/printer, resolver, linker, bundler, runtime helpers, minification, CSS, and source maps are implemented to varying degrees. The fixture backlog prevents a blanket package-parity claim. |
 | `cmd/esbuild`, `pkg/cli` | Native CLI includes watch and a stateless framed service for build/transform, formatting, and analysis. Serve and service contexts/plugins remain unsupported; CLI/protocol compatibility is not complete. |
-| `pkg/api` | Native Rust build/transform/context APIs, message formatting, metafile analysis, and plugin callbacks. Rebuild/watch/dispose exist; cancellation and serve do not. The 33 captured Go helper cases do not verify the whole API. |
+| `pkg/api` | Native Rust build/transform/context APIs, message formatting, metafile analysis, and plugin callbacks. Rebuild/watch/cancel/dispose exist; serve remains unsupported. The 33 captured Go helper cases do not verify the whole API. |
 | Plugins | Native setup, resolve/load, lifecycle callbacks, nested resolution, plugin data, and watch paths exist. The upstream JavaScript plugin host and its service-protocol integration are not ported. |
 | Host/distribution | The native stateless service works with the pinned original Node wrapper in bounded tests. Wrappers are not distributed here; WebAssembly, npm/platform packages, and release/distribution tooling remain unported. |
 

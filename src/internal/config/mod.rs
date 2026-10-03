@@ -947,6 +947,13 @@ pub struct Options {
     pub exclude_sources_content: bool,
 }
 
+impl Options {
+    #[must_use]
+    pub fn did_cancel(&self) -> bool {
+        self.cancel_flag.as_ref().is_some_and(|flag| flag.did_cancel())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

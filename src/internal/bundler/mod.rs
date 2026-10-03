@@ -74,6 +74,9 @@ pub struct CompiledBundle {
     pub metafile: String,
     pub output_files: Vec<OutputFile>,
     pub scan_result: linker::ScanImportsAndExportsResult,
+    /// Scanning succeeded and the API reached the Compile phase. Cancellation
+    /// then adds its diagnostic even when compilation itself logged errors.
+    pub compile_attempted: bool,
 }
 
 /// Convert scanner output directly into the prepared linker graph and chunks.
@@ -131,6 +134,9 @@ pub fn compile_javascript_bundle_with_mangle_cache(
     unique_key_prefix: &str,
     mangle_cache: Option<&mut config::MangleCache>,
 ) -> CompiledBundle {
+    if options.did_cancel() {
+        return CompiledBundle::default();
+    }
     compile_javascript_bundle_with_css_names(
         file_system,
         bundle,
@@ -324,6 +330,7 @@ fn compile_javascript_bundle_with_css_names(
         metafile,
         output_files,
         scan_result: prepared.scan_result,
+        compile_attempted: false,
     }
 }
 
@@ -713,9 +720,15 @@ pub fn bundle_javascript_with_mangle_cache(
         );
     }
     if log.has_errors() {
-        CompiledBundle::default()
+        CompiledBundle {
+            compile_attempted: true,
+            ..CompiledBundle::default()
+        }
     } else {
-        compiled
+        CompiledBundle {
+            compile_attempted: true,
+            ..compiled
+        }
     }
 }
 
@@ -2199,6 +2212,9 @@ fn resolve_import_records_from_directory(
     > = HashMap::new();
 
     for (record_index, record) in records.iter_mut().enumerate() {
+        if options.did_cancel() {
+            return;
+        }
         if record.source_index.is_valid()
             || record.copy_source_index.is_valid()
             || record.flags.contains(ImportRecordFlags::IS_UNUSED)
@@ -2820,6 +2836,9 @@ fn parse_pending_file(
     pending: &PendingFile,
     tsconfig_cache: &mut TsConfigCache,
 ) -> ParseResult {
+    if options.did_cancel() {
+        return ParseResult::default();
+    }
     let PendingFile {
         is_injected,
         path,
@@ -2900,6 +2919,9 @@ fn parse_pending_file(
     ) else {
         return ParseResult::default();
     };
+    if options.did_cancel() {
+        return ParseResult::default();
+    }
     let mut file_options = options.clone();
     let tsconfig = if options.tsconfig_raw.is_empty() && source.key_path.namespace == "file" {
         find_nearest_tsconfig(
@@ -3082,6 +3104,9 @@ fn preprocess_injected_files(
     let mut results = Vec::new();
     let mut visited = HashSet::new();
     for inject_path in &options.inject_paths {
+        if options.did_cancel() {
+            return Vec::new();
+        }
         let Some(resolved) = resolve_injected_path(log, file_system, caches, options, inject_path)
         else {
             continue;
@@ -3175,6 +3200,9 @@ pub fn scan_bundle(
 ) -> ScannedBundle {
     apply_option_defaults(options);
     run_on_start_plugins(log, file_system, &options.plugins);
+    if options.did_cancel() {
+        return ScannedBundle::default();
+    }
     let mut bundle = ScannedBundle::default();
     let mut tsconfig_cache = TsConfigCache::default();
 
@@ -3238,6 +3266,9 @@ pub fn scan_bundle(
         );
         resolution_slots.insert(source_index, std::mem::take(&mut result.resolve_results));
         bundle.files[source_index as usize] = result.file;
+    }
+    if options.did_cancel() {
+        return ScannedBundle::default();
     }
     if options.abs_output_base.is_empty() && entry_points.is_empty() {
         options.abs_output_base = file_system.cwd().to_string();
@@ -3364,6 +3395,9 @@ pub fn scan_bundle(
     let mut automatically_generated_entry_paths = Vec::new();
     let mut expanded_entry_points = Vec::new();
     for entry_point in entry_points {
+        if options.did_cancel() {
+            return ScannedBundle::default();
+        }
         if let Some(matches) = expand_entry_point_glob(file_system, &entry_point.input_path) {
             if matches.is_empty() {
                 log.add_error(
@@ -3383,6 +3417,9 @@ pub fn scan_bundle(
         }
     }
     for entry_point in &expanded_entry_points {
+        if options.did_cancel() {
+            return ScannedBundle::default();
+        }
         let input_path_in_file_namespace = entry_point_is_file(file_system, entry_point);
         let input_path = if input_path_in_file_namespace
             && !file_system.is_abs(&entry_point.input_path)
@@ -3417,6 +3454,9 @@ pub fn scan_bundle(
             None,
             false,
         );
+        if options.did_cancel() {
+            return ScannedBundle::default();
+        }
         let Some(resolved) = resolved else {
             if !did_log_plugin_error {
                 let mut notes = Vec::new();
@@ -3526,6 +3566,9 @@ pub fn scan_bundle(
 
     let mut cursor = 0;
     while cursor < pending.len() {
+        if options.did_cancel() {
+            return ScannedBundle::default();
+        }
         let source_index = pending[cursor].source_index;
         let mut result = parse_pending_file(
             log,
@@ -3536,6 +3579,9 @@ pub fn scan_bundle(
             &pending[cursor],
             &mut tsconfig_cache,
         );
+        if options.did_cancel() {
+            return ScannedBundle::default();
+        }
         cursor += 1;
         let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
         if bundle.files.len() < needed_length {
@@ -4686,6 +4732,76 @@ fn automatically_generated_entry_point_path(file_system: &dyn Fs, path: &str) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancellation_stops_compile_admission_but_not_admitted_entry_groups() {
+        let log = crate::internal::logger::Log::new_defer(
+            crate::internal::logger::DeferLogKind::NoVerboseOrDebug,
+            std::collections::HashMap::new(),
+        );
+        let fs = crate::internal::fs::mock_fs(
+            &std::collections::HashMap::from([
+                ("/project/a.js".into(), "foo()".into()),
+                ("/project/b.js".into(), "bar()".into()),
+            ]),
+            crate::internal::fs::MockKind::Unix,
+            "/project",
+        );
+        let mut options = crate::internal::config::Options {
+            mode: crate::internal::config::Mode::Bundle,
+            output_format: crate::internal::config::Format::EsModule,
+            abs_output_dir: "/out".into(),
+            abs_output_base: "/project".into(),
+            ..crate::internal::config::Options::default()
+        };
+        let bundle = super::scan_bundle(
+            &log,
+            &fs,
+            &crate::internal::cache::CacheSet::default(),
+            &[
+                super::EntryPoint {
+                    input_path: "a.js".into(),
+                    ..super::EntryPoint::default()
+                },
+                super::EntryPoint {
+                    input_path: "b.js".into(),
+                    ..super::EntryPoint::default()
+                },
+            ],
+            &mut options,
+            "TEST",
+        );
+        assert!(!log.has_errors());
+        let expected = super::compile_javascript_bundle_with_mangle_cache(
+            &fs, &bundle, &options, "TEST", None,
+        );
+        assert_eq!(expected.output_files.len(), 2);
+        let flag = std::sync::Arc::new(crate::internal::config::CancelFlag::default());
+        flag.cancel();
+        options.cancel_flag = Some(flag);
+        assert!(
+            super::compile_javascript_bundle_with_mangle_cache(
+                &fs, &bundle, &options, "TEST", None
+            )
+            .output_files
+            .is_empty()
+        );
+        // The inner compiler is reached only after the public Compile entry
+        // check. Go finishes all entry groups after that check has passed.
+        let admitted = super::compile_javascript_bundle_with_css_names(
+            &fs,
+            &bundle,
+            &options,
+            "TEST",
+            &mut std::collections::HashSet::new(),
+            None,
+        );
+        assert_eq!(admitted.output_files.len(), 2);
+        for (actual, expected) in admitted.output_files.iter().zip(expected.output_files) {
+            assert_eq!(actual.abs_path, expected.abs_path);
+            assert_eq!(actual.contents, expected.contents);
+        }
+    }
+
     use super::{
         apply_option_defaults, automatically_generated_entry_point_path, bundle_javascript,
         default_extension_to_loader_map, find_reachable_files, guess_mime_type, hash_for_file_name,

@@ -1,8 +1,10 @@
 //! Port of esbuild's public `pkg/api` package.
 
 #[cfg(test)]
-mod upstream_tests;
+mod cancel_tests;
 mod mangle_cache;
+#[cfg(test)]
+mod upstream_tests;
 mod watcher;
 
 pub use mangle_cache::MangleCache;
@@ -1511,8 +1513,22 @@ struct BuildContextState {
 
 #[derive(Default)]
 struct InFlightBuild {
+    cancellation: BuildCancellation,
     outcome: Mutex<Option<InFlightOutcome>>,
     changed: Condvar,
+}
+
+#[derive(Default)]
+struct BuildCancellation {
+    flag: Arc<config::CancelFlag>,
+    #[cfg(test)]
+    after_compile: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl BuildCancellation {
+    fn cancel(&self) {
+        self.flag.cancel();
+    }
 }
 
 #[derive(Clone)]
@@ -1556,7 +1572,7 @@ impl BuildContext {
     #[must_use]
     pub fn rebuild(&self) -> BuildResult {
         self.rebuild_with(
-            || {
+            |cancellation| {
                 let (old_hashes, watcher) = {
                     let state = self
                         .inner
@@ -1572,6 +1588,7 @@ impl BuildContext {
                     &self.inner.prepared_plugins,
                     Some(&old_hashes),
                     watcher.as_ref().map(|_| &watch_data),
+                    Some(cancellation),
                 );
                 if let Some(watcher) = watcher {
                     watcher.set_watch_data(
@@ -1658,7 +1675,7 @@ impl BuildContext {
 
     fn rebuild_with(
         &self,
-        build: impl FnOnce() -> BuildResult,
+        build: impl FnOnce(&BuildCancellation) -> BuildResult,
         joined_existing_build: impl FnOnce(),
     ) -> BuildResult {
         let (in_flight, should_build) = {
@@ -1683,7 +1700,9 @@ impl BuildContext {
             return in_flight.wait_for_result();
         }
 
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(build));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build(&in_flight.cancellation)
+        }));
         match outcome {
             Ok(result) => {
                 let mut state = self
@@ -1718,6 +1737,36 @@ impl BuildContext {
                 drop(state);
                 std::panic::resume_unwind(payload);
             }
+        }
+    }
+
+    /// Cancels the current build and waits for it, including plugin callbacks.
+    ///
+    /// An idle or disposed context is unaffected. Each rebuild has its own token.
+    /// Cancellation is cooperative. Once compilation starts, completed output
+    /// can still be returned and written, matching Go's post-compile check.
+    pub fn cancel(&self) {
+        self.cancel_with(|| {});
+    }
+
+    // The service's onStart replay waits for this acknowledgment, not for the
+    // cancel worker itself: that worker must wait until onStart has returned.
+    pub(crate) fn cancel_with(&self, waiting_for_build: impl FnOnce()) {
+        let active = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.disposed {
+                return;
+            }
+            state.active.clone()
+        };
+        if let Some(active) = active {
+            active.cancellation.cancel();
+            waiting_for_build();
+            let _ = active.wait();
         }
     }
 
@@ -3279,7 +3328,7 @@ fn build_with_cache(options: BuildOptions, cache: &Arc<CacheSet>) -> BuildResult
         };
     }
     let (result, _) =
-        build_with_output_state(options, cache.as_ref(), &prepared_plugins, None, None);
+        build_with_output_state(options, cache.as_ref(), &prepared_plugins, None, None, None);
     deactivate_plugin_resolve(&prepared_plugins);
     run_on_dispose_callbacks(&prepared_plugins);
     result
@@ -3291,6 +3340,7 @@ fn build_with_output_state(
     prepared_plugins: &PreparedPlugins,
     previous_hashes: Option<&HashMap<String, String>>,
     watch_data_sink: Option<&Mutex<WatchData>>,
+    cancellation: Option<&BuildCancellation>,
 ) -> (BuildResult, HashMap<String, String>) {
     let mut result = build_with_output_state_core(
         options,
@@ -3299,6 +3349,7 @@ fn build_with_output_state(
         previous_hashes,
         watch_data_sink,
         None,
+        cancellation,
     );
     let latest_hashes = result
         .output_files
@@ -3317,6 +3368,7 @@ fn build_with_output_state_core(
     previous_hashes: Option<&HashMap<String, String>>,
     watch_data_sink: Option<&Mutex<WatchData>>,
     file_system: Option<Arc<dyn Fs>>,
+    cancellation: Option<&BuildCancellation>,
 ) -> BuildResult {
     let log = Log::new_defer(
         DeferLogKind::NoVerboseOrDebug,
@@ -3694,6 +3746,7 @@ fn build_with_output_state_core(
         };
     }
     let mut internal_options = config::Options {
+        cancel_flag: cancellation.map(|state| state.flag.clone()),
         mode,
         output_format,
         mangle_props,
@@ -3822,13 +3875,33 @@ fn build_with_output_state_core(
             &mut internal_options,
             "API",
         );
-        if !log.has_errors() {
+        let compile_attempted = !log.has_errors();
+        if compile_attempted {
             for error in mangle_cache_errors {
                 log.add_error(None, crate::internal::logger::Range::default(), error.text);
             }
         }
-        bundler::CompiledBundle::default()
+        bundler::CompiledBundle {
+            compile_attempted,
+            ..bundler::CompiledBundle::default()
+        }
     };
+    #[cfg(test)]
+    if let Some(cancellation) = cancellation {
+        let hook = cancellation.after_compile.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+    // Go adds this after Compile if scanning succeeded, including when Compile
+    // logged errors. Results already returned by Compile remain publishable.
+    if compiled.compile_attempted && cancellation.is_some_and(|state| state.flag.did_cancel()) {
+        log.add_error(
+            None,
+            crate::internal::logger::Range::default(),
+            "The build was canceled",
+        );
+    }
     let (mut errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
     // The bundler has already logged import issues with their actual severity,
     // location, and overrides. Missing generated imports can be warnings, not errors.
@@ -3837,24 +3910,20 @@ fn build_with_output_state_core(
     } else {
         String::new()
     };
-    let output_files: Vec<BuildOutputFile> = if errors.is_empty() {
-        compiled
-            .output_files
-            .into_iter()
-            .map(|output| BuildOutputFile {
-                path: if write_to_stdout {
-                    "<stdout>".into()
-                } else {
-                    output.abs_path
-                },
-                hash: output_file_hash(&output.contents),
-                contents: output.contents,
-                executable: output.is_executable,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let output_files: Vec<BuildOutputFile> = compiled
+        .output_files
+        .into_iter()
+        .map(|output| BuildOutputFile {
+            path: if write_to_stdout {
+                "<stdout>".into()
+            } else {
+                output.abs_path
+            },
+            hash: output_file_hash(&output.contents),
+            contents: output.contents,
+            executable: output.is_executable,
+        })
+        .collect();
     if write && (errors.is_empty() || (previous_hashes.is_some() && !write_to_stdout)) {
         errors.extend(write_build_output_files(
             &output_files,
@@ -4231,6 +4300,7 @@ fn compile_transform(options: BuildOptions) -> BuildResult {
         None,
         None,
         Some(Arc::new(mock_fs(&HashMap::new(), MockKind::Unix, "/"))),
+        None,
     )
 }
 
@@ -5522,6 +5592,7 @@ mod tests {
             &prepared_plugins,
             None,
             None,
+            None,
         );
         assert_eq!(result.errors.len(), 1);
         assert_eq!(
@@ -6042,7 +6113,7 @@ mod tests {
         let first_count = invocation_count.clone();
         let first = std::thread::spawn(move || {
             first_context.rebuild_with(
-                move || {
+                move |_| {
                     first_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     started_sender.send(()).expect("signal active rebuild");
                     release_receiver.recv().expect("release active rebuild");
@@ -6061,7 +6132,7 @@ mod tests {
         let second_count = invocation_count.clone();
         let second = std::thread::spawn(move || {
             second_context.rebuild_with(
-                move || {
+                move |_| {
                     second_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     super::BuildResult {
                         metafile: "unexpected second build".into(),
@@ -6092,7 +6163,7 @@ mod tests {
         let rebuild_context = build_context.clone();
         let rebuild = std::thread::spawn(move || {
             rebuild_context.rebuild_with(
-                move || {
+                move |_| {
                     started_sender.send(()).expect("signal active rebuild");
                     release_receiver.recv().expect("release active rebuild");
                     super::BuildResult::default()
