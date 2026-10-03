@@ -1,0 +1,715 @@
+{
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+  "go_binary_sha256": "a5b888adb15b0a570c7fc904737de515b159119e7501491f452ee1b8c4cff2cf",
+  "wrapper_sha256": "8331fe1d8b3a07381f33cc425fcfaa94776e263113653f80ec3ba433e9657e73",
+  "provenance": "Captured unchanged pinned Go wrapper transform outputs; Unicode extension lookup failures are controls recorded separately, not altered. ESM/IIFE final-dot generated-name differences are also recorded separately as inherited controls.",
+  "vectors": [
+    {
+      "name": "path-0",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-1",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png///"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-2",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png\\"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-3",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png\\\\"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-4",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/\\/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-5",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "./dir.png/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-6",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "/dir.png/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-7",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "//dir.png/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-8",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/."
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-9",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/./"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-10",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/.."
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-11",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/../"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-12",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/../asset.gif/"
+      },
+      "code": "module.exports = \"data:image/gif,%PDF-\";\n"
+    },
+    {
+      "name": "path-13",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png//asset.gif\\/"
+      },
+      "code": "module.exports = \"data:image/gif,%PDF-\";\n"
+    },
+    {
+      "name": "path-14",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": ".PNG/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-15",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir/.PNG///"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-16",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": ".PNG/."
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-17",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir\\.PNG\\"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-18",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.PNG\\no-extension"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-19",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.PNG\\.."
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-20",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-21",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css/"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-22",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css\\"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-23",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.MODULE.css"
+      },
+      "code": "module.exports = \"data:text/css;charset=utf-8,%PDF-\";\n"
+    },
+    {
+      "name": "path-24",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.CSS"
+      },
+      "code": "module.exports = \"data:text/css;charset=utf-8,%PDF-\";\n"
+    },
+    {
+      "name": "path-25",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.module.css/x"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-26",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.css/.."
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-27",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.png."
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-28",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.png./"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-29",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset..PNG/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-30",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "./"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-31",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "../"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-32",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "/"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-33",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "///"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-34",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "\\"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-35",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "\\\\"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-36",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "C:\\"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-37",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "C:\\dir.PNG\\"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-38",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "C:/dir.PNG/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-39",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "C:dir.PNG/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-40",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "C:dir.PNG\\"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-41",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "z:\\dir.PNG\\"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-42",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "Z:\\dir.PNG\\"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-43",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "\\\\server\\share\\asset.PNG\\"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-44",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "//server/share/asset.PNG/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-45",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir\\with.dot\\asset.PNG"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "path-46",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir\\with.png\\no-extension"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-47",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.PNG?query/"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-48",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.PNG#hash/"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-49",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir/asset.PNG\\?query"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "path-50",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir/..\\asset.PNG"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "format-esm-dir.png/",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/",
+        "format": "esm"
+      },
+      "code": "var dir_default = \"data:image/png,%PDF-\";\nexport {\n  dir_default as default\n};\n"
+    },
+    {
+      "name": "format-cjs-dir.png/",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "format-iife-dir.png/",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/",
+        "format": "iife"
+      },
+      "code": "(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var require_dir = __commonJS({\n    \"dir.png/\"(exports, module) {\n      module.exports = \"data:image/png,%PDF-\";\n    }\n  });\n  require_dir();\n})();\n"
+    },
+    {
+      "name": "format-esm-dir.png\\",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png\\",
+        "format": "esm"
+      },
+      "code": "var dir_default = \"data:image/png,%PDF-\";\nexport {\n  dir_default as default\n};\n"
+    },
+    {
+      "name": "format-cjs-dir.png\\",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png\\",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "format-iife-dir.png\\",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png\\",
+        "format": "iife"
+      },
+      "code": "(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var require_dir = __commonJS({\n    \"dir.png\\\\\"(exports, module) {\n      module.exports = \"data:image/png,%PDF-\";\n    }\n  });\n  require_dir();\n})();\n"
+    },
+    {
+      "name": "format-cjs-dir.png/.",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/.",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "format-esm-dir.png/../",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/../",
+        "format": "esm"
+      },
+      "code": "var __default = \"data:application/pdf,%PDF-\";\nexport {\n  __default as default\n};\n"
+    },
+    {
+      "name": "format-cjs-dir.png/../",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/../",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "format-iife-dir.png/../",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/../",
+        "format": "iife"
+      },
+      "code": "(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var require__ = __commonJS({\n    \"dir.png/../\"(exports, module) {\n      module.exports = \"data:application/pdf,%PDF-\";\n    }\n  });\n  require__();\n})();\n"
+    },
+    {
+      "name": "format-esm-asset.module.css",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css",
+        "format": "esm"
+      },
+      "code": "var asset_default = \"data:application/pdf,%PDF-\";\nexport {\n  asset_default as default\n};\n"
+    },
+    {
+      "name": "format-cjs-asset.module.css",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "format-iife-asset.module.css",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css",
+        "format": "iife"
+      },
+      "code": "(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var require_asset = __commonJS({\n    \"asset.module.css\"(exports, module) {\n      module.exports = \"data:application/pdf,%PDF-\";\n    }\n  });\n  require_asset();\n})();\n"
+    },
+    {
+      "name": "format-esm-asset.module.css/",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css/",
+        "format": "esm"
+      },
+      "code": "var asset_default = \"data:application/pdf,%PDF-\";\nexport {\n  asset_default as default\n};\n"
+    },
+    {
+      "name": "format-cjs-asset.module.css/",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css/",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "format-iife-asset.module.css/",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css/",
+        "format": "iife"
+      },
+      "code": "(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var require_asset = __commonJS({\n    \"asset.module.css/\"(exports, module) {\n      module.exports = \"data:application/pdf,%PDF-\";\n    }\n  });\n  require_asset();\n})();\n"
+    },
+    {
+      "name": "format-esm-dir\\.PNG\\",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir\\.PNG\\",
+        "format": "esm"
+      },
+      "code": "var __default = \"data:image/png,%PDF-\";\nexport {\n  __default as default\n};\n"
+    },
+    {
+      "name": "format-cjs-dir\\.PNG\\",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir\\.PNG\\",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "format-iife-dir\\.PNG\\",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir\\.PNG\\",
+        "format": "iife"
+      },
+      "code": "(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var require__ = __commonJS({\n    \"dir\\\\.PNG\\\\\"(exports, module) {\n      module.exports = \"data:image/png,%PDF-\";\n    }\n  });\n  require__();\n})();\n"
+    },
+    {
+      "name": "format-esm-C:\\dir.PNG\\",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "C:\\dir.PNG\\",
+        "format": "esm"
+      },
+      "code": "var dir_default = \"data:image/png,%PDF-\";\nexport {\n  dir_default as default\n};\n"
+    },
+    {
+      "name": "format-cjs-C:\\dir.PNG\\",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "C:\\dir.PNG\\",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n"
+    },
+    {
+      "name": "format-iife-C:\\dir.PNG\\",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "C:\\dir.PNG\\",
+        "format": "iife"
+      },
+      "code": "(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var require_dir = __commonJS({\n    \"C:\\\\dir.PNG\\\\\"(exports, module) {\n      module.exports = \"data:image/png,%PDF-\";\n    }\n  });\n  require_dir();\n})();\n"
+    },
+    {
+      "name": "raw-nul-ff",
+      "input_base64": "AP8=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/"
+      },
+      "code": "module.exports = \"data:image/png;base64,AP8=\";\n"
+    },
+    {
+      "name": "raw-raw-wtf8",
+      "input_base64": "7aCA",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/"
+      },
+      "code": "module.exports = \"data:image/png;base64,7aCA\";\n"
+    }
+  ],
+  "excluded_controls": [
+    {
+      "name": "format-esm-dir.png/.",
+      "reason": "Inherited generated identifier difference, outside the MIME wrapper; both baseline and frozen MIME proposal differ from Go."
+    },
+    {
+      "name": "format-iife-dir.png/.",
+      "reason": "Inherited generated identifier difference, outside the MIME wrapper; both baseline and frozen MIME proposal differ from Go."
+    }
+  ]
+}

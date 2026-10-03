@@ -29,8 +29,8 @@ use crate::internal::{
     css_parser, css_printer,
     fs::{Fs, MockKind, RealFsOptions, WatchData, mock_fs, real_fs},
     helpers::{
-        encode_string_as_shortest_data_url, escape_closing_tag, mime_type_by_extension,
-        quote_for_json, quote_go_string, string_to_utf16,
+        encode_string_as_shortest_data_url, escape_closing_tag,
+        guess_mime_type as guess_mime_type_by_extension, quote_for_json, quote_go_string, string_to_utf16,
     },
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
@@ -4505,41 +4505,11 @@ fn js_printer_options(
 }
 
 fn guess_mime_type(sourcefile: &str, contents: &[u8]) -> String {
-    let extension = FsPath::new(sourcefile)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map_or_else(String::new, |extension| format!(".{extension}"));
-    let known = mime_type_by_extension(&extension);
-    let mime_type = if known.is_empty() {
-        detect_content_type(contents)
-    } else {
-        known
-    };
-    mime_type.replace("; ", ";")
-}
-
-fn detect_content_type(contents: &[u8]) -> &'static str {
-    if contents.starts_with(b"\x89PNG\r\n\x1a\n") {
-        "image/png"
-    } else if contents.starts_with(b"\xff\xd8\xff") {
-        "image/jpeg"
-    } else if contents.starts_with(b"GIF87a") || contents.starts_with(b"GIF89a") {
-        "image/gif"
-    } else if contents.starts_with(b"%PDF-") {
-        "application/pdf"
-    } else if contents.starts_with(b"\0asm") {
-        "application/wasm"
-    } else if contents.starts_with(b"PK\x03\x04") {
-        "application/zip"
-    } else if std::str::from_utf8(contents).is_ok()
-        && !contents
-            .iter()
-            .any(|byte| *byte < 0x20 && !matches!(*byte, b'\t' | b'\n' | b'\r' | b'\x0c'))
-    {
-        "text/plain; charset=utf-8"
-    } else {
-        "application/octet-stream"
-    }
+    // Match the bundler's OS-independent treatment of trailing separators
+    // and the special ".module.css" extension.
+    let (_, _, extension) =
+        crate::internal::logger::platform_independent_path_dir_base_ext(sourcefile);
+    guess_mime_type_by_extension(&extension, contents)
 }
 
 fn transform_css(
@@ -13034,7 +13004,7 @@ mod tests {
                     ..TransformOptions::default()
                 }
             )),
-            "module.exports = \"data:application/octet-stream;base64,/w==\";\n"
+            "module.exports = \"data:text/plain;charset=utf-8;base64,/w==\";\n"
         );
         assert_eq!(
             code(transform(

@@ -27,8 +27,8 @@ use crate::internal::{
         SideEffects, SideEffectsKind,
     },
     helpers::{
-        encode_string_as_shortest_data_url, mime_type_by_extension, quote_for_json,
-        quote_go_string, quote_single, string_to_utf16, utf16_to_string,
+        encode_string_as_shortest_data_url, guess_mime_type as guess_mime_type_by_extension,
+        quote_for_json, quote_go_string, quote_single, string_to_utf16, utf16_to_string,
     },
     js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
     js_lexer::KeyOrValue,
@@ -4444,36 +4444,7 @@ fn set_pure_data_result(result: &mut ParseResult, ast: js_ast::Ast) {
 
 #[must_use]
 pub fn guess_mime_type(extension: &str, contents: &[u8]) -> String {
-    let known = mime_type_by_extension(extension);
-    let mime_type = if known.is_empty() {
-        detect_content_type(contents)
-    } else {
-        known
-    };
-    mime_type.replace("; ", ";")
-}
-
-fn detect_content_type(contents: &[u8]) -> &'static str {
-    if contents.starts_with(b"\x89PNG\r\n\x1a\n") {
-        "image/png"
-    } else if contents.starts_with(b"\xff\xd8\xff") {
-        "image/jpeg"
-    } else if contents.starts_with(b"GIF87a") || contents.starts_with(b"GIF89a") {
-        "image/gif"
-    } else if contents.starts_with(b"%PDF-") {
-        "application/pdf"
-    } else if contents.starts_with(b"\0asm") {
-        "application/wasm"
-    } else if contents.starts_with(b"PK\x03\x04") {
-        "application/zip"
-    } else if !contents
-        .iter()
-        .any(|byte| *byte < 0x20 && !matches!(*byte, b'\t' | b'\n' | b'\r' | b'\x0c'))
-    {
-        "text/plain; charset=utf-8"
-    } else {
-        "application/octet-stream"
-    }
+    guess_mime_type_by_extension(extension, contents)
 }
 
 #[allow(clippy::too_many_lines)]

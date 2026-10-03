@@ -1,0 +1,685 @@
+{
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+  "go_binary_sha256": "a5b888adb15b0a570c7fc904737de515b159119e7501491f452ee1b8c4cff2cf",
+  "wrapper_sha256": "8331fe1d8b3a07381f33cc425fcfaa94776e263113653f80ec3ba433e9657e73",
+  "provenance": "Unchanged pinned JS wrapper/API outputs; inherited maps/text-WTF8/binary-target controls remain in process reports.",
+  "transforms": [
+    {
+      "name": "extension-asset.GİF",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF"
+      },
+      "code": "module.exports = \"data:image/gif,%PDF-\";\n",
+      "url": "data:image/gif,%PDF-"
+    },
+    {
+      "name": "extension-.AVİF",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": ".AVİF"
+      },
+      "code": "module.exports = \"data:image/avif,%PDF-\";\n",
+      "url": "data:image/avif,%PDF-"
+    },
+    {
+      "name": "extension-asset.marKdown",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.marKdown"
+      },
+      "code": "module.exports = \"data:text/markdown;charset=utf-8,%PDF-\";\n",
+      "url": "data:text/markdown;charset=utf-8,%PDF-"
+    },
+    {
+      "name": "extension-asset.gİf",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gİf"
+      },
+      "code": "module.exports = \"data:image/gif,%PDF-\";\n",
+      "url": "data:image/gif,%PDF-"
+    },
+    {
+      "name": "extension-asset.WEBMANİFEST",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.WEBMANİFEST"
+      },
+      "code": "module.exports = \"data:application/manifest+json,%PDF-\";\n",
+      "url": "data:application/manifest+json,%PDF-"
+    },
+    {
+      "name": "extension-asset.GIF",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GIF"
+      },
+      "code": "module.exports = \"data:image/gif,%PDF-\";\n",
+      "url": "data:image/gif,%PDF-"
+    },
+    {
+      "name": "extension-asset.CSS",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.CSS"
+      },
+      "code": "module.exports = \"data:text/css;charset=utf-8,%PDF-\";\n",
+      "url": "data:text/css;charset=utf-8,%PDF-"
+    },
+    {
+      "name": "extension-asset.MJS",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.MJS"
+      },
+      "code": "module.exports = \"data:text/javascript;charset=utf-8,%PDF-\";\n",
+      "url": "data:text/javascript;charset=utf-8,%PDF-"
+    },
+    {
+      "name": "extension-asset.gıf",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.gi̇f",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gi̇f"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.cſſ",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.cſſ"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.cß",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.cß"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.GＩF",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GＩF"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.woﬀ",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.woﬀ"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.ＷＯＦＦ２",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.ＷＯＦＦ２"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.unknown",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.unknown"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.ΣVG",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.ΣVG"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.GİF?query",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF?query"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.GİF#hash",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF#hash"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.GİF\u0000",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF\u0000"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "extension-asset.GİF/",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF/"
+      },
+      "code": "module.exports = \"data:image/gif,%PDF-\";\n",
+      "url": "data:image/gif,%PDF-"
+    },
+    {
+      "name": "extension-dir\\asset.AVİF\\",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir\\asset.AVİF\\"
+      },
+      "code": "module.exports = \"data:image/avif,%PDF-\";\n",
+      "url": "data:image/avif,%PDF-"
+    },
+    {
+      "name": "GİF-raw-ff",
+      "kind": "transform",
+      "input_base64": "/w==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF"
+      },
+      "code": "module.exports = \"data:image/gif;base64,/w==\";\n",
+      "url": "data:image/gif;base64,/w=="
+    },
+    {
+      "name": "GİF-raw-nul-ff",
+      "kind": "transform",
+      "input_base64": "AP8=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF"
+      },
+      "code": "module.exports = \"data:image/gif;base64,AP8=\";\n",
+      "url": "data:image/gif;base64,AP8="
+    },
+    {
+      "name": "GİF-raw-wtf8",
+      "kind": "transform",
+      "input_base64": "7aCA",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF"
+      },
+      "code": "module.exports = \"data:image/gif;base64,7aCA\";\n",
+      "url": "data:image/gif;base64,7aCA"
+    },
+    {
+      "name": "AVİF-raw-ff",
+      "kind": "transform",
+      "input_base64": "/w==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.AVİF"
+      },
+      "code": "module.exports = \"data:image/avif;base64,/w==\";\n",
+      "url": "data:image/avif;base64,/w=="
+    },
+    {
+      "name": "AVİF-raw-nul-ff",
+      "kind": "transform",
+      "input_base64": "AP8=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.AVİF"
+      },
+      "code": "module.exports = \"data:image/avif;base64,AP8=\";\n",
+      "url": "data:image/avif;base64,AP8="
+    },
+    {
+      "name": "AVİF-raw-wtf8",
+      "kind": "transform",
+      "input_base64": "7aCA",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.AVİF"
+      },
+      "code": "module.exports = \"data:image/avif;base64,7aCA\";\n",
+      "url": "data:image/avif;base64,7aCA"
+    },
+    {
+      "name": "marKdown-raw-ff",
+      "kind": "transform",
+      "input_base64": "/w==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.marKdown"
+      },
+      "code": "module.exports = \"data:text/markdown;charset=utf-8;base64,/w==\";\n",
+      "url": "data:text/markdown;charset=utf-8;base64,/w=="
+    },
+    {
+      "name": "marKdown-raw-nul-ff",
+      "kind": "transform",
+      "input_base64": "AP8=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.marKdown"
+      },
+      "code": "module.exports = \"data:text/markdown;charset=utf-8;base64,AP8=\";\n",
+      "url": "data:text/markdown;charset=utf-8;base64,AP8="
+    },
+    {
+      "name": "marKdown-raw-wtf8",
+      "kind": "transform",
+      "input_base64": "7aCA",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.marKdown"
+      },
+      "code": "module.exports = \"data:text/markdown;charset=utf-8;base64,7aCA\";\n",
+      "url": "data:text/markdown;charset=utf-8;base64,7aCA"
+    },
+    {
+      "name": "gıf-raw-ff",
+      "kind": "transform",
+      "input_base64": "/w==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,/w==\";\n",
+      "url": "data:text/plain;charset=utf-8;base64,/w=="
+    },
+    {
+      "name": "gıf-raw-nul-ff",
+      "kind": "transform",
+      "input_base64": "AP8=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,AP8=\";\n",
+      "url": "data:application/octet-stream;base64,AP8="
+    },
+    {
+      "name": "gıf-raw-wtf8",
+      "kind": "transform",
+      "input_base64": "7aCA",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,7aCA\";\n",
+      "url": "data:text/plain;charset=utf-8;base64,7aCA"
+    },
+    {
+      "name": "cſſ-raw-ff",
+      "kind": "transform",
+      "input_base64": "/w==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.cſſ"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,/w==\";\n",
+      "url": "data:text/plain;charset=utf-8;base64,/w=="
+    },
+    {
+      "name": "cſſ-raw-nul-ff",
+      "kind": "transform",
+      "input_base64": "AP8=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.cſſ"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,AP8=\";\n",
+      "url": "data:application/octet-stream;base64,AP8="
+    },
+    {
+      "name": "cſſ-raw-wtf8",
+      "kind": "transform",
+      "input_base64": "7aCA",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.cſſ"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,7aCA\";\n",
+      "url": "data:text/plain;charset=utf-8;base64,7aCA"
+    },
+    {
+      "name": "GＩF-raw-ff",
+      "kind": "transform",
+      "input_base64": "/w==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GＩF"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,/w==\";\n",
+      "url": "data:text/plain;charset=utf-8;base64,/w=="
+    },
+    {
+      "name": "GＩF-raw-nul-ff",
+      "kind": "transform",
+      "input_base64": "AP8=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GＩF"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,AP8=\";\n",
+      "url": "data:application/octet-stream;base64,AP8="
+    },
+    {
+      "name": "GＩF-raw-wtf8",
+      "kind": "transform",
+      "input_base64": "7aCA",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GＩF"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,7aCA\";\n",
+      "url": "data:text/plain;charset=utf-8;base64,7aCA"
+    },
+    {
+      "name": "format-esm",
+      "kind": "transform",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF",
+        "format": "esm"
+      },
+      "code": "var asset_default = \"data:image/gif;base64,/wA=\";\nexport {\n  asset_default as default\n};\n"
+    },
+    {
+      "name": "format-cjs",
+      "kind": "transform",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:image/gif;base64,/wA=\";\n"
+    },
+    {
+      "name": "format-iife",
+      "kind": "transform",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.GİF",
+        "format": "iife"
+      },
+      "code": "(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var require_asset = __commonJS({\n    \"asset.G\\u0130F\"(exports, module) {\n      module.exports = \"data:image/gif;base64,/wA=\";\n    }\n  });\n  require_asset();\n})();\n"
+    },
+    {
+      "name": "minify-unicode",
+      "kind": "transform",
+      "input_base64": "w6kjICVhYiA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.marKdown",
+        "minify": true,
+        "charset": "utf8"
+      },
+      "code": "module.exports=\"data:text/markdown;charset=utf-8,é%23 %25ab%20\";\n",
+      "url": "data:text/markdown;charset=utf-8,é%23 %25ab%20"
+    },
+    {
+      "name": "sniff-pdf",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    },
+    {
+      "name": "sniff-html",
+      "kind": "transform",
+      "input_base64": "PEh0TWw+",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:text/html;charset=utf-8,<HtMl>\";\n",
+      "url": "data:text/html;charset=utf-8,<HtMl>"
+    },
+    {
+      "name": "sniff-xml",
+      "kind": "transform",
+      "input_base64": "IDw/eG1s",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:text/xml;charset=utf-8, <?xml\";\n",
+      "url": "data:text/xml;charset=utf-8, <?xml"
+    },
+    {
+      "name": "sniff-png",
+      "kind": "transform",
+      "input_base64": "iVBORw0KGgo=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:image/png;base64,iVBORw0KGgo=\";\n",
+      "url": "data:image/png;base64,iVBORw0KGgo="
+    },
+    {
+      "name": "sniff-nul-after-512",
+      "kind": "transform",
+      "input_base64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEA",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%00\";\n",
+      "url": "data:text/plain;charset=utf-8,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%00"
+    },
+    {
+      "name": "sniff-eot-order",
+      "kind": "transform",
+      "input_base64": "R0lGODlh/////////////////////////////////////0xQ",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.gıf"
+      },
+      "code": "module.exports = \"data:image/gif;base64,R0lGODlh/////////////////////////////////////0xQ\";\n",
+      "url": "data:image/gif;base64,R0lGODlh/////////////////////////////////////0xQ"
+    },
+    {
+      "name": "sourcefile-slash",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png/"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n",
+      "url": "data:image/png,%PDF-"
+    },
+    {
+      "name": "sourcefile-backslash",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.png\\"
+      },
+      "code": "module.exports = \"data:image/png,%PDF-\";\n",
+      "url": "data:image/png,%PDF-"
+    },
+    {
+      "name": "sourcefile-module-css",
+      "kind": "transform",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.module.css"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n",
+      "url": "data:application/pdf,%PDF-"
+    }
+  ],
+  "css": [
+    {
+      "name": "css-dataurl-GİF",
+      "file": "asset.GİF",
+      "loader": "dataurl",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:image/gif;base64,/wDtoIA=);\n}\n",
+      "hash": "bVQ00okZJbM",
+      "url": "data:image/gif;base64,/wDtoIA="
+    },
+    {
+      "name": "css-base64-GİF",
+      "file": "asset.GİF",
+      "loader": "base64",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:image/gif;base64,/wDtoIA=);\n}\n",
+      "hash": "bVQ00okZJbM",
+      "url": "data:image/gif;base64,/wDtoIA="
+    },
+    {
+      "name": "css-dataurl-AVİF",
+      "file": "asset.AVİF",
+      "loader": "dataurl",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:image/avif;base64,/wDtoIA=);\n}\n",
+      "hash": "n1LHOisN74g",
+      "url": "data:image/avif;base64,/wDtoIA="
+    },
+    {
+      "name": "css-base64-AVİF",
+      "file": "asset.AVİF",
+      "loader": "base64",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:image/avif;base64,/wDtoIA=);\n}\n",
+      "hash": "n1LHOisN74g",
+      "url": "data:image/avif;base64,/wDtoIA="
+    },
+    {
+      "name": "css-dataurl-marKdown",
+      "file": "asset.marKdown",
+      "loader": "dataurl",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:text/markdown;charset=utf-8;base64,/wDtoIA=);\n}\n",
+      "hash": "wYBdbi2duU4",
+      "url": "data:text/markdown;charset=utf-8;base64,/wDtoIA="
+    },
+    {
+      "name": "css-base64-marKdown",
+      "file": "asset.marKdown",
+      "loader": "base64",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:text/markdown;charset=utf-8;base64,/wDtoIA=);\n}\n",
+      "hash": "wYBdbi2duU4",
+      "url": "data:text/markdown;charset=utf-8;base64,/wDtoIA="
+    },
+    {
+      "name": "css-dataurl-gıf",
+      "file": "asset.gıf",
+      "loader": "dataurl",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:application/octet-stream;base64,/wDtoIA=);\n}\n",
+      "hash": "O6ZM+pqSjIA",
+      "url": "data:application/octet-stream;base64,/wDtoIA="
+    },
+    {
+      "name": "css-base64-gıf",
+      "file": "asset.gıf",
+      "loader": "base64",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:application/octet-stream;base64,/wDtoIA=);\n}\n",
+      "hash": "O6ZM+pqSjIA",
+      "url": "data:application/octet-stream;base64,/wDtoIA="
+    },
+    {
+      "name": "css-dataurl-cſſ",
+      "file": "asset.cſſ",
+      "loader": "dataurl",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:application/octet-stream;base64,/wDtoIA=);\n}\n",
+      "hash": "O6ZM+pqSjIA",
+      "url": "data:application/octet-stream;base64,/wDtoIA="
+    },
+    {
+      "name": "css-base64-cſſ",
+      "file": "asset.cſſ",
+      "loader": "base64",
+      "input_base64": "/wDtoIA=",
+      "code": "/* <stdin> */\na {\n  background: url(data:application/octet-stream;base64,/wDtoIA=);\n}\n",
+      "hash": "O6ZM+pqSjIA",
+      "url": "data:application/octet-stream;base64,/wDtoIA="
+    }
+  ]
+}

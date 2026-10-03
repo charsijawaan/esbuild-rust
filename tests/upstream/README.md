@@ -1208,6 +1208,25 @@ diagnostic identities without new suppressions. Captured active indices and
 original assertions are unchanged. Broader filesystem-glob outbase inference
 and traversal/callback differences remain outside this correction.
 
+Data URL MIME detection now uses one shared byte-based detector in direct
+transforms and bundled assets. Its ordered signatures, control-byte rules, and
+512-byte sniff window follow the pinned Go HTTP implementation. Sourcefile
+extensions use the existing platform-independent path helper, including trailing
+separators and `.module.css`. Extension lookup retains Go's simple Unicode
+lowercase projection for `İ` and `K`; it does not normalize or fully case-fold
+unknown extensions. URL encoding continues to preserve the input bytes.
+
+Eleven native regression groups compare captured Go outputs for sniffing,
+extension precedence, sourcefile paths, Unicode case, and bundled assets. The
+unchanged original `transformTests/dataurl` passes in both worker modes. The
+normal suite passes 1,280 tests; strict Clippy retains the same 621 diagnostic
+identities without new suppressions. An existing custom unit expectation for
+byte `FF` was corrected after fresh pinned-Go checks confirmed text MIME with
+base64 encoding; `FF` followed by NUL still selects octet-stream. The first
+failed integration log is retained. Original assertions and captured active
+indices are unchanged. Text-loader WTF-8 decoding, Data URL map source arrays,
+and older-target binary-loader helper gaps remain separate work.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

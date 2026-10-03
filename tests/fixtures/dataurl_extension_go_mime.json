@@ -1,0 +1,401 @@
+{
+  "cases": [
+    {
+      "extension": ".GİF",
+      "lower": ".gif",
+      "mime": "image/gif"
+    },
+    {
+      "extension": ".AVİF",
+      "lower": ".avif",
+      "mime": "image/avif"
+    },
+    {
+      "extension": ".gİf",
+      "lower": ".gif",
+      "mime": "image/gif"
+    },
+    {
+      "extension": ".avİf",
+      "lower": ".avif",
+      "mime": "image/avif"
+    },
+    {
+      "extension": ".marKdown",
+      "lower": ".markdown",
+      "mime": "text/markdown; charset=utf-8"
+    },
+    {
+      "extension": ".MARKDOWN",
+      "lower": ".markdown",
+      "mime": "text/markdown; charset=utf-8"
+    },
+    {
+      "extension": ".WEBMANİFEST",
+      "lower": ".webmanifest",
+      "mime": "application/manifest+json"
+    },
+    {
+      "extension": ".GIf",
+      "lower": ".gif",
+      "mime": "image/gif"
+    },
+    {
+      "extension": ".K",
+      "lower": ".k",
+      "mime": ""
+    },
+    {
+      "extension": ".gıf",
+      "lower": ".gıf",
+      "mime": ""
+    },
+    {
+      "extension": ".gi̇f",
+      "lower": ".gi̇f",
+      "mime": ""
+    },
+    {
+      "extension": ".cſſ",
+      "lower": ".cſſ",
+      "mime": ""
+    },
+    {
+      "extension": ".cß",
+      "lower": ".cß",
+      "mime": ""
+    },
+    {
+      "extension": ".GＩF",
+      "lower": ".gｉf",
+      "mime": ""
+    },
+    {
+      "extension": ".woﬀ",
+      "lower": ".woﬀ",
+      "mime": ""
+    },
+    {
+      "extension": ".ΣVG",
+      "lower": ".σvg",
+      "mime": ""
+    },
+    {
+      "extension": ".ＷＯＦＦ２",
+      "lower": ".ｗｏｆｆ２",
+      "mime": ""
+    },
+    {
+      "extension": ".unknown",
+      "lower": ".unknown",
+      "mime": ""
+    },
+    {
+      "extension": ".UnKnOwN",
+      "lower": ".unknown",
+      "mime": ""
+    },
+    {
+      "extension": ".GİF?query",
+      "lower": ".gif?query",
+      "mime": ""
+    },
+    {
+      "extension": ".GİF#hash",
+      "lower": ".gif#hash",
+      "mime": ""
+    },
+    {
+      "extension": ".GİF/",
+      "lower": ".gif/",
+      "mime": ""
+    },
+    {
+      "extension": ".GİF\u0000",
+      "lower": ".gif\u0000",
+      "mime": ""
+    },
+    {
+      "extension": ".İ",
+      "lower": ".i",
+      "mime": ""
+    },
+    {
+      "extension": ".png.",
+      "lower": ".png.",
+      "mime": ""
+    },
+    {
+      "extension": ".module.css",
+      "lower": ".module.css",
+      "mime": ""
+    },
+    {
+      "extension": ".module.Cſſ",
+      "lower": ".module.cſſ",
+      "mime": ""
+    },
+    {
+      "extension": ".avif",
+      "lower": ".avif",
+      "mime": "image/avif"
+    },
+    {
+      "extension": ".AVIF",
+      "lower": ".avif",
+      "mime": "image/avif"
+    },
+    {
+      "extension": ".css",
+      "lower": ".css",
+      "mime": "text/css; charset=utf-8"
+    },
+    {
+      "extension": ".CSS",
+      "lower": ".css",
+      "mime": "text/css; charset=utf-8"
+    },
+    {
+      "extension": ".eot",
+      "lower": ".eot",
+      "mime": "application/vnd.ms-fontobject"
+    },
+    {
+      "extension": ".EOT",
+      "lower": ".eot",
+      "mime": "application/vnd.ms-fontobject"
+    },
+    {
+      "extension": ".gif",
+      "lower": ".gif",
+      "mime": "image/gif"
+    },
+    {
+      "extension": ".GIF",
+      "lower": ".gif",
+      "mime": "image/gif"
+    },
+    {
+      "extension": ".htm",
+      "lower": ".htm",
+      "mime": "text/html; charset=utf-8"
+    },
+    {
+      "extension": ".HTM",
+      "lower": ".htm",
+      "mime": "text/html; charset=utf-8"
+    },
+    {
+      "extension": ".html",
+      "lower": ".html",
+      "mime": "text/html; charset=utf-8"
+    },
+    {
+      "extension": ".HTML",
+      "lower": ".html",
+      "mime": "text/html; charset=utf-8"
+    },
+    {
+      "extension": ".jpeg",
+      "lower": ".jpeg",
+      "mime": "image/jpeg"
+    },
+    {
+      "extension": ".JPEG",
+      "lower": ".jpeg",
+      "mime": "image/jpeg"
+    },
+    {
+      "extension": ".jpg",
+      "lower": ".jpg",
+      "mime": "image/jpeg"
+    },
+    {
+      "extension": ".JPG",
+      "lower": ".jpg",
+      "mime": "image/jpeg"
+    },
+    {
+      "extension": ".js",
+      "lower": ".js",
+      "mime": "text/javascript; charset=utf-8"
+    },
+    {
+      "extension": ".JS",
+      "lower": ".js",
+      "mime": "text/javascript; charset=utf-8"
+    },
+    {
+      "extension": ".json",
+      "lower": ".json",
+      "mime": "application/json; charset=utf-8"
+    },
+    {
+      "extension": ".JSON",
+      "lower": ".json",
+      "mime": "application/json; charset=utf-8"
+    },
+    {
+      "extension": ".markdown",
+      "lower": ".markdown",
+      "mime": "text/markdown; charset=utf-8"
+    },
+    {
+      "extension": ".MARKDOWN",
+      "lower": ".markdown",
+      "mime": "text/markdown; charset=utf-8"
+    },
+    {
+      "extension": ".md",
+      "lower": ".md",
+      "mime": "text/markdown; charset=utf-8"
+    },
+    {
+      "extension": ".MD",
+      "lower": ".md",
+      "mime": "text/markdown; charset=utf-8"
+    },
+    {
+      "extension": ".mjs",
+      "lower": ".mjs",
+      "mime": "text/javascript; charset=utf-8"
+    },
+    {
+      "extension": ".MJS",
+      "lower": ".mjs",
+      "mime": "text/javascript; charset=utf-8"
+    },
+    {
+      "extension": ".otf",
+      "lower": ".otf",
+      "mime": "font/otf"
+    },
+    {
+      "extension": ".OTF",
+      "lower": ".otf",
+      "mime": "font/otf"
+    },
+    {
+      "extension": ".pdf",
+      "lower": ".pdf",
+      "mime": "application/pdf"
+    },
+    {
+      "extension": ".PDF",
+      "lower": ".pdf",
+      "mime": "application/pdf"
+    },
+    {
+      "extension": ".png",
+      "lower": ".png",
+      "mime": "image/png"
+    },
+    {
+      "extension": ".PNG",
+      "lower": ".png",
+      "mime": "image/png"
+    },
+    {
+      "extension": ".sfnt",
+      "lower": ".sfnt",
+      "mime": "font/sfnt"
+    },
+    {
+      "extension": ".SFNT",
+      "lower": ".sfnt",
+      "mime": "font/sfnt"
+    },
+    {
+      "extension": ".svg",
+      "lower": ".svg",
+      "mime": "image/svg+xml"
+    },
+    {
+      "extension": ".SVG",
+      "lower": ".svg",
+      "mime": "image/svg+xml"
+    },
+    {
+      "extension": ".ttf",
+      "lower": ".ttf",
+      "mime": "font/ttf"
+    },
+    {
+      "extension": ".TTF",
+      "lower": ".ttf",
+      "mime": "font/ttf"
+    },
+    {
+      "extension": ".wasm",
+      "lower": ".wasm",
+      "mime": "application/wasm"
+    },
+    {
+      "extension": ".WASM",
+      "lower": ".wasm",
+      "mime": "application/wasm"
+    },
+    {
+      "extension": ".webmanifest",
+      "lower": ".webmanifest",
+      "mime": "application/manifest+json"
+    },
+    {
+      "extension": ".WEBMANIFEST",
+      "lower": ".webmanifest",
+      "mime": "application/manifest+json"
+    },
+    {
+      "extension": ".webp",
+      "lower": ".webp",
+      "mime": "image/webp"
+    },
+    {
+      "extension": ".WEBP",
+      "lower": ".webp",
+      "mime": "image/webp"
+    },
+    {
+      "extension": ".woff",
+      "lower": ".woff",
+      "mime": "font/woff"
+    },
+    {
+      "extension": ".WOFF",
+      "lower": ".woff",
+      "mime": "font/woff"
+    },
+    {
+      "extension": ".woff2",
+      "lower": ".woff2",
+      "mime": "font/woff2"
+    },
+    {
+      "extension": ".WOFF2",
+      "lower": ".woff2",
+      "mime": "font/woff2"
+    },
+    {
+      "extension": ".xhtml",
+      "lower": ".xhtml",
+      "mime": "application/xhtml+xml; charset=utf-8"
+    },
+    {
+      "extension": ".XHTML",
+      "lower": ".xhtml",
+      "mime": "application/xhtml+xml; charset=utf-8"
+    },
+    {
+      "extension": ".xml",
+      "lower": ".xml",
+      "mime": "text/xml; charset=utf-8"
+    },
+    {
+      "extension": ".XML",
+      "lower": ".xml",
+      "mime": "text/xml; charset=utf-8"
+    }
+  ],
+  "source": "unchanged pinned internal/helpers/mime.go; only package name changed to main",
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e"
+}

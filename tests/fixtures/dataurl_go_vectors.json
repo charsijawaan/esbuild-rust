@@ -1,0 +1,1419 @@
+{
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+  "go_binary_sha256": "a5b888adb15b0a570c7fc904737de515b159119e7501491f452ee1b8c4cff2cf",
+  "go_version": "go1.26.5",
+  "wrapper_sha256": "8331fe1d8b3a07381f33cc425fcfaa94776e263113653f80ec3ba433e9657e73",
+  "provenance": "Pinned Go JS API outputs, unchanged wrapper; input_base64 is exact UTF-8/Uint8Array wire bytes. JS lone surrogates are encoded by the wrapper as U+FFFD.",
+  "transform": [
+    {
+      "name": "original-controls",
+      "group": "raw",
+      "input_base64": "AAEC",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,%00%01%02\";\n"
+    },
+    {
+      "name": "original-string",
+      "group": "raw",
+      "input_base64": "w73DvsO/",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,\\xFD\\xFE\\xFF\";\n"
+    },
+    {
+      "name": "original-bytes",
+      "group": "raw",
+      "input_base64": "/f7/",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,/f7/\";\n"
+    },
+    {
+      "name": "raw-ff",
+      "group": "raw",
+      "input_base64": "/w==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,/w==\";\n"
+    },
+    {
+      "name": "raw-nul-ff",
+      "group": "raw",
+      "input_base64": "AP8=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,AP8=\";\n"
+    },
+    {
+      "name": "raw-wtf8-high",
+      "group": "raw",
+      "input_base64": "7aCA",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,7aCA\";\n"
+    },
+    {
+      "name": "raw-wtf8-low",
+      "group": "raw",
+      "input_base64": "7b+/",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,7b+/\";\n"
+    },
+    {
+      "name": "js-lone-surrogate",
+      "group": "raw",
+      "input_base64": "77+9",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,\\uFFFD\";\n"
+    },
+    {
+      "name": "replacement",
+      "group": "raw",
+      "input_base64": "77+9",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,\\uFFFD\";\n"
+    },
+    {
+      "name": "empty",
+      "group": "raw",
+      "input_base64": "",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,\";\n"
+    },
+    {
+      "name": "escape",
+      "group": "sniff",
+      "input_base64": "Gw==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,%1B\";\n"
+    },
+    {
+      "name": "literal-percent",
+      "group": "encoding",
+      "input_base64": "YSV6",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a%z\";\n"
+    },
+    {
+      "name": "percent-hex",
+      "group": "encoding",
+      "input_base64": "YSVhRg==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a%25aF\";\n"
+    },
+    {
+      "name": "percent-incomplete",
+      "group": "encoding",
+      "input_base64": "YSVB",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a%A\";\n"
+    },
+    {
+      "name": "hash",
+      "group": "encoding",
+      "input_base64": "YWJjI2RlZg==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,abc%23def\";\n"
+    },
+    {
+      "name": "trailing-spaces",
+      "group": "encoding",
+      "input_base64": "YSAJCg0=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a %09%0A%0D\";\n"
+    },
+    {
+      "name": "embedded-controls",
+      "group": "encoding",
+      "input_base64": "YQFi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0001b\";\n"
+    },
+    {
+      "name": "unicode",
+      "group": "encoding",
+      "input_base64": "8J+misOp",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,\\u{1F98A}\\xE9\";\n"
+    },
+    {
+      "name": "two-nuls",
+      "group": "encoding",
+      "input_base64": "AAA=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,%00%00\";\n"
+    },
+    {
+      "name": "base64-exact-tie",
+      "group": "encoding",
+      "input_base64": "AAAAAAA=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,AAAAAAA=\";\n"
+    },
+    {
+      "name": "control-00",
+      "group": "sniff",
+      "input_base64": "YQBi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\\0b\";\n"
+    },
+    {
+      "name": "control-01",
+      "group": "sniff",
+      "input_base64": "YQFi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0001b\";\n"
+    },
+    {
+      "name": "control-02",
+      "group": "sniff",
+      "input_base64": "YQJi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0002b\";\n"
+    },
+    {
+      "name": "control-03",
+      "group": "sniff",
+      "input_base64": "YQNi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0003b\";\n"
+    },
+    {
+      "name": "control-04",
+      "group": "sniff",
+      "input_base64": "YQRi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0004b\";\n"
+    },
+    {
+      "name": "control-05",
+      "group": "sniff",
+      "input_base64": "YQVi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0005b\";\n"
+    },
+    {
+      "name": "control-06",
+      "group": "sniff",
+      "input_base64": "YQZi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0006b\";\n"
+    },
+    {
+      "name": "control-07",
+      "group": "sniff",
+      "input_base64": "YQdi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\\x07b\";\n"
+    },
+    {
+      "name": "control-08",
+      "group": "sniff",
+      "input_base64": "YQhi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\\bb\";\n"
+    },
+    {
+      "name": "control-09",
+      "group": "sniff",
+      "input_base64": "YQli",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a%09b\";\n"
+    },
+    {
+      "name": "control-0a",
+      "group": "sniff",
+      "input_base64": "YQpi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a%0Ab\";\n"
+    },
+    {
+      "name": "control-0b",
+      "group": "sniff",
+      "input_base64": "YQti",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\\vb\";\n"
+    },
+    {
+      "name": "control-0c",
+      "group": "sniff",
+      "input_base64": "YQxi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a\\fb\";\n"
+    },
+    {
+      "name": "control-0d",
+      "group": "sniff",
+      "input_base64": "YQ1i",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a%0Db\";\n"
+    },
+    {
+      "name": "control-0e",
+      "group": "sniff",
+      "input_base64": "YQ5i",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u000eb\";\n"
+    },
+    {
+      "name": "control-0f",
+      "group": "sniff",
+      "input_base64": "YQ9i",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u000fb\";\n"
+    },
+    {
+      "name": "control-10",
+      "group": "sniff",
+      "input_base64": "YRBi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0010b\";\n"
+    },
+    {
+      "name": "control-11",
+      "group": "sniff",
+      "input_base64": "YRFi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0011b\";\n"
+    },
+    {
+      "name": "control-12",
+      "group": "sniff",
+      "input_base64": "YRJi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0012b\";\n"
+    },
+    {
+      "name": "control-13",
+      "group": "sniff",
+      "input_base64": "YRNi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0013b\";\n"
+    },
+    {
+      "name": "control-14",
+      "group": "sniff",
+      "input_base64": "YRRi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0014b\";\n"
+    },
+    {
+      "name": "control-15",
+      "group": "sniff",
+      "input_base64": "YRVi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0015b\";\n"
+    },
+    {
+      "name": "control-16",
+      "group": "sniff",
+      "input_base64": "YRZi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0016b\";\n"
+    },
+    {
+      "name": "control-17",
+      "group": "sniff",
+      "input_base64": "YRdi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0017b\";\n"
+    },
+    {
+      "name": "control-18",
+      "group": "sniff",
+      "input_base64": "YRhi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0018b\";\n"
+    },
+    {
+      "name": "control-19",
+      "group": "sniff",
+      "input_base64": "YRli",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u0019b\";\n"
+    },
+    {
+      "name": "control-1a",
+      "group": "sniff",
+      "input_base64": "YRpi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u001ab\";\n"
+    },
+    {
+      "name": "control-1b",
+      "group": "sniff",
+      "input_base64": "YRti",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a\\x1Bb\";\n"
+    },
+    {
+      "name": "control-1c",
+      "group": "sniff",
+      "input_base64": "YRxi",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u001cb\";\n"
+    },
+    {
+      "name": "control-1d",
+      "group": "sniff",
+      "input_base64": "YR1i",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u001db\";\n"
+    },
+    {
+      "name": "control-1e",
+      "group": "sniff",
+      "input_base64": "YR5i",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u001eb\";\n"
+    },
+    {
+      "name": "control-1f",
+      "group": "sniff",
+      "input_base64": "YR9i",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,a\u001fb\";\n"
+    },
+    {
+      "name": "control-del",
+      "group": "sniff",
+      "input_base64": "YX9i",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,a\\x7Fb\";\n"
+    },
+    {
+      "name": "nul-at-511",
+      "group": "sniff",
+      "input_base64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQA=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%00\";\n"
+    },
+    {
+      "name": "nul-at-512",
+      "group": "sniff",
+      "input_base64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEA",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%00\";\n"
+    },
+    {
+      "name": "nul-at-513",
+      "group": "sniff",
+      "input_base64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhAA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%00\";\n"
+    },
+    {
+      "name": "html-at-504",
+      "group": "sniff",
+      "input_base64": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgPGh0bWw+",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/html;charset=utf-8,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        <html>\";\n"
+    },
+    {
+      "name": "html-truncated",
+      "group": "sniff",
+      "input_base64": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIDxodG1sPg==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            <html>\";\n"
+    },
+    {
+      "name": "signature-pdf",
+      "group": "sniff",
+      "input_base64": "JVBERi0=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/pdf,%PDF-\";\n"
+    },
+    {
+      "name": "signature-ps",
+      "group": "sniff",
+      "input_base64": "JSFQUy1BZG9iZS0=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/postscript,%!PS-Adobe-\";\n"
+    },
+    {
+      "name": "signature-bom-be",
+      "group": "sniff",
+      "input_base64": "/v8AYQ==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-16be;base64,/v8AYQ==\";\n"
+    },
+    {
+      "name": "signature-bom-le",
+      "group": "sniff",
+      "input_base64": "//5hAA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-16le;base64,//5hAA==\";\n"
+    },
+    {
+      "name": "signature-bom-utf8",
+      "group": "sniff",
+      "input_base64": "77u/AA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,\\uFEFF%00\";\n"
+    },
+    {
+      "name": "signature-bom-be-short",
+      "group": "sniff",
+      "input_base64": "/v8=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8;base64,/v8=\";\n"
+    },
+    {
+      "name": "signature-bom-utf8-short",
+      "group": "sniff",
+      "input_base64": "77u/",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,\\uFEFF\";\n"
+    },
+    {
+      "name": "signature-ico",
+      "group": "sniff",
+      "input_base64": "AAABAA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:image/x-icon,%00%00%01%00\";\n"
+    },
+    {
+      "name": "signature-cur",
+      "group": "sniff",
+      "input_base64": "AAACAA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:image/x-icon,%00%00%02%00\";\n"
+    },
+    {
+      "name": "signature-bmp",
+      "group": "sniff",
+      "input_base64": "Qk0=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:image/bmp,BM\";\n"
+    },
+    {
+      "name": "signature-gif87",
+      "group": "sniff",
+      "input_base64": "R0lGODdh",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:image/gif,GIF87a\";\n"
+    },
+    {
+      "name": "signature-gif89",
+      "group": "sniff",
+      "input_base64": "R0lGODlh",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:image/gif,GIF89a\";\n"
+    },
+    {
+      "name": "signature-webp",
+      "group": "sniff",
+      "input_base64": "UklGRv////9XRUJQVlA=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:image/webp;base64,UklGRv////9XRUJQVlA=\";\n"
+    },
+    {
+      "name": "signature-png",
+      "group": "sniff",
+      "input_base64": "iVBORw0KGgo=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:image/png;base64,iVBORw0KGgo=\";\n"
+    },
+    {
+      "name": "signature-jpeg",
+      "group": "sniff",
+      "input_base64": "/9j/",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:image/jpeg;base64,/9j/\";\n"
+    },
+    {
+      "name": "signature-aiff",
+      "group": "sniff",
+      "input_base64": "Rk9STf////9BSUZG",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:audio/aiff;base64,Rk9STf////9BSUZG\";\n"
+    },
+    {
+      "name": "signature-mp3",
+      "group": "sniff",
+      "input_base64": "SUQz",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:audio/mpeg,ID3\";\n"
+    },
+    {
+      "name": "signature-ogg",
+      "group": "sniff",
+      "input_base64": "T2dnUwA=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/ogg,OggS%00\";\n"
+    },
+    {
+      "name": "signature-midi",
+      "group": "sniff",
+      "input_base64": "TVRoZAAAAAY=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:audio/midi,MThd%00%00%00%06\";\n"
+    },
+    {
+      "name": "signature-avi",
+      "group": "sniff",
+      "input_base64": "UklGRgECAwRBVkkg",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:video/avi,RIFF\u0001\u0002\u0003\u0004AVI%20\";\n"
+    },
+    {
+      "name": "signature-wave",
+      "group": "sniff",
+      "input_base64": "UklGRgECAwRXQVZF",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:audio/wave,RIFF\u0001\u0002\u0003\u0004WAVE\";\n"
+    },
+    {
+      "name": "signature-mp4-major",
+      "group": "sniff",
+      "input_base64": "AAAADGZ0eXBtcDQy",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:video/mp4,\\0\\0\\0\\fftypmp42\";\n"
+    },
+    {
+      "name": "signature-mp4-compatible",
+      "group": "sniff",
+      "input_base64": "AAAAFGZ0eXBpc29t/////21wNDI=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:video/mp4;base64,AAAAFGZ0eXBpc29t/////21wNDI=\";\n"
+    },
+    {
+      "name": "signature-mp4-version-only",
+      "group": "sniff",
+      "input_base64": "AAAAEGZ0eXBpc29tbXA0Mg==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,\\0\\0\\0\u0010ftypisommp42\";\n"
+    },
+    {
+      "name": "signature-mp4-short",
+      "group": "sniff",
+      "input_base64": "AAAAEGZ0eXBtcDQy",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,\\0\\0\\0\u0010ftypmp42\";\n"
+    },
+    {
+      "name": "signature-mp4-misaligned",
+      "group": "sniff",
+      "input_base64": "AAAADWZ0eXBtcDQyAA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/octet-stream,\\0\\0\\0%0Dftypmp42%00\";\n"
+    },
+    {
+      "name": "signature-webm",
+      "group": "sniff",
+      "input_base64": "GkXfow==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:video/webm,\u001aE\\u07E3\";\n"
+    },
+    {
+      "name": "signature-ttf",
+      "group": "sniff",
+      "input_base64": "AAEAAA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:font/ttf,%00%01%00%00\";\n"
+    },
+    {
+      "name": "signature-otf",
+      "group": "sniff",
+      "input_base64": "T1RUTw==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:font/otf,OTTO\";\n"
+    },
+    {
+      "name": "signature-ttc",
+      "group": "sniff",
+      "input_base64": "dHRjZg==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:font/collection,ttcf\";\n"
+    },
+    {
+      "name": "signature-woff",
+      "group": "sniff",
+      "input_base64": "d09GRg==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:font/woff,wOFF\";\n"
+    },
+    {
+      "name": "signature-woff2",
+      "group": "sniff",
+      "input_base64": "d09GMg==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:font/woff2,wOF2\";\n"
+    },
+    {
+      "name": "signature-gzip",
+      "group": "sniff",
+      "input_base64": "H4sI",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/x-gzip;base64,H4sI\";\n"
+    },
+    {
+      "name": "signature-zip",
+      "group": "sniff",
+      "input_base64": "UEsDBA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/zip,PK%03%04\";\n"
+    },
+    {
+      "name": "signature-rar4",
+      "group": "sniff",
+      "input_base64": "UmFyIRoHAA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/x-rar-compressed,Rar!%1A%07%00\";\n"
+    },
+    {
+      "name": "signature-rar5",
+      "group": "sniff",
+      "input_base64": "UmFyIRoHAQA=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/x-rar-compressed,Rar!%1A%07%01%00\";\n"
+    },
+    {
+      "name": "signature-wasm",
+      "group": "sniff",
+      "input_base64": "AGFzbQ==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/wasm,\\0asm\";\n"
+    },
+    {
+      "name": "signature-eot",
+      "group": "sniff",
+      "input_base64": "/////////////////////////////////////////////0xQ",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:application/vnd.ms-fontobject;base64,/////////////////////////////////////////////0xQ\";\n"
+    },
+    {
+      "name": "html",
+      "group": "sniff",
+      "input_base64": "PGh0bWw+",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/html;charset=utf-8,<html>\";\n"
+    },
+    {
+      "name": "html-case",
+      "group": "sniff",
+      "input_base64": "CQoMDSA8IURvQ3RZcEUgaFRtTD4=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/html;charset=utf-8,%09%0A\\f%0D <!DoCtYpE hTmL>\";\n"
+    },
+    {
+      "name": "html-tab",
+      "group": "sniff",
+      "input_base64": "PEhUTUwJPg==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,<HTML%09>\";\n"
+    },
+    {
+      "name": "html-short",
+      "group": "sniff",
+      "input_base64": "PEhUTUw=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,<HTML\";\n"
+    },
+    {
+      "name": "comment",
+      "group": "sniff",
+      "input_base64": "PCEtLT4=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/html;charset=utf-8,<!-->\";\n"
+    },
+    {
+      "name": "xml",
+      "group": "sniff",
+      "input_base64": "IAk8P3htbA==",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/xml;charset=utf-8, %09<?xml\";\n"
+    },
+    {
+      "name": "xml-case",
+      "group": "sniff",
+      "input_base64": "PD9YTUw=",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8,<?XML\";\n"
+    },
+    {
+      "name": "pdf-whitespace",
+      "group": "sniff",
+      "input_base64": "ICVQREYt",
+      "options": {
+        "loader": "dataurl"
+      },
+      "code": "module.exports = \"data:text/plain;charset=utf-8, %PDF-\";\n"
+    },
+    {
+      "name": "extension-input.js",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.js"
+      },
+      "code": "module.exports = \"data:text/javascript;charset=utf-8;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.mjs",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.mjs"
+      },
+      "code": "module.exports = \"data:text/javascript;charset=utf-8;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.JS",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.JS"
+      },
+      "code": "module.exports = \"data:text/javascript;charset=utf-8;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.jsx",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.jsx"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.ts",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.ts"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.tsx",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.tsx"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.css",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.css"
+      },
+      "code": "module.exports = \"data:text/css;charset=utf-8;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.json",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.json"
+      },
+      "code": "module.exports = \"data:application/json;charset=utf-8;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.svg",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.svg"
+      },
+      "code": "module.exports = \"data:image/svg+xml;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.bin",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.bin"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input."
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-.css",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": ".css"
+      },
+      "code": "module.exports = \"data:text/css;charset=utf-8;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-dir/.css",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir/.css"
+      },
+      "code": "module.exports = \"data:text/css;charset=utf-8;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-dir.with.dot/input",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.with.dot/input"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-dir.js/input",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "dir.js/input"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.css?query",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.css?query"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.js#hash",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.js#hash"
+      },
+      "code": "module.exports = \"data:application/octet-stream;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.woff2",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.woff2"
+      },
+      "code": "module.exports = \"data:font/woff2;base64,/wA=\";\n"
+    },
+    {
+      "name": "extension-input.webmanifest",
+      "group": "extension",
+      "input_base64": "/wA=",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.webmanifest"
+      },
+      "code": "module.exports = \"data:application/manifest+json;base64,/wA=\";\n"
+    },
+    {
+      "name": "unknown-extension-html-input.jsx",
+      "group": "extension",
+      "input_base64": "PGh0bWw+",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.jsx"
+      },
+      "code": "module.exports = \"data:text/html;charset=utf-8,<html>\";\n"
+    },
+    {
+      "name": "unknown-extension-html-input.ts",
+      "group": "extension",
+      "input_base64": "PGh0bWw+",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.ts"
+      },
+      "code": "module.exports = \"data:text/html;charset=utf-8,<html>\";\n"
+    },
+    {
+      "name": "unknown-extension-html-input.tsx",
+      "group": "extension",
+      "input_base64": "PGh0bWw+",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.tsx"
+      },
+      "code": "module.exports = \"data:text/html;charset=utf-8,<html>\";\n"
+    },
+    {
+      "name": "unknown-extension-html-input.unknown",
+      "group": "extension",
+      "input_base64": "PGh0bWw+",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "input.unknown"
+      },
+      "code": "module.exports = \"data:text/html;charset=utf-8,<html>\";\n"
+    },
+    {
+      "name": "option-minify",
+      "group": "encoding",
+      "input_base64": "8J+mijwvc2NyaXB0PiVhYiAjIA==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.JS",
+        "minify": true
+      },
+      "code": "module.exports=\"data:text/javascript;charset=utf-8,\\u{1F98A}<\\/script>%25ab %23%20\";\n"
+    },
+    {
+      "name": "option-minify-whitespace",
+      "group": "encoding",
+      "input_base64": "8J+mijwvc2NyaXB0PiVhYiAjIA==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.JS",
+        "minifyWhitespace": true
+      },
+      "code": "module.exports=\"data:text/javascript;charset=utf-8,\\u{1F98A}<\\/script>%25ab %23%20\";\n"
+    },
+    {
+      "name": "option-utf8",
+      "group": "encoding",
+      "input_base64": "8J+mijwvc2NyaXB0PiVhYiAjIA==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.JS",
+        "charset": "utf8"
+      },
+      "code": "module.exports = \"data:text/javascript;charset=utf-8,🦊<\\/script>%25ab %23%20\";\n"
+    },
+    {
+      "name": "option-ascii",
+      "group": "encoding",
+      "input_base64": "8J+mijwvc2NyaXB0PiVhYiAjIA==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.JS",
+        "charset": "ascii"
+      },
+      "code": "module.exports = \"data:text/javascript;charset=utf-8,\\u{1F98A}<\\/script>%25ab %23%20\";\n"
+    },
+    {
+      "name": "option-esm",
+      "group": "encoding",
+      "input_base64": "8J+mijwvc2NyaXB0PiVhYiAjIA==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.JS",
+        "format": "esm"
+      },
+      "code": "var asset_default = \"data:text/javascript;charset=utf-8,\\u{1F98A}<\\/script>%25ab %23%20\";\nexport {\n  asset_default as default\n};\n"
+    },
+    {
+      "name": "option-cjs",
+      "group": "encoding",
+      "input_base64": "8J+mijwvc2NyaXB0PiVhYiAjIA==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.JS",
+        "format": "cjs"
+      },
+      "code": "module.exports = \"data:text/javascript;charset=utf-8,\\u{1F98A}<\\/script>%25ab %23%20\";\n"
+    },
+    {
+      "name": "option-iife",
+      "group": "encoding",
+      "input_base64": "8J+mijwvc2NyaXB0PiVhYiAjIA==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.JS",
+        "format": "iife",
+        "globalName": "asset"
+      },
+      "code": "var asset = (() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var require_asset = __commonJS({\n    \"asset.JS\"(exports, module) {\n      module.exports = \"data:text/javascript;charset=utf-8,\\u{1F98A}<\\/script>%25ab %23%20\";\n    }\n  });\n  return require_asset();\n})();\n"
+    },
+    {
+      "name": "option-target-es5",
+      "group": "encoding",
+      "input_base64": "8J+mijwvc2NyaXB0PiVhYiAjIA==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.JS",
+        "target": "es5"
+      },
+      "code": "module.exports = \"data:text/javascript;charset=utf-8,\\uD83E\\uDD8A<\\/script>%25ab %23%20\";\n"
+    },
+    {
+      "name": "option-banner-footer",
+      "group": "encoding",
+      "input_base64": "8J+mijwvc2NyaXB0PiVhYiAjIA==",
+      "options": {
+        "loader": "dataurl",
+        "sourcefile": "asset.JS",
+        "banner": "/* before */",
+        "footer": "/* after */"
+      },
+      "code": "/* before */\nmodule.exports = \"data:text/javascript;charset=utf-8,\\u{1F98A}<\\/script>%25ab %23%20\";\n/* after */\n"
+    }
+  ],
+  "css": [
+    {
+      "name": "css-dataurl-html",
+      "file": "asset-html.unknown",
+      "input_base64": "PGh0bWw+",
+      "entry": "css-dataurl-html.css",
+      "loader": "dataurl",
+      "code": "/* css-dataurl-html.css */\na {\n  background: url(data:text/html;charset=utf-8,<html>);\n}\n",
+      "hash": "DzpG5OkKhP8"
+    },
+    {
+      "name": "css-base64-html",
+      "file": "asset-html.unknown",
+      "input_base64": "PGh0bWw+",
+      "entry": "css-base64-html.css",
+      "loader": "base64",
+      "code": "/* css-base64-html.css */\na {\n  background: url(data:text/html;charset=utf-8;base64,PGh0bWw+);\n}\n",
+      "hash": "zxdNl5q2dzU"
+    },
+    {
+      "name": "css-dataurl-raw-ff",
+      "file": "asset-raw-ff.unknown",
+      "input_base64": "/w==",
+      "entry": "css-dataurl-raw-ff.css",
+      "loader": "dataurl",
+      "code": "/* css-dataurl-raw-ff.css */\na {\n  background: url(data:text/plain;charset=utf-8;base64,/w==);\n}\n",
+      "hash": "iJEyR6xD0pg"
+    },
+    {
+      "name": "css-base64-raw-ff",
+      "file": "asset-raw-ff.unknown",
+      "input_base64": "/w==",
+      "entry": "css-base64-raw-ff.css",
+      "loader": "base64",
+      "code": "/* css-base64-raw-ff.css */\na {\n  background: url(data:text/plain;charset=utf-8;base64,/w==);\n}\n",
+      "hash": "enFq1wTCX6Y"
+    },
+    {
+      "name": "css-dataurl-nul",
+      "file": "asset-nul.unknown",
+      "input_base64": "AA==",
+      "entry": "css-dataurl-nul.css",
+      "loader": "dataurl",
+      "code": "/* css-dataurl-nul.css */\na {\n  background: url(data:application/octet-stream,%00);\n}\n",
+      "hash": "8I8lg45m9m0"
+    },
+    {
+      "name": "css-base64-nul",
+      "file": "asset-nul.unknown",
+      "input_base64": "AA==",
+      "entry": "css-base64-nul.css",
+      "loader": "base64",
+      "code": "/* css-base64-nul.css */\na {\n  background: url(data:application/octet-stream;base64,AA==);\n}\n",
+      "hash": "kwrHOgv297c"
+    },
+    {
+      "name": "css-dataurl-escape",
+      "file": "asset-escape.unknown",
+      "input_base64": "Gw==",
+      "entry": "css-dataurl-escape.css",
+      "loader": "dataurl",
+      "code": "/* css-dataurl-escape.css */\na {\n  background: url(data:text/plain;charset=utf-8,%1B);\n}\n",
+      "hash": "K/Ni2c3trec"
+    },
+    {
+      "name": "css-base64-escape",
+      "file": "asset-escape.unknown",
+      "input_base64": "Gw==",
+      "entry": "css-base64-escape.css",
+      "loader": "base64",
+      "code": "/* css-base64-escape.css */\na {\n  background: url(data:text/plain;charset=utf-8;base64,Gw==);\n}\n",
+      "hash": "EVFwzSYeTUs"
+    },
+    {
+      "name": "css-dataurl-window",
+      "file": "asset-window.unknown",
+      "input_base64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEA",
+      "entry": "css-dataurl-window.css",
+      "loader": "dataurl",
+      "code": "/* css-dataurl-window.css */\na {\n  background: url(data:text/plain;charset=utf-8,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%00);\n}\n",
+      "hash": "5zK2pQcgNUI"
+    },
+    {
+      "name": "css-base64-window",
+      "file": "asset-window.unknown",
+      "input_base64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEA",
+      "entry": "css-base64-window.css",
+      "loader": "base64",
+      "code": "/* css-base64-window.css */\na {\n  background: url(data:text/plain;charset=utf-8;base64,YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEA);\n}\n",
+      "hash": "07vnokuiGSA"
+    },
+    {
+      "name": "css-dataurl-webp",
+      "file": "asset-webp.unknown",
+      "input_base64": "UklGRmFiY2RXRUJQVlA=",
+      "entry": "css-dataurl-webp.css",
+      "loader": "dataurl",
+      "code": "/* css-dataurl-webp.css */\na {\n  background: url(data:image/webp,RIFFabcdWEBPVP);\n}\n",
+      "hash": "UX6ZxuOUlCk"
+    },
+    {
+      "name": "css-base64-webp",
+      "file": "asset-webp.unknown",
+      "input_base64": "UklGRmFiY2RXRUJQVlA=",
+      "entry": "css-base64-webp.css",
+      "loader": "base64",
+      "code": "/* css-base64-webp.css */\na {\n  background: url(data:image/webp;base64,UklGRmFiY2RXRUJQVlA=);\n}\n",
+      "hash": "edZyO47srWc"
+    }
+  ],
+  "stdin": [
+    {
+      "name": "build-stdin-html",
+      "contents": "<html>",
+      "sourcefile": "asset.jsx",
+      "loader": "dataurl",
+      "code": "var asset_default = \"data:text/html;charset=utf-8,<html>\";\nexport {\n  asset_default as default\n};\n"
+    },
+    {
+      "name": "build-stdin-ff",
+      "contents": "ÿ",
+      "sourcefile": "asset.jsx",
+      "loader": "dataurl",
+      "code": "var asset_default = \"data:text/plain;charset=utf-8,\\xFF\";\nexport {\n  asset_default as default\n};\n"
+    },
+    {
+      "name": "build-stdin-nul",
+      "contents": "\u0000",
+      "sourcefile": "asset.jsx",
+      "loader": "dataurl",
+      "code": "var asset_default = \"data:application/octet-stream,%00\";\nexport {\n  asset_default as default\n};\n"
+    }
+  ]
+}

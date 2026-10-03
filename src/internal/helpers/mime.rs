@@ -4,9 +4,32 @@
 #[must_use]
 pub fn mime_type_by_extension(extension: &str) -> &'static str {
     builtin_type(extension).unwrap_or_else(|| {
-        let lower = extension.to_ascii_lowercase();
+        // All catalog keys are ASCII. In Go's Unicode 15 simple lowercase
+        // table, these are the only non-ASCII runes that map to ASCII.
+        // Keep other runes non-ASCII: full case folding or normalization can
+        // incorrectly turn unknown extensions (such as ".cſſ") into keys.
+        let lower: String = extension
+            .chars()
+            .map(|character| match character {
+                '\u{0130}' => 'i',
+                '\u{212a}' => 'k',
+                _ => character.to_ascii_lowercase(),
+            })
+            .collect();
         builtin_type(&lower).unwrap_or("")
     })
+}
+
+/// Match esbuild's deterministic extension lookup and Go HTTP content sniffing.
+#[must_use]
+pub fn guess_mime_type(extension: &str, contents: &[u8]) -> String {
+    let known = mime_type_by_extension(extension);
+    let mime_type = if known.is_empty() {
+        super::mime_sniff::detect_content_type(contents)
+    } else {
+        known
+    };
+    mime_type.replace("; ", ";")
 }
 
 fn builtin_type(extension: &str) -> Option<&'static str> {
