@@ -774,6 +774,11 @@ including the active parser fixtures; strict Clippy retains 621 existing
 errors without added diagnostics. The inactive default bundler audit retains
 its prior counts.
 
+The complete runtime audit at `53b1b17` is recorded in
+`end_to_end_import_typo_checkpoint.json`: 1,448 passed, 14 failed, and no timeouts.
+Case 1409 is newly passing without regressions relative to `5d96242`.
+Case 80 remains the shared environment failure, leaving 13 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
