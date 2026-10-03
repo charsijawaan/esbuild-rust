@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,062 | 1,581 | 8,643 |
+| JS/TS parser and parser lowering | 7,064 | 1,579 | 8,643 |
 | Bundler | 918 | 153 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,304 | 1,734 | 14,038 |
+| Total | 12,306 | 1,732 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -627,6 +627,18 @@ Cases 1297, 1298, and 1302 are newly passing without regressions relative to
 `9b67893`. Case 80 remains the shared environment failure, leaving 38 Rust-only
 failures.
 
+Object shorthand printing now excludes identifiers that expand to namespace
+property aliases. Exported TypeScript destructuring and later object literals
+therefore retain their property accesses and defaults. Computed binding keys
+also preserve parentheses around comma expressions. An executable regression
+passes eight Rust/pinned-Go transform/bundle combinations covering nested
+patterns, rest/default values, computed-key side effects, and later namespace
+updates. Parser fixtures 1441 and 1444 (`TestComputedProperty`) are newly active
+with unchanged upstream output. The normal suite passes 995 tests, the parser
+audit has 7,064 matches without regressions, and strict Clippy retains 623
+existing errors without added diagnostics. These runtime checks do not establish
+complete object-rest lowering for older targets.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -727,7 +739,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,062 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,064 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -817,7 +829,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 92
-reviewed cases beyond the original option-based selection. So 12,304 concrete
+reviewed cases beyond the original option-based selection. So 12,306 concrete
 upstream cases are currently active in `cargo test`; the remaining 153 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

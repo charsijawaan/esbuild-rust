@@ -1960,7 +1960,7 @@ impl Printer<'_> {
                     } else {
                         if property.is_computed {
                             self.output.push(b'[');
-                            self.print_expr_at(&property.key, Precedence::Lowest);
+                            self.print_expr_at(&property.key, Precedence::Spread);
                             self.output.push(b']');
                         } else if property.prefer_quoted_key
                             && let Some(ExprData::String(key)) = property.key.data.as_deref()
@@ -2941,7 +2941,9 @@ impl Printer<'_> {
                         _ => None,
                     });
                     let shorthand_value_name = match property.value_or_nil.data.as_deref() {
-                        Some(ExprData::Identifier(value)) => {
+                        Some(ExprData::Identifier(value))
+                            if self.renamer.namespace_alias_for_symbol(value.reference).is_none() =>
+                        {
                             Some(self.renamer.name_for_symbol(value.reference))
                         }
                         Some(ExprData::ImportIdentifier(value)) => {
