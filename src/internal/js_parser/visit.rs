@@ -5665,7 +5665,6 @@ fn visit_class(
                 .use_count_estimate != 0
     });
     move_type_script_parameter_property_constructor_to_front(class);
-    preserve_type_script_omitted_computed_field_keys(core, class, resolve_identifiers);
     lower_standard_decorators(core, class, outer_class_name);
     let (lower_public_instance_fields, lower_public_static_fields) =
         class_private_member_lowering_flags(core, class);
@@ -5685,6 +5684,7 @@ fn visit_class(
         lower_public_instance_fields,
         lower_public_static_fields,
     );
+    preserve_type_script_omitted_computed_field_keys(core, class, resolve_identifiers);
     lower_type_script_experimental_decorators(core, class, outer_class_name, &decorator_keys);
     let constructor_was_present = class_constructor_index(class).is_some();
     let static_field_locations = class
@@ -5714,7 +5714,12 @@ fn visit_class(
         lower_public_instance_fields,
         lower_public_static_fields,
     );
-    lower_type_script_static_field_assignments(core, class, outer_class_name, class_post_start);
+    lower_type_script_static_field_assignments(
+        core,
+        class,
+        private_class_capture.or(used_inner_name).or(outer_class_name),
+        class_post_start,
+    );
     lower_type_script_class_field_assignments(core, class, constructor_was_present);
     if class_static_blocks_can_be_lowered(core, class)
         && let Some(class_ref) = private_class_capture.or(used_inner_name).or(outer_class_name)
@@ -6054,6 +6059,11 @@ fn class_public_static_fields_need_lowering(core: &ParserCore, class: &Class) ->
         .options
         .unsupported_js_features
         .contains(JsFeature::CLASS_STATIC_FIELD)
+        || (!class.use_define_for_class_fields
+            && core
+                .options
+                .unsupported_js_features
+                .contains(JsFeature::CLASS_STATIC_BLOCKS))
         || class_static_blocks_can_be_lowered(core, class))
         && class.properties.iter().any(|property| {
             property.kind == PropertyKind::Field
@@ -7382,7 +7392,10 @@ fn prepare_type_script_computed_property_keys(
 ) -> Vec<Option<Expr>> {
     let experimental_decorators =
         core.options.ts.config.experimental_decorators == crate::internal::config::MaybeBool::True;
+    let lower_assignment_fields =
+        core.options.ts.parse && !class.use_define_for_class_fields && !experimental_decorators;
     if !experimental_decorators
+        && !lower_assignment_fields
         && !(class.use_define_for_class_fields && (lower_instance_fields || lower_static_fields))
     {
         return vec![None; class.properties.len()];
@@ -7393,7 +7406,7 @@ fn prepare_type_script_computed_property_keys(
         .iter()
         .map(|property| {
             property.flags.contains(PropertyFlags::IS_COMPUTED)
-                && if class.use_define_for_class_fields {
+                && if class.use_define_for_class_fields || lower_assignment_fields {
                     let is_static = property.flags.contains(PropertyFlags::IS_STATIC);
                     !property.decorators.is_empty()
                         || (property.kind == PropertyKind::Field
@@ -7401,7 +7414,14 @@ fn prepare_type_script_computed_property_keys(
                                 property.key.data.as_deref(),
                                 Some(ExprData::PrivateIdentifier(_))
                             )
-                            && if is_static {
+                            && if lower_assignment_fields {
+                                (property.initializer_or_nil.data.is_some()
+                                    || property.value_or_nil.data.is_some())
+                                    && !matches!(
+                                        property.key.data.as_deref(),
+                                        Some(ExprData::String(_) | ExprData::Number(_))
+                                    )
+                            } else if is_static {
                                 lower_static_fields
                             } else {
                                 lower_instance_fields
@@ -7483,7 +7503,7 @@ fn prepare_type_script_computed_property_keys(
     temp_refs.reverse();
     let mut next_temp = 0usize;
     let mut decorator_keys = vec![None; class.properties.len()];
-    if class.use_define_for_class_fields {
+    if class.use_define_for_class_fields || lower_assignment_fields {
         let mut property_temp_refs = vec![None; class.properties.len()];
         for (index, &needs_temp) in needs_temp.iter().enumerate() {
             if needs_temp {
@@ -7511,24 +7531,36 @@ fn prepare_type_script_computed_property_keys(
                     class.properties[index].key.data.as_deref(),
                     Some(ExprData::PrivateIdentifier(_))
                 )
-                && if is_static {
+                && if lower_assignment_fields {
+                    class.properties[index].decorators.is_empty()
+                } else if is_static {
                     lower_static_fields
                 } else {
                     lower_instance_fields
                 };
 
             if must_move {
-                let reference = property_temp_refs[index].expect("moved computed field temp");
                 let property = &mut class.properties[index];
                 let loc = property.key.loc;
-                let evaluation = assign(
-                    computed_key_temp(core, loc, reference),
-                    std::mem::take(&mut property.key),
-                );
-                property.key = computed_key_temp(core, loc, reference);
-                if !property.decorators.is_empty() {
-                    decorator_keys[index] = Some(computed_key_temp(core, loc, reference));
-                }
+                let original_key = std::mem::take(&mut property.key);
+                let evaluation = if let Some(reference) = property_temp_refs[index] {
+                    property.key = computed_key_temp(core, loc, reference);
+                    if !property.decorators.is_empty() {
+                        decorator_keys[index] = Some(computed_key_temp(core, loc, reference));
+                    }
+                    assign(computed_key_temp(core, loc, reference), original_key)
+                } else if lower_assignment_fields
+                    && (property.initializer_or_nil.data.is_some()
+                        || property.value_or_nil.data.is_some())
+                {
+                    property.key = original_key;
+                    continue;
+                } else {
+                    // TypeScript omits uninitialized assignment-style fields,
+                    // but their computed keys still run during class definition.
+                    property.kind = PropertyKind::DeclareOrAbstract;
+                    original_key
+                };
                 if let Some(next_index) = next_retained_computed {
                     let next_property = &mut class.properties[next_index];
                     next_property.key =

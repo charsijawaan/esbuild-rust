@@ -459,3 +459,90 @@ console.log('ok');
         }
     }
 }
+
+#[test]
+fn typescript_assignment_fields_evaluate_computed_keys_once_in_source_order() {
+    let source = r#"
+const events = [];
+const key = value => (events.push(value), value);
+const init = (event, value) => (events.push(event), value);
+const base = event => (events.push(event), class {});
+class Foo extends base('base') {
+  [key('a')]() {}
+  [key('b')];
+  [key('c')] = init('instance', 1);
+  ['literal'] = 7;
+  [3] = 8;
+  [key('d')]() {}
+  static [key('e')];
+  static [key('f')] = init('static', 2);
+  static [key('g')]() {}
+  [key('h')];
+}
+const Bar = class extends base('expr-base') {
+  static [key('i')];
+  static [key('j')] = init('expr-static', 3);
+  [key('k')] = init('expr-instance', 4);
+  [key('l')];
+};
+const expected = 'base,a,b,c,d,e,f,g,h,static,expr-base,i,j,k,l,expr-static';
+if (events.join(',') !== expected) throw new Error(events.join(','));
+const first = new Foo, second = new Foo, third = new Bar;
+if (events.join(',') !== expected + ',instance,instance,expr-instance')
+  throw new Error('keys evaluated during construction: ' + events.join(','));
+if (first.c !== 1 || second.c !== 1 || first.literal !== 7 || first[3] !== 8
+  || Foo.f !== 2 || Bar.j !== 3 || third.k !== 4
+  || 'b' in first || 'h' in first || 'e' in Foo || 'i' in Bar || 'l' in third)
+  throw new Error('wrong assignment fields');
+console.log('ok');
+"#;
+    let tsconfig = r#"{"compilerOptions":{"useDefineForClassFields":false}}"#;
+    for (target, lower_blocks) in [
+        (Target::Es2015, false),
+        (Target::Es2021, false),
+        (Target::Es2022, false),
+        (Target::Es2022, true),
+    ] {
+        for minify in [false, true] {
+            let supported = if lower_blocks {
+                std::collections::HashMap::from([("class-static-blocks".into(), false)])
+            } else {
+                std::collections::HashMap::new()
+            };
+            let result = transform(
+                source,
+                TransformOptions {
+                    loader: Loader::Ts,
+                    tsconfig_raw: tsconfig.into(),
+                    target,
+                    supported: supported.clone(),
+                    minify_identifiers: minify,
+                    minify_syntax: minify,
+                    minify_whitespace: minify,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.code);
+            let result = build(BuildOptions {
+                bundle: true,
+                format: BuildFormat::CommonJs,
+                platform: BuildPlatform::Node,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    loader: Loader::Ts,
+                    ..BuildStdin::default()
+                }),
+                tsconfig_raw: tsconfig.into(),
+                target,
+                supported,
+                minify_identifiers: minify,
+                minify_syntax: minify,
+                minify_whitespace: minify,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.output_files[0].contents);
+        }
+    }
+}
