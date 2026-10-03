@@ -279,19 +279,6 @@ receiver variable. The local suite passes 969 tests and the full parser audit
 retains 7,040 matches without active regressions or new inactive matches.
 Strict Clippy retains 623 existing errors without added diagnostics.
 
-The complete factory-storage runtime audit at `ed98b35` remains at 1,303 passes,
-with no gains, regressions, or timeouts relative to `26328d6`.
-
-Named class expressions now share their captured binding with moved static
-initializers and extracted private members, and private storage names use the
-inner class name when present. A new executable regression passes native Node
-execution and 12 Rust/pinned-Go combinations covering repeated factories,
-instance/static private members, public static initializers, minification,
-feature overrides, and `keep_names`. Original `TestLowerClassStatic` case 215
-now matches exactly and is active. The normal suite passes 971 tests; the full
-parser audit matches 7,041 cases with no active regressions. Strict Clippy
-retains 623 existing errors without added diagnostics.
-
 The full runtime audit at `26328d6` is recorded in
 `end_to_end_private_binding_checkpoint.json`: 1,303 passed, 159 failed, and no
 timeouts. Cases 792, 1106, 1107, and 1110 are newly passing relative to `9ae1ea0`,
@@ -307,6 +294,22 @@ on Rust and pinned Go, including declaration, expression, and arrow factories
 and generated-name collisions. The normal suite passes 970 tests; the parser
 audit retains 7,040 matches with no active regressions or new inactive matches.
 Strict Clippy retains 623 existing errors without added diagnostics.
+
+The complete factory-storage runtime audit at `ed98b35` remains at 1,303 passes,
+with no gains, regressions, or timeouts relative to `26328d6`.
+
+Named class expressions now share their captured binding with moved static
+initializers and extracted private members, and private storage names use the
+inner class name when present. A new executable regression passes native Node
+execution and 12 Rust/pinned-Go combinations covering repeated factories,
+instance/static private members, public static initializers, minification,
+feature overrides, and `keep_names`. Original `TestLowerClassStatic` case 215
+now matches exactly and is active. The normal suite passes 971 tests; the full
+parser audit matches 7,041 cases with no active regressions. Strict Clippy
+retains 623 existing errors without added diagnostics.
+
+The full runtime audit at `b8288a0` remains at 1,303 passes, with no gains,
+regressions, or timeouts relative to `ed98b35`.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
