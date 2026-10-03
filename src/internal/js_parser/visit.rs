@@ -2205,7 +2205,10 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         LocalKind::Let
                     };
                     let capture_ref =
-                        (lower_static_blocks || lower_static_members || capture_lowered_inner_name)
+                        (!has_experimental_class_decorators
+                            && (lower_static_blocks
+                                || lower_static_members
+                                || capture_lowered_inner_name))
                             .then(|| {
                                 inner_name.unwrap_or_else(|| {
                                     generate_class_capture_ref(core, name.reference)
@@ -6215,7 +6218,9 @@ fn visit_class(
         outer_class_name
     };
     lower_type_script_experimental_decorators(core, class, decorator_target, &decorator_keys);
-    let member_decorator_statements = if capture_member_decorators {
+    let experimental_decorator_statements = if capture_experimental_member_decorators
+        || has_experimental_class_decorators
+    {
         core.class_post_statements.split_off(decorator_post_start)
     } else {
         Vec::new()
@@ -6283,7 +6288,7 @@ fn visit_class(
         static_initializers.sort_by_key(|statement| statement.loc.start);
         core.class_post_statements.extend(static_initializers);
     }
-    core.class_post_statements.extend(member_decorator_statements);
+    core.class_post_statements.extend(experimental_decorator_statements);
     if let Some(constructor_index) = class_constructor_index(class) {
         if let Some(ExprData::Function(function)) = class.properties[constructor_index]
             .value_or_nil
@@ -6622,7 +6627,8 @@ fn class_public_static_fields_need_lowering(core: &ParserCore, class: &Class) ->
                 .options
                 .unsupported_js_features
                 .contains(JsFeature::CLASS_STATIC_BLOCKS))
-        || class_static_blocks_can_be_lowered(core, class))
+        || class_static_blocks_can_be_lowered(core, class)
+        || experimental_class_decorators_need_static_lowering(core, class))
         && class.properties.iter().any(|property| {
             matches!(
                 property.kind,
@@ -6646,6 +6652,11 @@ fn class_has_experimental_class_decorators(core: &ParserCore, class: &Class) -> 
                         if function.function.args.iter().any(|argument| !argument.decorators.is_empty())
                 )
             }))
+}
+
+fn experimental_class_decorators_need_static_lowering(core: &ParserCore, class: &Class) -> bool {
+    core.options.ts.config.experimental_decorators == crate::internal::config::MaybeBool::True
+        && !class.decorators.is_empty()
 }
 
 fn class_has_experimental_member_decorators(core: &ParserCore, class: &Class) -> bool {
@@ -6707,7 +6718,8 @@ fn class_static_fields_require_private_lowering(core: &ParserCore, class: &Class
     // declarations must be lowered before visiting those references so they
     // remain valid outside the class body.
     // Upstream applies file-wide brand-check flags after this blanket pass.
-    class_public_static_fields_need_lowering(core, class)
+    experimental_class_decorators_need_static_lowering(core, class)
+        || class_public_static_fields_need_lowering(core, class)
         || class_static_blocks_can_be_lowered(core, class)
         || class.properties.iter().any(|property| {
             if auto_accessor_storage_needs_lowering(core, class, property) {
@@ -6728,7 +6740,8 @@ fn class_static_fields_require_private_lowering(core: &ParserCore, class: &Class
 fn class_private_member_lowering_flags(core: &ParserCore, class: &Class) -> (bool, bool) {
     let lower_static_blocks = class_static_blocks_can_be_lowered(core, class);
     let mut lower_instance_fields = false;
-    let mut lower_static_fields = lower_static_blocks;
+    let mut lower_static_fields =
+        lower_static_blocks || experimental_class_decorators_need_static_lowering(core, class);
     for property in &class.properties {
         if auto_accessor_storage_needs_lowering(core, class, property) {
             lower_static_fields = true;
@@ -6766,9 +6779,11 @@ fn class_private_member_lowering_flags(core: &ParserCore, class: &Class) -> (boo
 }
 
 fn class_static_blocks_can_be_lowered(core: &ParserCore, class: &Class) -> bool {
-    core.options
+    (core
+        .options
         .unsupported_js_features
         .contains(JsFeature::CLASS_STATIC_BLOCKS)
+        || experimental_class_decorators_need_static_lowering(core, class))
         && class.properties.iter().any(|property| {
             property.kind == PropertyKind::ClassStaticBlock
                 && property.class_static_block.as_ref().is_some_and(|block| {

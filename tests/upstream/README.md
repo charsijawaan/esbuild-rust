@@ -645,6 +645,19 @@ Cases 1305, 1306, and 1308 are newly passing without regressions relative to
 `ea73f09`. Case 80 remains the shared environment failure, leaving 35 Rust-only
 failures.
 
+Legacy class decorator expressions now force static-field lowering before
+visitation, and simple static blocks move with those fields even on native
+targets. Decorators run after static initialization, including on named default
+exports. Decorated declarations initialize their mutable class binding directly,
+so immediate static references see the original class and later references see
+the replacement. Constructor parameter decorators keep their separate pinned-Go
+lowering flags. An executable regression passes 24 Rust/pinned-Go combinations
+covering replacement, class-name references, static/instance fields, private
+storage, constructor/member decorators, factory calls, and name preservation.
+The normal suite passes 996 tests, the parser audit preserves all 7,064 active
+cases, and strict Clippy retains 623 existing errors without added diagnostics.
+General static-block lowering remains separate work.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
