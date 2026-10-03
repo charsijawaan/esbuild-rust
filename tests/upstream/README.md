@@ -104,15 +104,29 @@ verification, not a replacement for the complete 1,258-pass report above.
 The local suite passes 906 library, 42 CLI, and four integration tests (952
 total; the exhaustive parser audit is separately ignored in normal runs).
 
-Resume point: default-format JavaScript transforms can emit lowering-helper
-calls such as `__async` without including the runtime helper definition. The
-file-build/linker path includes them. Routing every JS transform through the
-linker was explored but deferred because it also changes Unicode escaping and
-TypeScript namespace minifier output; that experiment is not in this checkpoint.
-Resolve these differences against pinned upstream and add executable stdin/API
-regressions before changing transform routing. Then rerun the complete runtime
-audit. The captured fixture backlog is 1,629 parser/lowering and 162 bundler
-cases (1,791 total); the wider API/plugin/WASM inventory remains separate.
+Default-format JavaScript, JSX, TypeScript, and TSX transforms now use the
+build linker to include all lowering helpers and their transitive dependencies.
+The former direct printer path and its partial helper definitions were removed.
+Comparison with pinned Go confirmed its surrogate-pair string escaping and
+the existing TypeScript namespace minifier output. The linker now keeps
+namespace-local declaration counts separate from property-access use counts;
+imported namespace aliases still count toward the imported namespace.
+
+Five executable regressions in `tests/transform_runtime.rs` exercise public API
+and stdin transforms with Node: async parameter rejection, function length,
+lexical `this`/`arguments`, helper-name collisions, transitive async-generator,
+private-field and spread/rest helpers, minification, source-map stack locations,
+and extracted legal comments. A separate regression for a parameter named
+`arguments` checks Rust behavior; the earlier pinned-Go panic for that spelling
+is not treated as a reference output. The native async target also exposed a
+missing separator in minified `return async (...) => ...`, which is corrected.
+The normal local suite now passes 957 tests (906 library, 42 CLI, and nine
+integration). Strict Clippy remains blocked by pre-existing repository lints,
+verified separately against untouched `965fee5`; no lint suppression was added.
+
+The captured fixture backlog is 1,629 parser/lowering and 162 bundler cases
+(1,791 total); the wider API/plugin/WASM inventory remains separate. Complete
+runtime results following this fix will be recorded after the ongoing audit.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.

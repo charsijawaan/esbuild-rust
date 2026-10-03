@@ -44,6 +44,8 @@ documented in the evaluation and local tests should be treated as exercised.
 
 ## Development
 
+Node.js is required for the executable transform integration tests.
+
 ```sh
 cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings

@@ -7,7 +7,7 @@ mod watcher;
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
-    fmt::{self, Write as _},
+    fmt,
     fs as std_fs,
     io::{self, Write as _},
     path::{Path as FsPath, PathBuf},
@@ -16,13 +16,13 @@ use std::{
 
 use crate::internal::{
     ast::{
-        DEFAULT_NAME_MINIFIER_CSS, DEFAULT_NAME_MINIFIER_JS, ImportKind, Ref, SymbolKind, SymbolMap,
+        DEFAULT_NAME_MINIFIER_CSS, ImportKind, Ref, SymbolKind, SymbolMap,
     },
     bundler,
     cache::CacheSet,
     config::{self, Mode},
     css_parser, css_printer,
-    fs::{Fs, MockKind, RealFsOptions, WatchData, mock_fs, real_fs},
+    fs::{Fs, RealFsOptions, WatchData, real_fs},
     helpers::{
         encode_string_as_shortest_data_url, escape_closing_tag, mime_type_by_extension,
         quote_for_json, string_to_utf16,
@@ -33,7 +33,7 @@ use crate::internal::{
         DeferLogKind, Log, Msg, MsgData, MsgKind, MsgLocation, OutputOptions, Path, PathStyle,
         PrettyPaths, Source, TerminalInfo, msg_id_to_string, string_to_maximum_msg_id,
     },
-    renamer::{Renamer, new_no_op_renamer},
+    renamer::new_no_op_renamer,
     resolver,
     sourcemap::{Chunk as SourceMapChunk, LineColumnOffset, generate_line_offset_tables},
     xxhash,
@@ -43,323 +43,6 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
 };
 use watcher::Watcher;
-
-struct TransformRenamer {
-    base: Box<dyn Renamer>,
-    symbols: SymbolMap,
-    overrides: HashMap<Ref, String>,
-}
-
-impl Renamer for TransformRenamer {
-    fn import_item_status_for_symbol(&self, reference: Ref) -> crate::internal::ast::ImportItemStatus {
-        self.symbols.get(self.symbols.follow_symbols_const(reference)).import_item_status
-    }
-    fn canonical_ref_for_symbol(&self, reference: Ref) -> Ref {
-        reference
-    }
-
-    fn name_for_symbol(&self, reference: Ref) -> String {
-        let reference = self.symbols.follow_symbols_const(reference);
-        self.overrides
-            .get(&reference)
-            .cloned()
-            .unwrap_or_else(|| self.base.name_for_symbol(reference))
-    }
-
-    fn namespace_alias_for_symbol(
-        &self,
-        reference: Ref,
-    ) -> Option<crate::internal::ast::NamespaceAlias> {
-        let reference = self.symbols.follow_symbols_const(reference);
-        self.symbols.get(reference).namespace_alias.clone()
-    }
-}
-
-#[derive(Default)]
-struct KeepNameHelper {
-    def_prop: String,
-    name: String,
-    target: String,
-    value: String,
-}
-
-#[derive(Default)]
-struct TransformRuntimeHelpers {
-    keep_name: KeepNameHelper,
-    pow: String,
-}
-
-fn runtime_helper_refs(ast: &crate::internal::js_ast::Ast, alias: &str) -> HashSet<Ref> {
-    ast.named_imports
-        .iter()
-        .filter_map(|(reference, import)| (import.alias == alias).then_some(*reference))
-        .chain(
-            ast.module_scope
-                .as_ref()
-                .into_iter()
-                .flat_map(|scope| {
-                    scope
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .generated
-                        .clone()
-                })
-                .filter(|reference| {
-                    ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
-                        .original_name
-                        == alias
-                }),
-        )
-        .collect()
-}
-
-fn unique_runtime_helper_name(base: &str, used_names: &mut HashSet<String>) -> String {
-    let mut name = base.to_string();
-    let mut suffix = 2;
-    while used_names.contains(&name) {
-        name = format!("{base}{suffix}");
-        suffix += 1;
-    }
-    used_names.insert(name.clone());
-    name
-}
-
-fn transform_runtime_renamer(
-    ast: &crate::internal::js_ast::Ast,
-    symbols: SymbolMap,
-    keep_names: bool,
-    minify_identifiers: bool,
-) -> (TransformRenamer, TransformRuntimeHelpers) {
-    let mut overrides = HashMap::new();
-    let keep_name_refs = if keep_names {
-        runtime_helper_refs(ast, "__name")
-    } else {
-        HashSet::new()
-    };
-    let pow_refs = runtime_helper_refs(ast, "__pow");
-    let keep_name_use_count = keep_name_refs
-        .iter()
-        .map(|reference| {
-            ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
-                .use_count_estimate
-        })
-        .sum::<u32>();
-    let pow_use_count = pow_refs
-        .iter()
-        .map(|reference| {
-            ast.symbols[usize::try_from(reference.inner_index).expect("symbol index")]
-                .use_count_estimate
-        })
-        .sum::<u32>();
-    let (base, mut helpers) = transform_base_renamer(
-        ast,
-        &symbols,
-        minify_identifiers,
-        (!keep_name_refs.is_empty()).then_some(keep_name_use_count),
-        (!pow_refs.is_empty()).then_some(pow_use_count),
-    );
-    if !minify_identifiers && (!keep_name_refs.is_empty() || !pow_refs.is_empty()) {
-        let helper_indices = keep_name_refs
-            .iter()
-            .chain(&pow_refs)
-            .map(|reference| reference.inner_index)
-            .collect::<HashSet<_>>();
-        let mut used_names = ast
-            .symbols
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| {
-                !helper_indices.contains(&u32::try_from(*index).expect("symbol index fits u32"))
-            })
-            .map(|(_, symbol)| symbol.original_name.clone())
-            .collect::<HashSet<_>>();
-        if !pow_refs.is_empty() {
-            helpers.pow = unique_runtime_helper_name("__pow", &mut used_names);
-        }
-        if !keep_name_refs.is_empty() {
-            helpers.keep_name.name = unique_runtime_helper_name("__name", &mut used_names);
-            helpers.keep_name.def_prop = unique_runtime_helper_name("__defProp", &mut used_names);
-            helpers.keep_name.target = "target".into();
-            helpers.keep_name.value = "value".into();
-        }
-    }
-    overrides.extend(
-        keep_name_refs
-            .into_iter()
-            .map(|reference| (reference, helpers.keep_name.name.clone())),
-    );
-    overrides.extend(
-        pow_refs
-            .into_iter()
-            .map(|reference| (reference, helpers.pow.clone())),
-    );
-    (
-        TransformRenamer {
-            base,
-            symbols,
-            overrides,
-        },
-        helpers,
-    )
-}
-
-fn transform_base_renamer(
-    ast: &crate::internal::js_ast::Ast,
-    symbols: &SymbolMap,
-    minify_identifiers: bool,
-    keep_name_use_count: Option<u32>,
-    pow_use_count: Option<u32>,
-) -> (Box<dyn Renamer>, TransformRuntimeHelpers) {
-    if minify_identifiers {
-        let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
-        let mut reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
-        if let Some(module_scope) = &ast.module_scope {
-            let module_scope = module_scope
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for member in module_scope.members.values() {
-                let reference = symbols.follow_symbols_const(member.reference);
-                let symbol = symbols.get(reference);
-                if symbol.kind != crate::internal::ast::SymbolKind::Import {
-                    reserved_names.insert(symbol.original_name.clone(), 1);
-                }
-            }
-        }
-        let mut renamer = crate::internal::renamer::MinifyRenamer::new(
-            symbols.clone(),
-            ast.nested_scope_slot_counts,
-            reserved_names,
-        );
-        let mut top_level_symbols = Vec::new();
-        for part in &ast.parts {
-            renamer.accumulate_symbol_use_counts(&mut top_level_symbols, &part.symbol_uses, &[0]);
-            for declared in &part.declared_symbols {
-                renamer.accumulate_symbol_declaration_count(
-                    &mut top_level_symbols,
-                    declared.reference,
-                    1,
-                    &[0],
-                );
-            }
-        }
-        let mut imported_symbols = top_level_symbols
-            .iter()
-            .copied()
-            .filter(|stable| {
-                symbols.get(stable.reference).kind == crate::internal::ast::SymbolKind::Import
-            })
-            .collect::<Vec<_>>();
-        crate::internal::renamer::sort_stable_symbol_counts(&mut imported_symbols);
-        renamer.allocate_top_level_symbol_slots(&imported_symbols);
-        let keep_name_slots = keep_name_use_count.map(|use_count| {
-            renamer.accumulate_synthetic_default_nested_slot(0, 2);
-            renamer.accumulate_synthetic_default_nested_slot(1, 2);
-            let def_prop = renamer.allocate_synthetic_default_top_level_slot(2);
-            let name = renamer.allocate_synthetic_default_top_level_slot(use_count.wrapping_add(2));
-            (def_prop, name)
-        });
-        let pow_slot = pow_use_count
-            .map(|use_count| renamer.allocate_synthetic_default_top_level_slot(use_count));
-        let minifier =
-            DEFAULT_NAME_MINIFIER_JS.shuffle_by_char_freq(ast.char_freq.unwrap_or_default());
-        renamer.assign_names_by_frequency(&minifier);
-        let keep_name = keep_name_slots
-            .map(|(def_prop, name)| KeepNameHelper {
-                def_prop: renamer.name_for_synthetic_default_slot(def_prop),
-                name: renamer.name_for_synthetic_default_slot(name),
-                target: renamer.name_for_synthetic_default_slot(0),
-                value: renamer.name_for_synthetic_default_slot(1),
-            })
-            .unwrap_or_default();
-        let pow = pow_slot
-            .map(|slot| renamer.name_for_synthetic_default_slot(slot))
-            .unwrap_or_default();
-        (
-            Box::new(renamer),
-            TransformRuntimeHelpers { keep_name, pow },
-        )
-    } else {
-        let scopes = ast.module_scope.iter().cloned().collect::<Vec<_>>();
-        let reserved_names = crate::internal::renamer::compute_reserved_names(&scopes, symbols);
-        let mut renamer =
-            crate::internal::renamer::NumberRenamer::new(symbols.clone(), reserved_names);
-        let mut nested_scopes = Vec::new();
-        for part in &ast.parts {
-            for declared in &part.declared_symbols {
-                if declared.is_top_level {
-                    renamer.add_top_level_symbol(declared.reference);
-                }
-            }
-            nested_scopes.extend(part.scopes.iter().cloned());
-        }
-        renamer.assign_names_by_scope(&HashMap::from([(0, nested_scopes)]));
-        (Box::new(renamer), TransformRuntimeHelpers::default())
-    }
-}
-
-fn prepend_transform_runtime_helpers(
-    code: &mut Vec<u8>,
-    helpers: &TransformRuntimeHelpers,
-    minify_whitespace: bool,
-) {
-    let mut prefix = String::new();
-    let KeepNameHelper {
-        def_prop,
-        name,
-        target,
-        value,
-    } = &helpers.keep_name;
-    if !name.is_empty() {
-        if minify_whitespace {
-            write!(prefix, "var {def_prop}=Object.defineProperty;")
-                .expect("writing to a string cannot fail");
-        } else {
-            writeln!(prefix, "var {def_prop} = Object.defineProperty;")
-                .expect("writing to a string cannot fail");
-        }
-    }
-    if !helpers.pow.is_empty() {
-        if minify_whitespace {
-            write!(prefix, "var {}=Math.pow;", helpers.pow)
-                .expect("writing to a string cannot fail");
-        } else {
-            writeln!(prefix, "var {} = Math.pow;", helpers.pow)
-                .expect("writing to a string cannot fail");
-        }
-    }
-    if !name.is_empty() {
-        let value_property = if value == "value" {
-            "value".into()
-        } else {
-            format!("value: {value}")
-        };
-        if minify_whitespace {
-            let value_property = value_property.replace(' ', "");
-            write!(
-                prefix,
-                "var {name}=({target},{value})=>{def_prop}({target},\"name\",{{{value_property},configurable:true}});"
-            )
-            .expect("writing to a string cannot fail");
-        } else {
-            writeln!(
-                prefix,
-                "var {name} = ({target}, {value}) => {def_prop}({target}, \"name\", {{ {value_property}, configurable: true }});"
-            )
-            .expect("writing to a string cannot fail");
-        }
-    }
-    if prefix.is_empty() {
-        return;
-    }
-    let insertion = if code.starts_with(b"#!") {
-        code.iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(code.len(), |index| index + 1)
-    } else {
-        0
-    };
-    code.splice(insertion..insertion, prefix.bytes());
-}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u16)]
@@ -1005,7 +688,6 @@ struct TransformPrint {
     code: Vec<u8>,
     extracted_legal_comments: Vec<String>,
     source_map_chunk: SourceMapChunk,
-    source_map_prefix_lines: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -4117,12 +3799,13 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
             ..TransformResult::default()
         };
     }
-    let needs_tree_shaking_linker = options.tree_shaking == BuildTreeShaking::Enabled
-        && matches!(
-            options.loader,
-            Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None
-        );
-    if options.format != BuildFormat::Default || needs_tree_shaking_linker {
+    let needs_javascript_linker = matches!(
+        options.loader,
+        Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None
+    );
+    // Lowering can introduce any of the runtime helpers. Use the same linker
+    // as builds to include their dependencies and rename them with user code.
+    if options.format != BuildFormat::Default || needs_javascript_linker {
         return transform_with_linker(input.as_ref(), options);
     }
     let input_contents = Arc::<[u8]>::from(input.as_ref());
@@ -4143,9 +3826,6 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
     let mut printed = match options.loader {
         Loader::Css | Loader::GlobalCss | Loader::LocalCss => {
             transform_css(&log, source, &options, &target_features)
-        }
-        Loader::Js | Loader::Jsx | Loader::Ts | Loader::Tsx | Loader::None => {
-            transform_javascript(&log, source, &options, &target_features)
         }
         Loader::Json => TransformPrint {
             code: transform_json(&log, source, &options, &target_features),
@@ -4216,7 +3896,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
                 &sourcefile,
                 &input_contents,
                 &printed.source_map_chunk,
-                printed.source_map_prefix_lines + banner_lines,
+                banner_lines,
                 &options,
             );
             if matches!(
@@ -4585,112 +4265,6 @@ fn detect_content_type(contents: &[u8]) -> &'static str {
     }
 }
 
-fn transform_javascript(
-    log: &Log,
-    source: Source,
-    options: &TransformOptions,
-    target_features: &ValidatedTargetFeatures,
-) -> TransformPrint {
-    let line_offset_tables = (options.sourcemap != BuildSourceMap::None)
-        .then(|| generate_line_offset_tables(&source.contents, 1));
-    let mut parser_options = js_parser::Options::default();
-    parser_options.ts.parse = matches!(options.loader, Loader::Ts | Loader::Tsx);
-    parser_options.jsx.parse = matches!(options.loader, Loader::Jsx | Loader::Tsx);
-    parser_options.jsx.preserve = options.jsx == BuildJsx::Preserve;
-    parser_options.jsx.automatic_runtime = options.jsx == BuildJsx::Automatic;
-    parser_options.jsx.factory =
-        validate_jsx_define(log, &options.jsx_factory, "jsx factory", false);
-    parser_options.jsx.fragment =
-        validate_jsx_define(log, &options.jsx_fragment, "jsx fragment", true);
-    parser_options
-        .jsx
-        .import_source
-        .clone_from(&options.jsx_import_source);
-    parser_options.jsx.development = options.jsx_development;
-    parser_options.jsx.side_effects = options.jsx_side_effects;
-    if !options.tsconfig_raw.is_empty() {
-        let file_system = mock_fs(&HashMap::<String, String>::new(), MockKind::Unix, "/");
-        if let Some(tsconfig) = parse_tsconfig_raw(log, &file_system, "/", &options.tsconfig_raw) {
-            tsconfig.jsx_settings.apply_to(&mut parser_options.jsx);
-            parser_options.ts.config = tsconfig.settings;
-            parser_options.ts_always_strict =
-                tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
-        }
-    }
-    parser_options.defines = Some(validate_defines(
-        log,
-        &options.define,
-        &options.pure,
-        options.platform,
-        options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
-    ));
-    parser_options.platform = match options.platform {
-        BuildPlatform::Default | BuildPlatform::Browser => config::Platform::Browser,
-        BuildPlatform::Node => config::Platform::Node,
-        BuildPlatform::Neutral => config::Platform::Neutral,
-    };
-    parser_options
-        .original_target_env
-        .clone_from(&target_features.original_target_environment);
-    parser_options.unsupported_js_features = target_features.unsupported_js_features;
-    parser_options.unsupported_js_feature_overrides =
-        target_features.unsupported_js_feature_overrides;
-    parser_options.unsupported_js_feature_overrides_mask =
-        target_features.unsupported_js_feature_overrides_mask;
-    parser_options.log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
-    parser_options.code_path_style = internal_path_style(options.abs_paths, AbsPaths::CODE);
-    parser_options.minify_syntax = options.minify_syntax;
-    parser_options.minify_identifiers = options.minify_identifiers;
-    parser_options.minify_whitespace = options.minify_whitespace;
-    parser_options.ascii_only = options.ascii_only;
-    parser_options.drop_console = options.drop_console;
-    parser_options.drop_debugger = options.drop_debugger;
-    parser_options.drop_labels.clone_from(&options.drop_labels);
-    parser_options.ignore_dce_annotations = options.ignore_annotations;
-    parser_options.keep_names = options.keep_names;
-    parser_options.omit_runtime_for_tests = true;
-    let (ast, ok) = js_parser::parse(log.clone(), source, parser_options);
-    if !ok {
-        return TransformPrint::default();
-    }
-    let mut symbols = SymbolMap::new(1);
-    symbols.symbols_for_source[0].clone_from(&ast.symbols);
-    let (renamer, helpers) = transform_runtime_renamer(
-        &ast,
-        symbols,
-        options.keep_names,
-        options.minify_identifiers,
-    );
-    let printed = if let Some(line_offset_tables) = line_offset_tables {
-        js_printer::print_with_source_map(
-            &ast,
-            &renamer,
-            js_printer_options(options, target_features),
-            None,
-            line_offset_tables,
-        )
-    } else {
-        js_printer::print(&ast, &renamer, js_printer_options(options, target_features))
-    };
-    let mut code = printed.js;
-    let printed_len = code.len();
-    prepend_transform_runtime_helpers(&mut code, &helpers, options.minify_whitespace);
-    let source_map_prefix_len = code.len() - printed_len;
-    if options.minify_whitespace && !code.is_empty() && code.last() != Some(&b'\n') {
-        code.push(b'\n');
-    }
-    let mut source_map_prefix_offset = LineColumnOffset::default();
-    source_map_prefix_offset.advance_bytes(&code[..source_map_prefix_len]);
-    let source_map_prefix_lines = usize::try_from(source_map_prefix_offset.lines)
-        .expect("source-map prefix line count is non-negative");
-    TransformPrint {
-        code,
-        extracted_legal_comments: printed.extracted_legal_comments,
-        source_map_chunk: printed.source_map_chunk,
-        source_map_prefix_lines,
-    }
-}
-
 fn transform_css(
     log: &Log,
     source: Source,
@@ -4757,7 +4331,6 @@ fn transform_css(
         code: css,
         extracted_legal_comments: printed.extracted_legal_comments,
         source_map_chunk: printed.source_map_chunk,
-        ..TransformPrint::default()
     }
 }
 
@@ -9837,7 +9410,7 @@ mod tests {
         assert!(BuildOptions::default().ascii_only);
         assert_eq!(
             code(transform("\"π😀\"", TransformOptions::default())),
-            "\"\\u03C0\\u{1F600}\";\n"
+            "\"\\u03C0\\uD83D\\uDE00\";\n"
         );
         assert_eq!(
             code(transform(

@@ -218,7 +218,10 @@ impl MinifyRenamer {
     ) {
         reference = self.symbols.follow_symbols_const(reference);
         let mut symbol = self.symbols.get(reference);
-        if follow_namespace_alias {
+        // TypeScript namespace locals retain their declaration counts even
+        // after their uses become property accesses. Imported aliases instead
+        // refer to the namespace itself for both declarations and uses.
+        if follow_namespace_alias || symbol.kind == SymbolKind::Import {
             while let Some(alias) = &symbol.namespace_alias {
                 reference = self.symbols.follow_symbols_const(alias.namespace_ref);
                 symbol = self.symbols.get(reference);

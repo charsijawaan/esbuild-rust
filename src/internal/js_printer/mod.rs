@@ -3410,6 +3410,7 @@ impl Printer<'_> {
                                 )
                     );
                 if arrow.is_async {
+                    self.print_space_before_identifier();
                     self.output.extend_from_slice(b"async");
                     if can_omit_parameter_parentheses {
                         self.output.push(b' ');
