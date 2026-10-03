@@ -823,6 +823,12 @@ cases plus nil/empty, separate-entry, and callback behavior were independently
 checked with Go. The normal suite passes 1,032 tests; strict Clippy retains 621
 existing errors without added diagnostics.
 
+The complete runtime audit at `40167fe` is recorded in
+`end_to_end_mangle_cache_checkpoint.json`: 1,453 passed, nine failed, and no
+timeouts. Case 1460 is newly passing without regressions relative to `578cdb6`.
+All three CLI watch cases now pass. Case 80 remains the shared environment
+failure, leaving eight Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

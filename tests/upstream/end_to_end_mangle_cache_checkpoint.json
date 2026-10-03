@@ -1,0 +1,35 @@
+{
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+  "rust_commit": "40167fe",
+  "previous_rust_commit": "578cdb6",
+  "rust_binary_sha256": "1d8b3059bea2e2806c136f587bb21871a82fcc1e514d3e84f07bd695906ba5ad",
+  "reference_binary_sha256": "a5b888adb15b0a570c7fc904737de515b159119e7501491f452ee1b8c4cff2cf",
+  "node_version": "v24.15.0",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "registered_tests": 1462,
+  "reference_passed": 1461,
+  "rust_passed": 1453,
+  "rust_failed": 9,
+  "rust_timeouts": 0,
+  "reference_failure_indices": [
+    80
+  ],
+  "shared_failure_indices": [
+    80
+  ],
+  "rust_only_failure_indices": [
+    269,
+    313,
+    1450,
+    1452,
+    1454,
+    1456,
+    1457,
+    1458
+  ],
+  "newly_passing_indices": [
+    1460
+  ],
+  "regression_indices": []
+}
