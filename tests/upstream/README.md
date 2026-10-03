@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,020 | 1,623 | 8,643 |
+| JS/TS parser and parser lowering | 7,030 | 1,613 | 8,643 |
 | Bundler | 909 | 162 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,253 | 1,785 | 14,038 |
+| Total | 12,263 | 1,775 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -181,6 +181,15 @@ of the gains come from the private-access warnings. Go still passes 1,461,
 with the shared case-80 failure. The 186 Rust-only runtime failures remain
 separate from the 1,785 inactive fixture cases and the API/plugin/WASM inventory.
 
+Duplicate class members now use `duplicate-class-member` and the original
+member wording; object keys retain `duplicate-object-key`. Both warning and
+note underline the identifier range. Checks are skipped for dependency files,
+matching upstream even when a log override promotes these messages to errors.
+Ten original `TestWarningDuplicateClassMember` diagnostic cases now match and
+are active. The full parser audit preserves every prior active case, and the
+normal suite passes 964 tests. Original runtime slices 838–840, 931–933,
+1022–1024, and 1115–1117 pass 12/12, fixing eight duplicate-member cases.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -281,7 +290,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,020 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,030 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -371,7 +380,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 83
-reviewed cases beyond the original option-based selection. So 12,253 concrete
+reviewed cases beyond the original option-based selection. So 12,263 concrete
 upstream cases are currently active in `cargo test`; the remaining 162 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

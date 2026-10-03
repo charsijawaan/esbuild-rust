@@ -13032,6 +13032,96 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_class_members_have_distinct_ids_and_identifier_ranges() {
+        for (source, id, what, context) in [
+            (
+                "class Foo { member; set member(value) {} }",
+                "duplicate-class-member",
+                "member",
+                "class body",
+            ),
+            (
+                "class Foo { static member; static member() {} }",
+                "duplicate-class-member",
+                "member",
+                "class body",
+            ),
+            (
+                "const object = { member: 1, member: 2 }",
+                "duplicate-object-key",
+                "key",
+                "object literal",
+            ),
+        ] {
+            let result = transform(source, TransformOptions::default());
+            assert!(result.errors.is_empty());
+            assert_eq!(result.warnings.len(), 1);
+            let warning = &result.warnings[0];
+            assert_eq!(warning.id, id);
+            assert_eq!(
+                warning.text,
+                format!("Duplicate {what} \"member\" in {context}")
+            );
+            let location = warning.location.as_ref().unwrap();
+            assert_eq!(location.column, source.rfind("member").unwrap());
+            assert_eq!(location.length, "member".len());
+            assert_eq!(warning.notes.len(), 1);
+            assert_eq!(
+                warning.notes[0].text,
+                format!("The original {what} \"member\" is here:")
+            );
+            let original = warning.notes[0].location.as_ref().unwrap();
+            assert_eq!(original.column, source.find("member").unwrap());
+            assert_eq!(original.length, "member".len());
+        }
+        let source = "class Foo { get member() {} set member(value) {} static member; }";
+        assert!(
+            transform(source, TransformOptions::default())
+                .warnings
+                .is_empty()
+        );
+        let result = transform(
+            "class Foo { member; member; } const object = { member: 1, member: 2 }",
+            TransformOptions {
+                log_override: HashMap::from([(
+                    "duplicate-class-member".into(),
+                    super::LogLevel::Error,
+                )]),
+                ..TransformOptions::default()
+            },
+        );
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].id, "duplicate-class-member");
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].id, "duplicate-object-key");
+        assert!(result.code.is_empty());
+    }
+
+    #[test]
+    fn duplicate_property_checks_are_suppressed_for_dependencies() {
+        let directory = context_test_directory("duplicate-warnings");
+        std::fs::create_dir_all(directory.join("node_modules/pkg")).unwrap();
+        std::fs::write(
+            directory.join("node_modules/pkg/input.js"),
+            "class Foo { member; member; } const object = { member: 1, member: 2 }",
+        )
+        .unwrap();
+        let result = build(BuildOptions {
+            abs_working_dir: directory.to_string_lossy().into_owned(),
+            entry_points: vec!["node_modules/pkg/input.js".into()],
+            log_override: HashMap::from([
+                ("duplicate-class-member".into(), super::LogLevel::Error),
+                ("duplicate-object-key".into(), super::LogLevel::Error),
+            ]),
+            ..BuildOptions::default()
+        });
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.warnings.is_empty());
+        assert!(!result.output_files.is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn returns_diagnostics_and_suppresses_code_on_errors() {
         let result = transform(
             "const = 1",

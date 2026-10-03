@@ -13080,33 +13080,33 @@ fn report_duplicate_properties(
     properties: &[crate::internal::js_ast::Property],
     context: DuplicatePropertiesIn,
 ) {
+    if is_inside_node_modules(&core.source.key_path.text) {
+        return;
+    }
+    let (id, what, location) = match context {
+        DuplicatePropertiesIn::Object => (MsgId::JsDuplicateObjectKey, "key", "object literal"),
+        DuplicatePropertiesIn::Class => (MsgId::JsDuplicateClassMember, "member", "class body"),
+    };
     for duplicate in find_duplicate_properties(properties, context) {
         let key = String::from_utf16_lossy(&duplicate.key);
-        let context = match context {
-            DuplicatePropertiesIn::Object => "object literal",
-            DuplicatePropertiesIn::Class => "class body",
-        };
         if let Some(log) = &core.log {
-            let earlier_range = Range {
-                loc: duplicate.original_loc,
-                len: 0,
-            };
-            let note = core
-                .tracker
-                .msg_data(earlier_range, format!("The original key {key:?} is here:"));
+            let earlier_range = crate::internal::js_lexer::range_of_identifier(
+                &core.source,
+                duplicate.original_loc,
+            );
+            let note = core.tracker.msg_data(
+                earlier_range,
+                format!("The original {what} {key:?} is here:"),
+            );
             log.add_id_with_notes(
-                MsgId::JsDuplicateObjectKey,
-                if is_inside_node_modules(&core.source.key_path.text) {
-                    MsgKind::Debug
-                } else {
-                    MsgKind::Warning
-                },
+                id,
+                MsgKind::Warning,
                 Some(&mut core.tracker),
-                Range {
-                    loc: duplicate.duplicate_loc,
-                    len: 0,
-                },
-                format!("Duplicate key {key:?} in {context}"),
+                crate::internal::js_lexer::range_of_identifier(
+                    &core.source,
+                    duplicate.duplicate_loc,
+                ),
+                format!("Duplicate {what} {key:?} in {location}"),
                 vec![note],
             );
         }
