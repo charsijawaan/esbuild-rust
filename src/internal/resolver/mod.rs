@@ -3380,6 +3380,8 @@ fn get_pnp_dependency_target(expression: &Expr) -> Option<PnpIdentAndReference> 
 
 type ExtendsCallback<'a> = dyn FnMut(&str, Range) -> Option<TsConfigJson> + 'a;
 
+// The caller owns recursion scope. Only a complete root config may filter paths
+// after all inherited baseUrl and paths settings have been combined.
 #[allow(clippy::too_many_lines)]
 pub fn parse_tsconfig_json(
     log: &Log,
@@ -3388,6 +3390,7 @@ pub fn parse_tsconfig_json(
     file_dir: &str,
     config_dir: &str,
     mut extends: Option<&mut ExtendsCallback<'_>>,
+    is_extends: bool,
 ) -> Option<TsConfigJson> {
     let (json, ok) = parse_json(
         log.clone(),
@@ -3676,6 +3679,26 @@ pub fn parse_tsconfig_json(
         }
     }
 
+    // Validate the final config, including raw API configs, after all baseUrl
+    // and paths overrides have been applied.
+    if !is_extends
+        && result.base_url.is_none()
+        && let Some(paths) = &mut result.paths
+    {
+        let mut tracker = None;
+        for substitutions in paths.map.values_mut() {
+            substitutions.retain(|path| {
+                is_valid_tsconfig_path_no_base_url_pattern(
+                    &path.text,
+                    log,
+                    &paths.source,
+                    &mut tracker,
+                    path.loc,
+                )
+            });
+        }
+    }
+
     Some(result)
 }
 
@@ -3738,12 +3761,10 @@ fn is_valid_tsconfig_path_pattern(
     false
 }
 
-#[allow(dead_code)]
 fn is_slash(byte: u8) -> bool {
     matches!(byte, b'/' | b'\\')
 }
 
-#[allow(dead_code)]
 fn is_valid_tsconfig_path_no_base_url_pattern(
     text: &str,
     log: &Log,
@@ -4173,6 +4194,7 @@ mod tests {
             "/project",
             "/configs",
             Some(&mut extends),
+            false,
         )
         .expect("valid tsconfig");
 

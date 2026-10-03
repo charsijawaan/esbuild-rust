@@ -10,9 +10,9 @@ The captured corpus currently contains 14,038 concrete cases:
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
 | JS/TS parser and parser lowering | 7,116 | 1,527 | 8,643 |
-| Bundler | 940 | 131 | 1,071 |
+| Bundler | 942 | 129 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,380 | 1,658 | 14,038 |
+| Total | 12,382 | 1,656 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -1025,6 +1025,18 @@ The complete isolated runtime audit at `be18e17` is recorded in
 `end_to_end_service_checkpoint.json`: 1,461 passed, one shared Go/Rust failure
 at case 80, and no timeouts or regressions relative to `28438b2`.
 
+Tsconfig path substitutions are validated after inheritance, so a derived
+`baseUrl` can make inherited paths valid. Recursion scope is passed explicitly;
+complete configs and failures are cached within each scanner instead of ambient
+thread state. Independent scans and context rebuilds validate again, while
+injected files, stdin, and entry inputs share one scan's diagnostics. Two
+original diagnostic fixtures are newly active with unchanged assertions.
+Nine integration regressions compare 19 pinned Go configurations, and two
+scanner unit regressions verify warning lifetime and deduplication. The isolated
+normal suite passes 1,134 tests and strict Clippy retains 621 existing errors
+without additions. Raw-config inheritance and package-export condition handling
+remain separate follow-ups.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -1180,7 +1192,7 @@ instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 Files containing invalid UTF-8 are additionally stored in a base64 sidecar so
 binary-loader snapshots retain the exact upstream bytes.
 
-The active bundler tranche exact-compares 856 Unix snapshots and 83
+The active bundler tranche exact-compares 856 Unix snapshots and 85
 diagnostic-only cases from the default, DCE, import-star, TypeScript import-star,
 lowering, TypeScript, package-json,
 tsconfig, loader, CSS, code-splitting, Yarn PnP, import-phase, and entry-point glob suites that use

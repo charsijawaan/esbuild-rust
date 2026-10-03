@@ -1709,6 +1709,7 @@ pub(crate) fn resolve_for_plugin_api(
                 (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
                 options.preserve_symlinks,
                 options.log_path_style,
+                &mut TsConfigCache::default(),
             )
         } else {
             None
@@ -2433,6 +2434,15 @@ fn resolve_import_records_from_directory(
     }
 }
 
+// Final configs belong to one scanner, just like upstream's resolver dirCache.
+// Extends sources are deliberately not cached here: their configDir and final
+// baseUrl depend on the root config that is currently being parsed.
+// Preserve the current loader's PnP query context as part of the cache key.
+#[derive(Default)]
+struct TsConfigCache {
+    roots: HashMap<(String, String, Option<String>), Option<resolver::TsConfigJson>>,
+}
+
 fn find_nearest_tsconfig(
     log: &Log,
     file_system: &dyn Fs,
@@ -2440,6 +2450,7 @@ fn find_nearest_tsconfig(
     override_path: Option<&str>,
     preserve_symlinks: bool,
     log_path_style: logger::PathStyle,
+    tsconfig_cache: &mut TsConfigCache,
 ) -> Option<resolver::TsConfigJson> {
     fn discover_pnp(
         log: &Log,
@@ -2497,6 +2508,7 @@ fn find_nearest_tsconfig(
         if !visited.insert(path.to_string()) {
             return None;
         }
+        let is_extends = visited.len() > 1;
         let (contents, error, _) = file_system.read_file(path);
         if error.is_some() {
             return None;
@@ -2694,13 +2706,35 @@ fn find_nearest_tsconfig(
             &directory,
             config_dir,
             Some(&mut extends),
+            is_extends,
         );
         visited.remove(path);
         result
     }
 
-    let mut visited = HashSet::new();
     let pnp = discover_pnp(log, file_system, start_directory);
+    let mut load_root = |path: &str, config_dir: &str| {
+        let key = (
+            path.to_string(),
+            config_dir.to_string(),
+            pnp.as_ref().map(|manifest| manifest.abs_path.clone()),
+        );
+        if let Some(config) = tsconfig_cache.roots.get(&key) {
+            return config.clone();
+        }
+        let config = load(
+            log,
+            file_system,
+            path,
+            &mut HashSet::new(),
+            config_dir,
+            pnp.as_ref(),
+            preserve_symlinks,
+            log_path_style,
+        );
+        tsconfig_cache.roots.insert(key, config.clone());
+        config
+    };
     if let Some(path) = override_path {
         let (_, error, _) = file_system.read_file(path);
         if error.is_some() {
@@ -2712,16 +2746,7 @@ fn find_nearest_tsconfig(
             return None;
         }
         let config_dir = file_system.dir(path);
-        return load(
-            log,
-            file_system,
-            path,
-            &mut visited,
-            &config_dir,
-            pnp.as_ref(),
-            preserve_symlinks,
-            log_path_style,
-        );
+        return load_root(path, &config_dir);
     }
     if crate::internal::helpers::is_inside_node_modules(start_directory) {
         return None;
@@ -2732,16 +2757,7 @@ fn find_nearest_tsconfig(
             let path = file_system.join(&[&directory, config_name]);
             let (_, error, _) = file_system.read_file(&path);
             if error.is_none() {
-                return load(
-                    log,
-                    file_system,
-                    &path,
-                    &mut visited,
-                    &directory,
-                    pnp.as_ref(),
-                    preserve_symlinks,
-                    log_path_style,
-                );
+                return load_root(&path, &directory);
             }
         }
         let parent = file_system.dir(&directory);
@@ -2763,6 +2779,7 @@ fn parse_pending_file(
     options: &Options,
     unique_key_prefix: &str,
     pending: &PendingFile,
+    tsconfig_cache: &mut TsConfigCache,
 ) -> ParseResult {
     let PendingFile {
         is_injected,
@@ -2853,6 +2870,7 @@ fn parse_pending_file(
             (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
             options.preserve_symlinks,
             options.log_path_style,
+            tsconfig_cache,
         )
     } else {
         None
@@ -3016,6 +3034,7 @@ fn preprocess_injected_files(
     caches: &CacheSet,
     options: &mut Options,
     unique_key_prefix: &str,
+    tsconfig_cache: &mut TsConfigCache,
 ) -> Vec<ParseResult> {
     if options.inject_paths.is_empty() {
         return Vec::new();
@@ -3050,6 +3069,7 @@ fn preprocess_injected_files(
                 import_path_range: Range::default(),
                 import_assert_or_with: None,
             },
+            tsconfig_cache,
         );
         if result.file.input_file.loader == Loader::Copy && options.mode != Mode::Bundle {
             log.add_error(
@@ -3117,6 +3137,7 @@ pub fn scan_bundle(
     apply_option_defaults(options);
     run_on_start_plugins(log, file_system, &options.plugins);
     let mut bundle = ScannedBundle::default();
+    let mut tsconfig_cache = TsConfigCache::default();
 
     let runtime_source = runtime::source(options.unsupported_js_features);
     let runtime_options = Options {
@@ -3152,8 +3173,14 @@ pub fn scan_bundle(
     let mut pending = Vec::new();
     let mut queued = HashSet::from([runtime::SOURCE_INDEX]);
     let mut resolution_slots: HashMap<u32, Vec<Option<ResolveResult>>> = HashMap::new();
-    let injected_results =
-        preprocess_injected_files(log, file_system, caches, options, unique_key_prefix);
+    let injected_results = preprocess_injected_files(
+        log,
+        file_system,
+        caches,
+        options,
+        unique_key_prefix,
+        &mut tsconfig_cache,
+    );
     queued.extend(
         injected_results
             .iter()
@@ -3234,6 +3261,7 @@ pub fn scan_bundle(
                 (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
                 options.preserve_symlinks,
                 options.log_path_style,
+                &mut tsconfig_cache,
             )
         } else {
             None
@@ -3467,6 +3495,7 @@ pub fn scan_bundle(
             options,
             unique_key_prefix,
             &pending[cursor],
+            &mut tsconfig_cache,
         );
         cursor += 1;
         let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
@@ -4646,6 +4675,86 @@ mod tests {
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
+
+    #[test]
+    fn independent_scans_with_the_same_log_each_validate_tsconfig_paths() {
+        let file_system = mock_fs(
+            &HashMap::from([
+                ("/entry.ts".into(), "console.log('entry');".into()),
+                (
+                    "/tsconfig.json".into(),
+                    r#"{"compilerOptions":{"paths":{"unused":["bad.ts"]}}}"#.into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/",
+        );
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let caches = CacheSet::default();
+        for expected_count in 1..=2 {
+            let _ = scan_bundle(
+                &log,
+                &file_system,
+                &caches,
+                &[super::EntryPoint {
+                    input_path: "/entry.ts".into(),
+                    ..super::EntryPoint::default()
+                }],
+                &mut Options {
+                    mode: Mode::Bundle,
+                    ..Options::default()
+                },
+                "REVIEW",
+            );
+            let messages = log.done();
+            assert_eq!(messages.len(), expected_count);
+            for message in messages {
+                assert_eq!(message.kind, MsgKind::Warning);
+                assert!(message.data.text.contains("Non-relative path"));
+            }
+        }
+    }
+
+    #[test]
+    fn injected_stdin_and_entry_inputs_share_one_tsconfig_validation_scope() {
+        let file_system = mock_fs(
+            &HashMap::from([
+                ("/entry.ts".into(), "console.log('entry');".into()),
+                ("/inject.ts".into(), "console.log('injected');".into()),
+                (
+                    "/tsconfig.json".into(),
+                    r#"{"compilerOptions":{"paths":{"unused":["bad.ts"]}}}"#.into(),
+                ),
+            ]),
+            MockKind::Unix,
+            "/",
+        );
+        let log = Log::new_defer(DeferLogKind::All, HashMap::new());
+        let _ = scan_bundle(
+            &log,
+            &file_system,
+            &CacheSet::default(),
+            &[super::EntryPoint {
+                input_path: "/entry.ts".into(),
+                ..super::EntryPoint::default()
+            }],
+            &mut Options {
+                mode: Mode::Bundle,
+                inject_paths: vec!["/inject.ts".into()],
+                stdin: Some(config::StdinInfo {
+                    contents: "console.log('stdin');".into(),
+                    abs_resolve_dir: "/".into(),
+                    ..config::StdinInfo::default()
+                }),
+                ..Options::default()
+            },
+            "REVIEW",
+        );
+        let messages = log.done();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MsgKind::Warning);
+        assert!(messages[0].data.text.contains("Non-relative path"));
+    }
 
     fn upstream_numeric_option(options: &serde_json::Value, name: &str) -> Option<u64> {
         options.get(name).and_then(serde_json::Value::as_u64)
@@ -5906,7 +6015,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 939 },
+            if selected_test.is_some() { 1 } else { 941 },
             "upstream basic bundler corpus case count"
         );
     }

@@ -2056,6 +2056,7 @@ fn parse_tsconfig_raw(
         directory,
         directory,
         None,
+        false,
     )
 }
 
