@@ -1,0 +1,701 @@
+[
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 22,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 2,
+          "line_text": "export {default} from './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "relative",
+      "contents": "// heading\nexport {default} from './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 17,
+          "line": 1,
+          "line_text": "import 'missing-package'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"missing-package\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"missing-package\""
+      }
+    ],
+    "input": {
+      "name": "package",
+      "contents": "import 'missing-package'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 4,
+          "line": 1,
+          "line_text": "import 'fs'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"fs\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"fs\""
+      }
+    ],
+    "input": {
+      "name": "builtin_hint_override",
+      "contents": "import 'fs'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 8,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "require('./loadme')",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "require",
+      "contents": "require('./loadme')",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "import('./loadme')",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "dynamic",
+      "contents": "import('./loadme')",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"reported \\\"loader\\\"\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "loader_name_override",
+      "contents": "import './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "reported \"loader\"",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "deferred_loader",
+      "contents": "import './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": true,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "custom:subdir/virtual.js",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"custom:subdir/virtual.js\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "virtual_path",
+      "contents": "import './loadme'",
+      "path": "subdir/virtual.js",
+      "namespace": "custom",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "absolute_log_paths",
+      "contents": "import './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": true,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'; export * from './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "duplicate",
+      "contents": "import './loadme'; export * from './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 8,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 2,
+          "line_text": "require('./loadme')",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "handled_require_then_unhandled",
+      "contents": "try { require('./loadme') } catch {}\nrequire('./loadme')",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [],
+    "input": {
+      "name": "handled_require",
+      "contents": "try { require('./loadme') } catch {}",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 1,
+    "warnings": []
+  },
+  {
+    "errors": [],
+    "input": {
+      "name": "handled_dynamic",
+      "contents": "import('./loadme').catch(() =\u003e {})",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 1,
+    "warnings": []
+  },
+  {
+    "errors": [],
+    "input": {
+      "name": "require_resolve",
+      "contents": "require.resolve('./loadme')",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 1,
+    "warnings": [
+      {
+        "detail_is_nil": true,
+        "id": "require-resolve-not-external",
+        "location": {
+          "column": 16,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "require.resolve('./loadme')",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [],
+        "plugin_name": "",
+        "text": "\"./loadme\" should be marked as external for use with \"require.resolve\""
+      }
+    ]
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "custom note"
+          }
+        ],
+        "plugin_name": "reported-resolver",
+        "text": "custom failure"
+      }
+    ],
+    "input": {
+      "name": "plugin_error",
+      "contents": "import './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "error",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [],
+    "input": {
+      "name": "external",
+      "contents": "import './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "external",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 1,
+    "warnings": []
+  },
+  {
+    "errors": [],
+    "input": {
+      "name": "explicit_directory",
+      "contents": "export {default} from './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": true,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 1,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './absent'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [],
+        "plugin_name": "",
+        "text": "Could not resolve \"./absent\""
+      }
+    ],
+    "input": {
+      "name": "directory_missing_relative",
+      "contents": "import './absent'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": true,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 16,
+          "line": 1,
+          "line_text": "import 'absent-package'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "You can mark the path \"absent-package\" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"absent-package\""
+      }
+    ],
+    "input": {
+      "name": "directory_missing_package",
+      "contents": "import 'absent-package'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": true,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [],
+    "input": {
+      "name": "file_directory_fallback",
+      "contents": "export {default} from './loadme'",
+      "path": "virtual.custom",
+      "namespace": "file",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 1,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 8,
+          "file": "for-testing:virtual",
+          "length": 14,
+          "line": 2,
+          "line_text": "@import './loadme.css';",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme.css\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme.css\""
+      }
+    ],
+    "input": {
+      "name": "css",
+      "contents": "/* heading */\n@import './loadme.css';",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": "css"
+    },
+    "output_files": 0,
+    "warnings": []
+  }
+]

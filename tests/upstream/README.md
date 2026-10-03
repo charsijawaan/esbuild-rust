@@ -1189,6 +1189,25 @@ python3 scripts/test_service_watch_transport.py \
   /path/to/rust-binary rust /tmp/watch-transport.json
 ```
 
+Plugin-loaded virtual modules without a resolve directory now report the
+original loader-attributed note, using shared Go quoting for plugin names,
+pretty paths, and requested imports. Entry points treat only `*` as a glob, so
+literal `?` paths reach plugins. Virtual rewrites retain the effective input
+prefix for generated output names. External import/export bindings hoisted
+from CommonJS wrappers reserve their names in the chunk scope before independent
+wrapper renaming, avoiding duplicate namespace declarations in ESM output.
+
+The three formerly failing originals `noResolveDirInVirtualModule`,
+`virtualEntryPoints`, and `externalRequire` now pass. All 25 selected original
+plugin functions pass on Rust and pinned Go in each worker mode; the frozen
+previous Rust binary passes 22/25 with precisely those three failures. Twelve
+new native regression groups include 25 captured full Go diagnostic results,
+13 optional live Go entry configurations, and executable namespace-shim controls.
+The normal suite passes 1,269 tests and strict Clippy retains the same 621
+diagnostic identities without new suppressions. Captured active indices and
+original assertions are unchanged. Broader filesystem-glob outbase inference
+and traversal/callback differences remain outside this correction.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

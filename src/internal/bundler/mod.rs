@@ -27,8 +27,8 @@ use crate::internal::{
         SideEffects, SideEffectsKind,
     },
     helpers::{
-        encode_string_as_shortest_data_url, mime_type_by_extension, quote_for_json, quote_single,
-        string_to_utf16, utf16_to_string,
+        encode_string_as_shortest_data_url, mime_type_by_extension, quote_for_json,
+        quote_go_string, quote_single, string_to_utf16, utf16_to_string,
     },
     js_ast::{self, ExportsKind, Expr, ExprData, ModuleType, StringExpr},
     js_lexer::KeyOrValue,
@@ -818,7 +818,7 @@ fn entry_point_is_file(file_system: &dyn Fs, entry_point: &EntryPoint) -> bool {
 }
 
 fn glob_traversal_root(file_system: &dyn Fs, absolute_pattern: &str) -> Option<String> {
-    let wildcard = absolute_pattern.find(['*', '?'])?;
+    let wildcard = absolute_pattern.find('*')?;
     let prefix = &absolute_pattern[..wildcard];
     let trimmed = prefix.trim_end_matches(['/', '\\']);
     Some(if trimmed.is_empty() && prefix.starts_with(['/', '\\']) {
@@ -831,15 +831,39 @@ fn glob_traversal_root(file_system: &dyn Fs, absolute_pattern: &str) -> Option<S
 }
 
 fn expand_entry_point_glob(file_system: &dyn Fs, pattern: &str) -> Option<Vec<String>> {
+    // Only '*' makes an entry point a glob. Other characters, including '?',
+    // must reach resolver plugins as part of the original literal path.
+    if !pattern.contains('*') {
+        return None;
+    }
     let absolute_pattern = if file_system.is_abs(pattern) {
         pattern.to_string()
     } else {
         file_system.join(&[file_system.cwd(), pattern])
     };
-    let (regexp, had_wildcard) = resolver::globstar_to_escaped_regexp(&absolute_pattern);
-    if !had_wildcard {
-        return None;
+    let mut regexp = String::from("^");
+    let mut was_globstar = false;
+    for part in crate::internal::helpers::parse_glob_pattern(&absolute_pattern) {
+        let prefix = part.prefix.replace('\\', "/");
+        let prefix = if was_globstar {
+            prefix.strip_prefix('/').unwrap_or(&prefix)
+        } else {
+            &prefix
+        };
+        regexp.push_str(&regex::escape(prefix));
+        match part.wildcard {
+            crate::internal::helpers::GlobWildcard::AllIncludingSlash => {
+                regexp.push_str("(?:[^/]*(?:/|$))*");
+                was_globstar = true;
+            }
+            crate::internal::helpers::GlobWildcard::AllExceptSlash => {
+                regexp.push_str("[^/]*");
+                was_globstar = false;
+            }
+            crate::internal::helpers::GlobWildcard::None => {}
+        }
     }
+    regexp.push('$');
     let regexp = regex::Regex::new(&regexp).ok()?;
     let root = glob_traversal_root(file_system, &absolute_pattern)?;
 
@@ -2171,6 +2195,11 @@ pub fn resolve_import_records(
     );
 }
 
+struct ImportResolveContext<'a> {
+    directory: &'a str,
+    plugin_name: &'a str,
+}
+
 #[allow(clippy::too_many_lines)]
 fn resolve_import_records_from_directory(
     log: &Log,
@@ -2178,7 +2207,7 @@ fn resolve_import_records_from_directory(
     caches: &CacheSet,
     options: &Options,
     tsconfig: Option<&resolver::TsConfigJson>,
-    source_directory: Option<&str>,
+    source_context: Option<ImportResolveContext<'_>>,
     result: &mut ParseResult,
 ) {
     if options.mode != Mode::Bundle || !result.ok {
@@ -2186,8 +2215,13 @@ fn resolve_import_records_from_directory(
     }
     let source = result.file.input_file.source.clone();
     let plugin_data = result.file.plugin_data.clone();
-    let source_directory =
-        source_directory.map_or_else(|| file_system.dir(&source.key_path.text), str::to_string);
+    let plugin_name = source_context
+        .as_ref()
+        .map_or("", |context| context.plugin_name);
+    let source_directory = source_context.map_or_else(
+        || file_system.dir(&source.key_path.text),
+        |context| context.directory.to_string(),
+    );
     // A raw build config replaces discovered configs and is anchored at cwd.
     // Upstream's tsConfigForDir excludes imports from node_modules.
     let tsconfig = if crate::internal::helpers::is_inside_node_modules(&source_directory) {
@@ -2398,7 +2432,29 @@ fn resolve_import_records_from_directory(
                     .contains(ImportRecordFlags::HANDLES_IMPORT_ERRORS)
             {
                 let mut notes = Vec::new();
-                if let Some(candidate) = relative_path_suggestion(
+                if source_directory.is_empty() && !plugin_name.is_empty() {
+                    let where_text = if source.pretty_paths == logger::PrettyPaths::default() {
+                        String::new()
+                    } else {
+                        format!(
+                            " for the file {}",
+                            quote_go_string(
+                                source
+                                    .pretty_paths
+                                    .select(options.log_path_style)
+                                    .as_bytes()
+                            )
+                        )
+                    };
+                    notes.push(MsgData {
+                        text: format!(
+                            "The plugin {} didn't set a resolve directory{where_text}, so esbuild did not search for {} on the file system.",
+                            quote_go_string(plugin_name.as_bytes()),
+                            quote_go_string(record.path.text.as_bytes())
+                        ),
+                        ..MsgData::default()
+                    });
+                } else if let Some(candidate) = relative_path_suggestion(
                     file_system,
                     options,
                     &source_directory,
@@ -3007,7 +3063,10 @@ fn parse_pending_file(
         caches,
         &file_options,
         tsconfig.as_ref(),
-        Some(&loaded.abs_resolve_dir),
+        Some(ImportResolveContext {
+            directory: &loaded.abs_resolve_dir,
+            plugin_name: &loaded.plugin_name,
+        }),
         &mut result,
     );
 
@@ -3365,7 +3424,10 @@ pub fn scan_bundle(
             caches,
             &file_options,
             tsconfig.as_ref(),
-            Some(stdin.abs_resolve_dir.as_str()),
+            Some(ImportResolveContext {
+                directory: &stdin.abs_resolve_dir,
+                plugin_name: "",
+            }),
             &mut result,
         );
         source_map::load_input_source_map(
@@ -3505,7 +3567,7 @@ pub fn scan_bundle(
             let generated_input_path = if path.namespace == "file" {
                 &path.text
             } else {
-                &entry_point.input_path
+                &input_path
             };
             let output_path =
                 automatically_generated_entry_point_path(file_system, generated_input_path);

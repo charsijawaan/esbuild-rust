@@ -1,0 +1,158 @@
+[
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\\x00\\a\\b\\f\\v\\u2028\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "override-controls",
+      "contents": "import './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "loader\u0000\u0007\b\f\u000b\u2028",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:virtual",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"café\" didn't set a resolve directory for the file \"for-testing:virtual\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "override-combining",
+      "contents": "import './loadme'",
+      "path": "",
+      "namespace": "",
+      "plugin_name": "café",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:subdir/virtual\u0007\u2028.js",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:subdir/virtual\\a\\u2028.js\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "pretty-path-controls",
+      "contents": "import './loadme'",
+      "path": "subdir/virtual\u0007\u2028.js",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  },
+  {
+    "errors": [
+      {
+        "detail_is_nil": true,
+        "id": "",
+        "location": {
+          "column": 7,
+          "file": "for-testing:subdir/café.js",
+          "length": 10,
+          "line": 1,
+          "line_text": "import './loadme'",
+          "namespace": "",
+          "suggestion": ""
+        },
+        "notes": [
+          {
+            "location": null,
+            "text": "The plugin \"loader\" didn't set a resolve directory for the file \"for-testing:subdir/café.js\", so esbuild did not search for \"./loadme\" on the file system."
+          }
+        ],
+        "plugin_name": "",
+        "text": "Could not resolve \"./loadme\""
+      }
+    ],
+    "input": {
+      "name": "pretty-path-unicode",
+      "contents": "import './loadme'",
+      "path": "subdir/café.js",
+      "namespace": "",
+      "plugin_name": "",
+      "resolve_action": "",
+      "resolve_dir": false,
+      "deferred": false,
+      "abs_paths": false,
+      "loader": ""
+    },
+    "output_files": 0,
+    "warnings": []
+  }
+]

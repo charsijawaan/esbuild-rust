@@ -6921,6 +6921,53 @@ pub fn rename_symbols_in_chunk(
         };
         if repr.meta.wrap == WrapKind::Cjs {
             renamer.add_top_level_symbol(repr.ast.wrapper_ref);
+            // External imports are hoisted outside the CommonJS wrapper when
+            // the output keeps ESM syntax. Reserve their bindings in the chunk
+            // scope before assigning independent names inside each wrapper.
+            if options.output_format.keep_esm_import_export_syntax() {
+                for part in &repr.ast.parts {
+                    for statement in &part.statements {
+                        let Some(data) = statement.data.as_deref() else {
+                            continue;
+                        };
+                        match data {
+                            js_ast::StmtData::Import(import)
+                                if !repr.ast.import_records[import.import_record_index as usize]
+                                    .source_index
+                                    .is_valid() =>
+                            {
+                                renamer.add_top_level_symbol(import.namespace_ref);
+                                if let Some(default_name) = &import.default_name {
+                                    renamer.add_top_level_symbol(default_name.reference);
+                                }
+                                if let Some(items) = &import.items {
+                                    for item in items {
+                                        renamer.add_top_level_symbol(item.name.reference);
+                                    }
+                                }
+                            }
+                            js_ast::StmtData::ExportStar(export)
+                                if !repr.ast.import_records[export.import_record_index as usize]
+                                    .source_index
+                                    .is_valid() =>
+                            {
+                                renamer.add_top_level_symbol(export.namespace_ref);
+                            }
+                            js_ast::StmtData::ExportFrom(export)
+                                if !repr.ast.import_records[export.import_record_index as usize]
+                                    .source_index
+                                    .is_valid() =>
+                            {
+                                renamer.add_top_level_symbol(export.namespace_ref);
+                                for item in &export.items {
+                                    renamer.add_top_level_symbol(item.name.reference);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             if let Some(module_scope) = &repr.ast.module_scope {
                 nested_scopes.insert(source_index, vec![module_scope.clone()]);
             }

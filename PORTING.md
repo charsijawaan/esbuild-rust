@@ -128,8 +128,8 @@ original upstream behavior before classifying them.
 
 ## Validation limits
 
-The latest recorded normal suite passed **1,257 Rust tests**, many of which
-iterate over captured cases; this is not 1,257 additional upstream cases.
+The latest recorded normal suite passed **1,269 Rust tests**, many of which
+iterate over captured cases; this is not 1,269 additional upstream cases.
 The exhaustive parser audit is separately ignored in normal runs. Strict
 Clippy remains blocked by **621 previously recorded errors**. See
 [tests/upstream/README.md](tests/upstream/README.md) for the committed checks,
