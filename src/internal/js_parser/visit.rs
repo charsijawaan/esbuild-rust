@@ -460,6 +460,45 @@ fn lower_private_wrapper(
     )
 }
 
+fn lower_private_assignment_pattern(core: &mut ParserCore, pattern: &mut Expr) {
+    match pattern.data.as_deref_mut() {
+        Some(ExprData::Index(index)) => {
+            if let Some((target, private)) = lowered_private_index(core, index) {
+                let loc = pattern.loc;
+                let storage = private_storage_identifier(core, loc, private.storage);
+                let mut args = vec![target, storage];
+                if let Some(setter) = private.setter {
+                    args.push(private_storage_identifier(core, loc, setter));
+                }
+                let wrapper = core.call_runtime(loc, "__privateWrapper", args);
+                *pattern = Expr::new(
+                    loc,
+                    ExprData::Dot(DotExpr {
+                        target: wrapper,
+                        name: "_".into(),
+                        name_loc: loc,
+                        ..DotExpr::default()
+                    }),
+                );
+            }
+        }
+        Some(ExprData::Array(array)) => {
+            for item in &mut array.items {
+                lower_private_assignment_pattern(core, item);
+            }
+        }
+        Some(ExprData::Object(object)) => {
+            for property in &mut object.properties {
+                lower_private_assignment_pattern(core, &mut property.value_or_nil);
+            }
+        }
+        Some(ExprData::Spread(spread)) => {
+            lower_private_assignment_pattern(core, &mut spread.value);
+        }
+        _ => {}
+    }
+}
+
 fn compound_assignment_operator(op: OpCode) -> Option<OpCode> {
     Some(match op {
         OpCode::BinaryAddAssign => OpCode::BinaryAdd,
@@ -4755,16 +4794,26 @@ fn visit_for_loop_init(
     is_in_or_of: bool,
 ) {
     match statement.data.as_deref_mut() {
-        Some(StmtData::Expr(expression)) => visit_expr_with_target(
-            core,
-            &mut expression.value,
-            resolve_identifiers,
-            if is_in_or_of {
-                AssignTarget::Replace
-            } else {
-                AssignTarget::None
-            },
-        ),
+        Some(StmtData::Expr(expression)) => {
+            visit_expr_with_target(
+                core,
+                &mut expression.value,
+                resolve_identifiers,
+                if is_in_or_of {
+                    AssignTarget::Replace
+                } else {
+                    AssignTarget::None
+                },
+            );
+            if is_in_or_of
+                && matches!(
+                    expression.value.data.as_deref(),
+                    Some(ExprData::Array(_) | ExprData::Object(_))
+                )
+            {
+                lower_private_assignment_pattern(core, &mut expression.value);
+            }
+        }
         Some(StmtData::Local(_)) => {
             let old_mode = core.options.mode;
             if is_in_or_of {
@@ -11715,6 +11764,15 @@ fn visit_expr_with_target_and_context(
             core.class_name_hint = old_class_name_hint;
             core.is_control_flow_dead = old_control_flow_dead;
             keep_inferred_name(core, &mut binary.right, inferred_name);
+            if assign_target == AssignTarget::None
+                && binary.op == OpCode::BinaryAssign
+                && matches!(
+                    binary.left.data.as_deref(),
+                    Some(ExprData::Array(_) | ExprData::Object(_))
+                )
+            {
+                lower_private_assignment_pattern(core, &mut binary.left);
+            }
             if binary.op == OpCode::BinaryIn
                 && let Some(ExprData::PrivateIdentifier(private)) = binary.left.data.as_deref()
                 && let Some(storage) = lowered_private_storage_ref(core, private.reference)
@@ -12793,6 +12851,16 @@ fn visit_expr_with_target_and_context(
                     }
                 } else {
                     validate_non_computed_property_key(core, &property.key);
+                }
+                // Assignment patterns store defaults separately from their
+                // targets so visitation does not lower them as assignments.
+                if assign_target != AssignTarget::None
+                    && property.initializer_or_nil.data.is_none()
+                    && let Some(ExprData::Binary(binary)) = property.value_or_nil.data.as_deref_mut()
+                    && binary.op == OpCode::BinaryAssign
+                {
+                    property.initializer_or_nil = std::mem::take(&mut binary.right);
+                    property.value_or_nil = std::mem::take(&mut binary.left);
                 }
                 let old_super_home_ref = core.visit_super_home_ref;
                 let old_super_home_is_class_instance = core.visit_super_home_is_class_instance;

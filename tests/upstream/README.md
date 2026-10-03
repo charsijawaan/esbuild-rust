@@ -495,6 +495,17 @@ timeouts. Cases 939, 941, 1123, and 1125 are newly passing without regressions
 relative to `44fdb03`. Case 80 remains the shared environment failure, leaving
 77 Rust-only failures.
 
+Private members in assignment patterns now use `__privateWrapper` targets,
+including nested array/object patterns, rest targets, and loop patterns. Object
+defaults are extracted before visitation so they remain initializers instead of
+becoming standalone private assignments. A native Node regression and 12
+Rust/pinned-Go transform/bundle combinations check assignment results, setters,
+receiver evaluation order, iterator closing, static fields, and brand errors.
+The normal suite passes 987 tests; the full parser audit preserves all 7,061
+active cases, and strict Clippy retains 623 existing errors without added
+diagnostics. Array-pattern defaults and direct private loop targets remain
+separate work; explored pinned-Go outputs also have runtime gaps there.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
