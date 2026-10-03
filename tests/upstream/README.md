@@ -749,6 +749,15 @@ The complete runtime audit at `560f331` is recorded in
 timeouts. Case 1344 is newly passing without regressions relative to `895a4d7`.
 Case 80 remains the shared environment failure, leaving 16 Rust-only failures.
 
+Built-in resolution now emits `different-path-case` warnings from the resolver's
+existing filename-case metadata. Importers outside `node_modules` warn for both
+relative and package paths; importers inside it retain upstream's suppression.
+Locations, absolute log paths, and warning overrides are preserved. Eleven
+configurations match pinned Go's diagnostics and execute with the expected
+values on the current case-insensitive filesystem. The normal suite passes
+1,015 tests, including the active parser fixtures; strict Clippy retains 621
+existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

@@ -1592,6 +1592,29 @@ fn resolve_with_plugins(
             ..ResolverContext::default()
         },
     );
+    if !crate::internal::helpers::is_inside_node_modules(abs_resolve_dir)
+        && let Some(different_case) = result.as_ref().and_then(|result| result.different_case.as_ref())
+    {
+        let pretty_path = |base: &str| {
+            let path = file_system.join(&[&different_case.dir, base]);
+            logger::PrettyPaths {
+                abs: path.clone(),
+                rel: file_system.rel(file_system.cwd(), &path).unwrap_or(path),
+            }
+        };
+        let mut tracker = LineColumnTracker::new(import_source);
+        log.add_id(
+            logger::MsgId::BundlerDifferentPathCase,
+            MsgKind::Warning,
+            Some(&mut tracker),
+            import_path_range,
+            format!(
+                "Use {:?} instead of {:?} to avoid issues with case-sensitive file systems",
+                pretty_path(&different_case.actual).select(options.log_path_style),
+                pretty_path(&different_case.query).select(options.log_path_style),
+            ),
+        );
+    }
     let mut replayed = Vec::new();
     for message in resolver_log.done() {
         if replayed
