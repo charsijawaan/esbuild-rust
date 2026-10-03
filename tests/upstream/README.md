@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,095 | 1,548 | 8,643 |
+| JS/TS parser and parser lowering | 7,107 | 1,536 | 8,643 |
 | Bundler | 939 | 132 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,358 | 1,680 | 14,038 |
+| Total | 12,370 | 1,668 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -901,6 +901,20 @@ The isolated normal suite passes 1,051 tests, the exhaustive parser audit passes
 7,095 cases without regressions, and strict Clippy retains 621 existing errors
 without added diagnostics.
 
+The complete isolated runtime audit at `0d1f035` is recorded in
+`end_to_end_optional_chain_checkpoint.json`: 1,461 passed, one shared Go/Rust
+failure at case 80, and no timeouts or regressions relative to `c1e4f42`.
+
+String and inlined enum lengths now fold using UTF-16 code units; numeric
+in-bounds literal string indexes fold to the corresponding code unit. Twelve
+original parser cases are newly active with unchanged assertions. Four extra
+regressions cover Unicode, invalid indexes, inherited getters, call and tag
+receivers, and 20 executable configurations. Separate output assertions record
+pinned Go's literal-index write/delete quirks without claiming correct runtimes.
+The isolated normal suite passes 1,055 tests, the exhaustive parser audit passes
+7,107 cases without regressions, and strict Clippy retains 621 existing errors
+without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -1001,7 +1015,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,095 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,107 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -1098,7 +1112,7 @@ declaration hoisting, and TypeScript namespace exports. Their original option
 bits and output snapshots are unchanged. It also includes nine injection cases
 covering duplicate paths, import order, TypeScript, JSX dotted names, `import.meta`,
 string export names, non-bundled builds, and copied files. It also covers bundled
-and non-bundled import-assignment diagnostics. So 12,358 concrete upstream cases
+and non-bundled import-assignment diagnostics. So 12,370 concrete upstream cases
 are currently active in `cargo test`; the remaining 132 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

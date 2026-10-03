@@ -11467,6 +11467,41 @@ fn dot_chain_parts(core: &ParserCore, expression: &Expr, tail: &str) -> Option<V
     }
 }
 
+fn maybe_fold_string_length(target: &Expr, name: &str) -> Option<ExprData> {
+    if name != "length" {
+        return None;
+    }
+    let target = match target.data.as_deref()? {
+        ExprData::InlinedEnum(inlined) => &inlined.value,
+        _ => target,
+    };
+    let ExprData::String(string) = target.data.as_deref()? else {
+        return None;
+    };
+    // JavaScript counts UTF-16 code units, including unpaired surrogates.
+    Some(ExprData::Number(f64::from(
+        u32::try_from(string.value.len()).ok()?,
+    )))
+}
+
+fn maybe_fold_string_index(target: &Expr, index: &Expr) -> Option<ExprData> {
+    let ExprData::Number(number) = index.data.as_deref()? else {
+        return None;
+    };
+    let ExprData::String(string) = target.data.as_deref()? else {
+        return None;
+    };
+    let length = u32::try_from(string.value.len()).ok()?;
+    if number.fract() != 0.0 || *number < 0.0 || *number >= f64::from(length) {
+        return None;
+    }
+    let offset = usize::try_from(crate::internal::js_ast::to_uint32(*number)).ok()?;
+    Some(ExprData::String(StringExpr {
+        value: vec![string.value[offset]],
+        ..StringExpr::default()
+    }))
+}
+
 fn maybe_fold_object_property_access(
     core: &ParserCore,
     target: &Expr,
@@ -12994,6 +13029,14 @@ fn visit_expr_with_target_and_context(
             if core.options.minify_syntax
                 && assign_target == AssignTarget::None
                 && dot.optional_chain == OptionalChain::None
+                && let Some(replacement) = maybe_fold_string_length(&dot.target, &dot.name)
+            {
+                *data = replacement;
+                return;
+            }
+            if core.options.minify_syntax
+                && assign_target == AssignTarget::None
+                && dot.optional_chain == OptionalChain::None
                 && !context.is_call_target
                 && !context.is_template_tag
                 && let Some(replacement) =
@@ -13177,6 +13220,22 @@ fn visit_expr_with_target_and_context(
                 )
             {
                 *data = lowered;
+                return;
+            }
+            if core.options.minify_syntax
+                && assign_target == AssignTarget::None
+                && index.optional_chain == OptionalChain::None
+                && let Some(ExprData::String(string)) = index.index.data.as_deref()
+                && crate::internal::helpers::utf16_equals_wtf8(&string.value, b"length")
+                && let Some(replacement) = maybe_fold_string_length(&index.target, "length")
+            {
+                *data = replacement;
+                return;
+            }
+            if core.options.minify_syntax
+                && let Some(replacement) = maybe_fold_string_index(&index.target, &index.index)
+            {
+                *data = replacement;
                 return;
             }
             if core.options.minify_syntax
