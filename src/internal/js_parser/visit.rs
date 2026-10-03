@@ -810,6 +810,28 @@ fn lower_optional_chain(core: &mut ParserCore, expression: Expr) -> Option<ExprD
     if let Some(lowered) = lower_private_optional_chain(core, &expression) {
         return Some(lowered);
     }
+    lower_optional_chain_with_receiver(core, expression, false)
+        .and_then(|lowered| lowered.value.data.map(|data| *data))
+}
+
+struct OptionalChainReceiver {
+    value: Expr,
+    wrappers: Vec<CaptureValueWrapper>,
+}
+
+struct LoweredOptionalChain {
+    value: Expr,
+    receiver: Option<OptionalChainReceiver>,
+}
+
+// Each OptionalChain::Start begins a separate chain. As in Go's exprOut,
+// carry the last property's receiver and its wrapper to an outer optional call.
+// The wrapper must enclose that call too when the capture is a parameter.
+fn lower_optional_chain_with_receiver(
+    core: &mut ParserCore,
+    expression: Expr,
+    store_this_arg: bool,
+) -> Option<LoweredOptionalChain> {
     let loc = expression.loc;
     let mut current = expression;
     let mut chain = Vec::new();
@@ -817,7 +839,7 @@ fn lower_optional_chain(core: &mut ParserCore, expression: Expr) -> Option<ExprD
 
     loop {
         match current.data.as_deref()? {
-            ExprData::Dot(dot) => {
+            ExprData::Dot(dot) if dot.optional_chain != OptionalChain::None => {
                 let is_start = dot.optional_chain == OptionalChain::Start;
                 chain.push(ExprData::Dot(dot.clone()));
                 current = dot.target.clone();
@@ -825,7 +847,7 @@ fn lower_optional_chain(core: &mut ParserCore, expression: Expr) -> Option<ExprD
                     break;
                 }
             }
-            ExprData::Index(index) => {
+            ExprData::Index(index) if index.optional_chain != OptionalChain::None => {
                 let is_start = index.optional_chain == OptionalChain::Start;
                 if let Some(ExprData::PrivateIdentifier(private)) = index.index.data.as_deref()
                     && lowered_private_storage_ref(core, private.reference).is_some()
@@ -838,7 +860,7 @@ fn lower_optional_chain(core: &mut ParserCore, expression: Expr) -> Option<ExprD
                     break;
                 }
             }
-            ExprData::Call(call) => {
+            ExprData::Call(call) if call.optional_chain != OptionalChain::None => {
                 let is_start = call.optional_chain == OptionalChain::Start;
                 chain.push(ExprData::Call(call.clone()));
                 current = call.target.clone();
@@ -860,9 +882,20 @@ fn lower_optional_chain(core: &mut ParserCore, expression: Expr) -> Option<ExprD
     }
 
     let starts_with_call = matches!(chain.last(), Some(ExprData::Call(_)));
-    let mut this_arg = None;
+    let child_receiver = if let Some(lowered) =
+        lower_optional_chain_with_receiver(core, current.clone(), starts_with_call)
+    {
+        current = lowered.value;
+        lowered.receiver
+    } else {
+        None
+    };
+    let (mut this_arg, mut wrappers) = child_receiver.map_or_else(
+        || (None, Vec::new()),
+        |receiver| (Some(receiver.value), receiver.wrappers),
+    );
     let mut receiver_wrapper = CaptureValueWrapper::default();
-    if starts_with_call {
+    if starts_with_call && this_arg.is_none() {
         let current_is_super_get = is_runtime_helper_call(core, &current, "__superGet");
         match current.data.as_deref_mut() {
             Some(ExprData::Dot(dot)) => {
@@ -905,7 +938,21 @@ fn lower_optional_chain(core: &mut ParserCore, expression: Expr) -> Option<ExprD
     let ([value_for_test, mut result], wrapper) =
         capture_value_with_possible_side_effects(core, loc, current);
     let mut is_first_link = true;
-    for link in chain.into_iter().rev() {
+    let mut parent_receiver = None;
+    let chain_len = chain.len();
+    for (i, link) in chain.into_iter().rev().enumerate() {
+        if store_this_arg
+            && i + 1 == chain_len
+            && matches!(&link, ExprData::Dot(_) | ExprData::Index(_))
+        {
+            let ([access, receiver], wrapper) =
+                capture_value_with_possible_side_effects(core, loc, result);
+            result = access;
+            parent_receiver = Some(OptionalChainReceiver {
+                value: receiver,
+                wrappers: vec![wrapper],
+            });
+        }
         result = match link {
             ExprData::Dot(mut dot) => {
                 dot.target = result;
@@ -947,24 +994,36 @@ fn lower_optional_chain(core: &mut ParserCore, expression: Expr) -> Option<ExprD
         is_first_link = false;
     }
 
-    receiver_wrapper
-        .wrap(wrapper.wrap(Expr::new(
-            loc,
-            ExprData::If(IfExpr {
-                test: Expr::new(
-                    loc,
-                    ExprData::Binary(BinaryExpr {
-                        left: value_for_test,
-                        right: Expr::new(loc, ExprData::Null),
-                        op: OpCode::BinaryLooseEqual,
-                    }),
-                ),
-                yes: Expr::new(loc, ExprData::Undefined),
-                no: result,
-            }),
-        )))
-        .data
-        .map(|data| *data)
+    let mut value = Expr::new(
+        loc,
+        ExprData::If(IfExpr {
+            test: Expr::new(
+                loc,
+                ExprData::Binary(BinaryExpr {
+                    left: value_for_test,
+                    right: Expr::new(loc, ExprData::Null),
+                    op: OpCode::BinaryLooseEqual,
+                }),
+            ),
+            yes: Expr::new(loc, ExprData::Undefined),
+            no: result,
+        }),
+    );
+    wrappers.push(receiver_wrapper);
+    wrappers.push(wrapper);
+    if let Some(receiver) = &mut parent_receiver {
+        // The receiver can refer to the starting value's parameter capture,
+        // e.g. in a()?.b?.(). Keep all such declarations around the outer call.
+        receiver.wrappers.extend(wrappers);
+    } else {
+        for wrapper in wrappers.into_iter().rev() {
+            value = wrapper.wrap(value);
+        }
+    }
+    Some(LoweredOptionalChain {
+        value,
+        receiver: parent_receiver,
+    })
 }
 
 fn lower_exponentiation_assignment_operator(
