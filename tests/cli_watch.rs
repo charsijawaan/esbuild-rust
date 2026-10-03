@@ -324,3 +324,51 @@ fn watch_status_honors_colors_and_log_levels() {
         fixture.write("in.js", "foo(2)");
     }
 }
+
+#[test]
+fn watch_updates_property_cache_only_after_successful_builds() {
+    let fixture = Fixture::new();
+    fixture.write("in.js", "foo()");
+    let mut watch = WatchChild::new(
+        &fixture,
+        &[
+            "in.js",
+            "--watch=forever",
+            "--outdir=out",
+            "--mangle-props=.",
+            "--mangle-cache=cache/mangle.json",
+        ],
+    );
+    watch.wait(|watch| watch.finished() == 1);
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("cache/mangle.json")).unwrap(),
+        "{}\n"
+    );
+    fixture.write("in.js", "foo(bar.baz)");
+    watch.wait(|watch| watch.finished() == 2);
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("out/in.js")).unwrap(),
+        "foo(bar.a);\n"
+    );
+    let cache = "{\n  \"baz\": \"a\"\n}\n";
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("cache/mangle.json")).unwrap(),
+        cache
+    );
+    fixture.write("in.js", "const x = ;");
+    watch.wait(|watch| watch.finished() == 3);
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("cache/mangle.json")).unwrap(),
+        cache
+    );
+    fixture.write("in.js", "foo(bar.quux)");
+    watch.wait(|watch| watch.finished() == 4);
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("out/in.js")).unwrap(),
+        "foo(bar.a);\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("cache/mangle.json")).unwrap(),
+        "{\n  \"quux\": \"a\"\n}\n"
+    );
+}

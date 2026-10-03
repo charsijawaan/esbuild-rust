@@ -2,7 +2,10 @@
 
 #[cfg(test)]
 mod upstream_tests;
+mod mangle_cache;
 mod watcher;
+
+pub use mangle_cache::MangleCache;
 
 use std::{
     any::Any,
@@ -153,6 +156,7 @@ pub struct TransformOptions {
     pub mangle_props: String,
     pub reserve_props: String,
     pub mangle_quoted: bool,
+    pub mangle_cache: Option<MangleCache>,
     pub platform: BuildPlatform,
     pub jsx: BuildJsx,
     pub jsx_factory: String,
@@ -197,6 +201,7 @@ impl Default for TransformOptions {
             mangle_props: String::new(),
             reserve_props: String::new(),
             mangle_quoted: false,
+            mangle_cache: None,
             platform: BuildPlatform::default(),
             jsx: BuildJsx::default(),
             jsx_factory: String::new(),
@@ -687,6 +692,7 @@ pub struct TransformResult {
     pub code: Vec<u8>,
     pub map: Vec<u8>,
     pub legal_comments: Vec<u8>,
+    pub mangle_cache: Option<MangleCache>,
 }
 
 #[derive(Default)]
@@ -1282,6 +1288,7 @@ pub struct BuildOptions {
     pub mangle_props: String,
     pub reserve_props: String,
     pub mangle_quoted: bool,
+    pub mangle_cache: Option<MangleCache>,
     pub global_name: String,
     pub public_path: String,
     pub entry_names: String,
@@ -1356,6 +1363,7 @@ impl Default for BuildOptions {
             mangle_props: String::new(),
             reserve_props: String::new(),
             mangle_quoted: false,
+            mangle_cache: None,
             global_name: String::new(),
             public_path: String::new(),
             entry_names: String::new(),
@@ -1434,6 +1442,7 @@ pub struct BuildResult {
     pub warnings: Vec<Message>,
     pub metafile: String,
     pub output_files: Vec<BuildOutputFile>,
+    pub mangle_cache: Option<MangleCache>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3256,6 +3265,9 @@ fn build_with_output_state_core(
     let log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
     let mangle_props = validate_property_regex(&log, "mangle props", &options.mangle_props);
     let reserve_props = validate_property_regex(&log, "reserve props", &options.reserve_props);
+    let has_mangle_cache = options.mangle_cache.is_some();
+    let mangle_cache_errors = mangle_cache::validate(options.mangle_cache.as_ref());
+    let mut mangle_cache = mangle_cache::to_internal(options.mangle_cache.as_ref());
     let target_features = validate_target_features(
         &log,
         options.target,
@@ -3720,14 +3732,34 @@ fn build_with_output_state_core(
             ..bundler::EntryPoint::default()
         }
     }));
-    let compiled = bundler::bundle_javascript(
-        &log,
-        file_system.as_ref(),
-        cache,
-        &entry_points,
-        &mut internal_options,
-        "API",
-    );
+    let compiled = if mangle_cache_errors.is_empty() {
+        bundler::bundle_javascript_with_mangle_cache(
+            &log,
+            file_system.as_ref(),
+            cache,
+            &entry_points,
+            &mut internal_options,
+            "API",
+            has_mangle_cache.then_some(&mut mangle_cache),
+        )
+    } else {
+        // Upstream validates cache values after scanning succeeds. Context
+        // creation and syntax errors therefore do not report these errors.
+        let _ = bundler::scan_bundle(
+            &log,
+            file_system.as_ref(),
+            cache,
+            &entry_points,
+            &mut internal_options,
+            "API",
+        );
+        if !log.has_errors() {
+            for error in mangle_cache_errors {
+                log.add_error(None, crate::internal::logger::Range::default(), error.text);
+            }
+        }
+        bundler::CompiledBundle::default()
+    };
     let (mut errors, warnings) = public_messages_with_path_style(log.done(), log_path_style);
     // The bundler has already logged import issues with their actual severity,
     // location, and overrides. Missing generated imports can be warnings, not errors.
@@ -3764,6 +3796,8 @@ fn build_with_output_state_core(
         ));
     }
     BuildResult {
+        mangle_cache: (has_mangle_cache && errors.is_empty())
+            .then(|| mangle_cache::to_public(&mangle_cache)),
         errors,
         warnings,
         metafile,
@@ -3780,6 +3814,13 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         log_overrides(&options.log_override),
     );
     let mut options = options;
+    let cache_errors = mangle_cache::validate(options.mangle_cache.as_ref());
+    if !cache_errors.is_empty() {
+        return TransformResult {
+            errors: cache_errors,
+            ..TransformResult::default()
+        };
+    }
     let _ = validate_property_regex(&log, "mangle props", &options.mangle_props);
     let _ = validate_property_regex(&log, "reserve props", &options.reserve_props);
     let log_path_style = internal_path_style(options.abs_paths, AbsPaths::LOG);
@@ -3993,6 +4034,7 @@ pub fn transform(input: impl AsRef<[u8]>, options: TransformOptions) -> Transfor
         printed.code.clear();
     }
     TransformResult {
+        mangle_cache: errors.is_empty().then_some(options.mangle_cache).flatten(),
         errors,
         warnings,
         code: printed.code,
@@ -4052,6 +4094,7 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
         mangle_props: options.mangle_props,
         reserve_props: options.reserve_props,
         mangle_quoted: options.mangle_quoted,
+        mangle_cache: options.mangle_cache,
         global_name: options.global_name,
         sourcemap: options.sourcemap,
         source_root: options.source_root,
@@ -4084,6 +4127,7 @@ fn transform_with_linker(input: &[u8], options: TransformOptions) -> TransformRe
         ..BuildOptions::default()
     });
     let mut transformed = TransformResult {
+        mangle_cache: result.mangle_cache,
         errors: result.errors,
         warnings: result.warnings,
         ..TransformResult::default()

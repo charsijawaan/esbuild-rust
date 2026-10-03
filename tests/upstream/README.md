@@ -809,6 +809,20 @@ The complete runtime audit at `578cdb6` is recorded in
 Cases 1459 and 1461 are newly passing without regressions relative to `6e64713`.
 Case 80 remains the shared environment failure, leaving nine Rust-only failures.
 
+Builds and transforms now accept and return an optional property-mangle cache.
+String replacements, `false` reservations, unused entries, and the distinction
+between absent and empty caches are preserved. Explicit caches are shared
+across separate entry-point compilations. Context creation defers cache value
+validation until rebuilding, after successful scanning; compiler errors clear
+the returned cache, while `onEnd` callbacks see and retain completed caches.
+The CLI's `--mangle-cache` flag reads validated JSON and writes successful
+results in normal and watch modes, preserving existing key order and sorting
+new keys as upstream does. Invalid files and failed builds retain prior cache
+contents. Thirty-two CLI configurations match pinned Go exactly, and twelve API
+cases plus nil/empty, separate-entry, and callback behavior were independently
+checked with Go. The normal suite passes 1,032 tests; strict Clippy retains 621
+existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

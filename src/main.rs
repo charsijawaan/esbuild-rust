@@ -17,6 +17,7 @@ use esbuild_rs::{
     internal::{cli_helpers, logger::LogLevel},
 };
 
+mod cli_mangle_cache;
 mod cli_watch;
 
 fn parse_log_level(value: &str, argument: &str) -> Result<LogLevel, String> {
@@ -226,6 +227,7 @@ fn run_with_stdin_and_node_paths(
     let mut tsconfig = String::new();
     let mut tsconfig_raw = String::new();
     let mut metafile_path = String::new();
+    let mut mangle_cache_path = None;
     let mut analyze = AnalyzeMode::Disabled;
     let mut abs_paths = AbsPaths::default();
     let mut format = BuildFormat::Default;
@@ -382,6 +384,12 @@ fn run_with_stdin_and_node_paths(
         if let Some(value) = argument.strip_prefix("--mangle-props=") {
             options.mangle_props = value.into();
             continue;
+        }
+        if is_build {
+            if let Some(value) = argument.strip_prefix("--mangle-cache=") {
+                mangle_cache_path = Some(value.to_string());
+                continue;
+            }
         }
         if let Some(value) = argument.strip_prefix("--reserve-props=") {
             options.reserve_props = value.into();
@@ -832,7 +840,13 @@ fn run_with_stdin_and_node_paths(
         } else {
             None
         };
-        let build_options = BuildOptions {
+        let (cache_file, mangle_cache) = if let Some(path) = mangle_cache_path {
+            let (file, cache) = cli_mangle_cache::CacheFile::load(path, options.ascii_only, arguments)?;
+            (Some(file), Some(cache))
+        } else {
+            (None, None)
+        };
+        let mut build_options = BuildOptions {
             log_override: options.log_override,
             bundle,
             entry_points,
@@ -853,6 +867,7 @@ fn run_with_stdin_and_node_paths(
             mangle_props: options.mangle_props,
             reserve_props: options.reserve_props,
             mangle_quoted: options.mangle_quoted,
+            mangle_cache,
             global_name,
             public_path,
             entry_names,
@@ -900,6 +915,9 @@ fn run_with_stdin_and_node_paths(
             ..BuildOptions::default()
         };
         if watch {
+            if let Some(cache_file) = cache_file {
+                build_options.plugins.push(cache_file.watch_plugin(arguments));
+            }
             cli_watch::run(
                 build_options,
                 arguments,
@@ -963,6 +981,9 @@ fn run_with_stdin_and_node_paths(
             writeln!(&mut stderr, "{warning_summary}").expect("writing to a string cannot fail");
         }
         if outdir.is_empty() && outfile.is_empty() {
+            if let Some(cache_file) = &cache_file {
+                cache_file.write(result.mangle_cache.as_ref(), arguments);
+            }
             let [output] = result.output_files.as_slice() else {
                 return Err(prepend_cli_warnings(
                     "Must use \"--outdir\" when there are multiple output files".into(),
@@ -979,7 +1000,7 @@ fn run_with_stdin_and_node_paths(
                 }
             });
         }
-        for output in result.output_files {
+        for output in &result.output_files {
             let path = std::path::Path::new(&output.path);
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|error| {
@@ -989,7 +1010,7 @@ fn run_with_stdin_and_node_paths(
                     )
                 })?;
             }
-            fs::write(path, output.contents).map_err(|error| {
+            fs::write(path, &output.contents).map_err(|error| {
                 prepend_cli_warnings(
                     format!("Could not write {:?}: {error}", output.path),
                     &warning_details,
@@ -1009,12 +1030,15 @@ fn run_with_stdin_and_node_paths(
                     )
                 })?;
             }
-            fs::write(path, result.metafile).map_err(|error| {
+            fs::write(path, &result.metafile).map_err(|error| {
                 prepend_cli_warnings(
                     format!("Could not write {metafile_path:?}: {error}"),
                     &warning_details,
                 )
             })?;
+        }
+        if let Some(cache_file) = cache_file {
+            cache_file.write(result.mangle_cache.as_ref(), arguments);
         }
         let output = Output::Text(String::new());
         return Ok(if stderr.is_empty() {
@@ -1249,6 +1273,7 @@ fn help_text() -> String {
          \x20\x20--define:KEY=VALUE\n\
          \x20\x20--supported:FEATURE=true|false\n\
          \x20\x20--mangle-props=REGEX --reserve-props=REGEX --mangle-quoted\n\
+         \x20\x20--mangle-cache=FILE\n\
          \x20\x20--pure:CALL\n\
          \x20\x20--keep-names\n\
          \x20\x20--main-fields=FIELDS\n\

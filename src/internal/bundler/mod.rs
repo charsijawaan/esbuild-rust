@@ -118,12 +118,26 @@ pub fn compile_javascript_bundle(
     options: &Options,
     unique_key_prefix: &str,
 ) -> CompiledBundle {
+    compile_javascript_bundle_with_mangle_cache(
+        file_system, bundle, options, unique_key_prefix, None,
+    )
+}
+
+#[must_use]
+pub fn compile_javascript_bundle_with_mangle_cache(
+    file_system: &dyn Fs,
+    bundle: &ScannedBundle,
+    options: &Options,
+    unique_key_prefix: &str,
+    mangle_cache: Option<&mut config::MangleCache>,
+) -> CompiledBundle {
     compile_javascript_bundle_with_css_names(
         file_system,
         bundle,
         options,
         unique_key_prefix,
         &mut HashSet::new(),
+        mangle_cache,
     )
 }
 
@@ -133,6 +147,7 @@ fn compile_javascript_bundle_with_css_names(
     options: &Options,
     unique_key_prefix: &str,
     used_local_names: &mut HashSet<String>,
+    mut mangle_cache: Option<&mut config::MangleCache>,
 ) -> CompiledBundle {
     if !options.code_splitting && bundle.entry_points.len() > 1 {
         let mut compiled = CompiledBundle::default();
@@ -147,6 +162,7 @@ fn compile_javascript_bundle_with_css_names(
                 &group_options,
                 unique_key_prefix,
                 used_local_names,
+                mangle_cache.as_deref_mut(),
             );
             compiled.output_files.extend(group.output_files);
             compiled
@@ -205,7 +221,10 @@ fn compile_javascript_bundle_with_css_names(
         options.profiler_names,
     );
     let mangled_props = if options.mangle_props.is_some() {
-        linker::mangle_props(&mut prepared.graph, &mut config::MangleCache::new())
+        linker::mangle_props(
+            &mut prepared.graph,
+            mangle_cache.unwrap_or(&mut config::MangleCache::new()),
+        )
     } else {
         HashMap::new()
     };
@@ -402,6 +421,21 @@ pub fn bundle_javascript(
     options: &mut Options,
     unique_key_prefix: &str,
 ) -> CompiledBundle {
+    bundle_javascript_with_mangle_cache(
+        log, file_system, caches, entry_points, options, unique_key_prefix, None,
+    )
+}
+
+#[must_use]
+pub fn bundle_javascript_with_mangle_cache(
+    log: &Log,
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    entry_points: &[EntryPoint],
+    options: &mut Options,
+    unique_key_prefix: &str,
+    mangle_cache: Option<&mut config::MangleCache>,
+) -> CompiledBundle {
     let scanned = scan_bundle(
         log,
         file_system,
@@ -413,7 +447,9 @@ pub fn bundle_javascript(
     if log.has_errors() {
         return CompiledBundle::default();
     }
-    let compiled = compile_javascript_bundle(file_system, &scanned, options, unique_key_prefix);
+    let compiled = compile_javascript_bundle_with_mangle_cache(
+        file_system, &scanned, options, unique_key_prefix, mangle_cache,
+    );
     if !options.write_to_stdout && !options.allow_overwrite {
         for output in &compiled.output_files {
             if let Some(input) = scanned.files.iter().find(|file| {
