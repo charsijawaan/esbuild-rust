@@ -1241,6 +1241,22 @@ fn inferred_name_from_property_key(core: &ParserCore, expression: &Expr) -> Opti
     }
 }
 
+fn warn_about_unsupported_require_conversion(core: &mut ParserCore, loc: Loc) {
+    if core.options.mode == crate::internal::config::Mode::ConvertFormat
+        && core.options.output_format == crate::internal::config::Format::EsModule
+        && core.visit_try_body_depth == 0
+        && let Some(log) = core.log.clone()
+    {
+        log.add_id(
+            MsgId::JsUnsupportedRequireCall,
+            MsgKind::Warning,
+            Some(&mut core.tracker),
+            crate::internal::js_lexer::range_of_identifier(&core.source, loc),
+            "Converting \"require\" to \"esm\" is currently not supported",
+        );
+    }
+}
+
 fn inferred_name_from_binding(core: &ParserCore, binding: &Binding) -> Option<String> {
     match binding.data.as_deref() {
         Some(BindingData::Identifier(identifier)) => Some(symbol_name(core, identifier.reference)),
@@ -12274,6 +12290,11 @@ fn visit_expr_with_target_and_context(
                         record.flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
                         record.error_handler_loc = core.visit_try_catch_loc;
                     }
+                    if kind == crate::internal::ast::ImportKind::Require
+                        && call.optional_chain == OptionalChain::None
+                    {
+                        warn_about_unsupported_require_conversion(core, call.target.loc);
+                    }
                     *data = if kind == crate::internal::ast::ImportKind::Require {
                         ExprData::RequireString(crate::internal::js_ast::RequireStringExpr {
                             import_record_index,
@@ -12319,6 +12340,9 @@ fn visit_expr_with_target_and_context(
                                 let record = &mut core.import_records[import_record_index as usize];
                                 record.flags |= ImportRecordFlags::HANDLES_IMPORT_ERRORS;
                                 record.error_handler_loc = core.visit_try_catch_loc;
+                            }
+                            if template.optional_chain == OptionalChain::None {
+                                warn_about_unsupported_require_conversion(core, template.target.loc);
                             }
                             Expr::new(
                                 expression_loc,

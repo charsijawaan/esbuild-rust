@@ -466,6 +466,16 @@ timeouts. Original case 568 is newly passing without regressions relative to
 `ba700d8`. Case 80 remains the shared environment failure, leaving 83
 Rust-only failures.
 
+Converting literal or conditional `require()` calls to ESM now reports the
+original `unsupported-require-call` warning. Try bodies suppress this warning,
+while nested functions restore it; shadowed names, optional calls, and
+`require.resolve()` retain their original behavior. API and CLI regressions
+check source locations, format/bundle contexts, and log overrides against
+pinned Go. The normal suite passes 985 tests, the parser audit preserves all
+7,057 active cases, and strict Clippy retains 623 existing errors without
+added diagnostics. The full runtime audit passes 1,380 cases with no timeouts
+or regressions, fixing cases 413 and 414.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -566,7 +576,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,055 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,057 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -656,7 +666,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 92
-reviewed cases beyond the original option-based selection. So 12,297 concrete
+reviewed cases beyond the original option-based selection. So 12,299 concrete
 upstream cases are currently active in `cargo test`; the remaining 153 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
