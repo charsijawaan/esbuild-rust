@@ -473,8 +473,11 @@ while nested functions restore it; shadowed names, optional calls, and
 check source locations, format/bundle contexts, and log overrides against
 pinned Go. The normal suite passes 985 tests, the parser audit preserves all
 7,057 active cases, and strict Clippy retains 623 existing errors without
-added diagnostics. The full runtime audit passes 1,380 cases with no timeouts
-or regressions, fixing cases 413 and 414.
+added diagnostics. The full runtime audit at `44fdb03` is recorded in
+`end_to_end_require_warnings_checkpoint.json`: 1,380 passed, 82 failed, and no
+timeouts. Cases 413 and 414 are newly passing without regressions relative to
+`d4f54d1`. Case 80 remains the shared environment failure, leaving 81 Rust-only
+failures.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
