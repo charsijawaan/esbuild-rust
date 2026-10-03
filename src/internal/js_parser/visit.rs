@@ -2696,6 +2696,14 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
             Some(StmtData::Switch(switch)) => {
                 visit_expr(core, &mut switch.test, resolve_identifiers);
                 core.push_scope_for_visit_pass(ScopeKind::Block, switch.body_loc);
+                // Cases share a scope but may execute in a different order, so
+                // their constants cannot be treated as an initialized prefix.
+                core.current_scope
+                    .as_ref()
+                    .expect("switch body scope")
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_after_const_local_prefix = true;
                 core.visit_switch_depth += 1;
                 for case in &mut switch.cases {
                     visit_expr(core, &mut case.value_or_nil, resolve_identifiers);

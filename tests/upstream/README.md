@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,056 | 1,587 | 8,643 |
+| JS/TS parser and parser lowering | 7,057 | 1,586 | 8,643 |
 | Bundler | 918 | 153 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,298 | 1,740 | 14,038 |
+| Total | 12,299 | 1,739 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -449,6 +449,16 @@ The complete runtime audit at `ba700d8` is recorded in
 timeouts. Six original cases are newly passing without regressions relative
 to `b1cc6c4`. Case 80 remains the shared environment failure, leaving 84
 Rust-only failures.
+
+Switch scopes disable const-prefix inlining because cases share bindings but
+may execute in a different order. This preserves temporal dead zone errors
+when a skipped/later/default case declares a constant used by another case.
+An executable regression passes native Node and four Rust/pinned-Go
+transform/bundle combinations, including successful fall-through and
+minification. The original switch parser fixture now matches exactly and is
+active. The normal suite passes 983 tests; the parser audit has 7,057 matches
+without active regressions, and strict Clippy retains 623 existing errors
+without added diagnostics.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
