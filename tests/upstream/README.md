@@ -345,6 +345,12 @@ The normal suite passes 976 tests. The parser audit retains 7,055 matches
 without active regressions, and strict Clippy retains 623 existing errors
 without added diagnostics.
 
+The complete runtime audit at `5cbf3c3` is recorded in
+`end_to_end_property_mangling_checkpoint.json`: 1,337 passed, 125 failed, and
+no timeouts. It gains all nine original cases using `--mangle-props` without
+regressions relative to `738873b`. Case 80 remains the shared environment
+failure, leaving 124 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
