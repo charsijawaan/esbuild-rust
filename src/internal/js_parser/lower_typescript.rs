@@ -283,6 +283,19 @@ fn lower_namespace_body(
     result
 }
 
+pub(crate) fn lower_namespace_body_for_using(
+    core: &mut ParserCore,
+    argument: Ref,
+    statements: &mut Vec<Stmt>,
+) {
+    *statements = lower_namespace_body(
+        core,
+        argument,
+        std::mem::take(statements),
+        &mut HashSet::new(),
+    );
+}
+
 fn namespace_keep_name_static_block(core: &ParserCore, class: &ClassStmt) -> Option<usize> {
     if !core.options.keep_names
         || !core

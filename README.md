@@ -51,9 +51,9 @@ cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-The test suite includes 12,306 active concrete cases extracted from the pinned
-upstream esbuild revision: 11,355 parser/printer cases, 836 bundler output
-snapshots, 82 bundler diagnostic cases, and 33 Go API cases. Another 1,732 captured cases remain
+The test suite includes 12,311 active concrete cases extracted from the pinned
+upstream esbuild revision: 11,355 parser/printer cases, 841 bundler output
+snapshots, 82 bundler diagnostic cases, and 33 Go API cases. Another 1,727 captured cases remain
 inactive parity work. The checked-in fixtures make these tests
 independent of Go; see [tests/upstream/README.md](tests/upstream/README.md) for
 reproducible regeneration instructions.

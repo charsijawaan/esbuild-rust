@@ -10,9 +10,9 @@ The captured corpus currently contains 14,038 concrete cases:
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
 | JS/TS parser and parser lowering | 7,064 | 1,579 | 8,643 |
-| Bundler | 918 | 153 | 1,071 |
+| Bundler | 923 | 148 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,306 | 1,732 | 14,038 |
+| Total | 12,311 | 1,727 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -829,6 +829,17 @@ timeouts. Case 1460 is newly passing without regressions relative to `578cdb6`.
 All three CLI watch cases now pass. Case 80 remains the shared environment
 failure, leaving eight Rust-only failures.
 
+Unsupported `using` and `await using` declarations now register resources and
+dispose them in generated `try`/`catch`/`finally` blocks. Disposal preserves
+reverse order, loop exits, generator cancellation, async fallbacks, and
+suppressed errors. Module wrappers retain imports, exports, and function
+hoisting; TypeScript enum and namespace lowering runs before disposal wrapping.
+The five original resource-management bundler snapshots are now active with
+unchanged options and assertions. Executable regressions cover 28 configurations,
+independently checked with pinned Go. The normal suite passes 1,037 tests, the
+parser audit retains 7,064 passes without regressions, and strict Clippy retains
+621 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -984,7 +995,7 @@ instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 Files containing invalid UTF-8 are additionally stored in a base64 sidecar so
 binary-loader snapshots retain the exact upstream bytes.
 
-The active bundler tranche exact-compares 836 Unix snapshots and 81
+The active bundler tranche exact-compares 841 Unix snapshots and 81
 diagnostic-only cases from the default, DCE, import-star, TypeScript import-star,
 lowering, TypeScript, package-json,
 tsconfig, loader, CSS, code-splitting, Yarn PnP, import-phase, and entry-point glob suites that use
@@ -1018,9 +1029,13 @@ compatibility, missing or global `composes` names, output paths, and external
 patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
-when selecting an inactive case. `bundler_additional_active.json` enables 92
-reviewed cases beyond the original option-based selection. So 12,306 concrete
-upstream cases are currently active in `cargo test`; the remaining 153 captured bundler cases are the parity backlog,
+when selecting an inactive case. `bundler_additional_active.json` enables 97
+reviewed cases beyond the original option-based selection. This includes all five
+captured explicit resource-management fixtures: synchronous and asynchronous
+disposal, `for of` and `for await` iterations, unsupported async targets, module
+declaration hoisting, and TypeScript namespace exports. Their original option
+bits and output snapshots are unchanged. So 12,311 concrete
+upstream cases are currently active in `cargo test`; the remaining 148 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
 List active and inactive bundler fixtures, including their filesystem variant:

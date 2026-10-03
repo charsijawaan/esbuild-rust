@@ -1498,7 +1498,7 @@ pub(crate) fn precompute_type_script_enum_constants(core: &mut ParserCore, state
     }
 }
 
-fn lower_await_value(core: &mut ParserCore, loc: Loc, mut value: Expr) -> Expr {
+pub(super) fn lower_await_value(core: &mut ParserCore, loc: Loc, mut value: Expr) -> Expr {
     if core.lower_await_to_yield {
         if core.visit_is_async_generator {
             // Distinguish an internal await from a value yielded to the caller.
@@ -1804,6 +1804,16 @@ fn lower_for_await_loop(
 
 #[allow(clippy::too_many_lines)]
 fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_identifiers: bool) {
+    visit_statements_with_using(core, statements, resolve_identifiers, true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn visit_statements_with_using(
+    core: &mut ParserCore,
+    statements: &mut Vec<Stmt>,
+    resolve_identifiers: bool,
+    lower_using: bool,
+) {
     let old_control_flow_dead = core.is_control_flow_dead;
     let mut export_assignments = Vec::new();
     for statement in statements.iter_mut() {
@@ -2165,7 +2175,8 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 let has_experimental_member_decorators =
                     class_has_experimental_member_decorators(core, &class.class);
                 let convert_to_expression_before_visit = (is_top_level_scope
-                    && core.options.mode == crate::internal::config::Mode::Bundle)
+                    && (core.options.mode == crate::internal::config::Mode::Bundle
+                        || core.will_wrap_module_in_try_catch_for_using))
                     || has_experimental_class_decorators
                     || class.class.should_lower_standard_decorators
                     || (lower_static_blocks && kept_class_name)
@@ -2198,7 +2209,8 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 if convert_to_expression && let Some(name) = class.class.name {
                     let is_export = class.is_export;
                     let local_kind = if is_top_level_scope
-                        && core.options.mode == crate::internal::config::Mode::Bundle
+                        && (core.options.mode == crate::internal::config::Mode::Bundle
+                            || core.will_wrap_module_in_try_catch_for_using)
                     {
                         LocalKind::Var
                     } else {
@@ -2374,7 +2386,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 core.record_declared_symbol(namespace.name.reference);
                 core.push_scope_for_visit_pass(ScopeKind::Entry, statement.loc);
                 core.record_declared_symbol(namespace.argument);
-                visit_statements(core, &mut namespace.statements, resolve_identifiers);
+                visit_statements_with_using(
+                    core,
+                    &mut namespace.statements,
+                    resolve_identifiers,
+                    false,
+                );
                 for statement in &namespace.statements {
                     if let Some(StmtData::Local(local)) = statement.data.as_deref()
                         && local.is_export
@@ -2393,6 +2410,17 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     &mut namespace.statements,
                     Some(namespace.argument),
                 );
+                if namespace.statements.iter().any(|statement| {
+                    matches!(statement.data.as_deref(), Some(StmtData::Local(local))
+                        if super::lower_using::should_lower_kind(core, local.kind))
+                }) {
+                    super::lower_typescript::lower_namespace_body_for_using(
+                        core,
+                        namespace.argument,
+                        &mut namespace.statements,
+                    );
+                    super::lower_using::lower_statements(core, &mut namespace.statements);
+                }
                 core.pop_scope();
             }
             Some(StmtData::ExportDefault(export)) => {
@@ -2464,7 +2492,8 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         let pre_start = core.class_pre_statements.len();
                         let post_start = core.class_post_statements.len();
                         let convert_to_expression = is_top_level_scope
-                            && core.options.mode == crate::internal::config::Mode::Bundle;
+                            && (core.options.mode == crate::internal::config::Mode::Bundle
+                                || core.will_wrap_module_in_try_catch_for_using);
                         let (inner_name, _) = visit_class(
                             core,
                             &mut class.class,
@@ -2672,7 +2701,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
             }
             Some(StmtData::For(loop_statement)) => {
                 core.push_scope_for_visit_pass(ScopeKind::Block, statement.loc);
-                visit_statement(core, &mut loop_statement.init_or_nil, resolve_identifiers);
+                visit_statement_with_using(
+                    core,
+                    &mut loop_statement.init_or_nil,
+                    resolve_identifiers,
+                    false,
+                );
                 visit_expr(core, &mut loop_statement.test_or_nil, resolve_identifiers);
                 visit_expr(core, &mut loop_statement.update_or_nil, resolve_identifiers);
                 validate_single_statement(
@@ -2815,6 +2849,12 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 if core.options.minify_syntax {
                     optimize_loop_body(core, &mut loop_statement.body);
                 }
+                super::lower_using::lower_for_of(
+                    core,
+                    loop_statement.init.loc,
+                    &mut loop_statement.init,
+                    &mut loop_statement.body,
+                );
                 relocate_for_in_or_of_init(core, &mut loop_statement.init);
                 core.pop_scope();
                 if loop_statement.await_range.len > 0
@@ -3151,6 +3191,9 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
         statements.append(&mut export_assignments);
     }
     flatten_synthetic_statement_blocks(statements);
+    if lower_using {
+        super::lower_using::lower_statements(core, statements);
+    }
     if core.options.minify_syntax {
         if !old_control_flow_dead {
             inline_single_use_declarations(core, statements);
@@ -4859,13 +4902,22 @@ fn report_forbidden_single_statement(core: &mut ParserCore, loc: Loc) {
 }
 
 fn visit_statement(core: &mut ParserCore, statement: &mut Stmt, resolve_identifiers: bool) {
+    visit_statement_with_using(core, statement, resolve_identifiers, true);
+}
+
+fn visit_statement_with_using(
+    core: &mut ParserCore,
+    statement: &mut Stmt,
+    resolve_identifiers: bool,
+    lower_using: bool,
+) {
     if statement.data.is_none() {
         return;
     }
     let loc = statement.loc;
     let mut statements = vec![std::mem::take(statement)];
     core.single_statement_depth += 1;
-    visit_statements(core, &mut statements, resolve_identifiers);
+    visit_statements_with_using(core, &mut statements, resolve_identifiers, lower_using);
     core.single_statement_depth -= 1;
     statements.retain(|statement| statement.data.is_some());
     *statement = if statements.len() == 1 {
@@ -4909,7 +4961,7 @@ fn visit_for_loop_init(
                 // preserves the binding as the loop assignment target.
                 core.options.mode = crate::internal::config::Mode::PassThrough;
             }
-            visit_statement(core, statement, resolve_identifiers);
+            visit_statement_with_using(core, statement, resolve_identifiers, false);
             core.options.mode = old_mode;
             if is_in_or_of && let Some(StmtData::Local(local)) = statement.data.as_deref_mut() {
                 local.kind = select_local_kind(local.kind, &core.options, false, false);
