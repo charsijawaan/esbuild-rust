@@ -2539,6 +2539,14 @@ impl Printer<'_> {
             key = Expr::new(key.loc, ExprData::Number(number));
             is_computed = false;
         }
+        if !is_computed
+            && let Some(ExprData::Number(value)) = key.data.as_deref()
+            && (value.is_sign_negative() || (*value == f64::INFINITY && self.options.minify_syntax))
+        {
+            // Negative literals and minified infinity expressions are only
+            // valid property keys inside brackets.
+            is_computed = true;
+        }
         if is_computed {
             self.output.push(b'[');
             let wrap = matches!(

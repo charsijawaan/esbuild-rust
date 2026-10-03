@@ -419,6 +419,15 @@ The complete runtime audit at `fea5233` is recorded in
 failures, and no timeouts, with no gains or regressions relative to `e3369d7`.
 Case 80 remains the shared environment failure, leaving 92 Rust-only failures.
 
+The printer restores computed brackets for folded negative numeric keys and
+minified positive infinity, where ordinary property syntax would be invalid.
+An executable regression covers object properties, class fields/methods,
+destructuring, signed zero, non-finite values, exponent notation, and large
+integers. It passes native Node and four Rust/pinned-Go transform/bundle
+combinations. The normal suite passes 981 tests; the parser audit retains
+7,056 matches without active regressions, and strict Clippy retains 623
+existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
