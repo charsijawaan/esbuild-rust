@@ -728,14 +728,21 @@ impl ParserCore {
                         let existing_index = usize::try_from(existing.reference.inner_index)
                             .expect("symbol index fits usize");
                         let existing_kind = self.symbols[existing_index].kind;
-                        if existing_kind == SymbolKind::Unbound
+                        if matches!(
+                            existing_kind,
+                            SymbolKind::CatchIdentifier | SymbolKind::Arguments
+                        ) {
+                            // Keep the catch parameter and the var declaration
+                            // on the same symbol, then hoist the var past this
+                            // binding scope into the enclosing function/module.
+                            self.symbols[existing_index].link = member.reference;
+                        } else if existing_kind == SymbolKind::Unbound
                             || existing_kind == SymbolKind::Hoisted
                             || (existing_kind.is_function() && target_kind.stops_hoisting())
                         {
                             self.symbols[symbol_index].link = existing.reference;
-                        } else if existing_kind != SymbolKind::CatchIdentifier
-                            && existing_kind != SymbolKind::Arguments
-                        {
+                            break;
+                        } else {
                             if is_sloppy_mode_block_function
                                 && parent
                                     .as_ref()
@@ -750,8 +757,8 @@ impl ParserCore {
                                     existing.loc,
                                 );
                             }
+                            break;
                         }
-                        break;
                     }
 
                     target_scope

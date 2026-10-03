@@ -434,6 +434,16 @@ timeouts. Original cases 560 and 561 are newly passing without regressions
 relative to `fea5233`. Case 80 remains the shared environment failure,
 leaving 90 Rust-only failures.
 
+Hoisting through a catch binding now merges the catch parameter into the
+inner `var` symbol and continues to the enclosing function/module scope.
+Catch initializers still affect the catch binding, while an outer declaration
+is retained even when the only `var` appears inside the catch. An executable
+regression passes native Node and eight Rust/pinned-Go transform/bundle
+combinations covering nested catches, `finally`, parameters, direct `eval`,
+and minification. The normal suite passes 982 tests; the parser audit retains
+7,056 matches without active regressions, and strict Clippy retains 623
+existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
