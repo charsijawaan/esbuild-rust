@@ -877,6 +877,10 @@ The isolated normal suite passes 1,047 tests, the parser audit passes 7,075
 cases without regressions, and strict Clippy retains 621 existing errors
 without added diagnostics.
 
+The complete isolated runtime audit at `c1e4f42` is recorded in
+`end_to_end_import_assignment_checkpoint.json`: 1,461 passed, one shared Go/Rust
+failure at case 80, and no timeouts or regressions relative to `02230a5`.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
