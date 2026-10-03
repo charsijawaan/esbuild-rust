@@ -11919,7 +11919,9 @@ fn visit_expr_with_target_and_context(
                 let lowered = if binary.op == OpCode::BinaryAssign {
                     lower_current_super_set(core, expression.loc, key, right)
                 } else if let Some(value_op) = compound_assignment_operator(binary.op) {
-                    let get = lower_current_super_get(core, expression.loc, key.clone());
+                    let ([key_for_set, key_for_get], wrapper) =
+                        capture_value_with_possible_side_effects(core, key.loc, key);
+                    let get = lower_current_super_get(core, expression.loc, key_for_get);
                     get.and_then(|get| {
                         let value = if value_op == OpCode::BinaryPower
                             && core
@@ -11938,7 +11940,8 @@ fn visit_expr_with_target_and_context(
                                 }),
                             )
                         };
-                        lower_current_super_set(core, expression.loc, key, value)
+                        lower_current_super_set(core, expression.loc, key_for_set, value)
+                            .map(|set| wrapper.wrap(set))
                     })
                 } else {
                     None

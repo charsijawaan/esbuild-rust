@@ -562,6 +562,16 @@ timeouts. Cases 891 and 1075 are newly passing without regressions relative to
 `a5403e2`. Case 80 remains the shared environment failure, leaving 52 Rust-only
 failures.
 
+Lowered compound assignments to `super` now capture computed keys once before
+the getter and right-hand expression, matching pinned Go's lowering. An
+executable regression passes 12 Rust/pinned-Go transform/bundle combinations
+covering arithmetic and bitwise assignments, BigInt, static fields, evaluation
+order, and throwing right-hand expressions. ES2015 configurations explicitly
+retain exponent syntax because explored pinned-Go exponent lowering emits
+invalid `super` access. The normal suite passes 990 tests, the parser audit
+preserves all 7,061 active cases, and strict Clippy retains 623 existing errors
+without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
