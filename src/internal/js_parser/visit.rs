@@ -2102,9 +2102,11 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                 let lower_private_static = (class.class.extends_or_nil.data.is_some()
                     || class_has_non_constructor_method(&class.class))
                     && class_private_static_members_need_lowering(core, &class.class);
+                let lower_public_static_fields =
+                    class_public_static_fields_need_lowering(core, &class.class);
                 let lower_public_static = (class.class.extends_or_nil.data.is_some()
                     || class_has_static_name(&class.class))
-                    && class_public_static_fields_need_lowering(core, &class.class);
+                    && lower_public_static_fields;
                 let (_, lower_static_due_to_private_members) =
                     class_private_member_lowering_flags(core, &class.class);
                 let lower_public_static_due_to_private_members = lower_static_due_to_private_members
@@ -2137,16 +2139,18 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     ClassVisitOptions {
                         merge_inner_name: !(convert_to_expression_before_visit
                             || lower_public_static_due_to_private_members
+                            || lower_public_static_fields
                             || lower_private_members),
                         capture_static_initialization: convert_to_expression_before_visit
                             && (lower_static_blocks || lower_static_members),
                         ..ClassVisitOptions::default()
                     },
                 );
-                let capture_private_inner_name = lower_private_members && inner_name.is_some();
+                let capture_lowered_inner_name =
+                    (lower_private_members || lower_public_static_fields) && inner_name.is_some();
                 let convert_to_expression = convert_to_expression_before_visit
                     || (lower_public_static_due_to_private_members && inner_name.is_some())
-                    || capture_private_inner_name;
+                    || capture_lowered_inner_name;
                 if convert_to_expression && let Some(name) = class.class.name {
                     let is_export = class.is_export;
                     let local_kind = if is_top_level_scope
@@ -2157,7 +2161,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         LocalKind::Let
                     };
                     let capture_ref =
-                        (lower_static_blocks || lower_static_members || capture_private_inner_name)
+                        (lower_static_blocks || lower_static_members || capture_lowered_inner_name)
                             .then(|| {
                                 inner_name.unwrap_or_else(|| {
                                     generate_class_capture_ref(core, name.reference)
@@ -2217,7 +2221,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                         }],
                         kind: if ((lower_static_members && !class_has_static_name(&class.class))
                             || (lower_static_blocks && kept_class_name)
-                            || capture_private_inner_name)
+                            || capture_lowered_inner_name)
                             && capture_ref.is_some()
                         {
                             LocalKind::Const
@@ -2245,7 +2249,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                                 ..LocalStmt::default()
                             }),
                         );
-                        if lower_static_members || lower_static_blocks || capture_private_inner_name {
+                        if lower_static_members || lower_static_blocks || capture_lowered_inner_name {
                             core.class_post_statements.push(outer_declaration);
                         } else {
                             append_to_statement.push(outer_declaration);
