@@ -1,0 +1,88 @@
+{
+  "upstream_revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+  "rust_commit": "be18e17",
+  "execution": "unchanged original functions and assertions; original Node wrapper; original internal concurrency retained",
+  "suite_sha256": {
+    "scripts/js-api-tests.js": "5dc7e1a66de33536f727691ea9478b611a3610c039654e1acb636232bbb13998",
+    "scripts/plugin-tests.js": "dbc9066058cd6010ba06bfaf453137986efefd96a0a2b8c18531ff1c9fb01995"
+  },
+  "core_test_ids": [
+    "transformTests/ignoreUndefinedOptions",
+    "transformTests/throwOnBadOptions",
+    "transformTests/transformLoaderBase64",
+    "transformTests/jsCharsetUTF8",
+    "transformTests/mangleCacheTransform",
+    "transformTests/transformLegalCommentsJS",
+    "transformTests/sourceMapExternalWithName",
+    "apiSyncTests/transformThrow",
+    "buildTests/errorIfEntryPointsNotArray",
+    "buildTests/errorIfBadWorkingDirectory",
+    "buildTests/mangleCacheBuild",
+    "buildTests/writeFalse",
+    "buildTests/workingDirTest",
+    "buildTests/customEntryPointOutputPathsRel",
+    "buildTests/sourceMapTrue",
+    "apiSyncTests/buildSync",
+    "apiSyncTests/buildSyncOutputFiles",
+    "apiSyncTests/transformSyncJSMap",
+    "apiSyncTests/transformSyncCSS",
+    "formatTests/formatMessages",
+    "analyzeTests/analyzeMetafile",
+    "serialTests/startStop"
+  ],
+  "core_reports": {
+    "rust_workers": {
+      "binary_sha256": "7af4e09a6703610f09be8ae5ce69608971d35d45de87c16183ade153c8be07f3",
+      "node_version": "v24.15.0",
+      "platform": "darwin",
+      "architecture": "arm64",
+      "worker_threads": true,
+      "selection": "core",
+      "completed": true,
+      "passed": 22,
+      "failed": 0
+    },
+    "rust_no_workers": {
+      "binary_sha256": "7af4e09a6703610f09be8ae5ce69608971d35d45de87c16183ade153c8be07f3",
+      "node_version": "v24.15.0",
+      "platform": "darwin",
+      "architecture": "arm64",
+      "worker_threads": false,
+      "selection": "core",
+      "completed": true,
+      "passed": 22,
+      "failed": 0
+    },
+    "go_workers": {
+      "binary_sha256": "a5b888adb15b0a570c7fc904737de515b159119e7501491f452ee1b8c4cff2cf",
+      "node_version": "v24.15.0",
+      "platform": "darwin",
+      "architecture": "arm64",
+      "worker_threads": true,
+      "selection": "core",
+      "completed": true,
+      "passed": 22,
+      "failed": 0
+    },
+    "go_no_workers": {
+      "binary_sha256": "a5b888adb15b0a570c7fc904737de515b159119e7501491f452ee1b8c4cff2cf",
+      "node_version": "v24.15.0",
+      "platform": "darwin",
+      "architecture": "arm64",
+      "worker_threads": false,
+      "selection": "core",
+      "completed": true,
+      "passed": 22,
+      "failed": 0
+    }
+  },
+  "binary_stdin_original": {
+    "id": "buildTests/buildLoaderStdinBase64",
+    "rust_workers_passed": true,
+    "rust_no_workers_passed": true
+  },
+  "normal_rust_tests_passed": 1123,
+  "strict_clippy_existing_errors": 621,
+  "strict_clippy_added_errors": 0,
+  "go_javascript_codec_comparison_passed": true
+}

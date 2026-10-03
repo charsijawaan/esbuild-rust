@@ -48,8 +48,8 @@ Inactive means not accepted as passing coverage; it can include output or
 diagnostic mismatches, unsupported harness options/filesystems, and candidates
 awaiting review. It does not mean one missing feature per case.
 
-[The complete class-parameter runtime report](tests/upstream/end_to_end_class_parameter_checkpoint.json)
-records the Rust binary from `28438b2`, both binary hashes, the environment,
+[The complete service runtime report](tests/upstream/end_to_end_service_checkpoint.json)
+records the Rust binary from `be18e17`, both binary hashes, the environment,
 and the shared case-80 failure. Rust and Go have the same pass/fail outcome for
 all 1,462 registered cases in that run. Other environments remain unverified.
 
