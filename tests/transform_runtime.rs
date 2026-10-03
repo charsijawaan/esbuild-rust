@@ -546,3 +546,114 @@ console.log('ok');
         }
     }
 }
+
+#[test]
+fn lowered_private_optional_calls_preserve_receivers_and_short_circuiting() {
+    let source = r#"
+let visits = 0, argumentsEvaluated = 0, getterReads = 0, mutableReceiver;
+const arg = () => (++argumentsEvaluated, mutableReceiver = null, 7);
+const same = (actual, expected) => {
+  if (actual !== expected) throw new Error('wrong receiver or result');
+};
+class Base {
+  make() { if (this.value !== 123) throw new Error('wrong super receiver'); return this; }
+}
+class Box extends Base {
+  value = 123;
+  self = this;
+  #empty;
+  #field = function(value) { if (this.value !== 123 || value !== 7) throw 'field'; return this; };
+  #method(value) { if (this.value !== 123 || value !== 7) throw 'method'; return this; }
+  get #getter() { ++getterReads; mutableReceiver = null; return this.#field; }
+  check() { if (this.value !== 123) throw 'public method'; return this; }
+  withDefault(value = this?.#method?.(arg())) { return value; }
+  withGetterDefault(value = (mutableReceiver = this)?.#getter?.(arg())) { return value; }
+  run() {
+    let receiver = this;
+    const that = () => (++visits, receiver);
+    same(that().#method(arg()), this);
+    same(that().#method?.(arg()), this);
+    same(that()?.#method(arg()), this);
+    same(that()?.#method?.(arg()), this);
+    same(that().self.#method(arg()), this);
+    same(that().self.#method?.(arg()), this);
+    same(that().self?.#method(arg()), this);
+    same(that().self?.#method?.(arg()), this);
+    same(that()?.self.#method(arg()), this);
+    same(that()?.self.#method?.(arg()), this);
+    same(that()?.self?.#method(arg()), this);
+    same(that()?.self?.#method?.(arg()), this);
+    if (visits !== 12 || argumentsEvaluated !== 12) throw 'repeated evaluation';
+    receiver = null;
+    same(that()?.#method?.(arg()), undefined);
+    same(that()?.self.#method?.(arg()), undefined);
+    same(that()?.self?.#getter?.(arg()), undefined);
+    same(this.#empty?.(arg()), undefined);
+    if (visits !== 15 || argumentsEvaluated !== 12 || getterReads !== 0) throw 'short circuit';
+    mutableReceiver = this;
+    same(mutableReceiver.#getter?.(arg()), this);
+    mutableReceiver = this;
+    same(mutableReceiver?.#getter?.(arg()), this);
+    same(this.withDefault(), this);
+    same(this.withGetterDefault(), this);
+    same(this?.#method?.(arg()).self?.#method?.(arg()).check?.(), this);
+    same(super.make?.().#method?.(arg()), this);
+    let threw = false;
+    try { (receiver?.self).#getter?.(arg()); } catch (error) { threw = error instanceof TypeError; }
+    if (!threw || getterReads !== 3) throw 'private access boundary';
+  }
+}
+new Box().run();
+console.log('ok');
+"#;
+    // Native execution also covers receiver mutation and nested parameter
+    // captures that the pinned Go lowering currently handles incorrectly.
+    execute_node(source.as_bytes());
+    for (target, lower_private) in [
+        (Target::Es2015, false),
+        (Target::Es2022, false),
+        (Target::Es2022, true),
+    ] {
+        for minify in [false, true] {
+            let supported = if lower_private {
+                std::collections::HashMap::from([
+                    ("class-private-field".into(), false),
+                    ("class-private-method".into(), false),
+                    ("class-private-accessor".into(), false),
+                ])
+            } else {
+                std::collections::HashMap::new()
+            };
+            let result = transform(
+                source,
+                TransformOptions {
+                    target,
+                    supported: supported.clone(),
+                    minify_identifiers: minify,
+                    minify_syntax: minify,
+                    minify_whitespace: minify,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.code);
+            let result = build(BuildOptions {
+                bundle: true,
+                format: BuildFormat::CommonJs,
+                platform: BuildPlatform::Node,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    ..BuildStdin::default()
+                }),
+                target,
+                supported,
+                minify_identifiers: minify,
+                minify_syntax: minify,
+                minify_whitespace: minify,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.output_files[0].contents);
+        }
+    }
+}

@@ -251,6 +251,18 @@ Cases 877, 970, 1061, and 1154 are newly passing relative to `c2fb0ab`, with no
 regressions. The pinned Go result remains 1,461 passed with the shared case-80
 failure, leaving 164 Rust-only runtime failures.
 
+Private optional chains now preserve each null check and the receiver of
+lowered method, function-field, and getter calls. Their captures remain in
+scope across parameter-default wrappers, and parenthesized accesses retain
+their throwing behavior. Original runtime cases 924 and 1108 pass individually.
+A new executable regression passes native Node execution and 12 Rust target,
+minification, transform/bundle, and private-feature override combinations.
+The receiver-mutation and nested-parameter portions also cover known failures
+in pinned Go and are not counted as new upstream coverage. The normal suite
+passes 968 tests; the full parser audit retains 7,040 matches without active
+regressions or new inactive matches. Strict Clippy retains 623 existing errors
+without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

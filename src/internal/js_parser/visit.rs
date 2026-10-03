@@ -574,7 +574,203 @@ fn lower_private_assignment(
     lowered.data.map(|data| *data)
 }
 
+fn lower_private_optional_chain(core: &mut ParserCore, expression: &Expr) -> Option<ExprData> {
+    let loc = expression.loc;
+    let mut current = expression.clone();
+    let mut chain = Vec::new();
+    let mut contains_private = false;
+    loop {
+        match current.data.as_deref()? {
+            ExprData::Dot(dot) if dot.optional_chain != OptionalChain::None => {
+                chain.push(ExprData::Dot(dot.clone()));
+                current = dot.target.clone();
+            }
+            ExprData::Index(index) => {
+                let is_private = matches!(index.index.data.as_deref(),
+                    Some(ExprData::PrivateIdentifier(private))
+                    if lowered_private_storage_ref(core, private.reference).is_some());
+                if index.optional_chain == OptionalChain::None && !is_private {
+                    break;
+                }
+                contains_private |= is_private;
+                let chain_ends_here = index.optional_chain == OptionalChain::None;
+                chain.push(ExprData::Index(index.clone()));
+                current = index.target.clone();
+                if chain_ends_here {
+                    break;
+                }
+            }
+            ExprData::Call(call) if call.optional_chain != OptionalChain::None => {
+                chain.push(ExprData::Call(call.clone()));
+                current = call.target.clone();
+            }
+            _ => break,
+        }
+    }
+    if !contains_private {
+        return None;
+    }
+    if let Some(lowered) = lower_optional_chain(core, current.clone()) {
+        current.data = Some(Box::new(lowered));
+    }
+    chain.reverse();
+    let mut wrappers = Vec::new();
+    let mut result = build_private_optional_chain(core, loc, current, None, &chain, &mut wrappers);
+    for wrapper in wrappers.into_iter().rev() {
+        result = wrapper.wrap(result);
+    }
+    result.data.map(|data| *data)
+}
+
+fn capture_optional_call_receiver(
+    core: &mut ParserCore,
+    mut value: Expr,
+    wrappers: &mut Vec<CaptureValueWrapper>,
+) -> (Expr, Option<Expr>) {
+    if is_runtime_helper_call(core, &value, "__superGet") {
+        let loc = value.loc;
+        return (value, Some(Expr::new(loc, ExprData::This)));
+    }
+    let target = match value.data.as_deref_mut() {
+        Some(ExprData::Dot(dot)) => &mut dot.target,
+        Some(ExprData::Index(index)) => &mut index.target,
+        _ => return (value, None),
+    };
+    if matches!(target.data.as_deref(), Some(ExprData::Super)) {
+        let loc = target.loc;
+        return (value, Some(Expr::new(loc, ExprData::This)));
+    }
+    let ([access, receiver], wrapper) =
+        capture_value_with_mutability(core, target.loc, std::mem::take(target), true);
+    *target = access;
+    wrappers.push(wrapper);
+    (value, Some(receiver))
+}
+
+fn build_private_optional_chain(
+    core: &mut ParserCore,
+    loc: Loc,
+    mut value: Expr,
+    mut receiver: Option<Expr>,
+    chain: &[ExprData],
+    wrappers: &mut Vec<CaptureValueWrapper>,
+) -> Expr {
+    let Some((link, remaining)) = chain.split_first() else {
+        return value;
+    };
+    let is_start = match link {
+        ExprData::Dot(dot) => dot.optional_chain == OptionalChain::Start,
+        ExprData::Index(index) => index.optional_chain == OptionalChain::Start,
+        ExprData::Call(call) => call.optional_chain == OptionalChain::Start,
+        _ => unreachable!("optional chain link"),
+    };
+    if is_start && matches!(link, ExprData::Call(_)) && receiver.is_none() {
+        (value, receiver) = capture_optional_call_receiver(core, value, wrappers);
+    }
+    let test = if is_start {
+        let ([test, result], wrapper) = capture_value_with_possible_side_effects(core, loc, value);
+        value = result;
+        wrappers.push(wrapper);
+        Some(test)
+    } else {
+        None
+    };
+    let (value, receiver) = lower_private_optional_chain_link(
+        core,
+        loc,
+        value,
+        receiver,
+        link,
+        matches!(remaining.first(), Some(ExprData::Call(_))),
+        wrappers,
+    );
+    let value = build_private_optional_chain(core, loc, value, receiver, remaining, wrappers);
+    if let Some(test) = test {
+        Expr::new(
+            loc,
+            ExprData::If(IfExpr {
+                test: Expr::new(
+                    loc,
+                    ExprData::Binary(BinaryExpr {
+                        left: test,
+                        right: Expr::new(loc, ExprData::Null),
+                        op: OpCode::BinaryLooseEqual,
+                    }),
+                ),
+                yes: Expr::new(loc, ExprData::Undefined),
+                no: value,
+            }),
+        )
+    } else {
+        value
+    }
+}
+
+fn lower_private_optional_chain_link(
+    core: &mut ParserCore,
+    loc: Loc,
+    mut value: Expr,
+    receiver: Option<Expr>,
+    link: &ExprData,
+    is_call_target: bool,
+    wrappers: &mut Vec<CaptureValueWrapper>,
+) -> (Expr, Option<Expr>) {
+    match link {
+        ExprData::Dot(dot) => {
+            let mut dot = dot.clone();
+            dot.target = value;
+            dot.optional_chain = OptionalChain::None;
+            (Expr::new(loc, ExprData::Dot(dot)), None)
+        }
+        ExprData::Index(index) => {
+            if let Some(ExprData::PrivateIdentifier(private)) = index.index.data.as_deref()
+                && let Some(storage) = lowered_private_storage_ref(core, private.reference)
+            {
+                let receiver = if is_call_target {
+                    let ([access, receiver], wrapper) =
+                        capture_value_with_mutability(core, loc, value, true);
+                    value = access;
+                    wrappers.push(wrapper);
+                    Some(receiver)
+                } else {
+                    None
+                };
+                (lower_private_get(core, loc, value, storage), receiver)
+            } else {
+                let mut index = index.clone();
+                index.target = value;
+                index.optional_chain = OptionalChain::None;
+                (Expr::new(loc, ExprData::Index(index)), None)
+            }
+        }
+        ExprData::Call(call) => {
+            let mut call = call.clone();
+            if let Some(receiver) = receiver {
+                call.args.insert(0, receiver);
+                call.target = Expr::new(
+                    loc,
+                    ExprData::Dot(DotExpr {
+                        target: value,
+                        name: "call".into(),
+                        name_loc: loc,
+                        ..DotExpr::default()
+                    }),
+                );
+                call.kind = CallKind::TargetWasOriginallyPropertyAccess;
+            } else {
+                call.target = value;
+            }
+            call.optional_chain = OptionalChain::None;
+            (Expr::new(loc, ExprData::Call(call)), None)
+        }
+        _ => unreachable!("optional chain link"),
+    }
+}
+
 fn lower_optional_chain(core: &mut ParserCore, expression: Expr) -> Option<ExprData> {
+    if let Some(lowered) = lower_private_optional_chain(core, &expression) {
+        return Some(lowered);
+    }
     let loc = expression.loc;
     let mut current = expression;
     let mut chain = Vec::new();
