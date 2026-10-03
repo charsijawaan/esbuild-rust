@@ -1192,6 +1192,9 @@ impl Printer<'_> {
         };
         let should_add_source_mapping = match data {
             StmtData::TypeScript(_) => false,
+            // Preserve the source position for indentation. With no indentation,
+            // the actual expression supplies the mapping (and any original name).
+            StmtData::Expr(_) => !self.options.minify_whitespace && self.indent > 0,
             StmtData::Comment(comment) if comment.is_legal_comment => {
                 self.options.legal_comments == LegalComments::Inline
             }
@@ -1887,7 +1890,12 @@ impl Printer<'_> {
     fn print_binding(&mut self, binding: &Binding) {
         let original_name = match binding.data.as_deref() {
             Some(BindingData::Identifier(identifier)) => {
-                self.renamer.original_name_for_symbol(identifier.reference)
+                let original = self.renamer.original_name_for_symbol(identifier.reference);
+                if original == self.renamer.name_for_symbol(identifier.reference) {
+                    String::new()
+                } else {
+                    original
+                }
             }
             _ => String::new(),
         };
@@ -2668,13 +2676,22 @@ impl Printer<'_> {
                 .options
                 .unsupported_features
                 .contains(JsFeature::BIGINT);
-        let original_name = match data {
-            ExprData::Identifier(identifier) => {
-                self.renamer.original_name_for_symbol(identifier.reference)
+        // These containers are mapped through the actual printed target/left
+        // expression. A generic unnamed mapping here can suppress a renamed
+        // identifier at the same byte position, especially when minifying.
+        let should_add_source_mapping = match data {
+            ExprData::Identifier(_) | ExprData::Call(_) | ExprData::Dot(_) | ExprData::Binary(_) => {
+                false
             }
-            _ => String::new(),
+            ExprData::Unary(unary)
+                if matches!(unary.op, OpCode::UnaryPostIncrement | OpCode::UnaryPostDecrement) => {
+                false
+            }
+            _ => true,
         };
-        self.add_source_mapping(expr.loc, &original_name);
+        if should_add_source_mapping {
+            self.add_source_mapping(expr.loc, "");
+        }
         let own_level = expr_precedence(data);
         let has_pure_comment = !self.options.minify_whitespace
             && match data {
@@ -2799,6 +2816,13 @@ impl Printer<'_> {
             ExprData::NewTarget(_) => self.output.extend_from_slice(b"new.target"),
             ExprData::ImportMeta(_) => self.output.extend_from_slice(b"import.meta"),
             ExprData::Identifier(identifier) => {
+                self.print_space_before_identifier();
+                let original = self.renamer.original_name_for_symbol(identifier.reference);
+                let name = self.renamer.name_for_symbol(identifier.reference);
+                self.add_source_mapping(
+                    expr.loc,
+                    if original == name { "" } else { &original },
+                );
                 self.print_symbol_expr(identifier.reference);
             }
             ExprData::ImportIdentifier(identifier) => {
@@ -3165,12 +3189,14 @@ impl Printer<'_> {
                     } else {
                         self.output.push(b'.');
                     }
+                    self.add_source_mapping(dot.name_loc, "");
                     self.print_identifier(&dot.name);
                 } else {
                     if dot.optional_chain == OptionalChain::Start {
                         self.output.extend_from_slice(b"?.");
                     }
                     self.output.push(b'[');
+                    self.add_source_mapping(dot.name_loc, "");
                     self.output.extend(quote_utf16(
                         &dot.name.encode_utf16().collect::<Vec<_>>(),
                         self.options,
@@ -3252,6 +3278,7 @@ impl Printer<'_> {
             }
             ExprData::Call(call) => {
                 if has_pure_comment {
+                    self.add_source_mapping(expr.loc, "");
                     self.output.extend_from_slice(b"/* @__PURE__ */ ");
                 }
                 let target_is_unbound_eval = matches!(
@@ -3322,7 +3349,12 @@ impl Printer<'_> {
                 if call.optional_chain == OptionalChain::Start {
                     self.output.extend_from_slice(b"?.");
                 }
-                self.print_arguments(&call.args, call.close_paren_loc, call.is_multi_line);
+                self.print_arguments(
+                    &call.args,
+                    expr.loc,
+                    call.close_paren_loc,
+                    call.is_multi_line,
+                );
             }
             ExprData::New(new) => {
                 if has_pure_comment {
@@ -3344,7 +3376,12 @@ impl Printer<'_> {
                     || !new.args.is_empty()
                     || level >= Precedence::Postfix
                 {
-                    self.print_arguments(&new.args, new.close_paren_loc, new.is_multi_line);
+                    self.print_arguments(
+                        &new.args,
+                        expr.loc,
+                        new.close_paren_loc,
+                        new.is_multi_line,
+                    );
                 }
             }
             ExprData::InlinedEnum(inlined) => {
@@ -3837,6 +3874,7 @@ impl Printer<'_> {
     fn print_arguments(
         &mut self,
         arguments: &[Expr],
+        expr_loc: crate::internal::logger::Loc,
         close_paren_loc: crate::internal::logger::Loc,
         was_multi_line: bool,
     ) {
@@ -3871,6 +3909,9 @@ impl Printer<'_> {
             self.print_indent();
         }
         self.forbid_in = old_forbid_in;
+        if close_paren_loc.start > expr_loc.start {
+            self.add_source_mapping(close_paren_loc, "");
+        }
         self.output.push(b')');
     }
 
@@ -5270,10 +5311,7 @@ mod tests {
         assert_eq!(result.js, b"let value = 1;\nvalue++;\n");
         assert!(!result.source_map_chunk.should_ignore);
         assert!(!result.source_map_chunk.buffer.data.is_empty());
-        assert_eq!(
-            result.source_map_chunk.quoted_names,
-            [b"\"value\"".to_vec()]
-        );
+        assert!(result.source_map_chunk.quoted_names.is_empty());
         assert_eq!(result.source_map_chunk.end_state.generated_line, 2);
         assert_eq!(result.source_map_chunk.final_generated_column, 0);
     }

@@ -982,6 +982,17 @@ normal suite passes 1,080 tests, the exhaustive parser audit preserves all 7,116
 passing cases, and strict Clippy retains 621 existing errors without additions.
 No original fixture activation or general printer-layout parity is claimed.
 
+JavaScript source maps now emit original names only for renamed bindings and
+map identifiers, property names, and closing call/constructor delimiters at
+their printed positions. Expression indentation and postfix updates preserve
+renamed names. Five native regressions also check the upstream working-directory
+error and independent Go hash vectors. The isolated normal suite passes 1,085
+tests and strict Clippy retains 621 existing errors without additions. Independent
+printer review verifies 302 assertions and no code, map, coordinate, or name
+regressions against the approved earlier candidate; remaining function-header,
+indexed-access, and tagged-template mapping gaps are separate work. These native
+corrections are prerequisites for the original JavaScript service tests below.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

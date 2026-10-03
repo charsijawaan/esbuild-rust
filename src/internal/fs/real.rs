@@ -81,16 +81,10 @@ pub fn real_fs_without_zip(options: RealFsOptions) -> Result<RealFs, FsError> {
             });
     }
     let mut filepath = GoFilepath::new(cwd, is_windows);
-    if !filepath.is_abs(&filepath.abs("")) {
-        return Err(FsError::new(
-            FsErrorKind::InvalidInput,
-            "the working directory is not an absolute path",
-        ));
-    }
     if !configured_working_dir.is_empty() && !filepath.is_abs(&configured_working_dir) {
         return Err(FsError::new(
             FsErrorKind::InvalidInput,
-            format!("the working directory {configured_working_dir:?} is not an absolute path"),
+            format!("The working directory {configured_working_dir:?} is not an absolute path"),
         ));
     }
     if let Ok(canonical) = fs::canonicalize(filepath.abs(""))
