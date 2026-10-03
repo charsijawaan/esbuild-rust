@@ -506,6 +506,12 @@ active cases, and strict Clippy retains 623 existing errors without added
 diagnostics. Array-pattern defaults and direct private loop targets remain
 separate work; explored pinned-Go outputs also have runtime gaps there.
 
+The complete runtime audit at `f0121ee` is recorded in
+`end_to_end_private_patterns_checkpoint.json`: 1,394 passed, 68 failed, and no
+timeouts. Ten original cases are newly passing without regressions relative to
+`54e0a49`. Case 80 remains the shared environment failure, leaving 67 Rust-only
+failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
