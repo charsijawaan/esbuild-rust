@@ -317,6 +317,49 @@ fn lower_nullish_coalescing(core: &mut ParserCore, loc: Loc, left: Expr, right: 
     ))
 }
 
+fn warn_about_private_access(core: &mut ParserCore, index: &IndexExpr, target: AssignTarget) {
+    let Some(ExprData::PrivateIdentifier(private)) = index.index.data.as_deref() else {
+        return;
+    };
+    let reference = core.follow_symbol_link(private.reference);
+    let symbol = &core.symbols[reference.inner_index as usize];
+    let action = match symbol.kind {
+        SymbolKind::PrivateMethod | SymbolKind::PrivateStaticMethod
+            if target != AssignTarget::None =>
+        {
+            "Writing to read-only method"
+        }
+        SymbolKind::PrivateGet | SymbolKind::PrivateStaticGet if target != AssignTarget::None => {
+            "Writing to getter-only property"
+        }
+        SymbolKind::PrivateSet | SymbolKind::PrivateStaticSet
+            if target != AssignTarget::Replace =>
+        {
+            "Reading from setter-only property"
+        }
+        _ => return,
+    };
+    let text = format!("{action} {:?} will throw", symbol.original_name);
+    let range = Range {
+        loc: index.index.loc,
+        len: i32::try_from(symbol.original_name.len()).expect("private name length fits i32"),
+    };
+    let kind = if is_inside_node_modules(&core.source.key_path.text) {
+        MsgKind::Debug
+    } else {
+        MsgKind::Warning
+    };
+    if let Some(log) = core.log.clone() {
+        log.add_id(
+            MsgId::JsPrivateNameWillThrow,
+            kind,
+            Some(&mut core.tracker),
+            range,
+            text,
+        );
+    }
+}
+
 fn lowered_private_index(
     core: &ParserCore,
     index: &crate::internal::js_ast::IndexExpr,
@@ -11279,6 +11322,7 @@ fn visit_expr_with_target_and_context(
                 },
             );
             visit_expr(core, &mut index.index, resolve_identifiers);
+            warn_about_private_access(core, index, assign_target);
             if core.lower_super_property_access
                 && matches!(index.target.data.as_deref(), Some(ExprData::Super))
             {

@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,014 | 1,629 | 8,643 |
+| JS/TS parser and parser lowering | 7,020 | 1,623 | 8,643 |
 | Bundler | 909 | 162 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,247 | 1,791 | 14,038 |
+| Total | 12,253 | 1,785 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -161,6 +161,19 @@ value with ES2015/ES2022 targets and minification. Execution fixtures also use
 process and sequence identifiers to avoid temporary-file collisions when tests
 run concurrently. The normal suite passes 960 tests.
 
+The complete runtime audit at `b3ffd98` passes 1,271 of 1,462 cases with no
+timeouts: 12 gains and no regressions relative to `10ddb1a`. The same pinned Go
+reference still fails only case 80. Private method writes, getter-only writes,
+and setter-only reads now emit the original `private-name-will-throw` warning,
+with member locations and log overrides. Dependency files use debug-level
+diagnostics by default, while transform sourcefile labels retain warnings,
+matching pinned Go. Instance/static members, compound assignments and updates,
+accessor pairs, and try/catch bodies have local diagnostic regressions.
+The four original runtime cases 838, 931, 1022, and 1115 pass individually.
+Six original `TestPrivateIdentifiers` diagnostic cases (6564–6569) now match
+exactly and are active; the full parser audit preserves all prior active cases.
+The normal suite passes 962 tests.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -261,7 +274,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,014 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,020 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -351,7 +364,7 @@ patterns with query/hash suffixes. The harness now translates extension order,
 property-mangling controls, output names, banners, drop labels, source maps,
 CSS targets, and explicit tsconfig paths, and rejects unmapped options even
 when selecting an inactive case. `bundler_additional_active.json` enables 83
-reviewed cases beyond the original option-based selection. So 12,247 concrete
+reviewed cases beyond the original option-based selection. So 12,253 concrete
 upstream cases are currently active in `cargo test`; the remaining 162 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 

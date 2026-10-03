@@ -12892,6 +12892,146 @@ mod tests {
     }
 
     #[test]
+    fn warns_about_private_accesses_that_will_throw() {
+        for target in [Target::Es2015, Target::Es2022] {
+            for static_prefix in ["", "static "] {
+                for (operation, action, name) in [
+                    ("this.#method = 1", "Writing to read-only method", "#method"),
+                    ("this.#method++", "Writing to read-only method", "#method"),
+                    (
+                        "this.#getter ||= 1",
+                        "Writing to getter-only property",
+                        "#getter",
+                    ),
+                    (
+                        "this.#getter = 1",
+                        "Writing to getter-only property",
+                        "#getter",
+                    ),
+                    (
+                        "this.#setter",
+                        "Reading from setter-only property",
+                        "#setter",
+                    ),
+                    (
+                        "this.#setter += 1",
+                        "Reading from setter-only property",
+                        "#setter",
+                    ),
+                    (
+                        "++this.#setter",
+                        "Reading from setter-only property",
+                        "#setter",
+                    ),
+                ] {
+                    let source = format!(
+                        "class Foo {{\n  {static_prefix}#method() {{}}\n  \
+                         {static_prefix}get #getter() {{}}\n  \
+                         {static_prefix}set #setter(x) {{}}\n  \
+                         {static_prefix}run() {{ try {{ {operation}; }} catch {{}} }}\n}}"
+                    );
+                    let result = transform(
+                        &source,
+                        TransformOptions {
+                            target,
+                            sourcefile: "private.js".into(),
+                            ..TransformOptions::default()
+                        },
+                    );
+                    assert!(result.errors.is_empty(), "{:?}", result.errors);
+                    assert_eq!(result.warnings.len(), 1, "{source}");
+                    let warning = &result.warnings[0];
+                    assert_eq!(warning.id, "private-name-will-throw");
+                    assert_eq!(warning.text, format!("{action} {name:?} will throw"));
+                    let location = warning.location.as_ref().unwrap();
+                    assert_eq!(location.file, "private.js");
+                    assert_eq!(location.line, 5);
+                    assert_eq!(location.length, name.len());
+                    assert_eq!(location.column, location.line_text.find(name).unwrap());
+                }
+                let source = format!(
+                    "class Foo {{ {static_prefix}#method() {{}} \
+                     {static_prefix}get #getter() {{}} {static_prefix}set #setter(x) {{}} \
+                     {static_prefix}get #pair() {{}} {static_prefix}set #pair(x) {{}} \
+                     {static_prefix}run() {{ this.#method(); this.#getter; this.#setter = 1; \
+                     this.#pair; this.#pair = 1; this.#pair += 1; this.#pair++; }} }}"
+                );
+                let result = transform(
+                    &source,
+                    TransformOptions {
+                        target,
+                        ..TransformOptions::default()
+                    },
+                );
+                assert!(result.errors.is_empty(), "{:?}", result.errors);
+                assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            }
+        }
+    }
+
+    #[test]
+    fn private_access_warnings_respect_log_overrides_and_dependency_paths() {
+        let source = "class Foo { #method() {} run() { this.#method = 1 } }";
+        for (level, error_count, warning_count) in [
+            (super::LogLevel::Silent, 0, 0),
+            (super::LogLevel::Warning, 0, 1),
+            (super::LogLevel::Error, 1, 0),
+        ] {
+            for sourcefile in ["input.js", "node_modules/pkg/input.js"] {
+                let result = transform(
+                    source,
+                    TransformOptions {
+                        sourcefile: sourcefile.into(),
+                        log_override: HashMap::from([("private-name-will-throw".into(), level)]),
+                        ..TransformOptions::default()
+                    },
+                );
+                assert_eq!(
+                    (result.errors.len(), result.warnings.len()),
+                    (error_count, warning_count),
+                    "{level:?} {sourcefile}"
+                );
+                assert_eq!(result.code.is_empty(), error_count != 0);
+            }
+        }
+        let transformed = transform(
+            source,
+            TransformOptions {
+                sourcefile: "node_modules/pkg/input.js".into(),
+                ..TransformOptions::default()
+            },
+        );
+        assert!(transformed.errors.is_empty());
+        assert_eq!(transformed.warnings.len(), 1);
+        let directory = context_test_directory("private-warnings");
+        std::fs::create_dir_all(directory.join("node_modules/pkg")).unwrap();
+        std::fs::write(directory.join("node_modules/pkg/input.js"), source).unwrap();
+        for (level, errors, warnings) in [
+            (None, 0, 0),
+            (Some(super::LogLevel::Warning), 0, 1),
+            (Some(super::LogLevel::Error), 1, 0),
+        ] {
+            let result = build(BuildOptions {
+                abs_working_dir: directory.to_string_lossy().into_owned(),
+                entry_points: vec!["node_modules/pkg/input.js".into()],
+                log_override: level
+                    .map(|level| HashMap::from([("private-name-will-throw".into(), level)]))
+                    .unwrap_or_default(),
+                ..BuildOptions::default()
+            });
+            assert_eq!(
+                (result.errors.len(), result.warnings.len()),
+                (errors, warnings),
+                "{level:?}: {:?} {:?}",
+                result.errors,
+                result.warnings
+            );
+            assert_eq!(result.output_files.is_empty(), errors != 0);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn returns_diagnostics_and_suppresses_code_on_errors() {
         let result = transform(
             "const = 1",
