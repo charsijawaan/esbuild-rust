@@ -512,6 +512,16 @@ timeouts. Ten original cases are newly passing without regressions relative to
 `54e0a49`. Case 80 remains the shared environment failure, leaving 67 Rust-only
 failures.
 
+Anonymous default-export classes now initialize a captured class value before
+assigning the export when static members must move outside the class body.
+This gives generated private brands, static `super` access, and public static
+fields a valid receiver. An executable regression passes 48 Rust/pinned-Go
+transform/bundle combinations for derived/plain classes, native/lowered fields,
+private fields/methods, lexical arrows, nested class keys, and keep-names during
+initialization. Decorator lowering retains its separate binding path. The normal
+suite passes 988 tests; the parser audit preserves all 7,061 active cases, and
+strict Clippy retains 623 existing errors without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the

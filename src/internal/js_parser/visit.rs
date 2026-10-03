@@ -2431,6 +2431,22 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                                 }
                             }
                         }
+                        let capture_default_static_initialization = class.class.name.is_none()
+                            && !class.class.should_lower_standard_decorators
+                            && core.options.ts.config.experimental_decorators
+                                != crate::internal::config::MaybeBool::True
+                            && (class_private_static_members_need_lowering(core, &class.class)
+                                || class_public_static_fields_need_lowering(core, &class.class)
+                                || class_static_blocks_can_be_lowered(core, &class.class));
+                        if capture_default_static_initialization {
+                            let symbol = &mut core.symbols
+                                [export.default_name.reference.inner_index as usize];
+                            if symbol.original_name == "default" {
+                                symbol.original_name =
+                                    format!("{}_default", core.source.identifier_name);
+                            }
+                            class.class.name = Some(export.default_name);
+                        }
                         if class.class.name.is_none()
                             && core.options.ts.config.experimental_decorators
                                 == crate::internal::config::MaybeBool::True
@@ -2446,11 +2462,64 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                             &mut class.class,
                             resolve_identifiers,
                             ClassVisitOptions {
-                                merge_inner_name: !convert_to_expression,
+                                merge_inner_name: !(convert_to_expression
+                                    || capture_default_static_initialization),
+                                capture_static_initialization: capture_default_static_initialization,
                                 ..ClassVisitOptions::default()
                             },
                         );
-                        if convert_to_expression {
+                        if capture_default_static_initialization {
+                            let capture_ref =
+                                inner_name.expect("default class initialization capture");
+                            core.current_scope
+                                .as_ref()
+                                .expect("default export scope")
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .generated
+                                .push(capture_ref);
+                            core.record_declared_symbol(capture_ref);
+                            let mut class_expression = class.class.clone();
+                            class_expression
+                                .name
+                                .as_mut()
+                                .expect("captured default class name")
+                                .reference = capture_ref;
+                            prepend_to_statements.extend(core.class_pre_statements.drain(pre_start..));
+                            prepend_to_statements.push(Stmt::new(
+                                export.value.loc,
+                                StmtData::Local(LocalStmt {
+                                    declarations: vec![Decl {
+                                        binding: identifier_binding(export.value.loc, capture_ref),
+                                        value_or_nil: Expr::new(
+                                            export.value.loc,
+                                            ExprData::Class(crate::internal::js_ast::ClassExpr {
+                                                class: class_expression,
+                                                ..crate::internal::js_ast::ClassExpr::default()
+                                            }),
+                                        ),
+                                    }],
+                                    kind: if convert_to_expression {
+                                        LocalKind::Var
+                                    } else {
+                                        LocalKind::Const
+                                    },
+                                    ..LocalStmt::default()
+                                }),
+                            ));
+                            prepend_to_statements.extend(core.class_post_statements.drain(post_start..));
+                            export.value = Stmt::new(
+                                export.value.loc,
+                                StmtData::Expr(ExprStmt {
+                                    value: class_capture_identifier(
+                                        core,
+                                        export.value.loc,
+                                        capture_ref,
+                                    ),
+                                    ..ExprStmt::default()
+                                }),
+                            );
+                        } else if convert_to_expression {
                             let mut class_expression = class.class.clone();
                             if let Some(inner_name) = inner_name {
                                 if let Some(name) = &mut class_expression.name {
