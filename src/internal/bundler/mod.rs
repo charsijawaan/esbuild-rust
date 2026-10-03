@@ -1646,6 +1646,22 @@ fn resolve_with_plugins(
             conditions: Some(&options.conditions),
             package_aliases: Some(&options.package_aliases),
             node_paths: Some(&options.abs_node_paths),
+            // The node: feature guard follows the output format, even for
+            // dynamic imports that are preserved or lowered by the printer.
+            strip_node_prefix_for_import: matches!(kind, ImportKind::Stmt | ImportKind::Dynamic)
+                && options.unsupported_js_features.contains(
+                    if options.output_format.keep_esm_import_export_syntax() {
+                        JsFeature::NODE_COLON_PREFIX_IMPORT
+                    } else {
+                        JsFeature::NODE_COLON_PREFIX_REQUIRE
+                    },
+                ),
+            strip_node_prefix_for_require: matches!(
+                kind,
+                ImportKind::Require | ImportKind::RequireResolve
+            ) && options
+                .unsupported_js_features
+                .contains(JsFeature::NODE_COLON_PREFIX_REQUIRE),
             ..ResolverContext::default()
         },
     );
@@ -6931,6 +6947,7 @@ mod tests {
         let file_system = mock_fs(&HashMap::new(), MockKind::Unix, "/project");
         let options = Options {
             mode: Mode::Bundle,
+            output_format: Format::CommonJs,
             plugins: vec![Plugin {
                 name: "external".into(),
                 on_resolve: vec![OnResolve {

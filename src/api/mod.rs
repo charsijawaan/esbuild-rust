@@ -28,7 +28,7 @@ use crate::internal::{
     fs::{Fs, MockKind, RealFsOptions, WatchData, mock_fs, real_fs},
     helpers::{
         encode_string_as_shortest_data_url, escape_closing_tag, mime_type_by_extension,
-        quote_for_json, string_to_utf16,
+        quote_for_json, quote_go_string, string_to_utf16,
     },
     js_ast::generate_non_unique_name_from_path,
     js_parser, js_printer,
@@ -2169,21 +2169,22 @@ fn write_build_output_files(
 }
 
 fn validate_externals(
+    log: &Log,
     file_system: &dyn Fs,
     paths: &[String],
-) -> Result<config::ExternalSettings, Vec<Message>> {
+) -> config::ExternalSettings {
     let mut result = config::ExternalSettings::default();
-    let mut errors = Vec::new();
     for path in paths {
         if let Some(index) = path.find('*') {
             if path[index + 1..].contains('*') {
-                errors.push(Message {
-                    text: format!(
-                        "External path {path:?} cannot have more than one \"*\" wildcard"
+                log.add_error(
+                    None,
+                    crate::internal::logger::Range::default(),
+                    format!(
+                        "External path {} cannot have more than one \"*\" wildcard",
+                        quote_go_string(path.as_bytes())
                     ),
-                    kind: MessageKind::Error,
-                    ..Message::default()
-                });
+                );
                 continue;
             }
             result.pre_resolve.patterns.push(config::WildcardPattern {
@@ -2219,11 +2220,41 @@ fn validate_externals(
             }
         }
     }
-    if errors.is_empty() {
-        Ok(result)
-    } else {
-        Err(errors)
+    result
+}
+
+fn validate_alias(
+    log: &Log,
+    file_system: &dyn Fs,
+    aliases: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut valid = HashMap::with_capacity(aliases.len());
+    for (old, new) in aliases {
+        let error = if new.is_empty() {
+            Some(format!(
+                "Invalid alias substitution: {}",
+                quote_go_string(new.as_bytes())
+            ))
+        } else if !old.starts_with(['.', '/'])
+            && !file_system.is_abs(old)
+            && !old.contains('\\')
+            // Equality with Go's path.Clean requires every slash-separated
+            // component to already be present and normalized.
+            && old.split('/').all(|part| !matches!(part, "" | "." | ".."))
+        {
+            valid.insert(old.clone(), new.clone());
+            None
+        } else {
+            Some(format!(
+                "Invalid alias name: {}",
+                quote_go_string(old.as_bytes())
+            ))
+        };
+        if let Some(error) = error {
+            log.add_error(None, crate::internal::logger::Range::default(), error);
+        }
     }
+    valid
 }
 
 fn default_abs_output_base(
@@ -2767,8 +2798,51 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
         &options.supported,
         options.platform,
     );
+    if let Err(errors) = validate_output_extensions(&options.out_extension) {
+        for error in errors {
+            log.add_error(None, crate::internal::logger::Range::default(), error.text);
+        }
+    }
+    let _ = validate_defines(
+        &log,
+        &options.define,
+        &options.pure,
+        options.platform,
+        options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
+    );
+    let _ = validate_jsx_define(&log, &options.jsx_factory, "jsx factory", false);
+    let _ = validate_jsx_define(&log, &options.jsx_fragment, "jsx fragment", true);
     let _ = validate_property_regex(&log, "mangle props", &options.mangle_props);
     let _ = validate_property_regex(&log, "reserve props", &options.reserve_props);
+    if !options.global_name.is_empty() {
+        let _ = js_parser::parse_global_name(
+            log.clone(),
+            Source {
+                key_path: crate::internal::logger::Path {
+                    text: "<global-name>".into(),
+                    ..crate::internal::logger::Path::default()
+                },
+                pretty_paths: PrettyPaths {
+                    abs: "<global-name>".into(),
+                    rel: "<global-name>".into(),
+                },
+                contents: Arc::from(options.global_name.as_bytes()),
+                ..Source::default()
+            },
+        );
+    }
+    if let Err(errors) = validate_build_loaders(&options.loader) {
+        for error in errors {
+            log.add_error(None, crate::internal::logger::Range::default(), error.text);
+        }
+    }
+    if let Err(errors) = validate_resolve_extensions(&options.resolve_extensions) {
+        for error in errors {
+            log.add_error(None, crate::internal::logger::Range::default(), error.text);
+        }
+    }
+    let external_settings = validate_externals(&log, file_system, &options.external);
+    let package_aliases = validate_alias(&log, file_system, &options.alias);
 
     let mut errors = Vec::new();
     let entry_point_count = options.entry_points.len()
@@ -2786,9 +2860,7 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
         errors.push(build_option_error(
             "Cannot use both \"outfile\" and \"outdir\"",
         ));
-    }
-
-    if options.outdir.is_empty() && options.outfile.is_empty() {
+    } else if options.outdir.is_empty() && options.outfile.is_empty() {
         if !matches!(
             options.sourcemap,
             BuildSourceMap::None | BuildSourceMap::Inline
@@ -2826,57 +2898,20 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
     }
 
     if !options.bundle {
-        if !options.external.is_empty() {
+        if external_settings.pre_resolve.has_matchers()
+            || external_settings.post_resolve.has_matchers()
+        {
             errors.push(build_option_error(
                 "Cannot use \"external\" without \"bundle\"",
             ));
         }
-        if !options.alias.is_empty() {
+        if !package_aliases.is_empty() {
             errors.push(build_option_error(
                 "Cannot use \"alias\" without \"bundle\"",
             ));
         }
     }
 
-    if let Err(validation_errors) = validate_externals(file_system, &options.external) {
-        errors.extend(validation_errors);
-    }
-    if let Err(validation_errors) = validate_build_loaders(&options.loader) {
-        errors.extend(validation_errors);
-    }
-    if let Err(validation_errors) = validate_output_extensions(&options.out_extension) {
-        errors.extend(validation_errors);
-    }
-    if let Err(validation_errors) = validate_resolve_extensions(&options.resolve_extensions) {
-        errors.extend(validation_errors);
-    }
-
-    if !options.global_name.is_empty() {
-        let _ = js_parser::parse_global_name(
-            log.clone(),
-            Source {
-                key_path: crate::internal::logger::Path {
-                    text: "<global-name>".into(),
-                    ..crate::internal::logger::Path::default()
-                },
-                pretty_paths: PrettyPaths {
-                    abs: "<global-name>".into(),
-                    rel: "<global-name>".into(),
-                },
-                contents: Arc::from(options.global_name.as_bytes()),
-                ..Source::default()
-            },
-        );
-    }
-    let _ = validate_defines(
-        &log,
-        &options.define,
-        &options.pure,
-        options.platform,
-        options.minify_whitespace && options.minify_identifiers && options.minify_syntax,
-    );
-    let _ = validate_jsx_define(&log, &options.jsx_factory, "jsx factory", false);
-    let _ = validate_jsx_define(&log, &options.jsx_fragment, "jsx fragment", true);
     if !options.tsconfig.is_empty() && !options.tsconfig_raw.is_empty() {
         log.add_error(
             None,
@@ -2902,11 +2937,13 @@ fn validate_context_options(options: &BuildOptions, file_system: &dyn Fs) -> Vec
         ));
     }
 
-    let (mut logged_errors, _) = public_messages_with_path_style(
+    for error in errors {
+        log.add_error(None, crate::internal::logger::Range::default(), error.text);
+    }
+    let (logged_errors, _) = public_messages_with_path_style(
         log.done(),
         internal_path_style(options.abs_paths, AbsPaths::LOG),
     );
-    logged_errors.extend(errors);
     logged_errors
 }
 
@@ -2927,7 +2964,18 @@ fn activate_plugin_resolve(
     file_system: Arc<dyn Fs>,
     cache: Arc<CacheSet>,
 ) -> Result<(), Vec<Message>> {
-    let external_settings = validate_externals(file_system.as_ref(), &options.external)?;
+    let log = Log::new_defer(
+        DeferLogKind::NoVerboseOrDebug,
+        log_overrides(&options.log_override),
+    );
+    let external_settings = validate_externals(&log, file_system.as_ref(), &options.external);
+    let package_aliases = validate_alias(&log, file_system.as_ref(), &options.alias);
+    if log.has_errors() {
+        return Err(public_messages_with_path_style(
+            log.done(),
+            internal_path_style(options.abs_paths, AbsPaths::LOG),
+        ).0);
+    }
     let abs_node_paths = options
         .node_paths
         .iter()
@@ -2958,7 +3006,7 @@ fn activate_plugin_resolve(
         abs_node_paths,
         external_settings,
         external_packages: options.packages == Packages::External,
-        package_aliases: options.alias.clone(),
+        package_aliases,
         preserve_symlinks: options.preserve_symlinks,
         tsconfig_path,
         tsconfig_raw: options.tsconfig_raw.clone(),
@@ -3325,6 +3373,8 @@ fn build_with_output_state_core(
     for plugin in &mut plugins_after_start {
         plugin.on_start.clear();
     }
+    let external_settings = validate_externals(&log, file_system.as_ref(), &options.external);
+    let package_aliases = validate_alias(&log, file_system.as_ref(), &options.alias);
     let entry_point_count = options.entry_points.len()
         + options.entry_points_advanced.len()
         + usize::from(options.stdin.is_some());
@@ -3400,14 +3450,16 @@ fn build_with_output_state_core(
     }
     if !bundle {
         let mut errors = Vec::new();
-        if !options.external.is_empty() {
+        if external_settings.pre_resolve.has_matchers()
+            || external_settings.post_resolve.has_matchers()
+        {
             errors.push(Message {
                 text: "Cannot use \"external\" without \"bundle\"".into(),
                 kind: MessageKind::Error,
                 ..Message::default()
             });
         }
-        if !options.alias.is_empty() {
+        if !package_aliases.is_empty() {
             errors.push(Message {
                 text: "Cannot use \"alias\" without \"bundle\"".into(),
                 kind: MessageKind::Error,
@@ -3421,15 +3473,6 @@ fn build_with_output_state_core(
             };
         }
     }
-    let external_settings = match validate_externals(file_system.as_ref(), &options.external) {
-        Ok(settings) => settings,
-        Err(errors) => {
-            return BuildResult {
-                errors,
-                ..BuildResult::default()
-            };
-        }
-    };
     let canonical_input_paths = options
         .entry_points
         .iter()
@@ -3712,7 +3755,7 @@ fn build_with_output_state_core(
         external_settings,
         inject_paths: options.inject,
         external_packages: options.packages == Packages::External,
-        package_aliases: options.alias,
+        package_aliases,
         extension_to_loader,
         output_extension_js,
         output_extension_css,

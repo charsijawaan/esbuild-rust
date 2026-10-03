@@ -364,6 +364,57 @@ fn warn_about_private_access(core: &mut ParserCore, index: &IndexExpr, target: A
     }
 }
 
+fn warn_about_typeof_and_string(core: &mut ParserCore, a: &Expr, b: &Expr, both_orders: bool) {
+    let (a, b) = if both_orders && matches!(a.data.as_deref(), Some(ExprData::String(_))) {
+        (b, a)
+    } else {
+        (a, b)
+    };
+    let Some(ExprData::Unary(unary)) = a.data.as_deref() else {
+        return;
+    };
+    let Some(ExprData::String(string)) = b.data.as_deref() else {
+        return;
+    };
+    if unary.op != OpCode::UnaryTypeof {
+        return;
+    }
+    let value = utf16_to_string(&string.value);
+    if matches!(
+        value.as_slice(),
+        b"undefined" | b"object" | b"boolean" | b"number" | b"bigint" | b"string"
+            | b"symbol" | b"function" | b"unknown"
+    ) {
+        return;
+    }
+    let notes = if value == b"null" {
+        vec![MsgData {
+            text: "The expression \"typeof x\" actually evaluates to \"object\" in JavaScript, not \"null\". You need to use \"x === null\" to test for null.".into(),
+            ..MsgData::default()
+        }]
+    } else {
+        Vec::new()
+    };
+    let kind = if is_inside_node_modules(&core.source.key_path.text) {
+        MsgKind::Debug
+    } else {
+        MsgKind::Warning
+    };
+    if let Some(log) = core.log.clone() {
+        log.add_id_with_notes(
+            MsgId::JsImpossibleTypeof,
+            kind,
+            Some(&mut core.tracker),
+            core.source.range_of_string(b.loc),
+            format!(
+                "The \"typeof\" operator will never evaluate to {}",
+                quote_go_string(&value)
+            ),
+            notes,
+        );
+    }
+}
+
 fn lowered_private_index(
     core: &ParserCore,
     index: &crate::internal::js_ast::IndexExpr,
@@ -2946,6 +2997,7 @@ fn visit_statements_with_using(
                 core.visit_switch_depth += 1;
                 for case in &mut switch.cases {
                     visit_expr(core, &mut case.value_or_nil, resolve_identifiers);
+                    warn_about_typeof_and_string(core, &switch.test, &case.value_or_nil, false);
                 }
 
                 let mut duplicate_cases: HashMap<u32, Vec<Expr>> = HashMap::new();
@@ -11520,10 +11572,70 @@ fn maybe_inline_iife(loc: Loc, call: &CallExpr) -> Option<ExprData> {
     replacement.data.map(|data| *data)
 }
 
+fn value_for_this(core: &mut ParserCore, loc: Loc, is_call_target: bool) -> Option<ExprData> {
+    if core.visit_super_receiver_is_home
+        && let Some(reference) = core.visit_super_home_ref
+    {
+        core.record_usage(reference);
+        return Some(ExprData::Identifier(IdentifierExpr {
+            reference,
+            ..IdentifierExpr::default()
+        }));
+    }
+    if !core.visit_this_is_nested {
+        if let Some(define) = core
+            .options
+            .defines
+            .as_ref()
+            .and_then(|defines| defines.identifier_defines.get("this"))
+            .and_then(|define| define.define_expr.clone())
+        {
+            return instantiate_define_expr(core, loc, &define, is_call_target);
+        }
+        if core.esm_export_keyword.len > 0
+            || core.esm_import_meta.len > 0
+            || core.top_level_await_keyword.len > 0
+            || core.options.module_type_data.module_type.is_esm()
+        {
+            return Some(ExprData::Undefined);
+        }
+        if core.options.mode != crate::internal::config::Mode::PassThrough {
+            core.record_usage(core.exports_ref);
+            return Some(ExprData::Identifier(IdentifierExpr {
+                reference: core.exports_ref,
+                ..IdentifierExpr::default()
+            }));
+        }
+    }
+    None
+}
+
+// Defines can generate these values without an occurrence in the source. Apply
+// the same lowering as the visit pass, but only source occurrences warn.
+fn value_for_import_meta(core: &mut ParserCore) -> ExprData {
+    if core
+        .options
+        .unsupported_js_features
+        .contains(JsFeature::IMPORT_META)
+        || core.options.mode != crate::internal::config::Mode::PassThrough
+            && !core.options.output_format.keep_esm_import_export_syntax()
+    {
+        let reference = core.make_import_meta_ref();
+        core.record_usage(reference);
+        ExprData::Identifier(IdentifierExpr {
+            reference,
+            ..IdentifierExpr::default()
+        })
+    } else {
+        ExprData::ImportMeta(crate::internal::js_ast::ImportMetaExpr::default())
+    }
+}
+
 pub(super) fn instantiate_define_expr(
     core: &mut ParserCore,
     loc: Loc,
     define: &crate::internal::config::DefineExpr,
+    is_call_target: bool,
 ) -> Option<ExprData> {
     if define.constant.data.is_some() {
         let mut value = define.constant.clone();
@@ -11553,29 +11665,49 @@ pub(super) fn instantiate_define_expr(
         }));
     }
     let first = define.parts.first()?;
-    let result = core.find_symbol(loc, first);
-    core.record_usage(result.reference);
-    let data = if core.is_import_item.contains(&result.reference) {
-        ExprData::ImportIdentifier(crate::internal::js_ast::ImportIdentifierExpr {
-            reference: result.reference,
-            was_originally_identifier: true,
-            ..crate::internal::js_ast::ImportIdentifierExpr::default()
-        })
-    } else {
-        ExprData::Identifier(IdentifierExpr {
-            reference: result.reference,
-            must_keep_due_to_with_stmt: result.is_inside_with_scope,
-            ..IdentifierExpr::default()
-        })
+    let mut parts = &define.parts[1..];
+    let data = match first.as_str() {
+        "NaN" => ExprData::Number(f64::NAN),
+        "Infinity" => ExprData::Number(f64::INFINITY),
+        "null" => ExprData::Null,
+        "undefined" => ExprData::Undefined,
+        "this" => value_for_this(core, loc, false).unwrap_or(ExprData::This),
+        "import" if parts.first().is_some_and(|part| part == "meta") => {
+            parts = &parts[1..];
+            value_for_import_meta(core)
+        }
+        _ => {
+            let result = core.find_symbol(loc, first);
+            if result.reference == core.require_ref && !is_call_target {
+                // Match Go's handleIdentifier: a generated require base is
+                // preserved only when the complete define is a call target.
+                ignore_usage_if_recorded(core, result.reference);
+                *value_to_substitute_for_require(core, loc).data?
+            } else if core.is_import_item.contains(&result.reference) {
+                ExprData::ImportIdentifier(crate::internal::js_ast::ImportIdentifierExpr {
+                    reference: result.reference,
+                    was_originally_identifier: true,
+                    ..crate::internal::js_ast::ImportIdentifierExpr::default()
+                })
+            } else {
+                ExprData::Identifier(IdentifierExpr {
+                    reference: result.reference,
+                    must_keep_due_to_with_stmt: result.is_inside_with_scope,
+                    can_be_removed_if_unused: true,
+                    ..IdentifierExpr::default()
+                })
+            }
+        }
     };
     let mut value = Expr::new(loc, data);
-    for part in &define.parts[1..] {
+    for part in parts {
         value = Expr::new(
             loc,
             ExprData::Dot(DotExpr {
                 target: value,
                 name: part.clone(),
                 name_loc: loc,
+                can_be_removed_if_unused: true,
                 ..DotExpr::default()
             }),
         );
@@ -11584,53 +11716,61 @@ pub(super) fn instantiate_define_expr(
         .or_else(|| value.data.map(|data| *data))
 }
 
-fn dot_chain_parts(core: &ParserCore, expression: &Expr, tail: &str) -> Option<Vec<String>> {
-    fn append(core: &ParserCore, expression: &Expr, parts: &mut Vec<String>) -> bool {
-        match expression.data.as_deref() {
-            Some(ExprData::Identifier(identifier)) => {
-                let Some(symbol) = core.symbols.get(identifier.reference.inner_index as usize)
-                else {
-                    return false;
-                };
-                if symbol.kind != crate::internal::ast::SymbolKind::Unbound {
-                    return false;
-                }
-                parts.push(symbol.original_name.clone());
-                true
-            }
-            Some(ExprData::Dot(dot)) => {
-                if !append(core, &dot.target, parts) {
-                    return false;
-                }
-                parts.push(dot.name.clone());
-                true
-            }
-            Some(ExprData::Index(index)) => {
-                let Some(ExprData::String(string)) = index.index.data.as_deref() else {
-                    return false;
-                };
-                if !append(core, &index.target, parts) {
-                    return false;
-                }
-                parts.push(
-                    String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
-                        &string.value,
-                    ))
-                    .into_owned(),
-                );
-                true
-            }
-            _ => false,
+fn is_dot_or_index_define_match(
+    core: &mut ParserCore,
+    expression: &Expr,
+    parts: &[String],
+) -> bool {
+    match expression.data.as_deref() {
+        Some(ExprData::Dot(dot)) if parts.len() > 1 => {
+            parts.last() == Some(&dot.name)
+                && is_dot_or_index_define_match(core, &dot.target, &parts[..parts.len() - 1])
         }
+        Some(ExprData::Index(index)) if parts.len() > 1 => {
+            let Some(ExprData::String(string)) = index.index.data.as_deref() else {
+                return false;
+            };
+            parts
+                .last()
+                .is_some_and(|part| part.as_bytes() == utf16_to_string(&string.value))
+                && is_dot_or_index_define_match(core, &index.target, &parts[..parts.len() - 1])
+        }
+        Some(ExprData::This) => !core.visit_this_is_nested && parts == ["this"],
+        Some(ExprData::ImportMeta(_)) => parts == ["import", "meta"],
+        Some(ExprData::Identifier(identifier)) if parts.len() == 1 => {
+            let name = symbol_name(core, identifier.reference);
+            if name != parts[0] {
+                return false;
+            }
+            let result = core.find_symbol(expression.loc, &name);
+            // The visit pass records actual reads. Matching must still resolve
+            // the symbol (including its name reservation) without adding a use.
+            core.ignore_usage(result.reference);
+            !result.is_inside_with_scope
+                && core.symbols
+                    [usize::try_from(result.reference.inner_index).expect("symbol index")]
+                .kind
+                .is_unbound_or_injected()
+        }
+        _ => false,
     }
+}
 
-    let mut parts = Vec::new();
-    if append(core, expression, &mut parts) {
-        parts.push(tail.to_string());
-        Some(parts)
-    } else {
-        None
-    }
+fn property_define(
+    core: &mut ParserCore,
+    expression: &Expr,
+    tail: &str,
+) -> Option<crate::internal::config::DefineData> {
+    let candidates = core
+        .options
+        .defines
+        .as_ref()?
+        .dot_defines
+        .get(tail)?
+        .clone();
+    candidates
+        .into_iter()
+        .find(|define| is_dot_or_index_define_match(core, expression, &define.key_parts))
 }
 
 fn maybe_fold_string_length(target: &Expr, name: &str) -> Option<ExprData> {
@@ -11734,6 +11874,93 @@ fn value_to_substitute_for_require(core: &mut ParserCore, loc: Loc) -> Expr {
             }),
         )
     }
+}
+
+fn lower_dynamic_import_expression(
+    core: &mut ParserCore,
+    loc: Loc,
+    argument: Expr,
+    close_paren_loc: Loc,
+) -> Expr {
+    // Non-string imports have no import record, so the printer cannot lower
+    // them. Match Go's EImportCall visitor and defer argument evaluation and
+    // require() errors to the promise callback.
+    let argument_loc = argument.loc;
+    let require = Expr::new(
+        loc,
+        ExprData::Call(CallExpr {
+            target: value_to_substitute_for_require(core, loc),
+            args: vec![argument],
+            close_paren_loc,
+            ..CallExpr::default()
+        }),
+    );
+    let value = core.call_runtime(argument_loc, "__toESM", vec![require]);
+    let body = FunctionBody {
+        loc,
+        block: BlockStmt {
+            statements: vec![Stmt::new(
+                loc,
+                StmtData::Return(ReturnStmt { value_or_nil: value }),
+            )],
+            ..BlockStmt::default()
+        },
+    };
+    let then = if core
+        .options
+        .unsupported_js_features
+        .contains(JsFeature::ARROW)
+    {
+        Expr::new(
+            loc,
+            ExprData::Function(FunctionExpr {
+                function: Function {
+                    body,
+                    has_body: true,
+                    ..Function::default()
+                },
+                ..FunctionExpr::default()
+            }),
+        )
+    } else {
+        Expr::new(
+            loc,
+            ExprData::Arrow(ArrowExpr {
+                body,
+                prefer_expr: true,
+                ..ArrowExpr::default()
+            }),
+        )
+    };
+    let property = |target, name: &str| {
+        Expr::new(
+            loc,
+            ExprData::Dot(DotExpr {
+                target,
+                name: name.into(),
+                name_loc: loc,
+                ..DotExpr::default()
+            }),
+        )
+    };
+    let promise = temp_identifier(loc, core.make_promise_ref());
+    let resolve = Expr::new(
+        loc,
+        ExprData::Call(CallExpr {
+            target: property(promise, "resolve"),
+            kind: CallKind::TargetWasOriginallyPropertyAccess,
+            ..CallExpr::default()
+        }),
+    );
+    Expr::new(
+        loc,
+        ExprData::Call(CallExpr {
+            target: property(resolve, "then"),
+            args: vec![then],
+            kind: CallKind::TargetWasOriginallyPropertyAccess,
+            ..CallExpr::default()
+        }),
+    )
 }
 
 fn ignore_usage_if_recorded(core: &mut ParserCore, reference: Ref) {
@@ -11889,7 +12116,9 @@ fn visit_expr_with_target_and_context(
     context: ExprVisitContext,
 ) {
     let expression_loc = expression.loc;
-    if let Some(replacement) = super::injection::rewrite(core, expression, assign_target) {
+    if let Some(replacement) =
+        super::injection::rewrite(core, expression, assign_target, context.is_call_target)
+    {
         expression.data = Some(Box::new(replacement));
         return;
     }
@@ -11961,18 +12190,6 @@ fn visit_expr_with_target_and_context(
                 core.record_usage(capture_ref);
                 identifier.reference = capture_ref;
             }
-            if identifier.reference == core.require_ref
-                && !context.is_call_target
-                && !context.is_property_access_target
-            {
-                ignore_usage_if_recorded(core, identifier.reference);
-                if let Some(replacement) =
-                    value_to_substitute_for_require(core, expression.loc).data
-                {
-                    *data = *replacement;
-                }
-                return;
-            }
             let current_scope_contains_direct_eval =
                 core.current_scope.as_ref().is_some_and(|scope| {
                     scope
@@ -12017,8 +12234,12 @@ fn visit_expr_with_target_and_context(
                             crate::internal::config::DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
                         );
                     if let Some(define_expr) = define.define_expr
-                        && let Some(replacement) =
-                            instantiate_define_expr(core, expression.loc, &define_expr)
+                        && let Some(replacement) = instantiate_define_expr(
+                            core,
+                            expression.loc,
+                            &define_expr,
+                            context.is_call_target,
+                        )
                     {
                         if core.symbols[identifier.reference.inner_index as usize].kind
                             == SymbolKind::Injected
@@ -12029,6 +12250,18 @@ fn visit_expr_with_target_and_context(
                         return;
                     }
                 }
+            }
+            // Visit source property bases before recognizing require.resolve
+            // calls. A define can replace the whole call target and return
+            // above without visiting its generated property base.
+            if identifier.reference == core.require_ref && !context.is_call_target {
+                ignore_usage_if_recorded(core, identifier.reference);
+                if let Some(replacement) =
+                    value_to_substitute_for_require(core, expression.loc).data
+                {
+                    *data = *replacement;
+                }
+                return;
             }
             if assign_target != AssignTarget::None {
                 let symbol_index =
@@ -12597,6 +12830,7 @@ fn visit_expr_with_target_and_context(
                     *data = ExprData::Boolean(if negate { !equal } else { equal });
                     return;
                 }
+                warn_about_typeof_and_string(core, &binary.left, &binary.right, true);
                 if core.options.minify_syntax {
                     match binary.op {
                         OpCode::BinaryLooseEqual | OpCode::BinaryLooseNotEqual => {
@@ -13081,10 +13315,45 @@ fn visit_expr_with_target_and_context(
                     if let Some(replacement) = replacement.data {
                         *data = *replacement;
                     }
+                } else if call.args.len() == 1
+                    && let Some(ExprData::Dot(dot)) = call.target.data.as_deref_mut()
+                {
+                    dot.target = value_to_substitute_for_require(core, dot.target.loc);
                 }
             }
         }
         ExprData::Dot(dot) => {
+            // Match the complete source chain before visiting its target. A
+            // shorter define or import.meta lowering can change that target.
+            if assign_target == AssignTarget::None
+                && let Some(define) = property_define(
+                    core,
+                    &Expr::new(expression.loc, ExprData::Dot(dot.clone())),
+                    &dot.name,
+                )
+            {
+                dot.can_be_removed_if_unused = define
+                    .flags
+                    .contains(crate::internal::config::DefineFlags::CAN_BE_REMOVED_IF_UNUSED);
+                dot.call_can_be_unwrapped_if_unused = !core.options.ignore_dce_annotations
+                    && define.flags.contains(
+                        crate::internal::config::DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
+                    );
+                dot.is_symbol_instance = define
+                    .flags
+                    .contains(crate::internal::config::DefineFlags::IS_SYMBOL_INSTANCE);
+                if let Some(define_expr) = define.define_expr
+                    && let Some(replacement) = instantiate_define_expr(
+                        core,
+                        expression.loc,
+                        &define_expr,
+                        context.is_call_target,
+                    )
+                {
+                    *data = replacement;
+                    return;
+                }
+            }
             visit_expr_with_target_and_context(
                 core,
                 &mut dot.target,
@@ -13135,34 +13404,6 @@ fn visit_expr_with_target_and_context(
             {
                 *data = replacement;
                 return;
-            }
-            if assign_target == AssignTarget::None
-                && let Some(parts) = dot_chain_parts(core, &dot.target, &dot.name)
-                && let Some(define) = core
-                    .options
-                    .defines
-                    .as_ref()
-                    .and_then(|defines| defines.dot_defines.get(&dot.name))
-                    .and_then(|defines| defines.iter().find(|define| define.key_parts == parts))
-                    .cloned()
-            {
-                dot.can_be_removed_if_unused = define
-                    .flags
-                    .contains(crate::internal::config::DefineFlags::CAN_BE_REMOVED_IF_UNUSED);
-                dot.call_can_be_unwrapped_if_unused = !core.options.ignore_dce_annotations
-                    && define.flags.contains(
-                        crate::internal::config::DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
-                    );
-                dot.is_symbol_instance = define
-                    .flags
-                    .contains(crate::internal::config::DefineFlags::IS_SYMBOL_INSTANCE);
-                if let Some(define_expr) = define.define_expr
-                    && let Some(replacement) =
-                        instantiate_define_expr(core, expression.loc, &define_expr)
-                {
-                    *data = replacement;
-                    return;
-                }
             }
             let replacement = if assign_target == AssignTarget::None
                 && dot.optional_chain == OptionalChain::None
@@ -13228,6 +13469,36 @@ fn visit_expr_with_target_and_context(
             }
         }
         ExprData::Index(index) => {
+            if assign_target == AssignTarget::None
+                && let Some(ExprData::String(string)) = index.index.data.as_deref()
+                && let Some(define) = property_define(
+                    core,
+                    &Expr::new(expression.loc, ExprData::Index(index.clone())),
+                    &String::from_utf8_lossy(&utf16_to_string(&string.value)),
+                )
+            {
+                index.can_be_removed_if_unused = define
+                    .flags
+                    .contains(crate::internal::config::DefineFlags::CAN_BE_REMOVED_IF_UNUSED);
+                index.call_can_be_unwrapped_if_unused = !core.options.ignore_dce_annotations
+                    && define.flags.contains(
+                        crate::internal::config::DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
+                    );
+                index.is_symbol_instance = define
+                    .flags
+                    .contains(crate::internal::config::DefineFlags::IS_SYMBOL_INSTANCE);
+                if let Some(define_expr) = define.define_expr
+                    && let Some(replacement) = instantiate_define_expr(
+                        core,
+                        expression.loc,
+                        &define_expr,
+                        context.is_call_target,
+                    )
+                {
+                    *data = replacement;
+                    return;
+                }
+            }
             visit_expr_with_target_and_context(
                 core,
                 &mut index.target,
@@ -13293,41 +13564,6 @@ fn visit_expr_with_target_and_context(
             }
             if assign_target != AssignTarget::None || context.is_delete_target {
                 report_import_namespace_property_assignment(core, &index.target);
-            }
-            if assign_target == AssignTarget::None
-                && let Some(ExprData::String(string)) = index.index.data.as_deref()
-            {
-                let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
-                    &string.value,
-                ))
-                .into_owned();
-                if let Some(parts) = dot_chain_parts(core, &index.target, &name)
-                    && let Some(define) = core
-                        .options
-                        .defines
-                        .as_ref()
-                        .and_then(|defines| defines.dot_defines.get(&name))
-                        .and_then(|defines| defines.iter().find(|define| define.key_parts == parts))
-                        .cloned()
-                {
-                    index.can_be_removed_if_unused = define
-                        .flags
-                        .contains(crate::internal::config::DefineFlags::CAN_BE_REMOVED_IF_UNUSED);
-                    index.call_can_be_unwrapped_if_unused = !core.options.ignore_dce_annotations
-                        && define.flags.contains(
-                            crate::internal::config::DefineFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED,
-                        );
-                    index.is_symbol_instance = define
-                        .flags
-                        .contains(crate::internal::config::DefineFlags::IS_SYMBOL_INSTANCE);
-                    if let Some(define_expr) = define.define_expr
-                        && let Some(replacement) =
-                            instantiate_define_expr(core, expression.loc, &define_expr)
-                    {
-                        *data = replacement;
-                        return;
-                    }
-                }
             }
             let replacement = if assign_target == AssignTarget::None
                 && index.optional_chain == OptionalChain::None
@@ -13885,6 +14121,18 @@ fn visit_expr_with_target_and_context(
                 let (assert_or_with, flags) = options.clone().unwrap_or_default();
                 let replacement = transpose_if_expr_chain(argument, &mut |argument| {
                     let Some(ExprData::String(path)) = argument.data.as_deref() else {
+                        if core
+                            .options
+                            .unsupported_js_features
+                            .contains(JsFeature::DYNAMIC_IMPORT)
+                        {
+                            return lower_dynamic_import_expression(
+                                core,
+                                expression_loc,
+                                argument,
+                                template.close_paren_loc,
+                            );
+                        }
                         let mut import = template.clone();
                         import.expr = argument;
                         return Expr::new(expression_loc, ExprData::ImportCall(import));
@@ -13946,6 +14194,18 @@ fn visit_expr_with_target_and_context(
                 ) && let Some(replacement) = replacement.data
                 {
                     *data = *replacement;
+                } else if core
+                    .options
+                    .unsupported_js_features
+                    .contains(JsFeature::DYNAMIC_IMPORT)
+                {
+                    let replacement = lower_dynamic_import_expression(
+                        core,
+                        expression_loc,
+                        std::mem::take(&mut import.expr),
+                        import.close_paren_loc,
+                    );
+                    *data = *replacement.data.expect("lowered dynamic import");
                 }
             }
         }
@@ -14488,6 +14748,18 @@ fn visit_expr_with_target_and_context(
             }
         }
         ExprData::ImportMeta(import_meta) => {
+            if let Some(define) = property_define(
+                core,
+                &Expr::new(expression.loc, ExprData::ImportMeta(import_meta.clone())),
+                "meta",
+            )
+            .and_then(|define| define.define_expr)
+                && let Some(replacement) =
+                    instantiate_define_expr(core, expression.loc, &define, context.is_call_target)
+            {
+                *data = replacement;
+                return;
+            }
             let unsupported = core
                 .options
                 .unsupported_js_features
@@ -14539,12 +14811,7 @@ fn visit_expr_with_target_and_context(
                         );
                     }
                 }
-                let reference = core.make_import_meta_ref();
-                core.record_usage(reference);
-                *data = ExprData::Identifier(IdentifierExpr {
-                    reference,
-                    ..IdentifierExpr::default()
-                });
+                *data = value_for_import_meta(core);
             }
         }
         ExprData::NameOfSymbol(name) => {
@@ -14565,31 +14832,14 @@ fn visit_expr_with_target_and_context(
         | ExprData::RequireResolveString(_)
         | ExprData::ImportString(_) => {}
         ExprData::This => {
-            if core.visit_super_receiver_is_home
-                && let Some(reference) = core.visit_super_home_ref
-            {
-                core.record_usage(reference);
-                *data = ExprData::Identifier(IdentifierExpr {
-                    reference,
-                    ..IdentifierExpr::default()
-                });
-                return;
-            }
             for uses_this in &mut core.async_arrow_this_usage {
                 *uses_this = true;
             }
-            if !core.visit_this_is_nested
-                && core.options.mode != crate::internal::config::Mode::PassThrough
+            // The pinned Go EThis visitor passes isDeleteTarget in the
+            // valueForThis isCallTarget position. Preserve that ordering.
+            if let Some(replacement) = value_for_this(core, expression.loc, context.is_delete_target)
             {
-                if core.is_file_considered_esm {
-                    *data = ExprData::Undefined;
-                } else {
-                    core.record_usage(core.exports_ref);
-                    *data = ExprData::Identifier(IdentifierExpr {
-                        reference: core.exports_ref,
-                        ..IdentifierExpr::default()
-                    });
-                }
+                *data = replacement;
             }
         }
         ExprData::BigInt(_) => {

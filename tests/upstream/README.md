@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,116 | 1,527 | 8,643 |
+| JS/TS parser and parser lowering | 7,127 | 1,516 | 8,643 |
 | Bundler | 945 | 126 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,385 | 1,653 | 14,038 |
+| Total | 12,396 | 1,642 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -1085,6 +1085,35 @@ Global-CSS map checks retain the known brace-location mismatch and compare
 metadata separately; full CSS mapping parity remains incomplete. The isolated
 normal suite passes 1,174 tests with the same 621 Clippy diagnostics.
 
+Defines now match complete property chains before lowering, including `this`
+and `import.meta`, while retaining shadowing, purity, and generated-name rules.
+Unsupported non-string dynamic imports lower to deferred `require` calls.
+Bundled `node:` prefixes follow the import/require target and output format.
+Native validation retains upstream external/alias error precedence, and
+impossible-`typeof` warnings carry their original IDs, notes, and ranges.
+Sixteen selected original API functions and the existing 22-function service
+core pass unchanged in both worker modes. These selections do not establish
+the full API suite as passing.
+
+The full parser audit adds nine original impossible-`typeof` diagnostics
+(indices 3034–3042) and two identifier-escape diagnostics (921–922), with zero
+regressions among previously active cases. The identifier cases also exercise
+the previously committed raw-byte lexer quoting. All original sources,
+expected diagnostics, and options remain unchanged. The normal suite passes
+1,213 tests with the same 621 strict Clippy diagnostics. A local plugin
+`require.resolve` regression now requests CommonJS output explicitly, matching
+the pinned Go format in which plugin interception occurs; its assertions are
+unchanged.
+
+Define-generated `require.resolve` call targets retain literal import records
+and bound receivers, while source property accesses substitute runtime
+`require` before call recognition. Eleven additional regressions cover complete
+and partial defines, callback kind/path, executed receiver binding, and pinned
+Go's source-`this` flag ordering. An independent review caught the original
+interaction regression and a draft `this` mismatch before integration; failed
+evidence remains preserved. Constructor-context differences remain outside this
+bounded correction.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -1185,7 +1214,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,116 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,127 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -1282,8 +1311,8 @@ declaration hoisting, and TypeScript namespace exports. Their original option
 bits and output snapshots are unchanged. It also includes nine injection cases
 covering duplicate paths, import order, TypeScript, JSX dotted names, `import.meta`,
 string export names, non-bundled builds, and copied files. It also covers bundled
-and non-bundled import-assignment diagnostics. So 12,385 concrete upstream cases
-are currently active in `cargo test`; the remaining 128 captured bundler cases are the parity backlog,
+and non-bundled import-assignment diagnostics. So 12,396 concrete upstream cases
+are currently active in `cargo test`; the remaining 126 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
 List active and inactive bundler fixtures, including their filesystem variant:

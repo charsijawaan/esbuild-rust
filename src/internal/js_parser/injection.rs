@@ -205,6 +205,7 @@ pub(super) fn rewrite(
     core: &mut ParserCore,
     expression: &Expr,
     target: AssignTarget,
+    is_call_target: bool,
 ) -> Option<ExprData> {
     let is_dot = matches!(
         expression.data.as_deref(),
@@ -235,7 +236,12 @@ pub(super) fn rewrite(
     if target == AssignTarget::None
         && let Some(define) = define
     {
-        return super::visit::instantiate_define_expr(core, expression.loc, &define);
+        return super::visit::instantiate_define_expr(
+            core,
+            expression.loc,
+            &define,
+            is_call_target,
+        );
     }
     rewrite_injected(core, expression, target)
 }

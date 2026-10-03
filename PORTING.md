@@ -3,7 +3,7 @@
 This is an experimental, AI-generated Rust port of esbuild. It is incomplete,
 unaudited, and not an official esbuild project.
 
-Status reviewed on 2026-10-04 through CSS module selectors and source maps, following
+Status reviewed on 2026-10-04 through define and dynamic-import lowering, following
 the native stateless service at `be18e17`. All comparisons target
 `6ff1d8b0d8c134e867a397eef39702a223ebef9e` (esbuild 0.28.1), as recorded in
 [UPSTREAM.md](UPSTREAM.md). Separate plugin, context, cancellation, and compiler
@@ -11,7 +11,7 @@ proposals are excluded until verified and committed.
 
 ## What the percentages mean
 
-- **Captured fixtures: 88.22% active** (12,385 / 14,038). These cases compare
+- **Captured fixtures: 88.30% active** (12,396 / 14,038). These cases compare
   original upstream output or diagnostics exactly in the normal test suite.
   This measures the captured corpus, not all upstream behavior.
 - **Original CLI/runtime suite: 99.93% passing** (1,461 / 1,462), matching
@@ -35,12 +35,12 @@ outside the port.
 | Captured corpus | Active | Remaining inactive | Captured |
 | --- | ---: | ---: | ---: |
 | Lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and lowering | 7,116 | 1,527 | 8,643 |
+| JS/TS parser and lowering | 7,127 | 1,516 | 8,643 |
 | Bundler | 945 | 126 | 1,071 |
 | Go API formatting/directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,385 | 1,653 | 14,038 |
+| Total | 12,396 | 1,642 | 14,038 |
 
-The parser backlog comprises 879 cases from `js_parser_test.go`, 555 from
+The parser backlog comprises 868 cases from `js_parser_test.go`, 555 from
 `ts_parser_test.go`, and 93 from `js_parser_lower_test.go`, calculated from
 [the captured cases](tests/upstream/js_parser.json) and
 [the committed active indices](tests/upstream/js_parser_active.json).
@@ -76,6 +76,13 @@ package parity.
 | Property mangling | API and CLI expose property patterns, reservations, quoted-property control (`5cbf3c3`), and reusable caches (`40167fe`). API build/transform results return caches; CLI builds persist `--mangle-cache=FILE`. [Mangling tests](tests/property_mangling.rs), [cache tests](tests/mangle_cache.rs). |
 | Resource management | `using` / `await using` lowering (`f1b8b91`) handles disposal order, abrupt exits, async disposal, module hoisting, and TypeScript scopes. All five captured resource-management bundler fixtures are active; six original runtime cases were fixed. [Implementation](src/internal/js_parser/lower_using.rs), [tests](tests/using_lowering.rs). |
 | Diagnostics | CLI color, log-level filtering, and log overrides are implemented; native build/transform options expose `log_override`. [CLI tests](tests/cli_diagnostics.rs), [API implementation](src/api/mod.rs). Logging parity remains bounded as described below. |
+| Defines and target lowering | Native defines support `this`, `import.meta`, and complete property chains before lowering. Non-string dynamic imports lower through deferred `require` calls for unsupported targets, and bundled `node:` imports follow target and output-format support. [Define tests](tests/defines_import_meta.rs), [dynamic import tests](tests/dynamic_import_expressions.rs), [Node prefix tests](tests/node_prefix_targets.rs). |
+
+The latest parser audit activates nine original impossible-`typeof` warning
+cases and two identifier-escape diagnostics. The latter also exercise the
+previously committed raw-byte lexer quoting. Native API validation now preserves
+upstream external/alias error precedence and absolute-path warning behavior.
+[Validation tests](tests/api_validation_paths.rs) cover those boundaries.
 
 [JS lowering](src/internal/js_parser/visit.rs) now includes optional chains,
 nullish/logical assignment, object spread/rest, async functions and async
@@ -119,8 +126,8 @@ original upstream behavior before classifying them.
 
 ## Validation limits
 
-The latest recorded normal suite passed **1,174 Rust tests**, many of which
-iterate over captured cases; this is not 1,174 additional upstream cases.
+The latest recorded normal suite passed **1,213 Rust tests**, many of which
+iterate over captured cases; this is not 1,213 additional upstream cases.
 The exhaustive parser audit is separately ignored in normal runs. Strict
 Clippy remains blocked by **621 previously recorded errors**. See
 [tests/upstream/README.md](tests/upstream/README.md) for the committed checks,
