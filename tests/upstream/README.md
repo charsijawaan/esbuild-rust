@@ -728,6 +728,11 @@ cases, two unsupported filesystem cases, and one unmapped option case. URL
 parser error wording and default transform input-map integration remain
 separate work.
 
+The complete runtime audit at `895a4d7` is recorded in
+`end_to_end_input_source_maps_checkpoint.json`: 1,444 passed, 18 failed, and no
+timeouts. Case 1343 is newly passing without regressions relative to `494cc56`.
+Case 80 remains the shared environment failure, leaving 17 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
