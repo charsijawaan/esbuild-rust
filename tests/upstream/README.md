@@ -9,10 +9,10 @@ The captured corpus currently contains 14,038 concrete cases:
 | Corpus | Active | Remaining | Captured |
 | --- | ---: | ---: | ---: |
 | Original lexer/printer/JSON/CSS parser corpora | 4,291 | 0 | 4,291 |
-| JS/TS parser and parser lowering | 7,068 | 1,575 | 8,643 |
-| Bundler | 932 | 139 | 1,071 |
+| JS/TS parser and parser lowering | 7,075 | 1,568 | 8,643 |
+| Bundler | 934 | 137 | 1,071 |
 | Go API formatting and directory-prefix helpers | 33 | 0 | 33 |
-| Total | 12,324 | 1,714 | 14,038 |
+| Total | 12,333 | 1,705 | 14,038 |
 
 This is coverage of the captured fixtures, not the entire upstream product test
 surface. Go utility tests and upstream's JavaScript API, plugin, WebAssembly,
@@ -866,6 +866,17 @@ this Node/macOS environment; case 80 remains their shared environment failure.
 This runtime result does not establish parity for the separate JavaScript API,
 plugin, WASM, platform, or inactive parser/bundler suites.
 
+Assignments to imported bindings now produce upstream's immutable-import notes
+and setter suggestions. Pass-through transforms warn under the `assign-to-import`
+message ID; bundling rejects direct and namespace-property writes, including
+destructuring, updates, and deletes. Mutating an object held by an imported
+binding remains valid. Both original bundler diagnostic fixtures and seven
+parser cases are newly active with unchanged assertions. Ninety CLI diagnostic
+configurations and two executable transform configurations match pinned Go.
+The isolated normal suite passes 1,047 tests, the parser audit passes 7,075
+cases without regressions, and strict Clippy retains 621 existing errors
+without added diagnostics.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
@@ -966,7 +977,7 @@ are base64-encoded to preserve invalid UTF-8. Go line directives preserve origin
 source locations despite instrumentation. Option translation rejects unknown
 fields instead of silently substituting defaults.
 
-`js_parser_active.json` contains the zero-based indices of the 7,068 exact-matching
+`js_parser_active.json` contains the zero-based indices of the 7,075 exact-matching
 cases enforced in normal `cargo test`. The ignored audit test runs all 8,643 cases
 and reports mismatches without treating a completed audit as a conformance pass:
 
@@ -1021,7 +1032,7 @@ instead of silently dropping them (`Defines` in 13 cases and `Plugins` in one).
 Files containing invalid UTF-8 are additionally stored in a base64 sidecar so
 binary-loader snapshots retain the exact upstream bytes.
 
-The active bundler tranche exact-compares 850 Unix snapshots and 81
+The active bundler tranche exact-compares 850 Unix snapshots and 83
 diagnostic-only cases from the default, DCE, import-star, TypeScript import-star,
 lowering, TypeScript, package-json,
 tsconfig, loader, CSS, code-splitting, Yarn PnP, import-phase, and entry-point glob suites that use
@@ -1062,8 +1073,9 @@ disposal, `for of` and `for await` iterations, unsupported async targets, module
 declaration hoisting, and TypeScript namespace exports. Their original option
 bits and output snapshots are unchanged. It also includes nine injection cases
 covering duplicate paths, import order, TypeScript, JSX dotted names, `import.meta`,
-string export names, non-bundled builds, and copied files. So 12,324 concrete
-upstream cases are currently active in `cargo test`; the remaining 139 captured bundler cases are the parity backlog,
+string export names, non-bundled builds, and copied files. It also covers bundled
+and non-bundled import-assignment diagnostics. So 12,333 concrete upstream cases
+are currently active in `cargo test`; the remaining 137 captured bundler cases are the parity backlog,
 not claimed as passing coverage.
 
 List active and inactive bundler fixtures, including their filesystem variant:

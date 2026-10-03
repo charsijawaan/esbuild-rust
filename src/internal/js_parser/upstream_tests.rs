@@ -173,7 +173,7 @@ fn run_corpus(audit: bool) {
     .unwrap();
     assert_eq!(
         active.len(),
-        7_068,
+        7_075,
         "active JS/TS parser case count changed"
     );
     if !audit {

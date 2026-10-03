@@ -1,4 +1,6 @@
 [
+  "TestAssignToImport",
+  "TestAssignToImportNoBundle",
   "TestCSSAssetPathsWithSpacesBundle",
   "TestCSSAtImportConditionsFromExternalRepo",
   "TestCSSAtImportExtensionOrderCollision",

@@ -2941,6 +2941,72 @@ fn parse_pending_file(
     result
 }
 
+fn resolve_injected_path(
+    log: &Log,
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    options: &Options,
+    inject_path: &str,
+) -> Option<ResolveResult> {
+    let entry = EntryPoint {
+        input_path: inject_path.to_string(),
+        ..EntryPoint::default()
+    };
+    let is_file = entry_point_is_file(file_system, &entry);
+    let path = if is_file
+        && !file_system.is_abs(inject_path)
+        && !inject_path.starts_with("./")
+        && !inject_path.starts_with("../")
+    {
+        format!("./{inject_path}")
+    } else {
+        inject_path.to_string()
+    };
+    let importer = Path {
+        namespace: if is_file {
+            "file".into()
+        } else {
+            String::new()
+        },
+        ..Path::default()
+    };
+    let (resolved, did_log_error) = resolve_with_plugins(
+        log,
+        file_system,
+        caches,
+        options,
+        &importer,
+        &path,
+        &logger::ImportAttributes::default(),
+        ImportKind::EntryPoint,
+        file_system.cwd(),
+        None,
+        None,
+        Range::default(),
+        None,
+        false,
+    );
+    let Some(resolved) = resolved else {
+        if !did_log_error {
+            log.add_error(
+                None,
+                Range::default(),
+                format!("Could not resolve {path:?}"),
+            );
+        }
+        return None;
+    };
+    if resolved.path_pair.is_external {
+        log.add_error(
+            None,
+            Range::default(),
+            format!("The injected path {path:?} cannot be marked as external"),
+        );
+        return None;
+    }
+    Some(resolved)
+}
+
 fn preprocess_injected_files(
     log: &Log,
     file_system: &dyn Fs,
@@ -2955,62 +3021,10 @@ fn preprocess_injected_files(
     let mut results = Vec::new();
     let mut visited = HashSet::new();
     for inject_path in &options.inject_paths {
-        let entry = EntryPoint {
-            input_path: inject_path.clone(),
-            ..EntryPoint::default()
-        };
-        let is_file = entry_point_is_file(file_system, &entry);
-        let path = if is_file
-            && !file_system.is_abs(inject_path)
-            && !inject_path.starts_with("./")
-            && !inject_path.starts_with("../")
-        {
-            format!("./{inject_path}")
-        } else {
-            inject_path.clone()
-        };
-        let importer = Path {
-            namespace: if is_file {
-                "file".into()
-            } else {
-                String::new()
-            },
-            ..Path::default()
-        };
-        let (resolved, did_log_error) = resolve_with_plugins(
-            log,
-            file_system,
-            caches,
-            options,
-            &importer,
-            &path,
-            &logger::ImportAttributes::default(),
-            ImportKind::EntryPoint,
-            file_system.cwd(),
-            None,
-            None,
-            Range::default(),
-            None,
-            false,
-        );
-        let Some(resolved) = resolved else {
-            if !did_log_error {
-                log.add_error(
-                    None,
-                    Range::default(),
-                    format!("Could not resolve {path:?}"),
-                );
-            }
+        let Some(resolved) = resolve_injected_path(log, file_system, caches, options, inject_path)
+        else {
             continue;
         };
-        if resolved.path_pair.is_external {
-            log.add_error(
-                None,
-                Range::default(),
-                format!("The injected path {path:?} cannot be marked as external"),
-            );
-            continue;
-        }
         let path = resolved.path_pair.primary.clone();
         let source_index = caches
             .source_index_cache
@@ -5886,7 +5900,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 931 },
+            if selected_test.is_some() { 1 } else { 933 },
             "upstream basic bundler corpus case count"
         );
     }

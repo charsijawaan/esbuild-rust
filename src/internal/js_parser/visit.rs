@@ -11071,6 +11071,8 @@ fn maybe_rewrite_import_namespace_property(
     name: &str,
     name_loc: Loc,
     prefer_quoted_key: bool,
+    assign_target: AssignTarget,
+    is_delete_target: bool,
 ) -> Option<ExprData> {
     if core.options.mode != crate::internal::config::Mode::Bundle {
         return None;
@@ -11127,6 +11129,13 @@ fn maybe_rewrite_import_namespace_property(
     };
     core.ignore_usage(namespace_ref);
     core.record_usage(item.reference);
+    if assign_target != AssignTarget::None || is_delete_target {
+        report_import_assignment(core, name_loc, item.reference);
+        return Some(ExprData::Identifier(IdentifierExpr {
+            reference: item.reference,
+            ..IdentifierExpr::default()
+        }));
+    }
     Some(ExprData::ImportIdentifier(
         crate::internal::js_ast::ImportIdentifierExpr {
             reference: item.reference,
@@ -11134,6 +11143,86 @@ fn maybe_rewrite_import_namespace_property(
             was_originally_identifier: false,
         },
     ))
+}
+
+fn report_import_assignment(core: &mut ParserCore, loc: Loc, reference: Ref) {
+    let name = core.symbols[reference.inner_index as usize]
+        .original_name
+        .clone();
+    let setter_hint = if is_identifier(&name) && name != "_" {
+        if name.as_bytes().first().is_some_and(u8::is_ascii) {
+            format!(
+                " (e.g. \"set{}{}\")",
+                name[..1].to_ascii_uppercase(),
+                &name[1..]
+            )
+        } else {
+            format!(" (e.g. \"set_{name}\")")
+        }
+    } else {
+        String::new()
+    };
+    let note = MsgData {
+        text: format!(
+            "Imports are immutable in JavaScript. To modify the value of this import, \
+             you must export a setter function in the imported file{setter_hint} and \
+             then import and call that function here instead."
+        ),
+        ..MsgData::default()
+    };
+    let range = crate::internal::js_lexer::range_of_identifier(&core.source, loc);
+    if let Some(log) = core.log.clone() {
+        if core.options.mode == crate::internal::config::Mode::Bundle {
+            log.add_error_with_notes(
+                Some(&mut core.tracker),
+                range,
+                format!("Cannot assign to import {name:?}"),
+                vec![note],
+            );
+        } else {
+            log.add_id_with_notes(
+                MsgId::JsAssignToImport,
+                if is_inside_node_modules(&core.source.key_path.text) {
+                    MsgKind::Debug
+                } else {
+                    MsgKind::Warning
+                },
+                Some(&mut core.tracker),
+                range,
+                format!("This assignment will throw because {name:?} is an import"),
+                vec![note],
+            );
+        }
+    }
+}
+
+fn report_import_namespace_property_assignment(core: &mut ParserCore, target: &Expr) {
+    if core.options.mode != crate::internal::config::Mode::Bundle {
+        return;
+    }
+    let Some(ExprData::Identifier(identifier)) = target.data.as_deref() else {
+        return;
+    };
+    let symbol = &core.symbols[identifier.reference.inner_index as usize];
+    if symbol.kind == SymbolKind::Import
+        && let Some(log) = core.log.clone()
+    {
+        log.add_error_with_notes(
+            Some(&mut core.tracker),
+            crate::internal::js_lexer::range_of_identifier(&core.source, target.loc),
+            format!(
+                "Cannot assign to property on import {:?}",
+                symbol.original_name
+            ),
+            vec![MsgData {
+                text: "Imports are immutable in JavaScript. To modify the value of this import, \
+                       you must export a setter function in the imported file and then import \
+                       and call that function here instead."
+                    .into(),
+                ..MsgData::default()
+            }],
+        );
+    }
 }
 
 fn iife_can_be_removed_if_unused(core: &ParserCore, args: &[Arg], body: &FunctionBody) -> bool {
@@ -11359,10 +11448,12 @@ fn maybe_fold_object_property_access(
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct ExprVisitContext {
     is_call_target: bool,
     is_property_access_target: bool,
     is_template_tag: bool,
+    is_delete_target: bool,
 }
 
 fn value_to_substitute_for_require(core: &mut ParserCore, loc: Loc) -> Expr {
@@ -11725,10 +11816,7 @@ fn visit_expr_with_target_and_context(
                         }
                     }
                     crate::internal::ast::SymbolKind::Import => {
-                        core.add_error_range(
-                            range,
-                            format!("Cannot assign to {symbol_name:?} because it is an import"),
-                        );
+                        report_import_assignment(core, expression.loc, identifier.reference);
                     }
                     crate::internal::ast::SymbolKind::Injected => {
                         super::injection::assignment_error(
@@ -11761,6 +11849,7 @@ fn visit_expr_with_target_and_context(
                     comment,
                 });
             } else if assign_target == AssignTarget::None
+                && !context.is_delete_target
                 && core.is_import_item.contains(&identifier.reference)
             {
                 *data = ExprData::ImportIdentifier(crate::internal::js_ast::ImportIdentifierExpr {
@@ -11853,11 +11942,15 @@ fn visit_expr_with_target_and_context(
                     unary.value = wrapper;
                 }
             } else {
-                visit_expr_with_target(
+                visit_expr_with_target_and_context(
                     core,
                     &mut unary.value,
                     resolve_identifiers,
                     unary.op.unary_assign_target(),
+                    ExprVisitContext {
+                        is_delete_target: unary.op == OpCode::UnaryDelete,
+                        ..ExprVisitContext::default()
+                    },
                 );
             }
             if matches!(
@@ -12767,13 +12860,15 @@ fn visit_expr_with_target_and_context(
             {
                 core.record_import_symbol_property_use(identifier.reference, dot.name.clone());
             }
-            if assign_target == AssignTarget::None
+            if dot.optional_chain == OptionalChain::None
                 && let Some(replacement) = maybe_rewrite_import_namespace_property(
                     core,
                     &dot.target,
                     &dot.name,
                     dot.name_loc,
                     false,
+                    assign_target,
+                    context.is_delete_target,
                 )
             {
                 *data = replacement;
@@ -12911,7 +13006,7 @@ fn visit_expr_with_target_and_context(
                 .into_owned();
                 core.record_import_symbol_property_use(identifier.reference, name);
             }
-            if assign_target == AssignTarget::None
+            if index.optional_chain == OptionalChain::None
                 && let Some(ExprData::String(string)) = index.index.data.as_deref()
             {
                 let name = String::from_utf8_lossy(&crate::internal::helpers::utf16_to_string(
@@ -12924,10 +13019,15 @@ fn visit_expr_with_target_and_context(
                     &name,
                     index.index.loc,
                     true,
+                    assign_target,
+                    context.is_delete_target,
                 ) {
                     *data = replacement;
                     return;
                 }
+            }
+            if assign_target != AssignTarget::None || context.is_delete_target {
+                report_import_namespace_property_assignment(core, &index.target);
             }
             if assign_target == AssignTarget::None
                 && let Some(ExprData::String(string)) = index.index.data.as_deref()

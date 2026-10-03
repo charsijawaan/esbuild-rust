@@ -20,8 +20,10 @@ results as the pinned upstream executable. That is encouraging, but it is not
 evidence of complete compatibility and this project is not a drop-in or
 production-ready esbuild replacement.
 
-The current engineering estimate is approximately 55% of the whole esbuild
-product surface and 75% of the selected native compiler/bundler/API core.
+The historical 2026-07-31 engineering estimate was approximately 55% of the
+whole esbuild product surface and 75% of the selected native compiler/bundler/API
+core. A fresh overall percentage has not been established; see [PORTING.md](PORTING.md)
+for current measured coverage and remaining API/distribution work.
 These deliberately conservative figures account for absent service and
 packaging surfaces as well as known target-compatibility lowering gaps that
 the bounded smoke matrix does not exercise.
@@ -51,10 +53,10 @@ cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-The test suite includes 12,324 active concrete cases extracted from the pinned
-upstream esbuild revision: 11,359 parser/printer cases, 850 bundler output
-snapshots, 82 bundler diagnostic cases, and 33 Go API cases. Another 1,714 captured cases remain
-inactive parity work. The checked-in fixtures make these tests
+The test suite includes 12,333 active concrete cases extracted from the pinned
+upstream esbuild revision: 11,366 parser/printer cases, 850 bundler output
+snapshots, 84 bundler diagnostic cases, and 33 Go API cases. Another 1,705
+captured cases remain inactive parity work. The checked-in fixtures make these tests
 independent of Go; see [tests/upstream/README.md](tests/upstream/README.md) for
 reproducible regeneration instructions.
 

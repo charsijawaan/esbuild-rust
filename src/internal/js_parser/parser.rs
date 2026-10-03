@@ -3615,7 +3615,15 @@ mod tests {
         assert!(ok);
         let messages = log.done();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].kind, MsgKind::Error);
+        assert_eq!(messages[0].kind, MsgKind::Warning);
+        assert_eq!(
+            messages[0].id,
+            crate::internal::logger::MsgId::JsAssignToImport
+        );
+        assert_eq!(
+            messages[0].data.text,
+            "This assignment will throw because \"value\" is an import"
+        );
 
         let log = Log::new_defer(DeferLogKind::All, HashMap::new());
         let source = Source {
