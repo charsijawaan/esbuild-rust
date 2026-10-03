@@ -140,9 +140,16 @@ members in class expressions, receiver mutation, single receiver evaluation,
 and parameter-scope captures across ES2015/ES2017/ES2022 and minification.
 The normal suite passes 958 tests. A full parser audit preserves all 7,014 active
 cases; inactive exact matches still need individual review before activation.
-Named class declarations with lowered static private members have a separate
-initialization-order bug: generated brand/field initializers can reference the
-outer class binding before initialization. That is the next resume point.
+Converted named class declarations now retain their inner class value for
+generated static initialization even when user code does not reference it.
+Static private brands/fields and public static fields initialize that captured
+value before assigning the outer class binding. An executable regression checks
+initialization order, private methods/fields/getters used as calls and tags,
+outer-binding reassignment, derived classes, and static private brand checks,
+with and without minification/keep-names and across native/lowered targets.
+The normal suite passes 959 tests. Original runtime case 904 is newly passing
+in the targeted 900–917 slice, which has no regressions. The complete runtime
+audit will establish the combined effect of the receiver and class-capture fixes.
 
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.

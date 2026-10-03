@@ -1827,6 +1827,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                     !(convert_to_expression_before_visit
                         || lower_public_static_due_to_private_members),
                     false,
+                    convert_to_expression_before_visit,
                 );
                 let convert_to_expression = convert_to_expression_before_visit
                     || (lower_public_static_due_to_private_members && inner_name.is_some());
@@ -2060,6 +2061,7 @@ fn visit_statements(core: &mut ParserCore, statements: &mut Vec<Stmt>, resolve_i
                             &mut class.class,
                             resolve_identifiers,
                             !convert_to_expression,
+                            false,
                             false,
                         );
                         if convert_to_expression {
@@ -5266,6 +5268,7 @@ fn visit_class(
     resolve_identifiers: bool,
     merge_inner_name: bool,
     capture_private_class_expression: bool,
+    capture_static_initialization: bool,
 ) -> (Option<Ref>, Option<Ref>) {
     let class_post_start = core.class_post_statements.len();
     let top_level_temp_start = core.top_level_temp_refs.len();
@@ -5585,9 +5588,18 @@ fn visit_class(
             core.visit_this_is_nested = old_this_is_nested;
         }
     }
+    // Converted declarations initialize their outer binding after static
+    // initialization. Generated static initializers must use the captured
+    // class value even when user code never references the inner name.
+    let needs_inner_name_for_static_initialization = capture_static_initialization
+        && !merge_inner_name
+        && outer_class_name.is_some()
+        && (class_private_static_members_need_lowering(core, class)
+            || class_public_static_fields_need_lowering(core, class));
     let used_inner_name = inner_class_name.filter(|inner| {
-        core.symbols[usize::try_from(inner.inner_index).expect("symbol index")].use_count_estimate
-            != 0
+        needs_inner_name_for_static_initialization
+            || core.symbols[usize::try_from(inner.inner_index).expect("symbol index")]
+                .use_count_estimate != 0
     });
     move_type_script_parameter_property_constructor_to_front(class);
     preserve_type_script_omitted_computed_field_keys(core, class, resolve_identifiers);
@@ -11959,6 +11971,7 @@ fn visit_expr_with_target_and_context(
                 resolve_identifiers,
                 true,
                 lower_private_members || lower_public_static,
+                false,
             );
             if let Some(name) = name_to_keep {
                 insert_class_name_static_block(core, &mut class.class, &name);

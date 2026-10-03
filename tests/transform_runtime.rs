@@ -270,3 +270,59 @@ console.log('ok');
         }
     }
 }
+
+#[test]
+fn lowered_static_private_members_initialize_the_captured_class() {
+    let source = r#"
+const assert = require('node:assert/strict');
+const events = [];
+class Box {
+  static #value = 7;
+  static #method() { return this; }
+  static #field = function() { return this; };
+  static get #getter() { return this.#field; }
+  static first = (events.push('first'), this.#value);
+  static second = (events.push('second'), this.#method``);
+  static check() {
+    assert.equal(this.#method(), this);
+    assert.equal(this.#method``, this);
+    assert.equal(this.#field(), this);
+    assert.equal(this.#field``, this);
+    assert.equal(this.#getter(), this);
+    assert.equal(this.#getter``, this);
+    assert.equal(Box, this);
+  }
+}
+const original = Box;
+Box = null;
+original.check();
+assert.equal(original.first, 7);
+assert.equal(original.second, original);
+assert.deepEqual(events, ['first', 'second']);
+class Derived extends original {
+  static #value = this;
+  static read() { return this.#value; }
+}
+assert.equal(Derived.read(), Derived);
+class Child extends Derived {}
+assert.throws(() => Child.read(), TypeError);
+console.log('ok');
+"#;
+    for target in [Target::Es2015, Target::Es2017, Target::Es2022] {
+        for minify in [false, true] {
+            let result = transform(
+                source,
+                TransformOptions {
+                    target,
+                    minify_identifiers: minify,
+                    minify_syntax: minify,
+                    minify_whitespace: minify,
+                    keep_names: true,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.code);
+        }
+    }
+}
