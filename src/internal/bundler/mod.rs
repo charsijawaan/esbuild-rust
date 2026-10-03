@@ -539,50 +539,61 @@ pub fn bundle_javascript(
                 let Some(target) = scanned.files.get(issue.result.source_index as usize) else {
                     continue;
                 };
+                if issue.was_generated && issue.use_count_estimate == 0 {
+                    continue;
+                }
                 let mut notes = Vec::new();
                 if let Some(suggestion) = &issue.suggestion
                     && let Some(suggestion_file) =
                         scanned.files.get(issue.suggestion_source_index as usize)
                 {
-                    let mut suggestion_tracker =
-                        LineColumnTracker::new(Some(&suggestion_file.input_file.source));
-                    notes.push(suggestion_tracker.msg_data(
-                        crate::internal::js_lexer::range_of_identifier(
-                            &suggestion_file.input_file.source,
-                            issue.suggestion_loc,
-                        ),
-                        format!("Did you mean to import {suggestion:?} instead?"),
-                    ));
+                    let text = format!("Did you mean to import {suggestion:?} instead?");
+                    if issue.suggestion_loc.start == 0 {
+                        notes.push(MsgData { text, ..MsgData::default() });
+                    } else {
+                        let mut suggestion_tracker =
+                            LineColumnTracker::new(Some(&suggestion_file.input_file.source));
+                        let range = if suggestion_file.input_file.loader.is_css() {
+                            crate::internal::css_lexer::range_of_identifier(
+                                &suggestion_file.input_file.source,
+                                issue.suggestion_loc,
+                            )
+                        } else {
+                            crate::internal::js_lexer::range_of_identifier(
+                                &suggestion_file.input_file.source,
+                                issue.suggestion_loc,
+                            )
+                        };
+                        notes.push(suggestion_tracker.msg_data(range, text));
+                    }
                 }
                 let target_path = target
                     .input_file
                     .source
                     .pretty_paths
                     .select(options.log_path_style);
-                if issue.was_generated {
-                    if issue.use_count_estimate > 0 {
-                        log.add_id_with_notes(
-                            crate::internal::logger::MsgId::BundlerImportIsUndefined,
-                            MsgKind::Warning,
-                            Some(&mut tracker),
-                            range,
-                            format!(
-                                "Import {:?} will always be undefined because there is no matching export in {:?}",
-                                named_import.alias, target_path
-                            ),
-                            notes,
-                        );
-                    }
+                let (kind, text) = if issue.was_generated {
+                    (MsgKind::Warning, format!(
+                        "Import {:?} will always be undefined because there is no matching export in {:?}",
+                        named_import.alias, target_path
+                    ))
                 } else {
-                    log.add_error_with_notes(
-                        Some(&mut tracker),
-                        range,
-                        format!(
-                            "No matching export in {:?} for import {:?}",
-                            target_path, named_import.alias
-                        ),
-                        notes,
-                    );
+                    (MsgKind::Error, format!(
+                        "No matching export in {:?} for import {:?}",
+                        target_path, named_import.alias
+                    ))
+                };
+                let mut data = tracker.msg_data(range, text);
+                if let Some(suggestion) = &issue.suggestion
+                    && let Some(location) = &mut data.location
+                {
+                    location.suggestion.clone_from(suggestion);
+                }
+                let message = Msg { notes, data, ..Msg::new(kind, "") };
+                if issue.was_generated {
+                    log.add_msg_id(logger::MsgId::BundlerImportIsUndefined, message);
+                } else {
+                    log.add_msg(message);
                 }
             }
             linker::MatchImportKind::Ambiguous => {

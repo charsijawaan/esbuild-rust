@@ -763,6 +763,17 @@ The complete runtime audit at `5d96242` is recorded in
 Cases 1425 and 1427 are newly passing without regressions relative to `560f331`.
 Case 80 remains the shared environment failure, leaving 14 Rust-only failures.
 
+Missing-import typo diagnostics now retain the suggested replacement in the
+primary location, choose CSS identifier ranges for CSS exports, and omit
+definition locations for generated exports without a name location. Named
+imports remain errors, while generated namespace accesses retain warning
+overrides and undefined runtime behavior. Eight JS/CSS/JSON/text-loader
+configurations match pinned Go's diagnostics exactly; regressions also check
+warning promotion and runtime behavior. The normal suite passes 1,018 tests,
+including the active parser fixtures; strict Clippy retains 621 existing
+errors without added diagnostics. The inactive default bundler audit retains
+its prior counts.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
