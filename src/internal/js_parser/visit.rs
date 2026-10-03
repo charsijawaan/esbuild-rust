@@ -4677,11 +4677,13 @@ fn validate_single_statement(
                 } else {
                     "labels"
                 };
-                mark_strict_mode_feature(
-                    core,
-                    crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
-                    &format!("Function declarations inside {place}"),
-                );
+                if core.is_strict_mode() {
+                    mark_strict_mode_feature(
+                        core,
+                        crate::internal::js_lexer::range_of_identifier(&core.source, statement.loc),
+                        &format!("Function declarations inside {place}"),
+                    );
+                }
             } else {
                 report_forbidden_single_statement(core, statement.loc);
             }
@@ -4767,6 +4769,15 @@ fn visit_label_statement_chain(
 
     while let Some(frame) = frames.pop() {
         core.is_control_flow_dead = frame.old_control_flow_dead;
+        if matches!(current.data.as_deref(), Some(StmtData::Function(_))) {
+            let mut statements = vec![current];
+            lower_block_level_function_declarations(core, &mut statements);
+            current = super::standalone_helpers::stmts_to_single_stmt(
+                frame.loc,
+                statements,
+                Loc::default(),
+            );
+        }
         core.pop_scope();
         if frame.should_drop {
             current = Stmt::new(frame.loc, StmtData::Empty);
