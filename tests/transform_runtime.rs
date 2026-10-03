@@ -548,6 +548,94 @@ console.log('ok');
 }
 
 #[test]
+fn lowered_named_class_expressions_share_their_binding_with_extracted_members() {
+    let source = r#"
+function make(value) {
+  return class Inner {
+    #initial = Inner;
+    #method() { return [Inner, value]; }
+    get #getter() { return Inner; }
+    static #initialStatic = Inner;
+    static #seed = value;
+    static #methodStatic() { return Inner; }
+    read() { return [this.#initial, ...this.#method(), this.#getter]; }
+    static read() { return [this.#initialStatic, this.#methodStatic(), this.#seed]; }
+  };
+}
+const A = make(1), a = new A, B = make(2), b = new B;
+const ar = a.read(), br = b.read(), as = A.read(), bs = B.read();
+if (ar[0] !== A || ar[1] !== A || ar[2] !== 1 || ar[3] !== A
+  || br[0] !== B || br[1] !== B || br[2] !== 2 || br[3] !== B
+  || as[0] !== A || as[1] !== A || as[2] !== 1
+  || bs[0] !== B || bs[1] !== B || bs[2] !== 2
+  || A.name !== 'Inner' || B.name !== 'Inner') throw 'wrong named expression binding';
+function publicFields(value) {
+  return class PublicInner {
+    static first = value;
+    static second = PublicInner.first;
+  };
+}
+const C = publicFields(3), D = publicFields(4);
+if (C.first !== 3 || C.second !== 3 || D.first !== 4 || D.second !== 4
+  || C.name !== 'PublicInner' || D.name !== 'PublicInner') throw 'wrong public static binding';
+console.log('ok');
+"#;
+    execute_node(source.as_bytes());
+    for (target, lower_private) in [
+        (Target::Es2015, false),
+        (Target::Es2022, false),
+        (Target::Es2022, true),
+    ] {
+        for minify in [false, true] {
+            let supported = if lower_private {
+                std::collections::HashMap::from([
+                    ("class-private-field".into(), false),
+                    ("class-private-method".into(), false),
+                    ("class-private-accessor".into(), false),
+                    ("class-private-static-field".into(), false),
+                    ("class-private-static-method".into(), false),
+                    ("class-static-field".into(), false),
+                ])
+            } else {
+                std::collections::HashMap::new()
+            };
+            let result = transform(
+                source,
+                TransformOptions {
+                    target,
+                    supported: supported.clone(),
+                    keep_names: true,
+                    minify_identifiers: minify,
+                    minify_syntax: minify,
+                    minify_whitespace: minify,
+                    ..TransformOptions::default()
+                },
+            );
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.code);
+            let result = build(BuildOptions {
+                bundle: true,
+                format: BuildFormat::CommonJs,
+                platform: BuildPlatform::Node,
+                stdin: Some(BuildStdin {
+                    contents: source.into(),
+                    ..BuildStdin::default()
+                }),
+                target,
+                supported,
+                keep_names: true,
+                minify_identifiers: minify,
+                minify_syntax: minify,
+                minify_whitespace: minify,
+                ..BuildOptions::default()
+            });
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            execute_node(&result.output_files[0].contents);
+        }
+    }
+}
+
+#[test]
 fn lowered_private_storage_is_local_to_each_factory_call() {
     let source = r#"
 function make(value) {

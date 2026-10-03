@@ -5632,6 +5632,7 @@ fn visit_class(
     }
     let private_class_name = outer_class_name
         .map(|reference| symbol_name(core, reference))
+        .or_else(|| inner_class_name.map(|reference| symbol_name(core, reference)))
         .or_else(|| core.class_name_hint.clone())
         .unwrap_or_else(|| "class".into());
     let private_static_brand_name = format!("{private_class_name}_static");
@@ -12724,6 +12725,12 @@ fn visit_expr_with_target_and_context(
                     ..ClassVisitOptions::default()
                 },
             );
+            // Moved initializers and private member functions must share the
+            // captured binding outside the class name scope.
+            if let (Some(inner_name), Some(capture)) = (inner_name, private_capture) {
+                core.merge_symbols(inner_name, capture);
+                class.class.name = None;
+            }
             if let Some(name) = name_to_keep {
                 insert_class_name_static_block(core, &mut class.class, &name);
             }
