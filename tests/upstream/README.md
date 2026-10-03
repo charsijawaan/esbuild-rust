@@ -744,6 +744,11 @@ the regressions also check absolute diagnostic paths. The normal suite passes
 621 existing errors, two fewer than the prior batch, without added diagnostics.
 The inactive default bundler audit retains its prior counts.
 
+The complete runtime audit at `560f331` is recorded in
+`end_to_end_tsconfig_read_checkpoint.json`: 1,445 passed, 17 failed, and no
+timeouts. Case 1344 is newly passing without regressions relative to `895a4d7`.
+Case 80 remains the shared environment failure, leaving 16 Rust-only failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
