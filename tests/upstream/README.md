@@ -639,6 +639,12 @@ audit has 7,064 matches without regressions, and strict Clippy retains 623
 existing errors without added diagnostics. These runtime checks do not establish
 complete object-rest lowering for older targets.
 
+The complete runtime audit at `a16378b` is recorded in
+`end_to_end_destructure_checkpoint.json`: 1,426 passed, 36 failed, and no timeouts.
+Cases 1305, 1306, and 1308 are newly passing without regressions relative to
+`ea73f09`. Case 80 remains the shared environment failure, leaving 35 Rust-only
+failures.
+
 The CLI supports diagnostic filtering with `--log-level`, including suppressing
 the summary below `info` and keeping a failing exit status in `silent` mode.
 Per-message `--log-override:MESSAGE=LEVEL` settings are passed through to the
