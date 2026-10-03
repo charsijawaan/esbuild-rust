@@ -5308,7 +5308,7 @@ fn mark_inlinable_function_declaration(core: &mut ParserCore, function: &Functio
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct ClassVisitOptions {
     merge_inner_name: bool,
     capture_private_class_expression: bool,
