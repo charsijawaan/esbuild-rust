@@ -11206,7 +11206,7 @@ fn maybe_inline_iife(loc: Loc, call: &CallExpr) -> Option<ExprData> {
     replacement.data.map(|data| *data)
 }
 
-fn instantiate_define_expr(
+pub(super) fn instantiate_define_expr(
     core: &mut ParserCore,
     loc: Loc,
     define: &crate::internal::config::DefineExpr,
@@ -11241,14 +11241,20 @@ fn instantiate_define_expr(
     let first = define.parts.first()?;
     let result = core.find_symbol(loc, first);
     core.record_usage(result.reference);
-    let mut value = Expr::new(
-        loc,
+    let data = if core.is_import_item.contains(&result.reference) {
+        ExprData::ImportIdentifier(crate::internal::js_ast::ImportIdentifierExpr {
+            reference: result.reference,
+            was_originally_identifier: true,
+            ..crate::internal::js_ast::ImportIdentifierExpr::default()
+        })
+    } else {
         ExprData::Identifier(IdentifierExpr {
             reference: result.reference,
             must_keep_due_to_with_stmt: result.is_inside_with_scope,
             ..IdentifierExpr::default()
-        }),
-    );
+        })
+    };
+    let mut value = Expr::new(loc, data);
     for part in &define.parts[1..] {
         value = Expr::new(
             loc,
@@ -11260,7 +11266,8 @@ fn instantiate_define_expr(
             }),
         );
     }
-    value.data.map(|data| *data)
+    super::injection::rewrite_injected(core, &value, AssignTarget::None)
+        .or_else(|| value.data.map(|data| *data))
 }
 
 fn dot_chain_parts(core: &ParserCore, expression: &Expr, tail: &str) -> Option<Vec<String>> {
@@ -11531,6 +11538,10 @@ fn visit_expr_with_target_and_context(
     context: ExprVisitContext,
 ) {
     let expression_loc = expression.loc;
+    if let Some(replacement) = super::injection::rewrite(core, expression, assign_target) {
+        expression.data = Some(Box::new(replacement));
+        return;
+    }
     if assign_target != AssignTarget::None {
         let is_pattern = match expression.data.as_deref() {
             Some(
@@ -11636,7 +11647,8 @@ fn visit_expr_with_target_and_context(
                     && symbol
                         .flags
                         .contains(SymbolFlags::CALL_CAN_BE_UNWRAPPED_IF_UNUSED);
-                if symbol.kind == crate::internal::ast::SymbolKind::Unbound
+                if symbol.kind.is_unbound_or_injected()
+                    && !identifier.must_keep_due_to_with_stmt
                     && let Some(define) = core
                         .options
                         .defines
@@ -11657,6 +11669,11 @@ fn visit_expr_with_target_and_context(
                         && let Some(replacement) =
                             instantiate_define_expr(core, expression.loc, &define_expr)
                     {
+                        if core.symbols[identifier.reference.inner_index as usize].kind
+                            == SymbolKind::Injected
+                        {
+                            core.ignore_usage(identifier.reference);
+                        }
                         *data = replacement;
                         return;
                     }
@@ -11711,6 +11728,13 @@ fn visit_expr_with_target_and_context(
                         core.add_error_range(
                             range,
                             format!("Cannot assign to {symbol_name:?} because it is an import"),
+                        );
+                    }
+                    crate::internal::ast::SymbolKind::Injected => {
+                        super::injection::assignment_error(
+                            core,
+                            expression.loc,
+                            identifier.reference,
                         );
                     }
                     _ => {}

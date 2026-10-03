@@ -1740,6 +1740,7 @@ struct LoadedFile {
 
 #[derive(Clone)]
 struct PendingFile {
+    is_injected: bool,
     path: Path,
     source_index: u32,
     resolve_metadata: ResolveResult,
@@ -1773,6 +1774,7 @@ fn enqueue_dependencies(
             .get(dependency_path.clone(), SourceIndexKind::Normal);
         if queued.insert(dependency_index) {
             pending.push(PendingFile {
+                is_injected: false,
                 path: dependency_path.clone(),
                 source_index: dependency_index,
                 resolve_metadata: resolve_result.clone(),
@@ -2160,7 +2162,10 @@ fn resolve_import_records_from_directory(
     > = HashMap::new();
 
     for (record_index, record) in records.iter_mut().enumerate() {
-        if record.source_index.is_valid() || record.flags.contains(ImportRecordFlags::IS_UNUSED) {
+        if record.source_index.is_valid()
+            || record.copy_source_index.is_valid()
+            || record.flags.contains(ImportRecordFlags::IS_UNUSED)
+        {
             continue;
         }
         if source.key_path.namespace == "glob" && record.path.text == "<runtime>" {
@@ -2744,6 +2749,336 @@ fn find_nearest_tsconfig(
     }
 }
 
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::too_many_lines
+)]
+fn parse_pending_file(
+    log: &Log,
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    options: &Options,
+    unique_key_prefix: &str,
+    pending: &PendingFile,
+) -> ParseResult {
+    let PendingFile {
+        is_injected,
+        path,
+        source_index,
+        resolve_metadata,
+        import_source,
+        import_path_range,
+        import_assert_or_with,
+    } = pending.clone();
+    let is_disabled = path.is_disabled();
+    let mut relative_path = if path.namespace == "file" {
+        file_system
+            .rel(file_system.cwd(), &path.text)
+            .unwrap_or_else(|| path.text.clone())
+    } else if path.namespace == "glob" {
+        path.text
+            .splitn(4, '\0')
+            .nth(1)
+            .unwrap_or(&path.text)
+            .to_string()
+    } else if path.namespace == "dataurl" {
+        let mut end = path.text.len().min(65);
+        while !path.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut pretty = path.text[..end].replace('\n', "\\n");
+        if pretty.len() > 64 {
+            let mut end = 64;
+            while !pretty.is_char_boundary(end) {
+                end -= 1;
+            }
+            pretty.truncate(end);
+            pretty.push_str("...");
+        }
+        format!("<{pretty}>")
+    } else {
+        format!("{}:{}", path.namespace, path.text)
+    } + &path.ignored_suffix;
+    if is_disabled {
+        relative_path = format!("(disabled):{relative_path}");
+    }
+    let absolute_path = if is_disabled {
+        relative_path.clone()
+    } else if path.namespace == "file" {
+        format!("{}{}", path.text, path.ignored_suffix)
+    } else if path.namespace == "glob" {
+        path.text
+            .splitn(4, '\0')
+            .next()
+            .unwrap_or(&relative_path)
+            .to_string()
+    } else {
+        relative_path.clone()
+    };
+    let mut source = Source {
+        index: source_index,
+        key_path: path,
+        pretty_paths: logger::PrettyPaths {
+            abs: absolute_path,
+            rel: relative_path,
+        },
+        ..Source::default()
+    };
+    source.identifier_name = if source.key_path.namespace == "glob" {
+        String::new()
+    } else {
+        identifier_name_from_path(file_system, options, &source.key_path.text)
+    };
+    let Some(loaded) = load_file_with_plugins(
+        log,
+        file_system,
+        caches,
+        options,
+        &mut source,
+        resolve_metadata.plugin_data.clone(),
+        import_source.as_ref(),
+        import_path_range,
+    ) else {
+        return ParseResult::default();
+    };
+    let mut file_options = options.clone();
+    let tsconfig = if options.tsconfig_raw.is_empty() && source.key_path.namespace == "file" {
+        find_nearest_tsconfig(
+            log,
+            file_system,
+            &file_system.dir(&source.key_path.text),
+            (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
+            options.preserve_symlinks,
+            options.log_path_style,
+        )
+    } else {
+        None
+    };
+    if let Some(tsconfig) = &tsconfig {
+        tsconfig.jsx_settings.apply_to(&mut file_options.jsx);
+        file_options.ts.config = tsconfig.settings;
+        file_options.ts_always_strict =
+            tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
+    }
+    if options.tsconfig_raw.is_empty() {
+        resolve_metadata
+            .ts_config_jsx
+            .apply_to(&mut file_options.jsx);
+        if let Some(ts_config) = &resolve_metadata.ts_config {
+            file_options.ts.config = *ts_config;
+        }
+        if let Some(ts_always_strict) = &resolve_metadata.ts_always_strict {
+            file_options.ts_always_strict = Some(Arc::new(ts_always_strict.clone()));
+        }
+    }
+    file_options.module_type_data.module_type =
+        if source.key_path.namespace == "file" && source.key_path.text.ends_with(".mjs") {
+            ModuleType::EsmMjs
+        } else if source.key_path.namespace == "file" && source.key_path.text.ends_with(".mts") {
+            ModuleType::EsmMts
+        } else if source.key_path.namespace == "file" && source.key_path.text.ends_with(".cjs") {
+            ModuleType::CommonJsCjs
+        } else if source.key_path.namespace == "file" && source.key_path.text.ends_with(".cts") {
+            ModuleType::CommonJsCts
+        } else if source.key_path.namespace == "file"
+            && [".js", ".jsx", ".ts", ".tsx"]
+                .iter()
+                .any(|extension| source.key_path.text.ends_with(extension))
+        {
+            resolve_metadata.module_type_data.module_type
+        } else {
+            ModuleType::Unknown
+        };
+    let is_glob_module = source.key_path.namespace == "glob";
+    let scan_mode = file_options.mode;
+    if is_injected {
+        file_options.mode = Mode::Bundle;
+    }
+    let mut result = parse_file_with_cache(
+        log,
+        source,
+        loaded.loader,
+        &file_options,
+        unique_key_prefix,
+        &loaded.plugin_name,
+        Some(caches),
+        import_source.as_ref(),
+        import_path_range,
+        import_assert_or_with.as_ref(),
+    );
+    if is_glob_module {
+        result.file.input_file.omit_from_source_maps_and_metafile = true;
+    }
+    file_options.mode = scan_mode;
+    result.file.plugin_data = loaded.plugin_data;
+    if result.file.input_file.side_effects.kind == SideEffectsKind::HasSideEffects
+        && let Some(side_effects_data) = &resolve_metadata.primary_side_effects_data
+    {
+        result.file.input_file.side_effects = SideEffects {
+            data: Some(side_effects_data.clone()),
+            kind: SideEffectsKind::NoSideEffectsPackageJson,
+        };
+    }
+    resolve_import_records_from_directory(
+        log,
+        file_system,
+        caches,
+        &file_options,
+        tsconfig.as_ref(),
+        Some(&loaded.abs_resolve_dir),
+        &mut result,
+    );
+
+    source_map::load_input_source_map(
+        log,
+        file_system,
+        caches,
+        &file_options,
+        &loaded.abs_resolve_dir,
+        &mut result.file.input_file,
+    );
+
+    result
+}
+
+fn preprocess_injected_files(
+    log: &Log,
+    file_system: &dyn Fs,
+    caches: &CacheSet,
+    options: &mut Options,
+    unique_key_prefix: &str,
+) -> Vec<ParseResult> {
+    if options.inject_paths.is_empty() {
+        return Vec::new();
+    }
+    options.injected_files.clear();
+    let mut results = Vec::new();
+    let mut visited = HashSet::new();
+    for inject_path in &options.inject_paths {
+        let entry = EntryPoint {
+            input_path: inject_path.clone(),
+            ..EntryPoint::default()
+        };
+        let is_file = entry_point_is_file(file_system, &entry);
+        let path = if is_file
+            && !file_system.is_abs(inject_path)
+            && !inject_path.starts_with("./")
+            && !inject_path.starts_with("../")
+        {
+            format!("./{inject_path}")
+        } else {
+            inject_path.clone()
+        };
+        let importer = Path {
+            namespace: if is_file {
+                "file".into()
+            } else {
+                String::new()
+            },
+            ..Path::default()
+        };
+        let (resolved, did_log_error) = resolve_with_plugins(
+            log,
+            file_system,
+            caches,
+            options,
+            &importer,
+            &path,
+            &logger::ImportAttributes::default(),
+            ImportKind::EntryPoint,
+            file_system.cwd(),
+            None,
+            None,
+            Range::default(),
+            None,
+            false,
+        );
+        let Some(resolved) = resolved else {
+            if !did_log_error {
+                log.add_error(
+                    None,
+                    Range::default(),
+                    format!("Could not resolve {path:?}"),
+                );
+            }
+            continue;
+        };
+        if resolved.path_pair.is_external {
+            log.add_error(
+                None,
+                Range::default(),
+                format!("The injected path {path:?} cannot be marked as external"),
+            );
+            continue;
+        }
+        let path = resolved.path_pair.primary.clone();
+        let source_index = caches
+            .source_index_cache
+            .get(path.clone(), SourceIndexKind::Normal);
+        if !visited.insert(source_index) {
+            continue;
+        }
+        let result = parse_pending_file(
+            log,
+            file_system,
+            caches,
+            options,
+            unique_key_prefix,
+            &PendingFile {
+                is_injected: true,
+                path,
+                source_index,
+                resolve_metadata: resolved,
+                import_source: None,
+                import_path_range: Range::default(),
+                import_assert_or_with: None,
+            },
+        );
+        if result.file.input_file.loader == Loader::Copy && options.mode != Mode::Bundle {
+            log.add_error(
+                None,
+                Range::default(),
+                format!(
+                    "Cannot inject {:?} with the \"copy\" loader without bundling enabled",
+                    result
+                        .file
+                        .input_file
+                        .source
+                        .pretty_paths
+                        .select(options.log_path_style)
+                ),
+            );
+        }
+        results.push(result);
+    }
+    for result in &results {
+        if !result.ok {
+            continue;
+        }
+        let input = &result.file.input_file;
+        let exports = if let Some(InputFileRepr::Js(repr)) = &input.repr {
+            let mut aliases = repr.ast.named_exports.iter().collect::<Vec<_>>();
+            aliases.sort_unstable_by_key(|(alias, _)| *alias);
+            aliases
+                .into_iter()
+                .map(|(alias, export)| config::InjectableExport {
+                    alias: alias.clone(),
+                    loc: export.alias_loc,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        options.injected_files.push(config::InjectedFile {
+            source: input.source.clone(),
+            exports,
+            is_copy_loader: input.loader == Loader::Copy,
+            ..config::InjectedFile::default()
+        });
+    }
+    results
+}
+
 /// Scan entry points and their recursively resolved dependencies into a graph.
 ///
 /// # Panics
@@ -2765,47 +3100,6 @@ pub fn scan_bundle(
     apply_option_defaults(options);
     run_on_start_plugins(log, file_system, &options.plugins);
     let mut bundle = ScannedBundle::default();
-
-    for inject_path in &options.inject_paths {
-        let absolute_inject_path = if file_system.is_abs(inject_path) {
-            inject_path.clone()
-        } else {
-            file_system.join(&[file_system.cwd(), inject_path])
-        };
-        let (_, read_error, _) = file_system.read_file(&absolute_inject_path);
-        if read_error.is_some() {
-            log.add_error(
-                None,
-                Range::default(),
-                format!("Could not resolve {inject_path:?}"),
-            );
-            continue;
-        }
-        if options.mode != Mode::Bundle {
-            let (_, base, extension) =
-                logger::platform_independent_path_dir_base_ext(&absolute_inject_path);
-            let loader = crate::internal::config::loader_from_file_extension(
-                &options.extension_to_loader,
-                &format!("{base}{extension}"),
-            );
-            if loader == Loader::Copy {
-                let pretty_paths = logger::PrettyPaths {
-                    abs: inject_path.clone(),
-                    rel: file_system
-                        .rel(file_system.cwd(), inject_path)
-                        .unwrap_or_else(|| inject_path.clone()),
-                };
-                log.add_error(
-                    None,
-                    Range::default(),
-                    format!(
-                        "Cannot inject {:?} with the \"copy\" loader without bundling enabled",
-                        pretty_paths.select(options.log_path_style)
-                    ),
-                );
-            }
-        }
-    }
 
     let runtime_source = runtime::source(options.unsupported_js_features);
     let runtime_options = Options {
@@ -2841,6 +3135,27 @@ pub fn scan_bundle(
     let mut pending = Vec::new();
     let mut queued = HashSet::from([runtime::SOURCE_INDEX]);
     let mut resolution_slots: HashMap<u32, Vec<Option<ResolveResult>>> = HashMap::new();
+    let injected_results =
+        preprocess_injected_files(log, file_system, caches, options, unique_key_prefix);
+    queued.extend(
+        injected_results
+            .iter()
+            .filter(|result| result.ok)
+            .map(|result| result.file.input_file.source.index),
+    );
+    for mut result in injected_results {
+        if !result.ok {
+            continue;
+        }
+        let source_index = result.file.input_file.source.index;
+        enqueue_dependencies(&result, caches, &mut queued, &mut pending);
+        bundle.files.resize_with(
+            bundle.files.len().max(source_index as usize + 1),
+            ScannerFile::default,
+        );
+        resolution_slots.insert(source_index, std::mem::take(&mut result.resolve_results));
+        bundle.files[source_index as usize] = result.file;
+    }
     if options.abs_output_base.is_empty() && entry_points.is_empty() {
         options.abs_output_base = file_system.cwd().to_string();
     }
@@ -2869,18 +3184,21 @@ pub fn scan_bundle(
         let source_index = caches
             .source_index_cache
             .get(key_path.clone(), SourceIndexKind::Normal);
-        let pretty_path = if stdin.source_file.is_empty() {
-            "<stdin>".to_string()
-        } else {
-            stdin.source_file.clone()
+        let pretty_paths = logger::PrettyPaths {
+            abs: key_path.text.clone(),
+            rel: if key_path.namespace == "file" {
+                file_system
+                    .rel(file_system.cwd(), &key_path.text)
+                    .unwrap_or_else(|| key_path.text.clone())
+                    .replace('\\', "/")
+            } else {
+                key_path.text.clone()
+            },
         };
         let source = Source {
             index: source_index,
             key_path,
-            pretty_paths: logger::PrettyPaths {
-                abs: pretty_path.clone(),
-                rel: pretty_path,
-            },
+            pretty_paths,
             contents: Arc::from(stdin.contents.into_bytes()),
             ..Source::default()
         };
@@ -3077,6 +3395,7 @@ pub fn scan_bundle(
         });
         if queued.insert(source_index) {
             pending.push(PendingFile {
+                is_injected: false,
                 path,
                 source_index,
                 resolve_metadata: resolved,
@@ -3121,185 +3440,20 @@ pub fn scan_bundle(
 
     let mut cursor = 0;
     while cursor < pending.len() {
-        let PendingFile {
-            path,
-            source_index,
-            resolve_metadata,
-            import_source,
-            import_path_range,
-            import_assert_or_with,
-        } = pending[cursor].clone();
-        cursor += 1;
-        let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
-        if bundle.files.len() < needed_length {
-            bundle
-                .files
-                .resize_with(needed_length, ScannerFile::default);
-        }
-        let is_disabled = path.is_disabled();
-        let mut relative_path = if path.namespace == "file" {
-            file_system
-                .rel(file_system.cwd(), &path.text)
-                .unwrap_or_else(|| path.text.clone())
-        } else if path.namespace == "glob" {
-            path.text
-                .splitn(4, '\0')
-                .nth(1)
-                .unwrap_or(&path.text)
-                .to_string()
-        } else if path.namespace == "dataurl" {
-            let mut end = path.text.len().min(65);
-            while !path.text.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut pretty = path.text[..end].replace('\n', "\\n");
-            if pretty.len() > 64 {
-                let mut end = 64;
-                while !pretty.is_char_boundary(end) {
-                    end -= 1;
-                }
-                pretty.truncate(end);
-                pretty.push_str("...");
-            }
-            format!("<{pretty}>")
-        } else {
-            format!("{}:{}", path.namespace, path.text)
-        } + &path.ignored_suffix;
-        if is_disabled {
-            relative_path = format!("(disabled):{relative_path}");
-        }
-        let absolute_path = if is_disabled {
-            relative_path.clone()
-        } else if path.namespace == "file" {
-            format!("{}{}", path.text, path.ignored_suffix)
-        } else if path.namespace == "glob" {
-            path.text
-                .splitn(4, '\0')
-                .next()
-                .unwrap_or(&relative_path)
-                .to_string()
-        } else {
-            relative_path.clone()
-        };
-        let mut source = Source {
-            index: source_index,
-            key_path: path,
-            pretty_paths: logger::PrettyPaths {
-                abs: absolute_path,
-                rel: relative_path,
-            },
-            ..Source::default()
-        };
-        source.identifier_name = if source.key_path.namespace == "glob" {
-            String::new()
-        } else {
-            identifier_name_from_path(file_system, options, &source.key_path.text)
-        };
-        let Some(loaded) = load_file_with_plugins(
+        let source_index = pending[cursor].source_index;
+        let mut result = parse_pending_file(
             log,
             file_system,
             caches,
             options,
-            &mut source,
-            resolve_metadata.plugin_data.clone(),
-            import_source.as_ref(),
-            import_path_range,
-        ) else {
-            continue;
-        };
-        let mut file_options = options.clone();
-        let tsconfig = if options.tsconfig_raw.is_empty() && source.key_path.namespace == "file" {
-            find_nearest_tsconfig(
-                log,
-                file_system,
-                &file_system.dir(&source.key_path.text),
-                (!options.tsconfig_path.is_empty()).then_some(options.tsconfig_path.as_str()),
-                options.preserve_symlinks,
-                options.log_path_style,
-            )
-        } else {
-            None
-        };
-        if let Some(tsconfig) = &tsconfig {
-            tsconfig.jsx_settings.apply_to(&mut file_options.jsx);
-            file_options.ts.config = tsconfig.settings;
-            file_options.ts_always_strict =
-                tsconfig.ts_always_strict_or_strict().cloned().map(Arc::new);
-        }
-        if options.tsconfig_raw.is_empty() {
-            resolve_metadata
-                .ts_config_jsx
-                .apply_to(&mut file_options.jsx);
-            if let Some(ts_config) = &resolve_metadata.ts_config {
-                file_options.ts.config = *ts_config;
-            }
-            if let Some(ts_always_strict) = &resolve_metadata.ts_always_strict {
-                file_options.ts_always_strict = Some(Arc::new(ts_always_strict.clone()));
-            }
-        }
-        file_options.module_type_data.module_type = if source.key_path.namespace == "file"
-            && source.key_path.text.ends_with(".mjs")
-        {
-            ModuleType::EsmMjs
-        } else if source.key_path.namespace == "file" && source.key_path.text.ends_with(".mts") {
-            ModuleType::EsmMts
-        } else if source.key_path.namespace == "file" && source.key_path.text.ends_with(".cjs") {
-            ModuleType::CommonJsCjs
-        } else if source.key_path.namespace == "file" && source.key_path.text.ends_with(".cts") {
-            ModuleType::CommonJsCts
-        } else if source.key_path.namespace == "file"
-            && [".js", ".jsx", ".ts", ".tsx"]
-                .iter()
-                .any(|extension| source.key_path.text.ends_with(extension))
-        {
-            resolve_metadata.module_type_data.module_type
-        } else {
-            ModuleType::Unknown
-        };
-        let is_glob_module = source.key_path.namespace == "glob";
-        let mut result = parse_file_with_cache(
-            log,
-            source,
-            loaded.loader,
-            &file_options,
             unique_key_prefix,
-            &loaded.plugin_name,
-            Some(caches),
-            import_source.as_ref(),
-            import_path_range,
-            import_assert_or_with.as_ref(),
+            &pending[cursor],
         );
-        if is_glob_module {
-            result.file.input_file.omit_from_source_maps_and_metafile = true;
+        cursor += 1;
+        let needed_length = usize::try_from(source_index).expect("source index fits usize") + 1;
+        if bundle.files.len() < needed_length {
+            bundle.files.resize_with(needed_length, ScannerFile::default);
         }
-        result.file.plugin_data = loaded.plugin_data;
-        if result.file.input_file.side_effects.kind == SideEffectsKind::HasSideEffects
-            && let Some(side_effects_data) = &resolve_metadata.primary_side_effects_data
-        {
-            result.file.input_file.side_effects = SideEffects {
-                data: Some(side_effects_data.clone()),
-                kind: SideEffectsKind::NoSideEffectsPackageJson,
-            };
-        }
-        resolve_import_records_from_directory(
-            log,
-            file_system,
-            caches,
-            &file_options,
-            tsconfig.as_ref(),
-            Some(&loaded.abs_resolve_dir),
-            &mut result,
-        );
-
-        source_map::load_input_source_map(
-            log,
-            file_system,
-            caches,
-            &file_options,
-            &loaded.abs_resolve_dir,
-            &mut result.file.input_file,
-        );
-
         enqueue_dependencies(&result, caches, &mut queued, &mut pending);
 
         if result.ok {
@@ -5732,7 +5886,7 @@ mod tests {
 
         assert_eq!(
             matched,
-            if selected_test.is_some() { 1 } else { 922 },
+            if selected_test.is_some() { 1 } else { 931 },
             "upstream basic bundler corpus case count"
         );
     }

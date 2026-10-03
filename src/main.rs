@@ -253,6 +253,7 @@ fn run_with_stdin_and_node_paths(
     let mut jsx_development = false;
     let mut jsx_side_effects = false;
     let mut external = Vec::new();
+    let mut inject = Vec::new();
     let mut aliases = HashMap::new();
     let mut packages = Packages::Bundle;
     let mut build_loaders = HashMap::new();
@@ -386,6 +387,10 @@ fn run_with_stdin_and_node_paths(
             continue;
         }
         if is_build {
+            if let Some(value) = argument.strip_prefix("--inject:") {
+                inject.push(value.to_string());
+                continue;
+            }
             if let Some(value) = argument.strip_prefix("--mangle-cache=") {
                 mangle_cache_path = Some(value.to_string());
                 continue;
@@ -849,6 +854,7 @@ fn run_with_stdin_and_node_paths(
         let mut build_options = BuildOptions {
             log_override: options.log_override,
             bundle,
+            inject,
             entry_points,
             entry_points_advanced,
             stdin,
@@ -1274,6 +1280,7 @@ fn help_text() -> String {
          \x20\x20--supported:FEATURE=true|false\n\
          \x20\x20--mangle-props=REGEX --reserve-props=REGEX --mangle-quoted\n\
          \x20\x20--mangle-cache=FILE\n\
+         \x20\x20--inject:FILE\n\
          \x20\x20--pure:CALL\n\
          \x20\x20--keep-names\n\
          \x20\x20--main-fields=FIELDS\n\

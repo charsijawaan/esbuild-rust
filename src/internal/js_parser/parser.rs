@@ -400,6 +400,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
             );
         }
         core.hoist_symbols();
+        let injected_parts = super::injection::prepare(&mut core);
         precompute_type_script_enum_constants(&mut core, &statements);
         let (mut parts, mut module_metadata, uses_exports_ref, uses_module_ref) =
             if core.options.tree_shaking && !core.will_wrap_module_in_try_catch_for_using {
@@ -457,6 +458,7 @@ pub fn parse(log: Log, source: Source, options: Options) -> (Ast, bool) {
         }
         insert_runtime_import_part(&mut core, &mut module_metadata, &mut parts);
         insert_generated_import_parts(&core, &module_metadata, &mut parts);
+        parts.splice(1..1, injected_parts);
         insert_generated_define_parts(&core, &mut parts);
         insert_import_meta_part(&core, &mut parts);
         insert_top_level_temp_part(&core, &mut parts);
@@ -872,6 +874,9 @@ fn insert_import_meta_part(core: &ParserCore, parts: &mut Vec<Part>) {
 }
 
 fn is_generated_import_record(core: &ParserCore, index: usize) -> bool {
+    if core.injected_import_records.contains(&u32::try_from(index).expect("import record index")) {
+        return true;
+    }
     core.jsx_import_records
         .values()
         .chain(core.glob_import_records.values())

@@ -6,6 +6,7 @@ mod deferred_errors;
 mod define;
 mod duplicate_properties;
 mod global_name;
+mod injection;
 mod json;
 mod lower_typescript;
 mod lower_using;

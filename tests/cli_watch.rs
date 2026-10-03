@@ -372,3 +372,47 @@ fn watch_updates_property_cache_only_after_successful_builds() {
         "{\n  \"quux\": \"a\"\n}\n"
     );
 }
+
+#[test]
+fn watches_injected_files_and_refreshes_their_exports_after_errors() {
+    let fixture = Fixture::new();
+    fixture.write("inject.js", "export const value = 1;");
+    fixture.write("in.js", "console.log(value);");
+    let mut watch = WatchChild::new(
+        &fixture,
+        &[
+            "in.js",
+            "--inject:inject.js",
+            "--watch=forever",
+            "--bundle",
+            "--outfile=out.js",
+        ],
+    );
+    watch.wait(|watch| watch.finished() == 1);
+    fixture.write("inject.js", "export const value = 22;");
+    watch.wait(|watch| watch.finished() == 2);
+    assert!(
+        watch
+            .stderr
+            .iter()
+            .any(|line| line == "[watch] build started (change: \"inject.js\")")
+    );
+    let output = std::fs::read_to_string(fixture.0.join("out.js")).unwrap();
+    assert!(output.contains("value = 22"), "{output}");
+    fixture.write("inject.js", "export const value = ;");
+    watch.wait(|watch| watch.finished() == 3);
+    assert!(watch.stderr.iter().any(|line| line.contains("[ERROR]")));
+    assert!(!fixture.0.join("out.js").exists());
+    fixture.write("inject.js", "export const value = 333;");
+    watch.wait(|watch| watch.finished() == 4);
+    let executed = Command::new("node")
+        .arg(fixture.0.join("out.js"))
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert_eq!(executed.stdout, b"333\n");
+}
